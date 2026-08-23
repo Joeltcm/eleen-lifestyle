@@ -77,11 +77,11 @@ app.post('/api/auth/reset-password', async (request, reply) => {
   const input = resetPasswordSchema.parse(request.body);
   const passwordHash = await bcrypt.hash(input.password, 12);
   const [user] = await sql`
-    UPDATE users SET password_hash = ${passwordHash}, updated_at = now()
-    WHERE email = ${input.email.toLowerCase()} AND role = 'admin' AND active = true
+    UPDATE users SET email = ${input.email.toLowerCase()}, password_hash = ${passwordHash}, updated_at = now()
+    WHERE id = (SELECT id FROM users WHERE role = 'admin' AND active = true ORDER BY created_at LIMIT 1)
     RETURNING id, email, full_name, role
   `;
-  if (!user) return reply.code(404).send({ error: 'No existe una cuenta administradora con ese correo' });
+  if (!user) return reply.code(404).send({ error: 'No existe una cuenta administradora activa' });
   const token = app.jwt.sign({ sub: user.id, email: user.email, role: user.role }, { expiresIn: '12h' });
   return { user: { id: user.id, email: user.email, fullName: user.full_name, role: user.role }, token };
 });
