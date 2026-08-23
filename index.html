@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#4b3943" />
+    <meta name="description" content="Gestión integral para entrenadores personales" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="stylesheet" href="./styles.css" />
+    <title>Eleen Lifestyle</title>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <a class="brand" href="#dashboard" aria-label="Eleen Lifestyle inicio"><span class="brand-mark">EL</span><span>Eleen<br /><b>Lifestyle</b></span></a>
+        <nav aria-label="Navegación principal">
+          <p class="nav-caption">GESTIÓN</p>
+          <a class="nav-link active" href="#dashboard" data-view="dashboard"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg></span><span>Resumen</span></a>
+          <a class="nav-link" href="#clients" data-view="clients"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></span><span>Clientes</span></a>
+          <a class="nav-link" href="#calendar" data-view="calendar"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M16 3v4M8 3v4M3 10h18"/><path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></svg></span><span>Agenda</span></a>
+          <a class="nav-link" href="#routines" data-view="routines"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 7v10M18 7v10M3 9v6M21 9v6M6 12h12"/></svg></span><span>Rutinas</span></a>
+          <a class="nav-link" href="#billing" data-view="billing"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M3 10h18M7 15h3"/></svg></span><span>Facturación</span></a>
+        </nav>
+        <div class="sidebar-foot"><span class="online-dot"></span><span><b>Guardado local</b><small>Datos en este dispositivo</small></span></div>
+      </aside>
+      <main>
+        <header class="topbar"><button class="menu-button" aria-label="Abrir menú">☰</button><div><p class="eyebrow" id="today"></p><h1 id="page-title">Buenos días</h1></div><button class="avatar" title="Perfil">AC</button></header>
+
+        <section class="view active" id="dashboard">
+          <div class="hero"><div class="hero-copy"><p class="eyebrow">CONTROL DEL NEGOCIO · SEMANA ACTUAL</p><h2>Entrena con<br /><i>intención.</i></h2><p>Una vista clara del progreso de tus clientes y la salud de tu negocio.</p><div class="hero-actions"><button class="primary" data-action="new-client">+ Nuevo cliente</button><button class="hero-link" data-view-go="calendar">Ver agenda <span>↗</span></button></div></div><div class="hero-visual" aria-hidden="true"><div class="hero-photo"><img src="./assets/eleen-training.jpg" alt="" /></div><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="hero-score"><span>ADHERENCIA</span><strong>86<em>%</em></strong><small>promedio semanal</small></div><div class="floating-stat stat-one"><b>+12</b><span>sesiones<br />esta semana</span></div><div class="floating-stat stat-two"><span class="spark">↗</span><b>+8.4%</b><small>ingreso mensual</small></div></div></div>
+          <div class="metrics">
+            <article><span>Clientes activos</span><strong id="active-clients">0</strong><small id="client-trend">—</small></article>
+            <article><span>Sesiones esta semana</span><strong id="week-sessions">0</strong><small>programadas</small></article>
+            <article><span>Cobrado este mes</span><strong id="month-collected">$0.00</strong><small id="collection-trend">confirmado</small></article>
+            <article><span>Por cobrar</span><strong id="pending-amount">$0.00</strong><small id="pending-count">0 facturas pendientes</small></article>
+          </div>
+          <div class="dashboard-grid">
+            <article class="card wide"><div class="card-head"><div><h3>Progreso físico</h3><p>Cambios desde la última evaluación InBody</p></div><button class="text-button" data-view-go="clients">Ver clientes →</button></div><div id="progress-list" class="progress-list"></div></article>
+            <article class="card"><div class="card-head"><div><h3>Próximas sesiones</h3><p>Agenda de hoy</p></div><button class="text-button" data-view-go="calendar">Agenda →</button></div><div id="today-sessions" class="agenda-list"></div></article>
+            <article class="card"><div class="card-head"><div><h3>Atención requerida</h3><p>Clientes que necesitan seguimiento</p></div></div><div id="alerts" class="alerts"></div></article>
+          </div>
+        </section>
+
+        <section class="view" id="clients">
+          <div class="section-heading"><div><p class="eyebrow">EXPEDIENTES</p><h2>Clientes</h2></div><button class="primary" data-action="new-client">+ Nuevo cliente</button></div>
+          <div class="toolbar"><input id="client-search" type="search" placeholder="Buscar cliente…" /><button class="filter">Todos los estados⌄</button></div>
+          <div class="client-grid" id="client-grid"></div>
+        </section>
+
+        <section class="view" id="calendar">
+          <div class="section-heading"><div><p class="eyebrow">PLANIFICACIÓN</p><h2>Agenda</h2></div><button class="primary" data-action="new-session">+ Agendar sesión</button></div>
+          <div class="calendar-connect"><div><span class="google-g">G</span><div><b>Google Calendar</b><p>Conecta tu agenda para sincronizar sesiones y recordatorios.</p></div></div><button class="secondary">Conectar calendario</button></div>
+          <div class="week-card"><div class="week-head"><button>‹</button><h3>Esta semana</h3><button>›</button></div><div id="week-calendar" class="week-calendar"></div></div>
+          <article class="card session-control"><div class="card-head"><div><h3>Control de sesiones</h3><p>Marca asistencia y descuenta automáticamente los paquetes</p></div></div><div id="session-list" class="session-list"></div></article>
+        </section>
+
+        <section class="view" id="routines">
+          <div class="section-heading"><div><p class="eyebrow">ENTRENAMIENTO</p><h2>Rutinas</h2></div><button class="primary" data-action="new-routine">+ Crear rutina</button></div>
+          <div class="routine-grid" id="routine-grid"></div>
+        </section>
+
+        <section class="view" id="billing">
+          <div class="section-heading"><div><p class="eyebrow">FINANZAS · USD</p><h2>Facturación</h2></div><button class="primary" data-action="new-invoice">+ Crear cobro</button></div>
+          <div class="metrics billing-metrics"><article><span>Facturado este mes</span><strong id="month-billed">$0.00</strong></article><article><span>Mensualidades activas</span><strong id="active-memberships">0</strong></article><article><span>Paquetes activos</span><strong id="active-packages">0</strong></article><article><span>Pendiente</span><strong id="billing-pending">$0.00</strong></article></div>
+          <article class="card"><div class="card-head"><div><h3>Cobros recientes</h3><p>Todos los importes están en USD</p></div></div><div class="table-wrap"><table><thead><tr><th>Cliente</th><th>Concepto</th><th>Vence</th><th>Método</th><th>Monto</th><th>Estado</th><th></th></tr></thead><tbody id="invoice-table"></tbody></table></div></article>
+          <article class="card package-card"><div class="card-head"><div><h3>Control de paquetes</h3><p>Sesiones compradas, utilizadas y disponibles</p></div></div><div class="table-wrap"><table><thead><tr><th>Cliente</th><th>Paquete</th><th>Compradas</th><th>Usadas</th><th>Disponibles</th><th>Estado</th><th></th></tr></thead><tbody id="package-table"></tbody></table></div></article>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="modal"><button class="modal-close" aria-label="Cerrar">×</button><div id="modal-content"></div></dialog>
+    <template id="new-client-template"><form id="client-form"><p class="eyebrow">NUEVO EXPEDIENTE</p><h2>Agregar cliente</h2><label>Nombre completo<input required name="name" placeholder="Ej. María González" /></label><label>Meta principal<select name="goal"><option>Ganar masa muscular</option><option>Reducir grasa corporal</option><option>Mejorar condición física</option><option>Rehabilitación y movilidad</option></select></label><div class="form-row"><label>Modalidad comercial<select name="billingModel" id="client-billing-model"><option value="monthly">Mensualidad</option><option value="package">Paquete de sesiones</option></select></label><label>Precio (USD)<input required name="plan" type="number" min="0" step="0.01" value="120" /></label></div><div id="client-package-fields" class="conditional-fields" hidden><div class="form-row"><label>Cantidad de sesiones<input name="packageSessions" type="number" min="1" value="8" /></label><label>Vigencia en días<input name="packageValidity" type="number" min="1" value="30" /></label></div></div><label>Correo electrónico<input name="email" type="email" placeholder="cliente@correo.com" /></label><button class="primary wide-button">Crear expediente</button></form></template>
+    <template id="new-invoice-template"><form id="invoice-form"><p class="eyebrow">NUEVO COBRO · USD</p><h2>Registrar cobro</h2><label>Cliente<select name="client" id="invoice-client" required></select></label><label>Concepto<select name="concept" id="invoice-concept"><option>Mensualidad</option><option>Paquete de sesiones</option><option>Sesión individual</option><option>Otro</option></select></label><div id="invoice-package-fields" class="conditional-fields" hidden><label>Sesiones incluidas<input name="sessions" type="number" min="1" value="8" /></label></div><div class="form-row"><label>Monto (USD)<input required name="amount" type="number" min="0.01" step="0.01" /></label><label>Vencimiento<input required name="due" type="date" /></label></div><label>Método de pago<select name="method"><option value="pending">Pendiente de confirmar</option><option>Efectivo</option><option>Yappy</option><option>Transferencia bancaria</option><option>Tarjeta</option><option>Otro</option></select></label><label>Referencia o comprobante<input name="reference" placeholder="Opcional" /></label><button class="primary wide-button">Guardar cobro</button></form></template>
+    <template id="new-session-template"><form id="session-form"><p class="eyebrow">AGENDA</p><h2>Agendar sesión</h2><label>Cliente<select name="client" id="session-client" required></select></label><div class="form-row"><label>Fecha<input name="date" type="date" required /></label><label>Hora<input name="time" type="time" required value="08:00" /></label></div><label>Rutina<select name="routine" id="session-routine"><option value="Evaluación / seguimiento">Evaluación / seguimiento</option></select></label><label>Modalidad<select name="mode"><option>Presencial</option><option>Virtual</option><option>Exterior</option></select></label><label>Notas<input name="notes" placeholder="Opcional" /></label><button class="primary wide-button">Agendar sesión</button></form></template>
+    <template id="new-routine-template"><form id="routine-form"><p class="eyebrow">ENTRENAMIENTO</p><h2>Crear rutina</h2><label>Nombre de la rutina<input name="title" required placeholder="Ej. Fuerza tren inferior" /></label><label>Descripción<input name="description" required placeholder="Objetivo y enfoque de la rutina" /></label><div class="form-row"><label>Sesiones por semana<input name="sessions" type="number" min="1" max="7" value="3" required /></label><label>Asignar a<select name="client" id="routine-client"><option value="">Sin asignar</option></select></label></div><label>Ejercicios<textarea name="exercises" rows="6" placeholder="Un ejercicio por línea&#10;Sentadilla · 4 × 8&#10;Hip thrust · 4 × 10"></textarea></label><button class="primary wide-button">Guardar rutina</button></form></template>
+    <template id="confirm-payment-template"><form id="payment-form"><p class="eyebrow">CONFIRMAR PAGO</p><h2>Validar cobro</h2><p id="payment-summary" class="form-summary"></p><label>Método de pago<select name="method" required><option>Efectivo</option><option>Yappy</option><option>Transferencia bancaria</option><option>Tarjeta</option><option>Otro</option></select></label><label>Referencia o comprobante<input name="reference" placeholder="Opcional" /></label><button class="primary wide-button">Confirmar pago</button></form></template>
+    <script src="./app.js"></script>
+  </body>
+</html>

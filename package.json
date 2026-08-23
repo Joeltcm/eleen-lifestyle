@@ -1,0 +1,10 @@
+{
+  "name": "eleen-lifestyle",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "node scripts/build-frontend.mjs",
+    "check": "node --check app.js && node --check sw.js"
+  }
+}
+
