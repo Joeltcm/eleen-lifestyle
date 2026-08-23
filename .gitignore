@@ -4,6 +4,7 @@ dist/
 .env.*
 !.env.example
 .railway/
+.wrangler/
 .DS_Store
 *.log
 assets/eleen-training.png

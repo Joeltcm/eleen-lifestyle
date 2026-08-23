@@ -91,8 +91,23 @@
         <section class="view" id="calendar">
           <div class="section-heading"><div><p class="eyebrow">PLANIFICACIÓN</p><h2>Agenda</h2></div><button class="primary" data-action="new-session">+ Agendar sesión</button></div>
           <div class="calendar-connect"><div><span class="google-g">G</span><div><b>Google Calendar</b><p>Conecta tu agenda para sincronizar sesiones y recordatorios.</p></div></div><button class="secondary">Conectar calendario</button></div>
-          <div class="week-card"><div class="week-head"><button>‹</button><h3>Esta semana</h3><button>›</button></div><div id="week-calendar" class="week-calendar"></div></div>
-          <article class="card session-control"><div class="card-head"><div><h3>Control de sesiones</h3><p>Marca asistencia y descuenta automáticamente los paquetes</p></div></div><div id="session-list" class="session-list"></div></article>
+          <div class="week-card calendar-card">
+            <div class="calendar-tools">
+              <div class="calendar-view-switch" role="group" aria-label="Vista de agenda">
+                <button class="calendar-view-button" data-calendar-mode="day">Día</button>
+                <button class="calendar-view-button active" data-calendar-mode="week">Semana</button>
+                <button class="calendar-view-button" data-calendar-mode="month">Mes</button>
+              </div>
+              <div class="calendar-period-nav">
+                <button class="calendar-nav-button" data-calendar-shift="-1" aria-label="Período anterior">‹</button>
+                <h3 id="calendar-period">Esta semana</h3>
+                <button class="calendar-nav-button" data-calendar-shift="1" aria-label="Período siguiente">›</button>
+                <button class="calendar-today-button" data-calendar-today>Hoy</button>
+              </div>
+            </div>
+            <div id="week-calendar" class="calendar-grid calendar-week"></div>
+          </div>
+          <article class="card session-control"><div class="card-head"><div><h3 id="session-control-title">Sesiones de la semana</h3><p id="session-control-copy">Marca asistencia y descuenta automáticamente los paquetes</p></div></div><div id="session-list" class="session-list"></div></article>
         </section>
 
         <section class="view" id="routines">
