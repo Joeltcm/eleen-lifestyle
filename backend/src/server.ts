@@ -2,9 +2,11 @@ import Fastify, { type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
 import bcrypt from 'bcryptjs';
+import { randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
 import { config } from './config.js';
 import { sql } from './db.js';
+import { createDownloadUrl, createUploadUrl, storageReady, verifyUpload } from './storage.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
 const app = Fastify({ logger: true, trustProxy: true });
@@ -183,6 +185,88 @@ app.post('/api/invoices/:id/confirm', { preHandler: requireStaff }, async (reque
   if (!invoice) return reply.code(404).send({ error: 'Cobro no encontrado' });
   if (invoice.package_id) await sql`UPDATE session_packages SET status = 'active' WHERE id = ${invoice.package_id} AND status = 'pending'`;
   return invoice;
+});
+
+const documentKind = z.enum(['inbody', 'contract', 'receipt', 'progress_photo', 'other']);
+const uploadSchema = z.object({
+  clientId: z.string().uuid(),
+  kind: documentKind,
+  fileName: z.string().trim().min(1).max(180),
+  contentType: z.enum(['application/pdf', 'image/jpeg', 'image/png', 'image/webp']),
+  sizeBytes: z.coerce.number().int().positive().max(20 * 1024 * 1024).optional()
+});
+
+function safeFileName(fileName: string) {
+  const normalized = fileName.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
+  return normalized.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(-120) || 'documento';
+}
+
+app.post('/api/documents/upload-url', { preHandler: requireStaff }, async (request, reply) => {
+  if (!storageReady) return reply.code(503).send({ error: 'El almacenamiento de documentos aún no está configurado' });
+  const auth = request.user as AuthUser;
+  const input = uploadSchema.parse(request.body);
+  const [client] = await sql`SELECT id FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub}`;
+  if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
+
+  const objectKey = `clients/${input.clientId}/${input.kind}/${randomUUID()}-${safeFileName(input.fileName)}`;
+  const [document] = await sql`
+    INSERT INTO documents (client_id, kind, object_key, original_name, content_type, size_bytes)
+    VALUES (${input.clientId}, ${input.kind}, ${objectKey}, ${input.fileName}, ${input.contentType}, ${input.sizeBytes || null})
+    RETURNING id, client_id, kind, original_name, content_type, size_bytes, upload_status, created_at
+  `;
+  const uploadUrl = await createUploadUrl(objectKey, input.contentType);
+  return reply.code(201).send({ document, uploadUrl, expiresInSeconds: 600 });
+});
+
+app.post('/api/documents/:id/complete', { preHandler: requireStaff }, async (request, reply) => {
+  if (!storageReady) return reply.code(503).send({ error: 'El almacenamiento de documentos aún no está configurado' });
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [document] = await sql`
+    SELECT d.* FROM documents d JOIN clients c ON c.id = d.client_id
+    WHERE d.id = ${id} AND c.owner_id = ${auth.sub}
+  `;
+  if (!document) return reply.code(404).send({ error: 'Documento no encontrado' });
+
+  try {
+    const uploaded = await verifyUpload(document.object_key);
+    const [updated] = await sql`
+      UPDATE documents SET upload_status = 'ready',
+        size_bytes = COALESCE(${uploaded.sizeBytes || null}, size_bytes),
+        content_type = COALESCE(${uploaded.contentType || null}, content_type)
+      WHERE id = ${id}
+      RETURNING id, client_id, kind, original_name, content_type, size_bytes, upload_status, created_at
+    `;
+    return updated;
+  } catch (error) {
+    request.log.warn({ error, documentId: id }, 'No se encontró el archivo cargado en R2');
+    return reply.code(409).send({ error: 'La carga todavía no aparece en el almacenamiento' });
+  }
+});
+
+app.get('/api/documents', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const query = z.object({ clientId: z.string().uuid().optional() }).parse(request.query);
+  return sql`
+    SELECT d.id, d.client_id, d.kind, d.original_name, d.content_type, d.size_bytes, d.upload_status, d.created_at, c.full_name
+    FROM documents d JOIN clients c ON c.id = d.client_id
+    WHERE c.owner_id = ${auth.sub} AND (${query.clientId || null}::uuid IS NULL OR d.client_id = ${query.clientId || null})
+    ORDER BY d.created_at DESC
+  `;
+});
+
+app.get('/api/documents/:id/download-url', { preHandler: requireStaff }, async (request, reply) => {
+  if (!storageReady) return reply.code(503).send({ error: 'El almacenamiento de documentos aún no está configurado' });
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [document] = await sql`
+    SELECT d.id, d.object_key, d.original_name, d.upload_status
+    FROM documents d JOIN clients c ON c.id = d.client_id
+    WHERE d.id = ${id} AND c.owner_id = ${auth.sub}
+  `;
+  if (!document) return reply.code(404).send({ error: 'Documento no encontrado' });
+  if (document.upload_status !== 'ready') return reply.code(409).send({ error: 'El documento todavía no está disponible' });
+  return { documentId: document.id, fileName: document.original_name, downloadUrl: await createDownloadUrl(document.object_key), expiresInSeconds: 300 };
 });
 
 const inbodySchema = z.object({ clientId: z.string().uuid(), documentId: z.string().uuid().optional(), deviceModel: z.string().optional(), testedAt: z.string().datetime(), values: z.record(z.string(), z.union([z.number(), z.string(), z.null()])), confidence: z.record(z.string(), z.number()).default({}), extractionStatus: z.enum(['pending', 'processing', 'ready', 'review', 'failed']).default('ready') });
