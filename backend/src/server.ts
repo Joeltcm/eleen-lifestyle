@@ -118,8 +118,8 @@ app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) =
   if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
   const pack = await sql.begin(async transaction => {
     const [created] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on) VALUES (${input.clientId}, ${`Paquete ${input.totalSessions} sesiones`}, ${input.totalSessions}, ${input.amount}, ${input.expiresOn || null}) RETURNING *`;
-    await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${input.clientId}, ${created.id}, 'Paquete de sesiones', ${input.amount}, current_date)`;
-    return created;
+    const [invoice] = await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${input.clientId}, ${created.id}, 'Paquete de sesiones', ${input.amount}, current_date) RETURNING id`;
+    return { ...created, invoice_id: invoice.id };
   });
   return reply.code(201).send(pack);
 });

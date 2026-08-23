@@ -1,6 +1,10 @@
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
-const dateKey = date => date.toISOString().slice(0, 10);
+const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+const API_BASE = 'https://api-production-b417f.up.railway.app';
+const authKey = 'eleen-lifestyle-session';
+let authToken = localStorage.getItem(authKey);
+let currentUser = null;
 const seed = {
   clients: [
     { id: 'c1', name: 'Cliente de prueba', goal: 'Ganar masa muscular', billingModel: 'monthly', plan: 150, email: '', status: 'Activo', inbody: { date: '2026-07-12', weight: 71.1, smm: 31.2, fat: 15.6, pbf: 21.9, score: 74, history: [{ date: '2025-10-04', weight: 65.1, smm: 29.6, fat: 12.3, pbf: 18.9 }, { date: '2025-11-07', weight: 67.5, smm: 29.7, fat: 14.7, pbf: 21.8 }, { date: '2026-07-12', weight: 71.1, smm: 31.2, fat: 15.6, pbf: 21.9 }] } },
@@ -26,15 +30,43 @@ const seed = {
     { id: 'r3', title: 'Recomposición corporal', description: 'Entrenamiento de fuerza con cardio estratégico.', clients: 1, sessions: 4, exercises: ['Prensa · 4 × 10', 'Press de pecho · 3 × 10', 'Intervalos · 8 × 30 s'] }
   ]
 };
-const storeKey = 'eleen-lifestyle-data';
-const previousStoreKey = 'momentum-coach-data';
-let data = JSON.parse(localStorage.getItem(storeKey) || localStorage.getItem(previousStoreKey) || 'null') || seed;
-if (!Array.isArray(data.packages)) data.packages = seed.packages;
-if (!Array.isArray(data.sessions)) data.sessions = seed.sessions;
-data.routines.forEach((routine, index) => { if (!routine.id) routine.id = `routine-${index}-${Date.now()}`; if (!Array.isArray(routine.exercises)) routine.exercises = []; });
-data.clients.forEach(client => { if (!client.billingModel) client.billingModel = data.packages.some(pack => pack.client === client.name) ? 'package' : 'monthly'; });
-localStorage.setItem(storeKey, JSON.stringify(data));
-const save = () => localStorage.setItem(storeKey, JSON.stringify(data));
+let data = { clients: [], invoices: [], packages: [], sessions: [], routines: [] };
+const save = () => {};
+const toast = (message, error = false) => {
+  const element = document.createElement('div'); element.className = `toast${error ? ' error' : ''}`; element.textContent = message;
+  document.body.append(element); setTimeout(() => element.remove(), 3200);
+};
+async function api(path, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (authToken && options.auth !== false) headers.Authorization = `Bearer ${authToken}`;
+  if (options.body !== undefined && !(options.body instanceof FormData)) headers['Content-Type'] = 'application/json';
+  const response = await fetch(`${API_BASE}${path}`, { method: options.method || 'GET', headers, body: options.body === undefined || options.body instanceof FormData ? options.body : JSON.stringify(options.body) });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (response.status === 401 && options.auth !== false) { localStorage.removeItem(authKey); authToken = null; }
+    throw new Error(payload.error || 'No fue posible completar la solicitud');
+  }
+  return payload;
+}
+const exerciseLabel = exercise => typeof exercise === 'string' ? exercise : [exercise.name, exercise.sets && `${exercise.sets} series`, exercise.reps].filter(Boolean).join(' · ');
+async function loadData() {
+  const [clients, invoices, packages, sessions, routines] = await Promise.all([
+    api('/api/clients'), api('/api/invoices'), api('/api/packages'), api('/api/sessions'), api('/api/routines')
+  ]);
+  const assessments = await Promise.all(clients.map(client => api(`/api/clients/${client.id}/inbody`)));
+  data.clients = clients.map((client, index) => {
+    const history = assessments[index].assessments.map(item => ({
+      date: String(item.tested_at).slice(0, 10), weight: Number(item.values.weightKg), smm: Number(item.values.skeletalMuscleMassKg),
+      fat: Number(item.values.bodyFatMassKg), pbf: Number(item.values.percentBodyFat), score: Number(item.values.inBodyScore)
+    }));
+    const latest = history.at(-1);
+    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), email: client.email || '', status: client.status === 'active' ? 'Activo' : 'Inactivo', inbody: latest ? { ...latest, history } : null };
+  });
+  data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, concept: item.concept, amount: Number(item.amount), due: item.due_on, method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status }));
+  data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired' }));
+  data.sessions = sessions.map(item => { const starts = new Date(item.starts_at); return { id: item.id, clientId: item.client_id, client: item.full_name, routineId: item.routine_id, date: dateKey(starts), time: `${String(starts.getHours()).padStart(2, '0')}:${String(starts.getMinutes()).padStart(2, '0')}`, routine: item.routine_title || 'Evaluación / seguimiento', mode: item.mode, status: item.status, notes: item.notes || '' }; });
+  data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: 0, sessions: item.sessions_per_week, exercises: (item.exercises || []).map(exerciseLabel) }));
+}
 const initials = name => name.split(' ').slice(0, 2).map(word => word[0]).join('').toUpperCase();
 const view = id => {
   document.querySelectorAll('.view').forEach(item => item.classList.toggle('active', item.id === id));
@@ -102,7 +134,7 @@ function renderBilling() {
   document.getElementById('package-table').innerHTML = data.packages.length ? data.packages.map(pack => {
     const remaining = remainingSessions(pack);
     const state = pack.status === 'pending' ? 'Pendiente de pago' : remaining ? 'Activo' : 'Agotado';
-    return `<tr><td><b>${pack.client}</b></td><td>${pack.label}</td><td>${pack.total}</td><td>${pack.used}</td><td><strong class="session-balance">${remaining}</strong></td><td><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span></td><td>${pack.status === 'confirmed' && remaining ? `<button class="secondary session-use" data-use-package="${pack.id}">Usar 1 sesión</button>` : ''}</td></tr>`;
+    return `<tr><td><b>${pack.client}</b></td><td>${pack.label}</td><td>${pack.total}</td><td>${pack.used}</td><td><strong class="session-balance">${remaining}</strong></td><td><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span></td><td><small>${pack.status === 'confirmed' && remaining ? 'Descuento automático' : '—'}</small></td></tr>`;
   }).join('') : '<tr><td colspan="7" class="empty">Aún no hay paquetes de sesiones.</td></tr>';
 }
 function renderAll() { renderDashboard(); renderClients(); renderCalendar(); renderRoutines(); renderBilling(); }
@@ -114,74 +146,83 @@ function newClient() {
   const model = document.getElementById('client-billing-model'); const packageFields = document.getElementById('client-package-fields');
   const togglePackage = () => { packageFields.hidden = model.value !== 'package'; };
   model.addEventListener('change', togglePackage); togglePackage();
-  document.getElementById('client-form').addEventListener('submit', event => {
-    event.preventDefault(); const form = new FormData(event.target); const billingModel = form.get('billingModel'); const name = form.get('name');
-    const client = { id: crypto.randomUUID(), name, goal: form.get('goal'), billingModel, plan: Number(form.get('plan')), packageSessions: billingModel === 'package' ? Number(form.get('packageSessions')) : null, packageValidity: billingModel === 'package' ? Number(form.get('packageValidity')) : null, email: form.get('email'), status: 'Activo', inbody: null };
-    data.clients.push(client);
-    if (billingModel === 'package') {
-      const invoiceId = crypto.randomUUID();
-      data.invoices.unshift({ id: invoiceId, client: name, concept: 'Paquete de sesiones', amount: client.plan, due: dateKey(today), method: 'pending', status: 'pending' });
-      data.packages.unshift({ id: crypto.randomUUID(), invoiceId, client: name, label: `Paquete ${client.packageSessions} sesiones`, total: client.packageSessions, used: 0, amount: client.plan, status: 'pending' });
-    }
-    save(); renderAll(); modal.close(); view('clients');
+  document.getElementById('client-form').addEventListener('submit', async event => {
+    event.preventDefault(); const form = new FormData(event.target); const billingModel = form.get('billingModel');
+    try {
+      event.target.classList.add('loading-state');
+      await api('/api/clients', { method: 'POST', body: { fullName: form.get('name'), goal: form.get('goal'), billingModel, standardPrice: Number(form.get('plan')), packageSessions: billingModel === 'package' ? Number(form.get('packageSessions')) : undefined, email: form.get('email') } });
+      await loadData(); renderAll(); modal.close(); view('clients'); toast('Cliente creado y sincronizado');
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
 function newInvoice() {
   const content = formFromTemplate('new-invoice-template'); openModal(content);
-  const selection = document.getElementById('invoice-client'); data.clients.forEach(client => selection.add(new Option(client.name, client.name)));
+  const selection = document.getElementById('invoice-client'); data.clients.forEach(client => selection.add(new Option(client.name, client.id)));
   const concept = document.getElementById('invoice-concept'); const packageFields = document.getElementById('invoice-package-fields');
   const togglePackage = () => { packageFields.hidden = concept.value !== 'Paquete de sesiones'; };
   concept.addEventListener('change', togglePackage); togglePackage();
   const amountInput = document.querySelector('#invoice-form [name="amount"]'); const dueInput = document.querySelector('#invoice-form [name="due"]'); const sessionsInput = document.querySelector('#invoice-form [name="sessions"]');
-  const fillClientPlan = () => { const client = data.clients.find(item => item.name === selection.value); if (!client) return; amountInput.value = client.plan; concept.value = client.billingModel === 'package' ? 'Paquete de sesiones' : 'Mensualidad'; if (client.packageSessions) sessionsInput.value = client.packageSessions; togglePackage(); };
+  const fillClientPlan = () => { const client = data.clients.find(item => item.id === selection.value); if (!client) return; amountInput.value = client.plan; concept.value = client.billingModel === 'package' ? 'Paquete de sesiones' : 'Mensualidad'; if (client.packageSessions) sessionsInput.value = client.packageSessions; togglePackage(); };
   dueInput.value = dateKey(today); selection.addEventListener('change', fillClientPlan); fillClientPlan();
-  document.getElementById('invoice-form').addEventListener('submit', event => {
-    event.preventDefault(); const form = new FormData(event.target); const method = form.get('method'); const status = method === 'pending' ? 'pending' : 'confirmed';
-    const invoice = { id: crypto.randomUUID(), client: form.get('client'), concept: form.get('concept'), amount: Number(form.get('amount')), due: form.get('due'), method, reference: form.get('reference'), status };
-    data.invoices.unshift(invoice);
-    if (invoice.concept === 'Paquete de sesiones') {
-      const sessions = Number(form.get('sessions'));
-      data.packages.unshift({ id: crypto.randomUUID(), invoiceId: invoice.id, client: invoice.client, label: `Paquete ${sessions} sesiones`, total: sessions, used: 0, amount: invoice.amount, status });
-      const client = data.clients.find(item => item.name === invoice.client); if (client) { client.billingModel = 'package'; client.plan = invoice.amount; client.packageSessions = sessions; }
-    }
-    save(); renderAll(); modal.close(); view('billing');
+  document.getElementById('invoice-form').addEventListener('submit', async event => {
+    event.preventDefault(); const form = new FormData(event.target); const method = form.get('method');
+    try {
+      event.target.classList.add('loading-state');
+      let invoice;
+      if (form.get('concept') === 'Paquete de sesiones') {
+        const pack = await api('/api/packages', { method: 'POST', body: { clientId: form.get('client'), totalSessions: Number(form.get('sessions')), amount: Number(form.get('amount')) } });
+        invoice = { id: pack.invoice_id };
+      } else {
+        invoice = await api('/api/invoices', { method: 'POST', body: { clientId: form.get('client'), concept: form.get('concept'), amount: Number(form.get('amount')), dueOn: form.get('due') } });
+      }
+      if (invoice && method !== 'pending') await api(`/api/invoices/${invoice.id}/confirm`, { method: 'POST', body: { method, reference: form.get('reference') || undefined } });
+      await loadData(); renderAll(); modal.close(); view('billing'); toast('Cobro registrado');
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
 function newSession() {
   const content = formFromTemplate('new-session-template'); openModal(content);
-  const clientSelect = document.getElementById('session-client'); data.clients.filter(client => client.status === 'Activo').forEach(client => clientSelect.add(new Option(client.name, client.name)));
-  const routineSelect = document.getElementById('session-routine'); data.routines.forEach(routine => routineSelect.add(new Option(routine.title, routine.title)));
+  const clientSelect = document.getElementById('session-client'); data.clients.filter(client => client.status === 'Activo').forEach(client => clientSelect.add(new Option(client.name, client.id)));
+  const routineSelect = document.getElementById('session-routine'); data.routines.forEach(routine => routineSelect.add(new Option(routine.title, routine.id)));
   document.querySelector('#session-form [name="date"]').value = dateKey(today);
-  document.getElementById('session-form').addEventListener('submit', event => {
+  document.getElementById('session-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target);
-    data.sessions.push({ id: crypto.randomUUID(), client: form.get('client'), date: form.get('date'), time: form.get('time'), routine: form.get('routine'), mode: form.get('mode'), notes: form.get('notes'), status: 'scheduled', packageDebited: false });
-    save(); renderAll(); modal.close(); view('calendar');
+    try {
+      event.target.classList.add('loading-state');
+      const routineId = form.get('routine');
+      await api('/api/sessions', { method: 'POST', body: { clientId: form.get('client'), routineId: routineId === 'Evaluación / seguimiento' ? undefined : routineId, startsAt: new Date(`${form.get('date')}T${form.get('time')}:00`).toISOString(), durationMinutes: 60, mode: form.get('mode'), notes: form.get('notes') || undefined } });
+      await loadData(); renderAll(); modal.close(); view('calendar'); toast('Sesión agendada');
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
 function newRoutine() {
   const content = formFromTemplate('new-routine-template'); openModal(content);
-  const clientSelect = document.getElementById('routine-client'); data.clients.filter(client => client.status === 'Activo').forEach(client => clientSelect.add(new Option(client.name, client.name)));
-  document.getElementById('routine-form').addEventListener('submit', event => {
+  const clientSelect = document.getElementById('routine-client'); data.clients.filter(client => client.status === 'Activo').forEach(client => clientSelect.add(new Option(client.name, client.id)));
+  document.getElementById('routine-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target); const assigned = form.get('client');
-    data.routines.unshift({ id: crypto.randomUUID(), title: form.get('title'), description: form.get('description'), clients: assigned ? 1 : 0, assignedClients: assigned ? [assigned] : [], sessions: Number(form.get('sessions')), exercises: String(form.get('exercises') || '').split('\n').map(item => item.trim()).filter(Boolean) });
-    save(); renderAll(); modal.close(); view('routines');
+    try {
+      event.target.classList.add('loading-state');
+      const exercises = String(form.get('exercises') || '').split('\n').map(item => item.trim()).filter(Boolean).map(name => ({ name }));
+      await api('/api/routines', { method: 'POST', body: { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: assigned || undefined, exercises } });
+      await loadData(); renderAll(); modal.close(); view('routines'); toast('Rutina guardada');
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
-function completeSession(id) {
-  const session = data.sessions.find(item => item.id === id); if (!session || session.status === 'completed') return;
-  session.status = 'completed';
-  const pack = data.packages.find(item => item.client === session.client && item.status === 'confirmed' && remainingSessions(item) > 0);
-  if (pack) { pack.used += 1; session.packageDebited = true; session.packageId = pack.id; }
-  save(); renderAll();
+async function completeSession(id) {
+  try { await api(`/api/sessions/${id}/complete`, { method: 'POST' }); await loadData(); renderAll(); toast('Sesión completada'); }
+  catch (error) { toast(error.message, true); }
 }
 function confirmInvoice(id) {
   const invoice = data.invoices.find(item => item.id === id); if (!invoice) return;
   const content = formFromTemplate('confirm-payment-template'); openModal(content);
   document.getElementById('payment-summary').textContent = `${invoice.client} · ${invoice.concept} · ${money.format(invoice.amount)}`;
-  document.getElementById('payment-form').addEventListener('submit', event => {
-    event.preventDefault(); const form = new FormData(event.target); invoice.method = form.get('method'); invoice.reference = form.get('reference'); invoice.status = 'confirmed'; invoice.confirmedAt = new Date().toISOString();
-    const pack = data.packages.find(item => item.invoiceId === invoice.id || (item.client === invoice.client && item.status === 'pending' && item.amount === invoice.amount)); if (pack) pack.status = 'confirmed';
-    save(); renderAll(); modal.close(); view('billing');
+  document.getElementById('payment-form').addEventListener('submit', async event => {
+    event.preventDefault(); const form = new FormData(event.target);
+    try {
+      event.target.classList.add('loading-state');
+      await api(`/api/invoices/${id}/confirm`, { method: 'POST', body: { method: form.get('method'), reference: form.get('reference') || undefined } });
+      await loadData(); renderAll(); modal.close(); view('billing'); toast('Pago confirmado');
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
 function clientDetail(id) {
@@ -196,8 +237,20 @@ function clientDetail(id) {
 }
 function inbodyImport(client) {
   const box = document.createElement('div');
-  box.innerHTML = `<p class="eyebrow">IMPORTACIÓN AUTOMÁTICA</p><h2>Analizar InBody</h2><p style="color:#6f7b75">Sube las páginas del reporte en PDF, JPG o PNG. El extractor identificará métricas y el historial sin digitación manual.</p><label style="border:2px dashed #b4cbbd;border-radius:9px;padding:24px;text-align:center;color:#42705f;cursor:pointer"><input id="inbody-file" type="file" accept="application/pdf,image/*" multiple hidden />Seleccionar reporte InBody<br><small style="color:#6f7b75;font-weight:400">PDF o imágenes del reporte completo</small></label><div id="scan-result"></div>`;
-  openModal(box); document.getElementById('inbody-file').addEventListener('change', event => { if (!event.target.files.length) return; document.getElementById('scan-result').innerHTML = `<div class="alert-item" style="margin-top:15px"><b>Archivo recibido</b><span>El motor OCR se conectará al servicio de análisis en la siguiente etapa. La interfaz y el modelo de datos ya admiten la importación automática del InBody 580.</span></div>`; });
+  box.innerHTML = `<p class="eyebrow">IMPORTACIÓN AUTOMÁTICA</p><h2>Analizar InBody</h2><p style="color:#6f7b75">Sube las páginas del reporte en PDF, JPG o PNG. Se guardarán en el expediente privado antes de iniciar el análisis.</p><label style="border:2px dashed #d8a7bc;border-radius:9px;padding:24px;text-align:center;color:#8c5870;cursor:pointer"><input id="inbody-file" type="file" accept="application/pdf,image/jpeg,image/png,image/webp" multiple hidden />Seleccionar reporte InBody<br><small style="color:#6f7b75;font-weight:400">Máximo 20 MB por archivo</small></label><div id="scan-result"></div>`;
+  openModal(box); document.getElementById('inbody-file').addEventListener('change', async event => {
+    const files = [...event.target.files]; if (!files.length) return;
+    const result = document.getElementById('scan-result'); result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>Subiendo ${files.length} archivo${files.length > 1 ? 's' : ''}…</b><span>Conexión privada con el expediente de ${client.name}.</span></div>`;
+    try {
+      for (const file of files) {
+        const created = await api('/api/documents/upload-url', { method: 'POST', body: { clientId: client.id, kind: 'inbody', fileName: file.name, contentType: file.type, sizeBytes: file.size } });
+        const uploaded = await fetch(created.uploadUrl, { method: 'PUT', headers: { 'Content-Type': file.type }, body: file });
+        if (!uploaded.ok) throw new Error(`No fue posible subir ${file.name}`);
+        await api(`/api/documents/${created.document.id}/complete`, { method: 'POST' });
+      }
+      result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>Reporte guardado de forma segura</b><span>Los archivos quedaron asociados a ${client.name}. La extracción OCR y la revisión de métricas se activarán en la siguiente fase.</span></div>`;
+    } catch (error) { result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>No se pudo completar la carga</b><span>${error.message}</span></div>`; }
+  });
 }
 document.querySelectorAll('.nav-link').forEach(link => link.addEventListener('click', () => view(link.dataset.view)));
 document.querySelectorAll('[data-view-go]').forEach(button => button.addEventListener('click', () => view(button.dataset.viewGo)));
@@ -208,10 +261,6 @@ document.addEventListener('click', event => {
   if (event.target.dataset.action === 'new-routine') newRoutine();
   if (event.target.dataset.client) clientDetail(event.target.dataset.client);
   if (event.target.dataset.inbody) inbodyImport(data.clients.find(client => client.id === event.target.dataset.inbody));
-  if (event.target.dataset.usePackage) {
-    const pack = data.packages.find(item => item.id === event.target.dataset.usePackage);
-    if (pack && remainingSessions(pack) > 0) { pack.used += 1; save(); renderAll(); }
-  }
   if (event.target.dataset.completeSession) completeSession(event.target.dataset.completeSession);
   if (event.target.dataset.confirmInvoice) confirmInvoice(event.target.dataset.confirmInvoice);
 });
@@ -221,4 +270,42 @@ document.getElementById('today').textContent = new Intl.DateTimeFormat('es-PA', 
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js'));
 }
-renderAll();
+
+function showAuth(setupRequired) {
+  document.getElementById('auth-screen').hidden = false; document.getElementById('app-shell').hidden = true;
+  document.getElementById('setup-form').hidden = !setupRequired; document.getElementById('login-form').hidden = setupRequired;
+  document.getElementById('auth-title').textContent = setupRequired ? 'Preparemos tu espacio' : 'Bienvenida de nuevo';
+  document.getElementById('auth-copy').textContent = setupRequired ? 'Crea la primera cuenta administradora de Eleen Lifestyle.' : 'Accede al centro de control de clientes, sesiones y facturación.';
+}
+async function enterApp(user) {
+  currentUser = user; document.getElementById('auth-screen').hidden = true; document.getElementById('app-shell').hidden = false;
+  document.getElementById('account-button').textContent = initials(user.fullName || user.full_name || user.email);
+  await loadData(); renderAll();
+}
+document.getElementById('login-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = new FormData(event.target); const errorBox = document.getElementById('login-error'); errorBox.textContent = '';
+  try {
+    event.target.classList.add('loading-state');
+    const result = await api('/api/auth/login', { method: 'POST', auth: false, body: { email: form.get('email'), password: form.get('password') } });
+    authToken = result.token; localStorage.setItem(authKey, authToken); await enterApp(result.user);
+  } catch (error) { errorBox.textContent = error.message; } finally { event.target.classList.remove('loading-state'); }
+});
+document.getElementById('setup-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = new FormData(event.target); const errorBox = document.getElementById('setup-error'); errorBox.textContent = '';
+  try {
+    event.target.classList.add('loading-state');
+    const result = await api('/api/auth/setup', { method: 'POST', auth: false, headers: { 'x-setup-token': form.get('setupToken') }, body: { fullName: form.get('fullName'), email: form.get('email'), password: form.get('password') } });
+    authToken = result.token; localStorage.setItem(authKey, authToken); await enterApp(result.user); toast('Cuenta administradora creada');
+  } catch (error) { errorBox.textContent = error.message; } finally { event.target.classList.remove('loading-state'); }
+});
+document.getElementById('account-button').addEventListener('click', () => {
+  localStorage.removeItem(authKey); authToken = null; currentUser = null; data = { clients: [], invoices: [], packages: [], sessions: [], routines: [] }; showAuth(false);
+});
+async function start() {
+  try {
+    const status = await api('/api/auth/setup-status', { auth: false });
+    if (!authToken) return showAuth(status.required);
+    const result = await api('/api/me'); await enterApp(result.user);
+  } catch (error) { showAuth(false); document.getElementById('login-error').textContent = authToken ? 'La sesión venció. Inicia sesión nuevamente.' : 'No fue posible conectar con el servidor.'; }
+}
+start();
