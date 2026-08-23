@@ -139,7 +139,12 @@ app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) =
   return reply.code(201).send(pack);
 });
 
-const routineSchema = z.object({ title: z.string().min(2), description: z.string().optional(), sessionsPerWeek: z.coerce.number().int().min(1).max(7), exercises: z.array(z.object({ name: z.string(), sets: z.number().optional(), reps: z.string().optional(), notes: z.string().optional() })).default([]), clientId: z.string().uuid().optional() });
+const routineExerciseSchema = z.object({
+  catalogId: z.string().max(80).optional(), name: z.string().min(1).max(120), english: z.string().max(120).optional(),
+  category: z.string().max(80).optional(), level: z.string().max(40).optional(), machine: z.string().max(180).optional(),
+  freeWeight: z.string().max(180).optional(), sets: z.coerce.number().int().min(1).max(20).optional(), reps: z.string().max(40).optional(), notes: z.string().max(300).optional()
+});
+const routineSchema = z.object({ title: z.string().min(2), description: z.string().optional(), sessionsPerWeek: z.coerce.number().int().min(1).max(7), exercises: z.array(routineExerciseSchema).max(80).default([]), clientId: z.string().uuid().optional() });
 app.get('/api/routines', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`SELECT * FROM routines WHERE owner_id = ${auth.sub} ORDER BY created_at DESC`;

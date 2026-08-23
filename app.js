@@ -4,6 +4,7 @@ const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).pad
 const API_BASE = 'https://api-production-b417f.up.railway.app';
 const authKey = 'eileen-lifestyle-session';
 const legacyAuthKey = 'eleen-lifestyle-session';
+const exerciseCatalog = window.EXERCISE_CATALOG || [];
 let authToken = localStorage.getItem(authKey) || localStorage.getItem(legacyAuthKey);
 if (authToken && !localStorage.getItem(authKey)) {
   localStorage.setItem(authKey, authToken);
@@ -73,7 +74,7 @@ async function loadData() {
   data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, concept: item.concept, amount: Number(item.amount), due: item.due_on, method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status }));
   data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired' }));
   data.sessions = sessions.map(item => { const starts = new Date(item.starts_at); return { id: item.id, clientId: item.client_id, client: item.full_name, routineId: item.routine_id, date: dateKey(starts), time: `${String(starts.getHours()).padStart(2, '0')}:${String(starts.getMinutes()).padStart(2, '0')}`, routine: item.routine_title || 'Evaluación / seguimiento', mode: item.mode, status: item.status, notes: item.notes || '' }; });
-  data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: 0, sessions: item.sessions_per_week, exercises: (item.exercises || []).map(exerciseLabel) }));
+  data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: 0, sessions: item.sessions_per_week, exercises: item.exercises || [] }));
 }
 const initials = name => name.split(' ').slice(0, 2).map(word => word[0]).join('').toUpperCase();
 const view = id => {
@@ -182,7 +183,7 @@ function renderCalendar() {
   document.getElementById('session-control-copy').textContent = visibleSessions.length ? `${visibleSessions.length} sesión${visibleSessions.length !== 1 ? 'es' : ''} en el período visible` : 'No hay sesiones en el período visible';
   document.getElementById('session-list').innerHTML = visibleSessions.length ? visibleSessions.map(session => `<div class="session-row"><div class="session-date"><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric' }).format(new Date(`${session.date}T12:00:00`))}</b><span>${session.time}</span></div><div class="session-person"><b>${session.client}</b><span>${session.routine} · ${session.mode}</span></div><span class="session-state ${session.status}">${session.status === 'completed' ? 'Realizada' : 'Programada'}</span>${session.status === 'scheduled' ? `<button class="secondary session-complete" data-complete-session="${session.id}">Marcar realizada</button>` : '<span class="session-done">✓</span>'}</div>`).join('') : `<p class="empty">No hay sesiones programadas ${periodName}.</p>`;
 }
-function renderRoutines() { document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${routine.title}</h3><p>${routine.description}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 3).map(exercise => `<span>${exercise}</span>`).join('')}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana</footer></article>`).join(''); }
+function renderRoutines() { document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${routine.title}</h3><p>${routine.description}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 3).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana</footer></article>`).join(''); }
 function renderBilling() {
   const billed = monthInvoices().reduce((sum, item) => sum + item.amount, 0);
   const pending = data.invoices.filter(item => item.status === 'pending').reduce((sum, item) => sum + item.amount, 0);
@@ -199,7 +200,7 @@ function renderBilling() {
 }
 function renderAll() { renderDashboard(); renderClients(); renderCalendar(); renderRoutines(); renderBilling(); }
 const modal = document.getElementById('modal');
-function openModal(content) { document.getElementById('modal-content').replaceChildren(content); modal.showModal(); }
+function openModal(content, wide = false) { modal.classList.toggle('modal-wide', wide); document.getElementById('modal-content').replaceChildren(content); if (!modal.open) modal.showModal(); }
 function formFromTemplate(id) { return document.getElementById(id).content.cloneNode(true); }
 function newClient() {
   const content = formFromTemplate('new-client-template'); openModal(content);
@@ -256,14 +257,61 @@ function newSession() {
   });
 }
 function newRoutine() {
-  const content = formFromTemplate('new-routine-template'); openModal(content);
+  const content = formFromTemplate('new-routine-template'); openModal(content, true);
   const clientSelect = document.getElementById('routine-client'); data.clients.filter(client => client.status === 'Activo').forEach(client => clientSelect.add(new Option(client.name, client.id)));
+  const categorySelect = document.getElementById('exercise-category');
+  const levelSelect = document.getElementById('exercise-level');
+  const exerciseSelect = document.getElementById('exercise-choice');
+  const reference = document.getElementById('exercise-reference');
+  const selectedList = document.getElementById('selected-exercises');
+  const selectedExercises = [];
+  [...new Set(exerciseCatalog.map(exercise => exercise.category))].forEach(category => categorySelect.add(new Option(category, category)));
+  [...new Set(exerciseCatalog.map(exercise => exercise.level))].forEach(level => levelSelect.add(new Option(level, level)));
+
+  const currentExercise = () => exerciseCatalog.find(exercise => exercise.id === exerciseSelect.value);
+  const renderReference = () => {
+    const exercise = currentExercise();
+    reference.innerHTML = exercise ? `<div><b>${exercise.name}</b><span>${exercise.english}</span></div><span class="exercise-level">${exercise.level}</span><small><b>Con máquina:</b> ${exercise.machine}<br><b>Sin máquina:</b> ${exercise.freeWeight}</small>` : '<p class="empty">No hay ejercicios con estos filtros.</p>';
+  };
+  const renderChoices = () => {
+    const choices = exerciseCatalog.filter(exercise => exercise.category === categorySelect.value && (!levelSelect.value || exercise.level === levelSelect.value));
+    exerciseSelect.replaceChildren(...choices.map(exercise => new Option(`${exercise.name} · ${exercise.english}`, exercise.id)));
+    renderReference();
+  };
+  const renderSelected = () => {
+    selectedList.replaceChildren();
+    if (!selectedExercises.length) {
+      const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = 'Selecciona ejercicios del catálogo.'; selectedList.append(empty); return;
+    }
+    selectedExercises.forEach((exercise, index) => {
+      const row = document.createElement('div'); row.className = 'selected-exercise';
+      const copy = document.createElement('div'); const name = document.createElement('b'); const details = document.createElement('span');
+      name.textContent = exercise.name; details.textContent = `${exercise.category} · ${exercise.sets} series · ${exercise.reps}`; copy.append(name, details);
+      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'exercise-remove'; remove.dataset.removeExercise = String(index); remove.setAttribute('aria-label', `Quitar ${exercise.name}`); remove.textContent = '×';
+      row.append(copy, remove); selectedList.append(row);
+    });
+  };
+  const prescription = exercise => ({
+    ...exercise,
+    catalogId: exercise.id,
+    sets: Number(document.getElementById('exercise-sets').value) || 3,
+    reps: document.getElementById('exercise-reps').value.trim() || '10'
+  });
+  categorySelect.addEventListener('change', renderChoices); levelSelect.addEventListener('change', renderChoices); exerciseSelect.addEventListener('change', renderReference);
+  document.getElementById('add-exercise').addEventListener('click', () => { const exercise = currentExercise(); if (!exercise) return; selectedExercises.push(prescription(exercise)); renderSelected(); });
+  document.getElementById('add-custom-exercise').addEventListener('click', () => {
+    const input = document.getElementById('custom-exercise'); const name = input.value.trim(); if (!name) return;
+    selectedExercises.push({ name, category: 'Personalizado', level: 'Personalizado', sets: Number(document.getElementById('exercise-sets').value) || 3, reps: document.getElementById('exercise-reps').value.trim() || '10' });
+    input.value = ''; renderSelected();
+  });
+  selectedList.addEventListener('click', event => { const button = event.target.closest('[data-remove-exercise]'); if (!button) return; selectedExercises.splice(Number(button.dataset.removeExercise), 1); renderSelected(); });
+  renderChoices(); renderSelected();
   document.getElementById('routine-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target); const assigned = form.get('client');
+    if (!selectedExercises.length) { toast('Agrega al menos un ejercicio a la rutina', true); return; }
     try {
       event.target.classList.add('loading-state');
-      const exercises = String(form.get('exercises') || '').split('\n').map(item => item.trim()).filter(Boolean).map(name => ({ name }));
-      await api('/api/routines', { method: 'POST', body: { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: assigned || undefined, exercises } });
+      await api('/api/routines', { method: 'POST', body: { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: assigned || undefined, exercises: selectedExercises } });
       await loadData(); renderAll(); modal.close(); view('routines'); toast('Rutina guardada');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
