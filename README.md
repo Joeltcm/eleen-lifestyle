@@ -1,4 +1,4 @@
-# Eleen Lifestyle
+# Eileen Lifestyle
 
 Primera base de la PWA para la gestión de entrenamiento personal.
 
@@ -8,6 +8,7 @@ Primera base de la PWA para la gestión de entrenamiento personal.
 - API TypeScript/Fastify desplegada en Railway.
 - PostgreSQL privado en Railway con migraciones automáticas.
 - API de producción: `https://api-production-b417f.up.railway.app`
+- PWA de producción: `https://eileen-lifestyle.pages.dev`
 
 ## Incluye
 

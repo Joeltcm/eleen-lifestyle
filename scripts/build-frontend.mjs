@@ -9,4 +9,4 @@ await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
 for (const file of files) await cp(resolve(root, file), resolve(output, file));
 await cp(resolve(root, 'assets'), resolve(output, 'assets'), { recursive: true });
-console.log(`Eleen Lifestyle frontend built in ${output}`);
+console.log(`Eileen Lifestyle frontend built in ${output}`);

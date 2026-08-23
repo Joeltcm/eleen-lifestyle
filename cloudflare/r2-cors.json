@@ -3,6 +3,7 @@
     {
       "allowed": {
         "origins": [
+          "https://eileen-lifestyle.pages.dev",
           "https://eleen-lifestyle.pages.dev",
           "http://localhost:8788"
         ],

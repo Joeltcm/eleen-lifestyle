@@ -2,8 +2,13 @@ const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 const API_BASE = 'https://api-production-b417f.up.railway.app';
-const authKey = 'eleen-lifestyle-session';
-let authToken = localStorage.getItem(authKey);
+const authKey = 'eileen-lifestyle-session';
+const legacyAuthKey = 'eleen-lifestyle-session';
+let authToken = localStorage.getItem(authKey) || localStorage.getItem(legacyAuthKey);
+if (authToken && !localStorage.getItem(authKey)) {
+  localStorage.setItem(authKey, authToken);
+  localStorage.removeItem(legacyAuthKey);
+}
 let currentUser = null;
 const seed = {
   clients: [
@@ -346,7 +351,7 @@ function showAuth(setupRequired) {
   document.getElementById('auth-screen').hidden = false; document.getElementById('app-shell').hidden = true;
   document.getElementById('setup-form').hidden = !setupRequired; document.getElementById('login-form').hidden = setupRequired; document.getElementById('reset-form').hidden = true;
   document.getElementById('auth-title').textContent = setupRequired ? 'Preparemos tu espacio' : 'Bienvenida de nuevo';
-  document.getElementById('auth-copy').textContent = setupRequired ? 'Crea la primera cuenta administradora de Eleen Lifestyle.' : 'Accede al centro de control de clientes, sesiones y facturación.';
+  document.getElementById('auth-copy').textContent = setupRequired ? 'Crea la primera cuenta administradora de Eileen Lifestyle.' : 'Accede al centro de control de clientes, sesiones y facturación.';
 }
 async function enterApp(user) {
   currentUser = user; document.getElementById('auth-screen').hidden = true; document.getElementById('app-shell').hidden = false;
@@ -383,7 +388,7 @@ document.getElementById('setup-form').addEventListener('submit', async event => 
   } catch (error) { errorBox.textContent = error.message; } finally { event.target.classList.remove('loading-state'); }
 });
 document.getElementById('account-button').addEventListener('click', () => {
-  localStorage.removeItem(authKey); authToken = null; currentUser = null; data = { clients: [], invoices: [], packages: [], sessions: [], routines: [] }; showAuth(false);
+  localStorage.removeItem(authKey); localStorage.removeItem(legacyAuthKey); authToken = null; currentUser = null; data = { clients: [], invoices: [], packages: [], sessions: [], routines: [] }; showAuth(false);
 });
 async function start() {
   try {

@@ -1,5 +1,5 @@
 {
-  "name": "eleen-lifestyle",
+  "name": "eileen-lifestyle",
   "private": true,
   "version": "0.1.0",
   "scripts": {
@@ -7,4 +7,3 @@
     "check": "node --check app.js && node --check sw.js"
   }
 }
-
