@@ -252,8 +252,12 @@ function inbodyImport(client) {
     } catch (error) { result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>No se pudo completar la carga</b><span>${error.message}</span></div>`; }
   });
 }
-document.querySelectorAll('.nav-link').forEach(link => link.addEventListener('click', () => view(link.dataset.view)));
-document.querySelectorAll('[data-view-go]').forEach(button => button.addEventListener('click', () => view(button.dataset.viewGo)));
+document.querySelectorAll('.nav-link').forEach(link => link.addEventListener('click', event => {
+  event.preventDefault(); view(link.dataset.view); history.replaceState(null, '', `#${link.dataset.view}`);
+}));
+document.querySelectorAll('[data-view-go]').forEach(button => button.addEventListener('click', event => {
+  event.preventDefault(); view(button.dataset.viewGo);
+}));
 document.addEventListener('click', event => {
   if (event.target.dataset.action === 'new-client') newClient();
   if (event.target.dataset.action === 'new-invoice') newInvoice();

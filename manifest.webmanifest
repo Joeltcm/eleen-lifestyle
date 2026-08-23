@@ -1,1 +1,21 @@
-{"name":"Eleen Lifestyle","short_name":"Eleen","start_url":"./","display":"standalone","background_color":"#faf7f6","theme_color":"#4b3943","icons":[{"src":"./icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]}
+{
+  "id": "./",
+  "name": "Eleen Lifestyle",
+  "short_name": "Eleen",
+  "description": "Gestión privada de clientes, sesiones, rutinas, facturación y progreso físico.",
+  "lang": "es-PA",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#faf7f6",
+  "theme_color": "#4b3943",
+  "categories": ["fitness", "health", "business", "productivity"],
+  "icons": [
+    {"src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"},
+    {"src": "./icon-maskable.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable"},
+    {"src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+    {"src": "./apple-touch-icon.png", "sizes": "180x180", "type": "image/png", "purpose": "any"}
+  ]
+}

@@ -2,10 +2,16 @@
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#4b3943" />
     <meta name="description" content="Gestión integral para entrenadores personales" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Eleen Lifestyle" />
+    <meta name="format-detection" content="telephone=no" />
     <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png" />
     <link rel="stylesheet" href="./styles.css" />
     <title>Eleen Lifestyle</title>
   </head>
@@ -47,7 +53,7 @@
     </section>
     <div class="shell" id="app-shell" hidden>
       <aside class="sidebar">
-        <a class="brand" href="#dashboard" aria-label="Eleen Lifestyle inicio"><span class="brand-mark">EL</span><span>Eleen<br /><b>Lifestyle</b></span></a>
+        <a class="brand" href="#dashboard" data-view-go="dashboard" aria-label="Eleen Lifestyle inicio"><span class="brand-mark">EL</span><span>Eleen<br /><b>Lifestyle</b></span></a>
         <nav aria-label="Navegación principal">
           <p class="nav-caption">GESTIÓN</p>
           <a class="nav-link active" href="#dashboard" data-view="dashboard"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg></span><span>Resumen</span></a>
