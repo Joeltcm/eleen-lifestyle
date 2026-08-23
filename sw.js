@@ -1,4 +1,4 @@
-const CACHE = 'eileen-lifestyle-v13';
+const CACHE = 'eileen-lifestyle-v14';
 const FILES = ['./', './index.html', './styles.css', './exercise-catalog.js', './app.js', './manifest.webmanifest', './icon.svg', './icon-maskable.svg', './icon-512.png', './apple-touch-icon.png', './assets/eleen-training.jpg'];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(FILES)).then(() => self.skipWaiting())));
 self.addEventListener('activate', event => event.waitUntil(Promise.all([

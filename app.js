@@ -183,7 +183,9 @@ function renderCalendar() {
   document.getElementById('session-control-copy').textContent = visibleSessions.length ? `${visibleSessions.length} sesión${visibleSessions.length !== 1 ? 'es' : ''} en el período visible` : 'No hay sesiones en el período visible';
   document.getElementById('session-list').innerHTML = visibleSessions.length ? visibleSessions.map(session => `<div class="session-row"><div class="session-date"><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric' }).format(new Date(`${session.date}T12:00:00`))}</b><span>${session.time}</span></div><div class="session-person"><b>${session.client}</b><span>${session.routine} · ${session.mode}</span></div><span class="session-state ${session.status}">${session.status === 'completed' ? 'Realizada' : 'Programada'}</span>${session.status === 'scheduled' ? `<button class="secondary session-complete" data-complete-session="${session.id}">Marcar realizada</button>` : '<span class="session-done">✓</span>'}</div>`).join('') : `<p class="empty">No hay sesiones programadas ${periodName}.</p>`;
 }
-function renderRoutines() { document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${routine.title}</h3><p>${routine.description}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 3).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana</footer></article>`).join(''); }
+function renderRoutines() {
+  document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${routine.title}</h3><p>${routine.description}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''}</footer></article>`).join('');
+}
 function renderBilling() {
   const billed = monthInvoices().reduce((sum, item) => sum + item.amount, 0);
   const pending = data.invoices.filter(item => item.status === 'pending').reduce((sum, item) => sum + item.amount, 0);
@@ -264,6 +266,7 @@ function newRoutine() {
   const exerciseSelect = document.getElementById('exercise-choice');
   const reference = document.getElementById('exercise-reference');
   const selectedList = document.getElementById('selected-exercises');
+  const exerciseCount = document.getElementById('exercise-count');
   const selectedExercises = [];
   [...new Set(exerciseCatalog.map(exercise => exercise.category))].forEach(category => categorySelect.add(new Option(category, category)));
   [...new Set(exerciseCatalog.map(exercise => exercise.level))].forEach(level => levelSelect.add(new Option(level, level)));
@@ -280,15 +283,20 @@ function newRoutine() {
   };
   const renderSelected = () => {
     selectedList.replaceChildren();
+    exerciseCount.textContent = `${selectedExercises.length} ejercicio${selectedExercises.length !== 1 ? 's' : ''}`;
     if (!selectedExercises.length) {
-      const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = 'Selecciona ejercicios del catálogo.'; selectedList.append(empty); return;
+      const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = 'Todavía no has agregado ejercicios. Usa el selector superior para construir la rutina.'; selectedList.append(empty); return;
     }
     selectedExercises.forEach((exercise, index) => {
       const row = document.createElement('div'); row.className = 'selected-exercise';
+      const order = document.createElement('span'); order.className = 'selected-exercise-number'; order.textContent = String(index + 1);
       const copy = document.createElement('div'); const name = document.createElement('b'); const details = document.createElement('span');
-      name.textContent = exercise.name; details.textContent = `${exercise.category} · ${exercise.sets} series · ${exercise.reps}`; copy.append(name, details);
+      name.textContent = exercise.name; details.textContent = [exercise.category, exercise.level].filter(Boolean).join(' · '); copy.append(name, details);
+      const dose = document.createElement('div'); dose.className = 'selected-exercise-dose';
+      const setsLabel = document.createElement('label'); setsLabel.className = 'selected-exercise-field'; const setsTitle = document.createElement('span'); setsTitle.textContent = 'Series'; const sets = document.createElement('input'); sets.type = 'number'; sets.min = '1'; sets.max = '20'; sets.value = exercise.sets; sets.dataset.exerciseSets = String(index); setsLabel.append(setsTitle, sets);
+      const repsLabel = document.createElement('label'); repsLabel.className = 'selected-exercise-field'; const repsTitle = document.createElement('span'); repsTitle.textContent = 'Repeticiones / tiempo'; const reps = document.createElement('input'); reps.value = exercise.reps; reps.dataset.exerciseReps = String(index); repsLabel.append(repsTitle, reps); dose.append(setsLabel, repsLabel);
       const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'exercise-remove'; remove.dataset.removeExercise = String(index); remove.setAttribute('aria-label', `Quitar ${exercise.name}`); remove.textContent = '×';
-      row.append(copy, remove); selectedList.append(row);
+      row.append(order, copy, dose, remove); selectedList.append(row);
     });
   };
   const prescription = exercise => ({
@@ -298,13 +306,17 @@ function newRoutine() {
     reps: document.getElementById('exercise-reps').value.trim() || '10'
   });
   categorySelect.addEventListener('change', renderChoices); levelSelect.addEventListener('change', renderChoices); exerciseSelect.addEventListener('change', renderReference);
-  document.getElementById('add-exercise').addEventListener('click', () => { const exercise = currentExercise(); if (!exercise) return; selectedExercises.push(prescription(exercise)); renderSelected(); });
+  document.getElementById('add-exercise').addEventListener('click', () => { const exercise = currentExercise(); if (!exercise) return; selectedExercises.push(prescription(exercise)); renderSelected(); selectedList.lastElementChild?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); });
   document.getElementById('add-custom-exercise').addEventListener('click', () => {
     const input = document.getElementById('custom-exercise'); const name = input.value.trim(); if (!name) return;
     selectedExercises.push({ name, category: 'Personalizado', level: 'Personalizado', sets: Number(document.getElementById('exercise-sets').value) || 3, reps: document.getElementById('exercise-reps').value.trim() || '10' });
     input.value = ''; renderSelected();
   });
   selectedList.addEventListener('click', event => { const button = event.target.closest('[data-remove-exercise]'); if (!button) return; selectedExercises.splice(Number(button.dataset.removeExercise), 1); renderSelected(); });
+  selectedList.addEventListener('input', event => {
+    if (event.target.matches('[data-exercise-sets]')) selectedExercises[Number(event.target.dataset.exerciseSets)].sets = Math.max(1, Math.min(20, Number(event.target.value) || 1));
+    if (event.target.matches('[data-exercise-reps]')) selectedExercises[Number(event.target.dataset.exerciseReps)].reps = event.target.value.trim() || '1';
+  });
   renderChoices(); renderSelected();
   document.getElementById('routine-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target); const assigned = form.get('client');
