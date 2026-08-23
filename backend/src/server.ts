@@ -38,7 +38,7 @@ async function requireStaff(request: FastifyRequest) {
 
 app.get('/health', async () => {
   const [database] = await sql`SELECT now() AS time`;
-  return { status: 'ok', service: 'eleen-lifestyle-api', databaseTime: database.time };
+  return { status: 'ok', service: 'eleen-lifestyle-api', databaseTime: database.time, documentStorage: storageReady ? 'ready' : 'configuration_required' };
 });
 
 app.get('/api/auth/setup-status', async () => {
