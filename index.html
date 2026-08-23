@@ -23,6 +23,15 @@
             <label>Contraseña<input required name="password" type="password" autocomplete="current-password" /></label>
             <p class="form-error" id="login-error" aria-live="polite"></p>
             <button class="primary wide-button">Iniciar sesión</button>
+            <button class="auth-link" id="show-reset" type="button">Restablecer acceso</button>
+          </form>
+          <form id="reset-form" hidden>
+            <label>Correo de la cuenta<input required name="email" type="email" autocomplete="username" /></label>
+            <label>Nueva contraseña<input required name="password" type="password" minlength="10" autocomplete="new-password" /><small>Mínimo 10 caracteres</small></label>
+            <label>Token inicial de Railway<input required name="setupToken" type="password" autocomplete="off" /></label>
+            <p class="form-error" id="reset-error" aria-live="polite"></p>
+            <button class="primary wide-button">Guardar nueva contraseña</button>
+            <button class="auth-link" id="cancel-reset" type="button">Volver al inicio de sesión</button>
           </form>
           <form id="setup-form" hidden>
             <label>Nombre de la entrenadora<input required name="fullName" autocomplete="name" /></label>

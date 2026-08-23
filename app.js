@@ -273,7 +273,7 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
 
 function showAuth(setupRequired) {
   document.getElementById('auth-screen').hidden = false; document.getElementById('app-shell').hidden = true;
-  document.getElementById('setup-form').hidden = !setupRequired; document.getElementById('login-form').hidden = setupRequired;
+  document.getElementById('setup-form').hidden = !setupRequired; document.getElementById('login-form').hidden = setupRequired; document.getElementById('reset-form').hidden = true;
   document.getElementById('auth-title').textContent = setupRequired ? 'Preparemos tu espacio' : 'Bienvenida de nuevo';
   document.getElementById('auth-copy').textContent = setupRequired ? 'Crea la primera cuenta administradora de Eleen Lifestyle.' : 'Accede al centro de control de clientes, sesiones y facturación.';
 }
@@ -288,6 +288,19 @@ document.getElementById('login-form').addEventListener('submit', async event => 
     event.target.classList.add('loading-state');
     const result = await api('/api/auth/login', { method: 'POST', auth: false, body: { email: form.get('email'), password: form.get('password') } });
     authToken = result.token; localStorage.setItem(authKey, authToken); await enterApp(result.user);
+  } catch (error) { errorBox.textContent = error.message; } finally { event.target.classList.remove('loading-state'); }
+});
+document.getElementById('show-reset').addEventListener('click', () => {
+  document.getElementById('login-form').hidden = true; document.getElementById('reset-form').hidden = false;
+  document.getElementById('auth-title').textContent = 'Restablecer acceso'; document.getElementById('auth-copy').textContent = 'Define una contraseña nueva usando el token privado guardado en Railway.';
+});
+document.getElementById('cancel-reset').addEventListener('click', () => showAuth(false));
+document.getElementById('reset-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = new FormData(event.target); const errorBox = document.getElementById('reset-error'); errorBox.textContent = '';
+  try {
+    event.target.classList.add('loading-state');
+    const result = await api('/api/auth/reset-password', { method: 'POST', auth: false, headers: { 'x-setup-token': form.get('setupToken') }, body: { email: form.get('email'), password: form.get('password') } });
+    authToken = result.token; localStorage.setItem(authKey, authToken); await enterApp(result.user); toast('Contraseña actualizada');
   } catch (error) { errorBox.textContent = error.message; } finally { event.target.classList.remove('loading-state'); }
 });
 document.getElementById('setup-form').addEventListener('submit', async event => {
