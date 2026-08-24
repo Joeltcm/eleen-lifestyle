@@ -81,11 +81,23 @@ async function loadData() {
 }
 const initials = name => name.split(' ').slice(0, 2).map(word => word[0]).join('').toUpperCase();
 const escapeHtml = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+const viewTitles = { dashboard: 'Buenos días', clients: 'Clientes', calendar: 'Agenda', routines: 'Rutinas', billing: 'Facturación' };
+const viewIds = new Set(Object.keys(viewTitles));
+const viewFromHash = () => {
+  const id = window.location.hash.slice(1);
+  return viewIds.has(id) ? id : 'dashboard';
+};
 const view = id => {
   document.querySelectorAll('.view').forEach(item => item.classList.toggle('active', item.id === id));
   document.querySelectorAll('.nav-link').forEach(item => item.classList.toggle('active', item.dataset.view === id));
-  document.getElementById('page-title').textContent = ({ dashboard: 'Buenos días', clients: 'Clientes', calendar: 'Agenda', routines: 'Rutinas', billing: 'Facturación' })[id];
+  document.getElementById('page-title').textContent = viewTitles[id];
   window.scrollTo(0, 0);
+};
+const navigate = (id, { replace = false } = {}) => {
+  const target = viewIds.has(id) ? id : 'dashboard';
+  view(target);
+  const hash = `#${target}`;
+  if (window.location.hash !== hash) window.history[replace ? 'replaceState' : 'pushState'](null, '', hash);
 };
 const monthInvoices = () => data.invoices.filter(invoice => { const date = new Date(`${invoice.issued || invoice.due}T12:00:00`); return date.getMonth() === today.getMonth() && date.getFullYear() === today.getFullYear(); });
 const remainingSessions = pack => Math.max(0, pack.total - pack.used);
@@ -218,7 +230,7 @@ function newClient() {
     try {
       event.target.classList.add('loading-state');
       await api('/api/clients', { method: 'POST', body: { fullName: form.get('name'), goal: form.get('goal'), billingModel, standardPrice: Number(form.get('plan')), packageSessions: billingModel === 'package' ? Number(form.get('packageSessions')) : undefined, email: form.get('email') } });
-      await loadData(); renderAll(); modal.close(); view('clients'); toast('Cliente creado y sincronizado');
+      await loadData(); renderAll(); modal.close(); navigate('clients'); toast('Cliente creado y sincronizado');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
@@ -243,7 +255,7 @@ function newInvoice() {
         invoice = await api('/api/invoices', { method: 'POST', body: { clientId: form.get('client'), concept: form.get('concept'), amount: Number(form.get('amount')), dueOn: form.get('due') } });
       }
       if (invoice && method !== 'pending') await api(`/api/invoices/${invoice.id}/confirm`, { method: 'POST', body: { method, reference: form.get('reference') || undefined } });
-      await loadData(); renderAll(); modal.close(); view('billing'); toast('Cobro registrado');
+      await loadData(); renderAll(); modal.close(); navigate('billing'); toast('Cobro registrado');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
@@ -258,7 +270,7 @@ function newSession() {
       event.target.classList.add('loading-state');
       const routineId = form.get('routine');
       await api('/api/sessions', { method: 'POST', body: { clientId: form.get('client'), routineId: routineId === 'Evaluación / seguimiento' ? undefined : routineId, startsAt: new Date(`${form.get('date')}T${form.get('time')}:00`).toISOString(), durationMinutes: 60, mode: form.get('mode'), notes: form.get('notes') || undefined } });
-      await loadData(); renderAll(); modal.close(); view('calendar'); toast('Sesión agendada');
+      await loadData(); renderAll(); modal.close(); navigate('calendar'); toast('Sesión agendada');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
@@ -328,7 +340,7 @@ function newRoutine() {
     try {
       event.target.classList.add('loading-state');
       await api('/api/routines', { method: 'POST', body: { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: assigned || undefined, exercises: selectedExercises } });
-      await loadData(); renderAll(); modal.close(); view('routines'); toast('Rutina guardada');
+      await loadData(); renderAll(); modal.close(); navigate('routines'); toast('Rutina guardada');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
@@ -345,7 +357,7 @@ function confirmInvoice(id) {
     try {
       event.target.classList.add('loading-state');
       await api(`/api/invoices/${id}/confirm`, { method: 'POST', body: { method: form.get('method'), reference: form.get('reference') || undefined } });
-      await loadData(); renderAll(); modal.close(); view('billing'); toast('Pago confirmado');
+      await loadData(); renderAll(); modal.close(); navigate('billing'); toast('Pago confirmado');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
@@ -389,7 +401,7 @@ function inbodyReview(client, assessments, pageErrors = [], skippedPages = []) {
         const testedAt = new Date(`${date}T12:00:00-05:00`).toISOString();
         await api(`/api/inbody/${original.id}`, { method: 'PATCH', body: { testedAt, values, extractionStatus: 'ready' } });
       }
-      await loadData(); renderAll(); modal.close(); view('clients'); toast('Historial InBody confirmado');
+      await loadData(); renderAll(); modal.close(); navigate('clients'); toast('Historial InBody confirmado');
     } catch (error) { toast(error.message, true); button.disabled = false; button.textContent = 'Confirmar resultados'; }
   });
 }
@@ -424,11 +436,13 @@ function inbodyImport(client) {
   });
 }
 document.querySelectorAll('.nav-link').forEach(link => link.addEventListener('click', event => {
-  event.preventDefault(); view(link.dataset.view); history.replaceState(null, '', `#${link.dataset.view}`);
+  event.preventDefault(); navigate(link.dataset.view);
 }));
 document.querySelectorAll('[data-view-go]').forEach(button => button.addEventListener('click', event => {
-  event.preventDefault(); view(button.dataset.viewGo);
+  event.preventDefault(); navigate(button.dataset.viewGo);
 }));
+window.addEventListener('popstate', () => view(viewFromHash()));
+window.addEventListener('hashchange', () => view(viewFromHash()));
 document.addEventListener('click', event => {
   const calendarModeButton = event.target.closest('[data-calendar-mode]');
   const calendarShiftButton = event.target.closest('[data-calendar-shift]');
@@ -467,7 +481,7 @@ function showAuth(setupRequired) {
 async function enterApp(user) {
   currentUser = user; document.getElementById('auth-screen').hidden = true; document.getElementById('app-shell').hidden = false;
   document.getElementById('account-button').textContent = initials(user.fullName || user.full_name || user.email);
-  await loadData(); renderAll();
+  await loadData(); renderAll(); navigate(viewFromHash(), { replace: true });
 }
 document.getElementById('login-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = new FormData(event.target); const errorBox = document.getElementById('login-error'); errorBox.textContent = '';
