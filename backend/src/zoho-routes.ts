@@ -180,6 +180,49 @@ async function localSummary(ownerId: string) {
   };
 }
 
+function billingPeriodBounds(year: number, month: number | 'all') {
+  const startMonth = month === 'all' ? 0 : month - 1;
+  const start = new Date(Date.UTC(year, startMonth, 1));
+  const end = month === 'all' ? new Date(Date.UTC(year + 1, 0, 1)) : new Date(Date.UTC(year, startMonth + 1, 1));
+  return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+}
+
+async function localPeriodSummary(ownerId: string, year: number, month: number | 'all') {
+  const { start, end } = billingPeriodBounds(year, month);
+  const [summary] = await sql`
+    SELECT
+      (SELECT count(DISTINCT i.client_id)::integer FROM invoices i JOIN clients c ON c.id = i.client_id
+        WHERE c.owner_id = ${ownerId} AND i.source_system = ${sourceSystem} AND i.status <> 'void'
+          AND COALESCE(i.issued_on, i.due_on) >= ${start}::date AND COALESCE(i.issued_on, i.due_on) < ${end}::date) AS clients,
+      (SELECT count(*)::integer FROM invoices i JOIN clients c ON c.id = i.client_id
+        WHERE c.owner_id = ${ownerId} AND i.source_system = ${sourceSystem} AND i.status <> 'void'
+          AND COALESCE(i.issued_on, i.due_on) >= ${start}::date AND COALESCE(i.issued_on, i.due_on) < ${end}::date) AS invoices,
+      (SELECT count(*)::integer FROM invoice_payments p JOIN clients c ON c.id = p.client_id
+        WHERE c.owner_id = ${ownerId} AND p.source_system = ${sourceSystem}
+          AND p.paid_on >= ${start}::date AND p.paid_on < ${end}::date) AS payments,
+      (SELECT count(*)::integer FROM memberships m JOIN clients c ON c.id = m.client_id
+        WHERE c.owner_id = ${ownerId} AND m.source_system = ${sourceSystem}
+          AND m.starts_on < ${end}::date AND (m.ends_on IS NULL OR m.ends_on >= ${start}::date)) AS recurring,
+      (SELECT count(*)::integer FROM credit_notes n JOIN clients c ON c.id = n.client_id
+        WHERE c.owner_id = ${ownerId} AND n.source_system = ${sourceSystem}
+          AND n.issued_on >= ${start}::date AND n.issued_on < ${end}::date) AS credits,
+      (SELECT COALESCE(sum(i.amount), 0)::numeric FROM invoices i JOIN clients c ON c.id = i.client_id
+        WHERE c.owner_id = ${ownerId} AND i.source_system = ${sourceSystem} AND i.status <> 'void'
+          AND COALESCE(i.issued_on, i.due_on) >= ${start}::date AND COALESCE(i.issued_on, i.due_on) < ${end}::date) AS total_invoiced,
+      (SELECT COALESCE(sum(p.amount), 0)::numeric FROM invoice_payments p JOIN clients c ON c.id = p.client_id
+        WHERE c.owner_id = ${ownerId} AND p.source_system = ${sourceSystem}
+          AND p.paid_on >= ${start}::date AND p.paid_on < ${end}::date) AS total_paid,
+      (SELECT COALESCE(sum(n.amount), 0)::numeric FROM credit_notes n JOIN clients c ON c.id = n.client_id
+        WHERE c.owner_id = ${ownerId} AND n.source_system = ${sourceSystem}
+          AND n.issued_on >= ${start}::date AND n.issued_on < ${end}::date) AS total_credits
+  `;
+  return {
+    year, month, start, end,
+    clients: Number(summary.clients), invoices: Number(summary.invoices), payments: Number(summary.payments), recurring: Number(summary.recurring), credits: Number(summary.credits),
+    totalInvoiced: rounded(Number(summary.total_invoiced)), totalPaid: rounded(Number(summary.total_paid)), totalCredits: rounded(Number(summary.total_credits))
+  };
+}
+
 function reconciled(source: ZohoRecord, local: ZohoRecord) {
   return ['clients', 'invoices', 'payments', 'recurring', 'credits'].every(key => Number(source[key]) === Number(local[key]))
     && ['totalInvoiced', 'totalPaid', 'totalCredits'].every(key => Math.abs(numeric(source[key]) - numeric(local[key])) < 0.01)
@@ -334,12 +377,18 @@ async function runSync(ownerId: string) {
 export async function registerZohoRoutes(app: FastifyInstance) {
   app.get('/api/integrations/zoho/status', { preHandler: requireStaff }, async request => {
     const auth = request.user as AuthUser;
+    const now = new Date();
+    const query = z.object({
+      year: z.coerce.number().int().min(2000).max(2100).default(now.getFullYear()),
+      month: z.union([z.literal('all'), z.coerce.number().int().min(1).max(12)]).default(now.getMonth() + 1)
+    }).parse(request.query);
     const [connection] = await sql`
       SELECT organization_id, organization_name, status, sync_enabled, last_sync_at, cutover_at, last_error, source_summary, local_summary
       FROM integration_connections WHERE owner_id = ${auth.sub} AND provider = ${provider}
     `;
     const [lastRun] = await sql`SELECT status, reconciled, started_at, completed_at, error_message FROM integration_sync_runs WHERE owner_id = ${auth.sub} AND provider = ${provider} ORDER BY started_at DESC LIMIT 1`;
-    return { configured: integrationConfigured(), connected: Boolean(connection), connection: connection || null, lastRun: lastRun || null, syncInProgress: runningOwners.has(auth.sub) };
+    const periodSummary = connection ? await localPeriodSummary(auth.sub, query.year, query.month) : null;
+    return { configured: integrationConfigured(), connected: Boolean(connection), connection: connection || null, lastRun: lastRun || null, periodSummary, syncInProgress: runningOwners.has(auth.sub) };
   });
 
   app.get('/api/integrations/zoho/authorize', { preHandler: requireStaff }, async (request, reply) => {

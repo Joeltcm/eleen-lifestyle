@@ -623,10 +623,11 @@ document.getElementById('compliance-period').addEventListener('change', async ev
   try { data.compliance = await api(`/api/compliance/summary?period=${compliancePeriod}`); renderDashboard(); }
   catch (error) { toast(error.message, true); }
 });
-document.getElementById('billing-month').addEventListener('change', event => { billingMonth = event.target.value; renderBilling(); });
-document.getElementById('billing-year').addEventListener('change', event => { billingYear = event.target.value; renderBilling(); });
+const notifyBillingPeriodChange = () => document.dispatchEvent(new CustomEvent('billingperiodchange', { detail: { month: billingMonth, year: billingYear } }));
+document.getElementById('billing-month').addEventListener('change', event => { billingMonth = event.target.value; renderBilling(); notifyBillingPeriodChange(); });
+document.getElementById('billing-year').addEventListener('change', event => { billingYear = event.target.value; renderBilling(); notifyBillingPeriodChange(); });
 document.getElementById('billing-current-period').addEventListener('click', () => {
-  billingMonth = String(today.getMonth() + 1); billingYear = String(today.getFullYear()); renderBilling();
+  billingMonth = String(today.getMonth() + 1); billingYear = String(today.getFullYear()); renderBilling(); notifyBillingPeriodChange();
 });
 document.getElementById('notification-button').addEventListener('click', () => notificationCenter(false));
 document.getElementById('today').textContent = new Intl.DateTimeFormat('es-PA', { weekday: 'long', day: 'numeric', month: 'long' }).format(today);

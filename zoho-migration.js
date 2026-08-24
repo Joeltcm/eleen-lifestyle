@@ -7,6 +7,9 @@
 
   let loadedForSession = false;
   let busy = false;
+  let statusRequest = 0;
+  let selectedMonth = String(new Date().getMonth() + 1);
+  let selectedYear = String(new Date().getFullYear());
   const formatCount = value => new Intl.NumberFormat('es-PA').format(Number(value || 0));
   const formatDate = value => value ? new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Todavía no se ha sincronizado';
   const statusNames = { connected: 'Conectado', syncing: 'Sincronizando', ready: 'Conciliado', completed: 'Migración completa', error: 'Requiere atención' };
@@ -17,9 +20,8 @@
     statusLabel.textContent = label || statusNames[value] || 'No conectado';
   }
 
-  function metric(label, source, local) {
-    const matches = Number(source || 0) === Number(local || 0);
-    return `<div class="zoho-sync-metric"><span>${label}</span><strong>${formatCount(local)}</strong><span>${matches ? 'Coincide con Zoho' : `Zoho: ${formatCount(source)}`}</span></div>`;
+  function periodMetric(label, value, historical, periodName) {
+    return `<div class="zoho-sync-metric"><span>${label}</span><strong>${formatCount(value)}</strong><span>${periodName} · Histórico: ${formatCount(historical)}</span></div>`;
   }
 
   function render(payload) {
@@ -34,19 +36,23 @@
       return;
     }
     const connection = payload.connection || {};
-    const source = connection.source_summary || {};
     const local = connection.local_summary || {};
+    const period = payload.periodSummary || { ...local, month: selectedMonth, year: Number(selectedYear) };
+    const periodName = period.month === 'all'
+      ? `Año ${period.year}`
+      : new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric' }).format(new Date(Number(period.year), Number(period.month) - 1, 1));
+    const displayPeriod = periodName.charAt(0).toUpperCase() + periodName.slice(1);
     const reconciled = Boolean(payload.lastRun?.reconciled);
     const state = payload.syncInProgress ? 'syncing' : connection.status;
     setStatus(state, payload.syncInProgress ? 'Sincronizando' : statusNames[state]);
     body.innerHTML = `
       <div class="zoho-sync-grid">
-        ${metric('Clientes', source.clients, local.clients)}
-        ${metric('Facturas', source.invoices, local.invoices)}
-        ${metric('Pagos', source.payments, local.payments)}
-        ${metric('Mensualidades', source.recurring, local.recurring)}
-        ${metric('Notas de crédito', source.credits, local.credits)}
-        <div class="zoho-sync-metric"><span>Total importado</span><strong>${money.format(Number(local.totalInvoiced || 0))}</strong><span>Facturación histórica</span></div>
+        ${periodMetric('Clientes facturados', period.clients, local.clients, displayPeriod)}
+        ${periodMetric('Facturas', period.invoices, local.invoices, displayPeriod)}
+        ${periodMetric('Pagos', period.payments, local.payments, displayPeriod)}
+        ${periodMetric('Mensualidades', period.recurring, local.recurring, displayPeriod)}
+        ${periodMetric('Notas de crédito', period.credits, local.credits, displayPeriod)}
+        <div class="zoho-sync-metric"><span>Total facturado</span><strong>${money.format(Number(period.totalInvoiced || 0))}</strong><span>${displayPeriod} · Histórico: ${money.format(Number(local.totalInvoiced || 0))}</span></div>
       </div>
       <div class="zoho-reconciliation ${reconciled ? 'is-ready' : ''}"><div><b>${reconciled ? 'Datos conciliados con Zoho' : 'Sincronización todavía por conciliar'}</b><small>${escapeText(connection.organization_name || 'Zoho Invoice')} · ${formatDate(connection.last_sync_at)}</small></div><span>${reconciled ? '✓ Coincide' : 'Pendiente'}</span></div>
       ${connection.last_error ? `<p class="zoho-error">${escapeText(connection.last_error)}</p>` : ''}
@@ -60,9 +66,14 @@
 
   async function loadStatus(showError = true) {
     if (!authToken) return;
+    const requestId = ++statusRequest;
     try {
-      render(await api('/api/integrations/zoho/status'));
+      const query = new URLSearchParams({ year: selectedYear, month: selectedMonth });
+      const payload = await api(`/api/integrations/zoho/status?${query}`);
+      if (requestId !== statusRequest) return;
+      render(payload);
     } catch (error) {
+      if (requestId !== statusRequest) return;
       setStatus('error', 'No disponible');
       body.innerHTML = `<p class="zoho-error">${escapeText(error.message)}</p><div class="zoho-migration-actions"><button class="secondary" id="zoho-refresh">Intentar nuevamente</button></div>`;
       if (showError) toast(error.message, true);
@@ -104,6 +115,11 @@
   };
   new MutationObserver(observeSession).observe(shell, { attributes: true, attributeFilter: ['hidden'] });
   observeSession();
+  document.addEventListener('billingperiodchange', event => {
+    selectedMonth = String(event.detail?.month || selectedMonth);
+    selectedYear = String(event.detail?.year || selectedYear);
+    if (!shell.hidden && authToken) loadStatus(false);
+  });
 
   if (new URLSearchParams(location.search).get('zoho') === 'connected') {
     history.replaceState(null, '', `${location.pathname}#billing`);
