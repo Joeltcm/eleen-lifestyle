@@ -15,6 +15,7 @@ const schema = z.object({
   CLOUDFLARE_API_TOKEN: z.string().optional(),
   CLOUDFLARE_VISION_MODEL: z.string().default('@cf/google/gemma-4-26b-a4b-it'),
   CLOUDFLARE_TEXT_MODEL: z.string().default('@cf/google/gemma-4-26b-a4b-it'),
+  INBODY_AI_DAILY_LIMIT: z.coerce.number().int().min(0).max(100).default(4),
   APP_URL: z.string().url().default('https://eileen-lifestyle.pages.dev'),
   ZOHO_CLIENT_ID: z.string().optional(),
   ZOHO_CLIENT_SECRET: z.string().optional(),

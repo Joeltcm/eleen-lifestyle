@@ -39,8 +39,9 @@ Después abre la URL que indique el servidor en un navegador. La información de
 - `CLOUDFLARE_ACCOUNT_ID`
 - `CLOUDFLARE_API_TOKEN`, creado con permisos `Workers AI Read` y `Workers AI Edit`
 - `CLOUDFLARE_VISION_MODEL` es opcional; usa `@cf/google/gemma-4-26b-a4b-it` por defecto
+- `INBODY_AI_DAILY_LIMIT` limita el consumo diario de toda la aplicación; el valor recomendado y predeterminado es `4`
 
-Los documentos se guardan primero en R2. La aplicación omite identificadores personales en la respuesta estructurada, comprueba rangos y relaciones matemáticas, y no genera diagnósticos médicos.
+Los documentos se guardan primero en R2. Antes de llamar a Workers AI, la API reserva atómicamente la cuota diaria en PostgreSQL; una imagen consume una unidad y un PDF reserva dos. Las páginas sin métricas comparables se conservan sin enviarse a IA. La aplicación omite identificadores personales en la respuesta estructurada, comprueba rangos y relaciones matemáticas, y no genera diagnósticos médicos.
 
 ## Próximas integraciones necesarias
 

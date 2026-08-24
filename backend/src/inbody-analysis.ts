@@ -110,7 +110,7 @@ export async function extractInBodyImage(imageUrl: string, fileName = '') {
         { role: 'system', content: 'You extract body-composition report data. Return only valid JSON and never include patient identity.' },
         { role: 'user', content: [{ type: 'text', text: `${prompt}\nSource filename: ${fileName || 'not provided'}.` }, { type: 'image_url', image_url: { url: imageUrl, detail: 'high' } }] }
       ],
-      response_format: { type: 'json_object' }, temperature: 0, max_completion_tokens: 4096,
+      response_format: { type: 'json_object' }, temperature: 0, max_completion_tokens: 1500,
       chat_template_kwargs: { enable_thinking: false }, stream: false
     })
   });
@@ -147,7 +147,7 @@ export async function extractInBodyDocument(body: Buffer, fileName: string, cont
   const model = config.CLOUDFLARE_TEXT_MODEL.split('/').map(encodeURIComponent).join('/');
   const payload = await cloudflareRequest(`/ai/run/${model}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages: [{ role: 'system', content: prompt }, { role: 'user', content: `Texto extraído del reporte:\n${text.slice(0, 30000)}` }], response_format: { type: 'json_object' }, temperature: 0, max_completion_tokens: 4096, chat_template_kwargs: { enable_thinking: false }, stream: false })
+    body: JSON.stringify({ messages: [{ role: 'system', content: prompt }, { role: 'user', content: `Texto extraído del reporte:\n${text.slice(0, 30000)}` }], response_format: { type: 'json_object' }, temperature: 0, max_completion_tokens: 1500, chat_template_kwargs: { enable_thinking: false }, stream: false })
   });
   const outer = payload.result as { result?: unknown } | undefined;
   const result = (outer?.result ?? outer) as { response?: unknown; answer?: unknown; choices?: Array<{ message?: { content?: unknown } }> } | undefined;
