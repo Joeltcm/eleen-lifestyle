@@ -23,6 +23,20 @@ type CalendarConnection = {
   sync_enabled: boolean;
 };
 
+type GoogleSyncResult = {
+  synced: number;
+  failed: number;
+  total: number;
+  errors: string[];
+  updatedFromGoogle: number;
+  checkedFromGoogle: number;
+  conflictsResolved: number;
+  alreadyRunning?: boolean;
+};
+
+const accessTokenCache = new Map<string, { token: string; expiresAt: number }>();
+const synchronizationLocks = new Set<string>();
+
 class GoogleCalendarError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
@@ -83,6 +97,8 @@ async function exchangeAuthorizationCode(code: string) {
 
 async function accessToken(connection: CalendarConnection) {
   if (!config.GOOGLE_CLIENT_ID || !config.GOOGLE_CLIENT_SECRET) throw new Error('Faltan las credenciales OAuth de Google en Railway');
+  const cached = accessTokenCache.get(connection.owner_id);
+  if (cached && cached.expiresAt > Date.now() + 60_000) return cached.token;
   const payload = await tokenRequest({
     refresh_token: decrypt(connection.encrypted_refresh_token),
     client_id: config.GOOGLE_CLIENT_ID,
@@ -90,7 +106,10 @@ async function accessToken(connection: CalendarConnection) {
     grant_type: 'refresh_token'
   });
   if (!payload.access_token) throw new Error('Google no entregó un token de acceso');
-  return String(payload.access_token);
+  const token = String(payload.access_token);
+  const expiresIn = Math.max(60, Number(payload.expires_in || 3600) - 300);
+  accessTokenCache.set(connection.owner_id, { token, expiresAt: Date.now() + expiresIn * 1000 });
+  return token;
 }
 
 async function googleRequest(token: string, path: string, options: RequestInit = {}) {
@@ -137,10 +156,98 @@ async function saveEvent(token: string, connection: CalendarConnection, session:
   }
   await sql`
     UPDATE sessions SET google_event_id = ${String(event.id)}, google_event_link = ${event.htmlLink ? String(event.htmlLink) : null},
-      google_synced_at = now(), google_sync_error = NULL, updated_at = now()
+      google_event_updated_at = ${event.updated ? String(event.updated) : new Date().toISOString()},
+      google_event_etag = ${event.etag ? String(event.etag) : null}, google_synced_at = now(), google_sync_error = NULL,
+      updated_at = now()
     WHERE id = ${session.id}
   `;
   return event;
+}
+
+async function eileenEventsFromGoogle(token: string, connection: CalendarConnection) {
+  const calendarId = encodeURIComponent(connection.organization_id || 'primary');
+  const events: GoogleRecord[] = [];
+  let pageToken: string | undefined;
+  do {
+    const parameters = new URLSearchParams({
+      singleEvents: 'true',
+      showDeleted: 'true',
+      maxResults: '2500',
+      privateExtendedProperty: 'source=eileen-lifestyle'
+    });
+    if (pageToken) parameters.set('pageToken', pageToken);
+    const payload = await googleRequest(token, `/calendars/${calendarId}/events?${parameters.toString()}`);
+    if (Array.isArray(payload.items)) events.push(...payload.items);
+    pageToken = payload.nextPageToken ? String(payload.nextPageToken) : undefined;
+  } while (pageToken);
+  return events;
+}
+
+async function pullGoogleChanges(ownerId: string, token: string, connection: CalendarConnection) {
+  const events = await eileenEventsFromGoogle(token, connection);
+  const sessions = await sql`
+    SELECT s.*
+    FROM sessions s JOIN clients c ON c.id = s.client_id
+    WHERE c.owner_id = ${ownerId} AND s.google_event_id IS NOT NULL
+  `;
+  const byId = new Map(sessions.map(session => [String(session.id), session]));
+  let updatedFromGoogle = 0;
+  let conflictsResolved = 0;
+
+  for (const event of events) {
+    const sessionId = event.extendedProperties?.private?.eileenSessionId;
+    const session = sessionId ? byId.get(String(sessionId)) : undefined;
+    if (!session || String(session.google_event_id) !== String(event.id)) continue;
+    const eventUpdatedAt = event.updated ? new Date(String(event.updated)) : null;
+    if (!eventUpdatedAt || Number.isNaN(eventUpdatedAt.getTime())) continue;
+    const storedUpdatedAt = session.google_event_updated_at ? new Date(session.google_event_updated_at) : null;
+    if (storedUpdatedAt && eventUpdatedAt.getTime() <= storedUpdatedAt.getTime() + 500) continue;
+
+    if (event.status === 'cancelled') {
+      await sql`
+        UPDATE sessions SET google_event_updated_at = ${eventUpdatedAt.toISOString()}, google_event_etag = ${event.etag ? String(event.etag) : null},
+          google_sync_error = 'El evento fue eliminado en Google; Eileen lo recreará en la próxima sincronización.'
+        WHERE id = ${session.id}
+      `;
+      continue;
+    }
+
+    const startValue = event.start?.dateTime;
+    const endValue = event.end?.dateTime;
+    if (!startValue || !endValue) {
+      await sql`
+        UPDATE sessions SET google_event_updated_at = ${eventUpdatedAt.toISOString()}, google_event_etag = ${event.etag ? String(event.etag) : null},
+          google_sync_error = 'El evento de Google debe conservar una hora de inicio y fin.'
+        WHERE id = ${session.id}
+      `;
+      continue;
+    }
+    const startsAt = new Date(String(startValue));
+    const endsAt = new Date(String(endValue));
+    const durationMinutes = Math.round((endsAt.getTime() - startsAt.getTime()) / 60_000);
+    if (Number.isNaN(startsAt.getTime()) || Number.isNaN(endsAt.getTime()) || durationMinutes <= 0) continue;
+
+    const localUpdatedAt = new Date(session.updated_at);
+    const lastSyncedAt = session.google_synced_at ? new Date(session.google_synced_at) : null;
+    const localDirty = Boolean(lastSyncedAt && localUpdatedAt.getTime() > lastSyncedAt.getTime() + 1000);
+    if (localDirty && localUpdatedAt.getTime() > eventUpdatedAt.getTime()) {
+      conflictsResolved += 1;
+      continue;
+    }
+
+    const scheduleChanged = startsAt.getTime() !== new Date(session.starts_at).getTime()
+      || durationMinutes !== Number(session.duration_minutes);
+    await sql`
+      UPDATE sessions SET starts_at = ${startsAt.toISOString()}, duration_minutes = ${durationMinutes},
+        google_event_link = ${event.htmlLink ? String(event.htmlLink) : session.google_event_link},
+        google_event_updated_at = ${eventUpdatedAt.toISOString()}, google_event_etag = ${event.etag ? String(event.etag) : null},
+        google_synced_at = now(), google_sync_error = NULL, updated_at = now()
+      WHERE id = ${session.id}
+    `;
+    if (scheduleChanged) updatedFromGoogle += 1;
+    if (localDirty) conflictsResolved += 1;
+  }
+  return { updatedFromGoogle, checkedFromGoogle: events.length, conflictsResolved };
 }
 
 async function connectionFor(ownerId: string) {
@@ -179,16 +286,26 @@ export async function syncSessionToGoogle(ownerId: string, sessionId: string) {
   }
 }
 
-async function syncFutureSessions(ownerId: string) {
+async function syncFutureSessions(ownerId: string): Promise<GoogleSyncResult> {
+  if (synchronizationLocks.has(ownerId)) {
+    return { synced: 0, failed: 0, total: 0, errors: [], updatedFromGoogle: 0, checkedFromGoogle: 0, conflictsResolved: 0, alreadyRunning: true };
+  }
+  synchronizationLocks.add(ownerId);
   const connection = await connectionFor(ownerId);
-  if (!connection) throw new Error('Google Calendar no está conectado');
+  if (!connection) {
+    synchronizationLocks.delete(ownerId);
+    throw new Error('Google Calendar no está conectado');
+  }
   await sql`UPDATE integration_connections SET status = 'syncing', last_error = NULL, updated_at = now() WHERE owner_id = ${ownerId} AND provider = ${provider}`;
   try {
     const token = await accessToken(connection);
+    const pulled = await pullGoogleChanges(ownerId, token, connection);
     const sessions = await sql`
       SELECT s.*, c.full_name, r.title AS routine_title
       FROM sessions s JOIN clients c ON c.id = s.client_id LEFT JOIN routines r ON r.id = s.routine_id
       WHERE c.owner_id = ${ownerId} AND s.status <> 'cancelled' AND s.starts_at >= now() - interval '1 day'
+        AND (s.google_event_id IS NULL OR s.google_sync_error IS NOT NULL OR s.google_synced_at IS NULL
+          OR s.updated_at > s.google_synced_at + interval '1 second')
       ORDER BY s.starts_at
     `;
     let synced = 0;
@@ -208,11 +325,13 @@ async function syncFutureSessions(ownerId: string) {
         last_error = ${errors.length ? errors.slice(0, 3).join(' · ') : null}, updated_at = now()
       WHERE owner_id = ${ownerId} AND provider = ${provider}
     `;
-    return { synced, failed: errors.length, total: sessions.length, errors: errors.slice(0, 3) };
+    return { synced, failed: errors.length, total: sessions.length, errors: errors.slice(0, 3), ...pulled };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'No fue posible sincronizar Google Calendar';
     await sql`UPDATE integration_connections SET status = 'error', last_error = ${message}, updated_at = now() WHERE owner_id = ${ownerId} AND provider = ${provider}`;
     throw error;
+  } finally {
+    synchronizationLocks.delete(ownerId);
   }
 }
 
@@ -294,6 +413,21 @@ export async function registerGoogleCalendarRoutes(app: FastifyInstance) {
       }).catch(error => app.log.warn(error));
     }
     await sql`DELETE FROM integration_connections WHERE owner_id = ${auth.sub} AND provider = ${provider}`;
+    accessTokenCache.delete(auth.sub);
     return { disconnected: true };
   });
+
+  const synchronizeConnectedCalendars = async () => {
+    if (!configured()) return;
+    const connections = await sql`
+      SELECT owner_id FROM integration_connections
+      WHERE provider = ${provider} AND sync_enabled = true AND encrypted_refresh_token IS NOT NULL
+    `;
+    for (const connection of connections) {
+      syncFutureSessions(String(connection.owner_id)).catch(error => app.log.warn({ error, ownerId: connection.owner_id }, 'Background Google Calendar sync failed'));
+    }
+  };
+  const backgroundSync = setInterval(() => void synchronizeConnectedCalendars(), 120_000);
+  backgroundSync.unref();
+  app.addHook('onClose', async () => clearInterval(backgroundSync));
 }

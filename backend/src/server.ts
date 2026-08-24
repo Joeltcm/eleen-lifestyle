@@ -300,6 +300,29 @@ app.post('/api/sessions', { preHandler: requireStaff }, async (request, reply) =
   catch (error) { app.log.warn({ error, sessionId: session.id }, 'Session created but Google Calendar sync failed'); }
   return reply.code(201).send(session);
 });
+const sessionScheduleSchema = z.object({
+  startsAt: z.string().datetime(),
+  durationMinutes: z.coerce.number().int().min(15).max(480),
+  mode: z.string().trim().min(2).max(60),
+  notes: z.string().trim().max(1000).optional()
+});
+app.patch('/api/sessions/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = sessionScheduleSchema.parse(request.body);
+  const [session] = await sql`
+    UPDATE sessions s SET starts_at = ${input.startsAt}, duration_minutes = ${input.durationMinutes},
+      mode = ${input.mode}, notes = ${input.notes || null}, google_sync_error = NULL, updated_at = now()
+    FROM clients c
+    WHERE s.id = ${id} AND c.id = s.client_id AND c.owner_id = ${auth.sub} AND s.status <> 'cancelled'
+    RETURNING s.*
+  `;
+  if (!session) return reply.code(404).send({ error: 'Sesión no encontrada o cancelada' });
+  try { await syncSessionToGoogle(auth.sub, session.id); }
+  catch (error) { app.log.warn({ error, sessionId: session.id }, 'Session updated but Google Calendar sync failed'); }
+  const [updated] = await sql`SELECT * FROM sessions WHERE id = ${session.id}`;
+  return updated;
+});
 async function recordSessionCompliance(id: string, ownerId: string, markedBy: string, completed: boolean, completionPercent: number) {
   return sql.begin(async transaction => {
     const [current] = await transaction`SELECT s.* FROM sessions s JOIN clients c ON c.id = s.client_id WHERE s.id = ${id} AND c.owner_id = ${ownerId} FOR UPDATE`;

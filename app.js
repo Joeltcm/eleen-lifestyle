@@ -1,6 +1,13 @@
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+const panamaDateTimeIso = (date, time) => new Date(`${date}T${time}:00-05:00`).toISOString();
+const panamaDateTimeParts = value => {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Panama', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+  }).formatToParts(new Date(value)).filter(part => part.type !== 'literal').map(part => [part.type, part.value]));
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, time: `${parts.hour}:${parts.minute}` };
+};
 const API_BASE = 'https://api-production-b417f.up.railway.app';
 const authKey = 'eileen-lifestyle-session';
 const legacyAuthKey = 'eleen-lifestyle-session';
@@ -49,6 +56,8 @@ let billingAnalyticsRequest = 0;
 let calendarMode = 'week';
 let calendarCursor = new Date(today);
 calendarCursor.setHours(12, 0, 0, 0);
+let calendarSyncTimer = null;
+let calendarSyncRunning = false;
 const save = () => {};
 const toast = (message, error = false) => {
   const element = document.createElement('div'); element.className = `toast${error ? ' error' : ''}`; element.textContent = message;
@@ -101,6 +110,23 @@ async function api(path, options = {}) {
   return payload;
 }
 const exerciseLabel = exercise => typeof exercise === 'string' ? exercise : [exercise.name, exercise.sets && `${exercise.sets} series`, exercise.reps].filter(Boolean).join(' · ');
+const sessionFromApi = item => {
+  const starts = panamaDateTimeParts(item.starts_at);
+  return {
+    id: item.id, clientId: item.client_id, client: item.full_name, routineId: item.routine_id,
+    date: starts.date, time: starts.time, durationMinutes: Number(item.duration_minutes || 60),
+    routine: item.routine_title || 'Evaluación / seguimiento', mode: item.mode, status: item.status,
+    completionPercent: Number(item.completion_percent || 0), notes: item.notes || '',
+    googleSynced: Boolean(item.google_event_id), googleEventLink: item.google_event_link || '',
+    googleSyncError: item.google_sync_error || ''
+  };
+};
+async function refreshSessions() {
+  data.sessions = (await api('/api/sessions')).map(sessionFromApi);
+}
+async function refreshGoogleCalendarState() {
+  data.googleCalendar = await api('/api/integrations/google-calendar/status').catch(() => ({ configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } }));
+}
 async function loadData() {
   const [clients, invoices, packages, sessions, routines, plans, compliance, notifications, googleCalendar] = await Promise.all([
     api('/api/clients'), api('/api/invoices'), api('/api/packages'), api('/api/sessions'), api('/api/routines'),
@@ -122,7 +148,7 @@ async function loadData() {
   });
   data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, concept: item.concept, amount: Number(item.amount), balance: item.source_system ? Number(item.balance) : item.status === 'pending' ? Number(item.amount) : 0, due: item.due_on, issued: item.issued_on || item.due_on, method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '' }));
   data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired' }));
-  data.sessions = sessions.map(item => { const starts = new Date(item.starts_at); return { id: item.id, clientId: item.client_id, client: item.full_name, routineId: item.routine_id, date: dateKey(starts), time: `${String(starts.getHours()).padStart(2, '0')}:${String(starts.getMinutes()).padStart(2, '0')}`, routine: item.routine_title || 'Evaluación / seguimiento', mode: item.mode, status: item.status, completionPercent: Number(item.completion_percent || 0), notes: item.notes || '', googleSynced: Boolean(item.google_event_id), googleEventLink: item.google_event_link || '', googleSyncError: item.google_sync_error || '' }; });
+  data.sessions = sessions.map(sessionFromApi);
   data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: 0, sessions: item.sessions_per_week, exercises: item.exercises || [] }));
   data.plans = plans.map(item => ({ id: item.id, name: item.name, description: item.description || '', billingModel: item.billing_model, price: Number(item.price), sessionsIncluded: Number(item.sessions_included || 0), validityDays: Number(item.validity_days || 0), active: item.active }));
   data.compliance = compliance; data.notifications = notifications; data.googleCalendar = googleCalendar; billingAnalytics = null; billingAnalyticsLoadingYear = null; billingAnalyticsRequest += 1; showPendingBrowserNotification(notifications);
@@ -238,12 +264,12 @@ function renderGoogleCalendar() {
     connect.textContent = 'Comprobar conexión'; connect.disabled = false; disconnect.hidden = true;
   } else if (!integration.connected) {
     status.textContent = 'Sin conectar';
-    copy.textContent = 'Autoriza el calendario principal para enviar allí las sesiones de entrenamiento.';
+    copy.textContent = 'Autoriza el calendario principal para mantener los horarios sincronizados en ambas direcciones.';
     connect.textContent = 'Conectar calendario'; connect.disabled = false; disconnect.hidden = true;
   } else {
     status.textContent = integration.connection?.status === 'error' ? 'Requiere atención' : 'Conectado';
     const lastSync = integration.connection?.last_sync_at ? ` · última sincronización ${new Intl.DateTimeFormat('es-PA', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(integration.connection.last_sync_at))}` : '';
-    copy.textContent = integration.connection?.last_error || `${counts.synced} sesión${counts.synced !== 1 ? 'es' : ''} sincronizada${counts.synced !== 1 ? 's' : ''}${counts.pending ? ` · ${counts.pending} pendiente${counts.pending !== 1 ? 's' : ''}` : ''}${lastSync}`;
+    copy.textContent = integration.connection?.last_error || `Sincronización bidireccional activa · ${counts.synced} sesión${counts.synced !== 1 ? 'es' : ''}${counts.pending ? ` · ${counts.pending} pendiente${counts.pending !== 1 ? 's' : ''}` : ''}${lastSync}`;
     connect.textContent = 'Sincronizar ahora'; connect.disabled = false; disconnect.hidden = false;
   }
 }
@@ -289,7 +315,7 @@ function renderCalendar() {
   const periodName = calendarMode === 'day' ? 'del día' : calendarMode === 'week' ? 'de la semana' : 'del mes';
   document.getElementById('session-control-title').textContent = `Sesiones ${periodName}`;
   document.getElementById('session-control-copy').textContent = visibleSessions.length ? `${visibleSessions.length} sesión${visibleSessions.length !== 1 ? 'es' : ''} en el período visible` : 'No hay sesiones en el período visible';
-  document.getElementById('session-list').innerHTML = visibleSessions.length ? visibleSessions.map(session => `<div class="session-row"><div class="session-date"><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric' }).format(new Date(`${session.date}T12:00:00`))}</b><span>${session.time}</span></div><div class="session-person"><b>${session.client}</b><span>${session.routine} · ${session.mode}</span>${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}</div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span>${session.status === 'cancelled' ? '<span class="session-done">—</span>' : sessionComplianceForm(session)}</div>`).join('') : `<p class="empty">No hay sesiones programadas ${periodName}.</p>`;
+  document.getElementById('session-list').innerHTML = visibleSessions.length ? visibleSessions.map(session => `<div class="session-row"><div class="session-date"><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric' }).format(new Date(`${session.date}T12:00:00`))}</b><span>${session.time} · ${session.durationMinutes} min</span></div><div class="session-person"><b>${session.client}</b><span>${session.routine} · ${session.mode}</span>${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}</div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span>${session.status === 'cancelled' ? '<span class="session-done">—</span>' : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button>${sessionComplianceForm(session)}</div>`}</div>`).join('') : `<p class="empty">No hay sesiones programadas ${periodName}.</p>`;
 }
 function renderRoutines() {
   document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${routine.title}</h3><p>${routine.description}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''}</footer></article>`).join('');
@@ -532,9 +558,15 @@ async function googleCalendarAction() {
     if (data.googleCalendar.connected) {
       button.textContent = 'Sincronizando…';
       const result = await api('/api/integrations/google-calendar/sync', { method: 'POST' });
-      data.googleCalendar = await api('/api/integrations/google-calendar/status');
-      renderGoogleCalendar(); renderCalendar();
-      toast(result.failed ? `${result.synced} sesiones sincronizadas; ${result.failed} requieren revisión` : `${result.synced} sesiones sincronizadas con Google`, Boolean(result.failed));
+      await Promise.all([refreshSessions(), refreshGoogleCalendarState()]);
+      renderDashboard(); renderGoogleCalendar(); renderCalendar();
+      const incoming = Number(result.updatedFromGoogle || 0);
+      const outgoing = Number(result.synced || 0);
+      const message = result.alreadyRunning ? 'La sincronización ya estaba en curso'
+        : result.failed ? `${outgoing} enviadas; ${result.failed} requieren revisión`
+          : incoming || outgoing ? `${incoming} cambio${incoming === 1 ? '' : 's'} recibido${incoming === 1 ? '' : 's'} de Google · ${outgoing} enviado${outgoing === 1 ? '' : 's'}`
+            : 'Calendarios al día';
+      toast(message, Boolean(result.failed));
     } else {
       button.textContent = 'Abriendo Google…';
       const result = await api('/api/integrations/google-calendar/authorize');
@@ -544,6 +576,27 @@ async function googleCalendarAction() {
     toast(error.message, true); button.disabled = false; button.textContent = original;
   }
 }
+async function synchronizeCalendarSilently() {
+  if (calendarSyncRunning || document.visibilityState !== 'visible' || !authToken || currentUser?.role === 'client' || !data.googleCalendar.connected) return;
+  calendarSyncRunning = true;
+  try {
+    const result = await api('/api/integrations/google-calendar/sync', { method: 'POST' });
+    await Promise.all([refreshSessions(), refreshGoogleCalendarState()]);
+    renderDashboard(); renderGoogleCalendar(); renderCalendar();
+    if (Number(result.updatedFromGoogle || 0) > 0) toast(`${result.updatedFromGoogle} horario${Number(result.updatedFromGoogle) === 1 ? '' : 's'} actualizado${Number(result.updatedFromGoogle) === 1 ? '' : 's'} desde Google`);
+  } catch (error) {
+    console.warn('No fue posible actualizar Google Calendar en segundo plano', error);
+  } finally { calendarSyncRunning = false; }
+}
+function stopCalendarSynchronization() {
+  if (calendarSyncTimer) clearInterval(calendarSyncTimer);
+  calendarSyncTimer = null; calendarSyncRunning = false;
+}
+function startCalendarSynchronization() {
+  stopCalendarSynchronization();
+  if (!data.googleCalendar.connected || currentUser?.role === 'client') return;
+  calendarSyncTimer = setInterval(() => void synchronizeCalendarSilently(), 75_000);
+}
 async function disconnectGoogleCalendar() {
   if (!window.confirm('Se detendrá la sincronización. Los eventos que ya existen en Google Calendar se conservarán.')) return;
   const button = document.getElementById('google-calendar-disconnect');
@@ -552,7 +605,7 @@ async function disconnectGoogleCalendar() {
     await api('/api/integrations/google-calendar/disconnect', { method: 'POST' });
     data.googleCalendar = await api('/api/integrations/google-calendar/status');
     data.sessions.forEach(session => { session.googleSynced = false; session.googleEventLink = ''; session.googleSyncError = ''; });
-    renderGoogleCalendar(); renderCalendar(); toast('Google Calendar desconectado');
+    stopCalendarSynchronization(); renderGoogleCalendar(); renderCalendar(); toast('Google Calendar desconectado');
   } catch (error) { toast(error.message, true); button.disabled = false; button.textContent = 'Desconectar'; }
 }
 function showGoogleCalendarReturn() {
@@ -601,8 +654,27 @@ function newSession() {
     try {
       event.target.classList.add('loading-state');
       const routineId = form.get('routine');
-      await api('/api/sessions', { method: 'POST', body: { clientId: form.get('client'), routineId: routineId === 'Evaluación / seguimiento' ? undefined : routineId, startsAt: new Date(`${form.get('date')}T${form.get('time')}:00`).toISOString(), durationMinutes: 60, mode: form.get('mode'), notes: form.get('notes') || undefined } });
+      await api('/api/sessions', { method: 'POST', body: { clientId: form.get('client'), routineId: routineId === 'Evaluación / seguimiento' ? undefined : routineId, startsAt: panamaDateTimeIso(form.get('date'), form.get('time')), durationMinutes: Number(form.get('durationMinutes')), mode: form.get('mode'), notes: form.get('notes') || undefined } });
       await loadData(); renderAll(); modal.close(); navigate('calendar'); toast('Sesión agendada');
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+function editSessionSchedule(session) {
+  if (!session) return;
+  const content = document.createElement('div');
+  content.innerHTML = `<form id="edit-session-form"><p class="eyebrow">HORARIO DE ENTRENAMIENTO</p><h2>Editar sesión</h2><p class="form-summary"><b>${escapeHtml(session.client)}</b><br>${escapeHtml(session.routine)}</p><div class="form-row"><label>Fecha<input name="date" type="date" value="${session.date}" required /></label><label>Hora<input name="time" type="time" value="${session.time}" required /></label></div><div class="form-row"><label>Duración<select name="durationMinutes">${[30, 45, 60, 75, 90, 120].map(minutes => `<option value="${minutes}" ${minutes === session.durationMinutes ? 'selected' : ''}>${minutes} minutos</option>`).join('')}</select></label><label>Modalidad<select name="mode">${['Presencial', 'Virtual', 'Exterior'].map(mode => `<option ${mode === session.mode ? 'selected' : ''}>${mode}</option>`).join('')}</select></label></div><label>Notas<textarea name="notes" rows="3" placeholder="Opcional">${escapeHtml(session.notes)}</textarea></label><p class="calendar-edit-help">El cambio se enviará a Google Calendar. Si después arrastras el evento en Google, el nuevo horario regresará automáticamente a Eileen.</p><button class="primary wide-button">Guardar horario</button></form>`;
+  openModal(content);
+  document.getElementById('edit-session-form').addEventListener('submit', async event => {
+    event.preventDefault(); const form = new FormData(event.target);
+    try {
+      event.target.classList.add('loading-state');
+      await api(`/api/sessions/${session.id}`, { method: 'PATCH', body: {
+        startsAt: panamaDateTimeIso(form.get('date'), form.get('time')),
+        durationMinutes: Number(form.get('durationMinutes')), mode: form.get('mode'), notes: form.get('notes') || undefined
+      } });
+      await Promise.all([refreshSessions(), refreshGoogleCalendarState()]);
+      renderDashboard(); renderGoogleCalendar(); renderCalendar(); modal.close();
+      toast(data.googleCalendar.connected ? 'Horario actualizado en Eileen y Google Calendar' : 'Horario actualizado');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
@@ -789,6 +861,7 @@ window.addEventListener('hashchange', () => { if (currentUser?.role !== 'client'
 document.addEventListener('click', event => {
   const actionButton = event.target.closest('[data-action]');
   const invoicePdfButton = event.target.closest('[data-invoice-pdf]');
+  const editSessionButton = event.target.closest('[data-edit-session]');
   const calendarModeButton = event.target.closest('[data-calendar-mode]');
   const calendarShiftButton = event.target.closest('[data-calendar-shift]');
   const calendarDateButton = event.target.closest('[data-calendar-date]');
@@ -810,6 +883,7 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'account-statement') financialReportDialog('account-statement');
   if (actionButton?.dataset.action === 'accounts-receivable') financialReportDialog('accounts-receivable');
   if (invoicePdfButton) previewProtectedPdf(`/api/invoices/${invoicePdfButton.dataset.invoicePdf}/pdf`, `Comprobante ${invoicePdfButton.dataset.invoiceNumber}`, `comprobante-${invoicePdfButton.dataset.invoiceNumber}.pdf`);
+  if (editSessionButton) editSessionSchedule(data.sessions.find(session => session.id === editSessionButton.dataset.editSession));
   if (event.target.dataset.editPlan) planEditor(data.plans.find(plan => plan.id === event.target.dataset.editPlan));
   if (event.target.dataset.client) clientDetail(event.target.dataset.client);
   if (event.target.dataset.inbody) inbodyImport(data.clients.find(client => client.id === event.target.dataset.inbody));
@@ -937,7 +1011,7 @@ async function enterApp(user) {
   const restoredView = viewFromHash();
   currentUser = user; view(restoredView); document.getElementById('auth-screen').hidden = true; document.getElementById('portal-shell').hidden = true; document.getElementById('app-shell').hidden = false;
   document.getElementById('account-button').textContent = initials(user.fullName || user.full_name || user.email);
-  await loadData(); renderAll(); navigate(restoredView, { replace: true }); showGoogleCalendarReturn();
+  await loadData(); renderAll(); navigate(restoredView, { replace: true }); showGoogleCalendarReturn(); startCalendarSynchronization();
 }
 document.getElementById('login-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = new FormData(event.target); const errorBox = document.getElementById('login-error'); errorBox.textContent = '';
@@ -969,6 +1043,7 @@ document.getElementById('setup-form').addEventListener('submit', async event => 
   } catch (error) { errorBox.textContent = error.message; } finally { event.target.classList.remove('loading-state'); }
 });
 const logout = () => {
+  stopCalendarSynchronization();
   localStorage.removeItem(authKey); localStorage.removeItem(legacyAuthKey); authToken = null; currentUser = null; portalData = null;
   data = { clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, notifications: [], googleCalendar: { configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } } }; showAuth(false);
 };
