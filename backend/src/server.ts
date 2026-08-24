@@ -35,9 +35,13 @@ app.setErrorHandler((error, _request, reply) => {
   return reply.code(500).send({ error: 'Error interno' });
 });
 
-async function requireStaff(request: FastifyRequest) {
+async function requireAuth(request: FastifyRequest) {
   await request.jwtVerify();
-  const user = request.user as AuthUser;
+  return request.user as AuthUser;
+}
+
+async function requireStaff(request: FastifyRequest) {
+  const user = await requireAuth(request);
   if (!['admin', 'trainer'].includes(user.role)) {
     const error = new Error('Acceso restringido');
     (error as Error & { statusCode: number }).statusCode = 403;
@@ -100,40 +104,139 @@ app.post('/api/auth/reset-password', async (request, reply) => {
   return { user: { id: user.id, email: user.email, fullName: user.full_name, role: user.role }, token };
 });
 
-app.get('/api/me', { preHandler: requireStaff }, async request => {
+app.get('/api/me', { preHandler: requireAuth }, async request => {
   const auth = request.user as AuthUser;
   const [user] = await sql`SELECT id, email, full_name, role FROM users WHERE id = ${auth.sub}`;
   return { user };
 });
 
+const planSchema = z.object({
+  name: z.string().trim().min(2).max(80), description: z.string().trim().max(240).optional(),
+  billingModel: z.enum(['monthly', 'package']), price: z.coerce.number().min(0),
+  sessionsIncluded: z.coerce.number().int().positive().optional(), validityDays: z.coerce.number().int().positive().optional(),
+  active: z.boolean().default(true)
+}).superRefine((plan, context) => {
+  if (plan.billingModel === 'package' && !plan.sessionsIncluded) context.addIssue({ code: 'custom', path: ['sessionsIncluded'], message: 'Indica la cantidad de sesiones' });
+});
+
+app.get('/api/plans', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  return sql`SELECT * FROM service_plans WHERE owner_id = ${auth.sub} ORDER BY active DESC, name`;
+});
+
+app.post('/api/plans', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const input = planSchema.parse(request.body);
+  const [plan] = await sql`
+    INSERT INTO service_plans (owner_id, name, description, billing_model, price, sessions_included, validity_days, active)
+    VALUES (${auth.sub}, ${input.name}, ${input.description || null}, ${input.billingModel}, ${input.price}, ${input.billingModel === 'package' ? input.sessionsIncluded! : null}, ${input.billingModel === 'package' ? input.validityDays || 30 : null}, ${input.active})
+    RETURNING *
+  `;
+  return reply.code(201).send(plan);
+});
+
+app.patch('/api/plans/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = planSchema.parse(request.body);
+  const [plan] = await sql`
+    UPDATE service_plans SET name = ${input.name}, description = ${input.description || null}, billing_model = ${input.billingModel},
+      price = ${input.price}, sessions_included = ${input.billingModel === 'package' ? input.sessionsIncluded! : null},
+      validity_days = ${input.billingModel === 'package' ? input.validityDays || 30 : null}, active = ${input.active}, updated_at = now()
+    WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *
+  `;
+  if (!plan) return reply.code(404).send({ error: 'Plan no encontrado' });
+  return plan;
+});
+
 const clientSchema = z.object({
   fullName: z.string().min(2), email: z.string().email().optional().or(z.literal('')), phone: z.string().optional(),
   goal: z.string().optional(), notes: z.string().optional(), billingModel: z.enum(['monthly', 'package']).default('monthly'),
-  standardPrice: z.coerce.number().min(0).default(0), packageSessions: z.coerce.number().int().positive().optional()
+  standardPrice: z.coerce.number().min(0).default(0), packageSessions: z.coerce.number().int().positive().optional(),
+  planId: z.string().uuid().optional(), cutoffDay: z.coerce.number().int().min(1).max(31).default(1)
 });
 app.get('/api/clients', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`
-    SELECT c.*, COALESCE((SELECT sum(total_sessions - used_sessions) FROM session_packages p WHERE p.client_id = c.id AND p.status = 'active'), 0)::integer AS available_sessions
-    FROM clients c WHERE c.owner_id = ${auth.sub} ORDER BY c.full_name
+    SELECT c.*, p.name AS plan_name, p.sessions_included, p.validity_days,
+      COALESCE((SELECT sum(total_sessions - used_sessions) FROM session_packages sp WHERE sp.client_id = c.id AND sp.status = 'active'), 0)::integer AS available_sessions
+    FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id
+    WHERE c.owner_id = ${auth.sub} ORDER BY c.full_name
   `;
 });
 app.post('/api/clients', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = clientSchema.parse(request.body);
   const result = await sql.begin(async transaction => {
+    const [selectedPlan] = input.planId ? await transaction`SELECT * FROM service_plans WHERE id = ${input.planId} AND owner_id = ${auth.sub} AND active = true` : [];
+    if (input.planId && !selectedPlan) return null;
+    const billingModel = selectedPlan?.billing_model || input.billingModel;
+    const standardPrice = selectedPlan ? Number(selectedPlan.price) : input.standardPrice;
+    const packageSessions = selectedPlan?.sessions_included || input.packageSessions;
     const [client] = await transaction`
-      INSERT INTO clients (owner_id, full_name, email, phone, goal, notes, billing_model, standard_price)
-      VALUES (${auth.sub}, ${input.fullName}, ${input.email || null}, ${input.phone || null}, ${input.goal || null}, ${input.notes || null}, ${input.billingModel}, ${input.standardPrice}) RETURNING *
+      INSERT INTO clients (owner_id, full_name, email, phone, goal, notes, billing_model, standard_price, plan_id, billing_cutoff_day)
+      VALUES (${auth.sub}, ${input.fullName}, ${input.email || null}, ${input.phone || null}, ${input.goal || null}, ${input.notes || null}, ${billingModel}, ${standardPrice}, ${selectedPlan?.id || null}, ${input.cutoffDay}) RETURNING *
     `;
-    if (input.billingModel === 'monthly') {
-      await transaction`INSERT INTO memberships (client_id, amount, renewal_day) VALUES (${client.id}, ${input.standardPrice}, ${new Date().getDate()})`;
-    } else if (input.packageSessions) {
-      const [pack] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount) VALUES (${client.id}, ${`Paquete ${input.packageSessions} sesiones`}, ${input.packageSessions}, ${input.standardPrice}) RETURNING id`;
-      await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${client.id}, ${pack.id}, 'Paquete de sesiones', ${input.standardPrice}, current_date)`;
+    if (billingModel === 'monthly') {
+      await transaction`INSERT INTO memberships (client_id, amount, renewal_day) VALUES (${client.id}, ${standardPrice}, ${input.cutoffDay})`;
+    } else if (packageSessions) {
+      const expiresOn = selectedPlan?.validity_days ? new Date(Date.now() + Number(selectedPlan.validity_days) * 86400000).toISOString().slice(0, 10) : null;
+      const [pack] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on) VALUES (${client.id}, ${selectedPlan?.name || `Paquete ${packageSessions} sesiones`}, ${packageSessions}, ${standardPrice}, ${expiresOn}) RETURNING id`;
+      await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${client.id}, ${pack.id}, 'Paquete de sesiones', ${standardPrice}, current_date)`;
     }
     return client;
   });
+  if (!result) return reply.code(404).send({ error: 'Plan no encontrado o inactivo' });
   return reply.code(201).send(result);
+});
+
+const clientPlanSchema = z.object({ planId: z.string().uuid(), cutoffDay: z.coerce.number().int().min(1).max(31) });
+app.patch('/api/clients/:id/plan', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = clientPlanSchema.parse(request.body);
+  const result = await sql.begin(async transaction => {
+    const [plan] = await transaction`SELECT * FROM service_plans WHERE id = ${input.planId} AND owner_id = ${auth.sub} AND active = true`;
+    if (!plan) return null;
+    const [client] = await transaction`
+      UPDATE clients SET plan_id = ${plan.id}, billing_model = ${plan.billing_model}, standard_price = ${plan.price}, billing_cutoff_day = ${input.cutoffDay}, updated_at = now()
+      WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *
+    `;
+    if (!client) return null;
+    if (plan.billing_model === 'monthly') {
+      await transaction`
+        INSERT INTO memberships (client_id, amount, renewal_day)
+        SELECT ${id}, ${plan.price}, ${input.cutoffDay}
+        WHERE NOT EXISTS (SELECT 1 FROM memberships WHERE client_id = ${id} AND status = 'active')
+      `;
+      await transaction`UPDATE memberships SET amount = ${plan.price}, renewal_day = ${input.cutoffDay}, status = 'active' WHERE client_id = ${id} AND status = 'active'`;
+    } else {
+      await transaction`UPDATE memberships SET status = 'paused' WHERE client_id = ${id} AND status = 'active'`;
+      const [existingPackage] = await transaction`SELECT id FROM session_packages WHERE client_id = ${id} AND status IN ('pending', 'active') AND label = ${plan.name} ORDER BY created_at DESC LIMIT 1`;
+      if (!existingPackage) {
+        const expiresOn = plan.validity_days ? new Date(Date.now() + Number(plan.validity_days) * 86400000).toISOString().slice(0, 10) : null;
+        const [createdPackage] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on) VALUES (${id}, ${plan.name}, ${plan.sessions_included}, ${plan.price}, ${expiresOn}) RETURNING id`;
+        await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${id}, ${createdPackage.id}, ${plan.name}, ${plan.price}, current_date)`;
+      }
+    }
+    return client;
+  });
+  if (!result) return reply.code(404).send({ error: 'Cliente o plan no encontrado' });
+  return result;
+});
+
+const portalAccessSchema = z.object({ email: z.string().email(), password: z.string().min(10) });
+app.post('/api/clients/:id/portal-access', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = portalAccessSchema.parse(request.body);
+  const passwordHash = await bcrypt.hash(input.password, 12);
+  const portalUser = await sql.begin(async transaction => {
+    const [client] = await transaction`SELECT * FROM clients WHERE id = ${id} AND owner_id = ${auth.sub} FOR UPDATE`;
+    if (!client) return null;
+    if (client.portal_user_id) {
+      const [updated] = await transaction`UPDATE users SET email = ${input.email.toLowerCase()}, password_hash = ${passwordHash}, active = true, updated_at = now() WHERE id = ${client.portal_user_id} RETURNING id, email, full_name, role`;
+      await transaction`UPDATE clients SET email = ${input.email.toLowerCase()}, updated_at = now() WHERE id = ${id}`;
+      return updated;
+    }
+    const [created] = await transaction`INSERT INTO users (email, password_hash, full_name, role) VALUES (${input.email.toLowerCase()}, ${passwordHash}, ${client.full_name}, 'client') RETURNING id, email, full_name, role`;
+    await transaction`UPDATE clients SET portal_user_id = ${created.id}, email = ${input.email.toLowerCase()}, updated_at = now() WHERE id = ${id}`;
+    return created;
+  });
+  if (!portalUser) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  return reply.code(201).send({ user: portalUser });
 });
 
 const packageSchema = z.object({ clientId: z.string().uuid(), totalSessions: z.coerce.number().int().positive(), amount: z.coerce.number().positive(), expiresOn: z.string().date().optional() });
@@ -184,22 +287,58 @@ app.post('/api/sessions', { preHandler: requireStaff }, async (request, reply) =
   if (!session) return reply.code(404).send({ error: 'Cliente no encontrado' });
   return reply.code(201).send(session);
 });
-app.post('/api/sessions/:id/complete', { preHandler: requireStaff }, async (request, reply) => {
-  const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const session = await sql.begin(async transaction => {
-    const [current] = await transaction`SELECT s.* FROM sessions s JOIN clients c ON c.id = s.client_id WHERE s.id = ${id} AND c.owner_id = ${auth.sub} FOR UPDATE`;
-    if (!current) return null; if (current.status === 'completed') return current;
-    const [pack] = await transaction`SELECT * FROM session_packages WHERE client_id = ${current.client_id} AND status = 'active' AND used_sessions < total_sessions ORDER BY purchased_on LIMIT 1 FOR UPDATE`;
-    if (pack) {
-      const nextUsed = pack.used_sessions + 1;
-      await transaction`UPDATE session_packages SET used_sessions = ${nextUsed}, status = ${nextUsed >= pack.total_sessions ? 'exhausted' : 'active'} WHERE id = ${pack.id}`;
-      const [updated] = await transaction`UPDATE sessions SET status = 'completed', package_id = ${pack.id}, package_debited = true, updated_at = now() WHERE id = ${id} RETURNING *`;
+async function recordSessionCompliance(id: string, ownerId: string, markedBy: string, completed: boolean, completionPercent: number) {
+  return sql.begin(async transaction => {
+    const [current] = await transaction`SELECT s.* FROM sessions s JOIN clients c ON c.id = s.client_id WHERE s.id = ${id} AND c.owner_id = ${ownerId} FOR UPDATE`;
+    if (!current) return null;
+    if (!completed && current.package_debited && current.package_id) {
+      await transaction`UPDATE session_packages SET used_sessions = GREATEST(0, used_sessions - 1), status = 'active' WHERE id = ${current.package_id}`;
+      const [updated] = await transaction`
+        UPDATE sessions SET status = 'no_show', completion_percent = 0, package_id = null, package_debited = false,
+          completed_by_user_id = ${markedBy}, completion_recorded_at = now(), updated_at = now()
+        WHERE id = ${id} RETURNING *
+      `;
       return updated;
     }
-    const [updated] = await transaction`UPDATE sessions SET status = 'completed', updated_at = now() WHERE id = ${id} RETURNING *`;
+    if (completed && !current.package_debited) {
+      const [pack] = await transaction`SELECT * FROM session_packages WHERE client_id = ${current.client_id} AND status = 'active' AND used_sessions < total_sessions ORDER BY purchased_on LIMIT 1 FOR UPDATE`;
+      if (!pack) {
+        const [updated] = await transaction`
+          UPDATE sessions SET status = 'completed', completion_percent = ${completionPercent}, completed_by_user_id = ${markedBy}, completion_recorded_at = now(), updated_at = now()
+          WHERE id = ${id} RETURNING *
+        `;
+        return updated;
+      }
+      const nextUsed = pack.used_sessions + 1;
+      await transaction`UPDATE session_packages SET used_sessions = ${nextUsed}, status = ${nextUsed >= pack.total_sessions ? 'exhausted' : 'active'} WHERE id = ${pack.id}`;
+      const [updated] = await transaction`
+        UPDATE sessions SET status = 'completed', completion_percent = ${completionPercent}, package_id = ${pack.id}, package_debited = true,
+          completed_by_user_id = ${markedBy}, completion_recorded_at = now(), updated_at = now()
+        WHERE id = ${id} RETURNING *
+      `;
+      return updated;
+    }
+    const [updated] = await transaction`
+      UPDATE sessions SET status = ${completed ? 'completed' : 'no_show'}, completion_percent = ${completed ? completionPercent : 0},
+        completed_by_user_id = ${markedBy}, completion_recorded_at = now(), updated_at = now()
+      WHERE id = ${id} RETURNING *
+    `;
     return updated;
   });
+}
+
+app.post('/api/sessions/:id/complete', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const session = await recordSessionCompliance(id, auth.sub, auth.sub, true, 100);
   if (!session) return reply.code(404).send({ error: 'Sesión no encontrada' }); return session;
+});
+
+const sessionComplianceSchema = z.object({ completed: z.boolean(), completionPercent: z.coerce.number().int().min(0).max(100) });
+app.patch('/api/sessions/:id/compliance', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = sessionComplianceSchema.parse(request.body);
+  const session = await recordSessionCompliance(id, auth.sub, auth.sub, input.completed, input.completed ? input.completionPercent : 0);
+  if (!session) return reply.code(404).send({ error: 'Sesión no encontrada' });
+  return session;
 });
 
 const invoiceSchema = z.object({ clientId: z.string().uuid(), packageId: z.string().uuid().optional(), concept: z.string().min(2), amount: z.coerce.number().min(0), dueOn: z.string().date() });
@@ -219,6 +358,178 @@ app.post('/api/invoices/:id/confirm', { preHandler: requireStaff }, async (reque
   if (!invoice) return reply.code(404).send({ error: 'Cobro no encontrado' });
   if (invoice.package_id) await sql`UPDATE session_packages SET status = 'active' WHERE id = ${invoice.package_id} AND status = 'pending'`;
   return invoice;
+});
+
+const reportPeriodSchema = z.enum(['week', 'month', '3months', '6months', 'year']);
+const reportStart = (period: z.infer<typeof reportPeriodSchema>) => {
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  if (period === 'week') start.setDate(start.getDate() - 7);
+  else if (period === 'month') start.setMonth(start.getMonth() - 1);
+  else if (period === '3months') start.setMonth(start.getMonth() - 3);
+  else if (period === '6months') start.setMonth(start.getMonth() - 6);
+  else start.setFullYear(start.getFullYear() - 1);
+  return start.toISOString();
+};
+
+async function complianceRows(ownerId: string, period: z.infer<typeof reportPeriodSchema>, clientId?: string) {
+  const start = reportStart(period);
+  return sql`
+    WITH activities AS (
+      SELECT c.id AS client_id, c.full_name, s.starts_at AS occurred_at, 'Sesión'::text AS source,
+        COALESCE(r.title, 'Evaluación / seguimiento') AS activity, s.status, s.completion_percent
+      FROM sessions s JOIN clients c ON c.id = s.client_id LEFT JOIN routines r ON r.id = s.routine_id
+      WHERE c.owner_id = ${ownerId} AND s.starts_at >= ${start} AND s.starts_at <= now() AND s.status <> 'cancelled'
+      UNION ALL
+      SELECT c.id AS client_id, c.full_name, rc.completed_on::timestamptz AS occurred_at, 'Rutina'::text AS source,
+        r.title AS activity, 'completed'::text AS status, rc.completion_percent
+      FROM routine_completions rc JOIN clients c ON c.id = rc.client_id JOIN routines r ON r.id = rc.routine_id
+      WHERE c.owner_id = ${ownerId} AND rc.completed_on >= ${start}::date AND rc.completed_on <= current_date
+    )
+    SELECT * FROM activities WHERE (${clientId || null}::uuid IS NULL OR client_id = ${clientId || null}) ORDER BY occurred_at DESC, full_name
+  `;
+}
+
+app.get('/api/compliance/summary', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser; const query = z.object({ period: reportPeriodSchema.default('week') }).parse(request.query);
+  const rows = await complianceRows(auth.sub, query.period);
+  const clients = new Map<string, { clientId: string; name: string; total: number; sum: number; completed: number }>();
+  for (const row of rows) {
+    const current = clients.get(row.client_id) || { clientId: row.client_id, name: row.full_name, total: 0, sum: 0, completed: 0 };
+    current.total += 1; current.sum += Number(row.completion_percent); if (Number(row.completion_percent) > 0) current.completed += 1;
+    clients.set(row.client_id, current);
+  }
+  const clientSummaries = [...clients.values()].map(item => ({
+    clientId: item.clientId, name: item.name, activities: item.total, completed: item.completed,
+    compliancePercent: item.total ? Math.round(item.sum / item.total) : 0
+  })).sort((a, b) => b.compliancePercent - a.compliancePercent || a.name.localeCompare(b.name));
+  return {
+    period: query.period, activities: rows.length,
+    compliancePercent: rows.length ? Math.round(rows.reduce((sum, row) => sum + Number(row.completion_percent), 0) / rows.length) : 0,
+    clients: clientSummaries
+  };
+});
+
+const csvCell = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+app.get('/api/compliance/report.csv', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const query = z.object({ period: reportPeriodSchema.default('month'), clientId: z.string().uuid().optional() }).parse(request.query);
+  const rows = await complianceRows(auth.sub, query.period, query.clientId);
+  const header = ['Cliente', 'Fecha', 'Origen', 'Actividad', 'Estado', 'Cumplimiento (%)'];
+  const lines = rows.map(row => [row.full_name, new Date(row.occurred_at).toLocaleString('es-PA', { timeZone: 'America/Panama' }), row.source, row.activity, row.status, row.completion_percent].map(csvCell).join(','));
+  reply.header('Content-Type', 'text/csv; charset=utf-8');
+  reply.header('Content-Disposition', `attachment; filename="cumplimiento-${query.period}.csv"`);
+  return `\uFEFF${header.map(csvCell).join(',')}\n${lines.join('\n')}`;
+});
+
+const notificationPreferenceSchema = z.object({
+  inAppEnabled: z.boolean(), browserEnabled: z.boolean(),
+  sessionReminderHours: z.coerce.number().int().min(1).max(168), paymentReminderDays: z.coerce.number().int().min(0).max(30)
+});
+
+app.get('/api/notification-preferences', { preHandler: requireAuth }, async request => {
+  const auth = request.user as AuthUser;
+  const [preference] = await sql`
+    INSERT INTO notification_preferences (user_id) VALUES (${auth.sub})
+    ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
+    RETURNING *
+  `;
+  return preference;
+});
+
+app.patch('/api/notification-preferences', { preHandler: requireAuth }, async request => {
+  const auth = request.user as AuthUser; const input = notificationPreferenceSchema.parse(request.body);
+  const [preference] = await sql`
+    INSERT INTO notification_preferences (user_id, in_app_enabled, browser_enabled, session_reminder_hours, payment_reminder_days)
+    VALUES (${auth.sub}, ${input.inAppEnabled}, ${input.browserEnabled}, ${input.sessionReminderHours}, ${input.paymentReminderDays})
+    ON CONFLICT (user_id) DO UPDATE SET in_app_enabled = EXCLUDED.in_app_enabled, browser_enabled = EXCLUDED.browser_enabled,
+      session_reminder_hours = EXCLUDED.session_reminder_hours, payment_reminder_days = EXCLUDED.payment_reminder_days, updated_at = now()
+    RETURNING *
+  `;
+  return preference;
+});
+
+app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const [preference] = await sql`SELECT * FROM notification_preferences WHERE user_id = ${auth.sub}`;
+  const sessionHours = Number(preference?.session_reminder_hours || 24); const paymentDays = Number(preference?.payment_reminder_days || 3);
+  if (auth.role === 'client') {
+    const [client] = await sql`SELECT * FROM clients WHERE portal_user_id = ${auth.sub}`;
+    if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+    const sessions = await sql`SELECT starts_at, duration_minutes FROM sessions WHERE client_id = ${client.id} AND status = 'scheduled' AND starts_at BETWEEN now() AND now() + ${`${sessionHours} hours`}::interval ORDER BY starts_at`;
+    const invoices = await sql`SELECT due_on, amount, concept FROM invoices WHERE client_id = ${client.id} AND status = 'pending' AND due_on <= current_date + ${paymentDays} ORDER BY due_on`;
+    return [
+      ...sessions.map(session => ({ type: 'session', title: 'Próximo entrenamiento', body: `Tienes una sesión el ${new Date(session.starts_at).toLocaleString('es-PA', { timeZone: 'America/Panama' })}.`, scheduledFor: session.starts_at })),
+      ...invoices.map(invoice => ({ type: 'payment', title: 'Recordatorio de pago', body: `${invoice.concept}: $${Number(invoice.amount).toFixed(2)} · vence ${invoice.due_on}.`, scheduledFor: invoice.due_on }))
+    ];
+  }
+  const sessions = await sql`
+    SELECT s.starts_at, c.full_name FROM sessions s JOIN clients c ON c.id = s.client_id
+    WHERE c.owner_id = ${auth.sub} AND s.status = 'scheduled' AND s.starts_at BETWEEN now() AND now() + ${`${sessionHours} hours`}::interval ORDER BY s.starts_at
+  `;
+  const invoices = await sql`
+    SELECT i.due_on, i.amount, i.concept, c.full_name FROM invoices i JOIN clients c ON c.id = i.client_id
+    WHERE c.owner_id = ${auth.sub} AND i.status = 'pending' AND i.due_on <= current_date + ${paymentDays} ORDER BY i.due_on
+  `;
+  return [
+    ...sessions.map(session => ({ type: 'session', title: `Sesión con ${session.full_name}`, body: new Date(session.starts_at).toLocaleString('es-PA', { timeZone: 'America/Panama' }), scheduledFor: session.starts_at })),
+    ...invoices.map(invoice => ({ type: 'payment', title: `Pago de ${invoice.full_name}`, body: `${invoice.concept}: $${Number(invoice.amount).toFixed(2)} · vence ${invoice.due_on}.`, scheduledFor: invoice.due_on }))
+  ];
+});
+
+async function portalClient(userId: string) {
+  const [client] = await sql`
+    SELECT c.*, p.name AS plan_name, p.sessions_included, p.validity_days
+    FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id WHERE c.portal_user_id = ${userId}
+  `;
+  return client;
+}
+
+app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
+  const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+  const [invoices, routines, sessions, busySlots, assessments, completions] = await Promise.all([
+    sql`SELECT id, concept, amount, balance, currency, due_on, status, payment_method, invoice_number, issued_on FROM invoices WHERE client_id = ${client.id} ORDER BY COALESCE(issued_on, due_on) DESC LIMIT 60`,
+    sql`SELECT ra.id AS assignment_id, r.id, r.title, r.description, r.sessions_per_week, r.exercises FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id WHERE ra.client_id = ${client.id} AND ra.active = true AND (ra.ends_on IS NULL OR ra.ends_on >= current_date) ORDER BY ra.starts_on DESC`,
+    sql`SELECT s.id, s.routine_id, s.starts_at, s.duration_minutes, s.mode, s.status, s.completion_percent, r.title AS routine_title FROM sessions s LEFT JOIN routines r ON r.id = s.routine_id WHERE s.client_id = ${client.id} AND s.starts_at >= now() - interval '1 year' ORDER BY s.starts_at`,
+    sql`SELECT s.id, s.starts_at, s.duration_minutes, (s.client_id = ${client.id}) AS is_mine FROM sessions s JOIN clients c ON c.id = s.client_id WHERE c.owner_id = ${client.owner_id} AND s.status <> 'cancelled' AND s.starts_at BETWEEN now() AND now() + interval '90 days' ORDER BY s.starts_at`,
+    sql`SELECT tested_at, values FROM inbody_assessments WHERE client_id = ${client.id} AND extraction_status = 'ready' ORDER BY tested_at`,
+    sql`SELECT routine_id, completed_on, completion_percent FROM routine_completions WHERE client_id = ${client.id} AND completed_on >= current_date - interval '1 year' ORDER BY completed_on`
+  ]);
+  const profile = {
+    id: client.id, full_name: client.full_name, email: client.email, goal: client.goal, status: client.status,
+    billing_model: client.billing_model, standard_price: client.standard_price, billing_cutoff_day: client.billing_cutoff_day,
+    plan_name: client.plan_name, sessions_included: client.sessions_included, validity_days: client.validity_days
+  };
+  const privateBusySlots = busySlots.map(slot => slot.is_mine
+    ? { id: slot.id, starts_at: slot.starts_at, duration_minutes: slot.duration_minutes, is_mine: true }
+    : { starts_at: slot.starts_at, duration_minutes: slot.duration_minutes, is_mine: false });
+  return { client: profile, invoices, routines, sessions, busySlots: privateBusySlots, assessments, routineCompletions: completions };
+});
+
+const routineCompletionSchema = z.object({ routineId: z.string().uuid(), completedOn: z.string().date(), completionPercent: z.coerce.number().int().min(0).max(100), notes: z.string().max(300).optional() });
+app.post('/api/portal/routine-completions', { preHandler: requireAuth }, async (request, reply) => {
+  const auth = request.user as AuthUser; if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
+  const input = routineCompletionSchema.parse(request.body); const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+  const [assignment] = await sql`SELECT id FROM routine_assignments WHERE routine_id = ${input.routineId} AND client_id = ${client.id} AND active = true`;
+  if (!assignment) return reply.code(404).send({ error: 'La rutina no está asignada a este cliente' });
+  const [completion] = await sql`
+    INSERT INTO routine_completions (routine_id, client_id, completed_on, completion_percent, marked_by_user_id, notes)
+    VALUES (${input.routineId}, ${client.id}, ${input.completedOn}, ${input.completionPercent}, ${auth.sub}, ${input.notes || null})
+    ON CONFLICT (routine_id, client_id, completed_on) DO UPDATE SET completion_percent = EXCLUDED.completion_percent,
+      marked_by_user_id = EXCLUDED.marked_by_user_id, notes = EXCLUDED.notes, updated_at = now()
+    RETURNING *
+  `;
+  return reply.code(201).send(completion);
+});
+
+app.patch('/api/portal/sessions/:id/compliance', { preHandler: requireAuth }, async (request, reply) => {
+  const auth = request.user as AuthUser; if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
+  const id = z.string().uuid().parse((request.params as { id: string }).id); const input = sessionComplianceSchema.parse(request.body);
+  const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+  const [owned] = await sql`SELECT id FROM sessions WHERE id = ${id} AND client_id = ${client.id}`; if (!owned) return reply.code(404).send({ error: 'Sesión no encontrada' });
+  const session = await recordSessionCompliance(id, client.owner_id, auth.sub, input.completed, input.completed ? input.completionPercent : 0);
+  return session;
 });
 
 const documentKind = z.enum(['inbody', 'contract', 'receipt', 'progress_photo', 'other']);

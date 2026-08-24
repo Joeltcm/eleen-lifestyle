@@ -1,4 +1,4 @@
-const CACHE = 'eileen-lifestyle-v26';
+const CACHE = 'eileen-lifestyle-v27';
 const FILES = ['./', './index.html', './styles.css', './zoho-migration.css', './exercise-catalog.js', './app.js', './zoho-migration.js', './manifest.webmanifest', './icon.svg', './icon-maskable.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png', './favicon-32.png', './favicon.ico', './assets/eleen-training.jpg'];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(FILES)).then(() => self.skipWaiting())));
 self.addEventListener('activate', event => event.waitUntil(Promise.all([
@@ -6,3 +6,10 @@ self.addEventListener('activate', event => event.waitUntil(Promise.all([
   self.clients.claim()
 ])));
 self.addEventListener('fetch', event => event.respondWith(caches.match(event.request).then(saved => saved || fetch(event.request))));
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clients => {
+    const existing = clients.find(client => 'focus' in client);
+    return existing ? existing.focus() : self.clients.openWindow('./');
+  }));
+});

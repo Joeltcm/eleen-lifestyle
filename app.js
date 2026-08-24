@@ -36,7 +36,9 @@ const seed = {
     { id: 'r3', title: 'Recomposición corporal', description: 'Entrenamiento de fuerza con cardio estratégico.', clients: 1, sessions: 4, exercises: ['Prensa · 4 × 10', 'Press de pecho · 3 × 10', 'Intervalos · 8 × 30 s'] }
   ]
 };
-let data = { clients: [], invoices: [], packages: [], sessions: [], routines: [] };
+let data = { clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, notifications: [] };
+let portalData = null;
+let compliancePeriod = 'week';
 let calendarMode = 'week';
 let calendarCursor = new Date(today);
 calendarCursor.setHours(12, 0, 0, 0);
@@ -60,8 +62,9 @@ async function api(path, options = {}) {
 }
 const exerciseLabel = exercise => typeof exercise === 'string' ? exercise : [exercise.name, exercise.sets && `${exercise.sets} series`, exercise.reps].filter(Boolean).join(' · ');
 async function loadData() {
-  const [clients, invoices, packages, sessions, routines] = await Promise.all([
-    api('/api/clients'), api('/api/invoices'), api('/api/packages'), api('/api/sessions'), api('/api/routines')
+  const [clients, invoices, packages, sessions, routines, plans, compliance, notifications] = await Promise.all([
+    api('/api/clients'), api('/api/invoices'), api('/api/packages'), api('/api/sessions'), api('/api/routines'),
+    api('/api/plans'), api(`/api/compliance/summary?period=${compliancePeriod}`), api('/api/notifications')
   ]);
   const assessments = await Promise.all(clients.map(client => api(`/api/clients/${client.id}/inbody`)));
   data.clients = clients.map((client, index) => {
@@ -72,12 +75,14 @@ async function loadData() {
     }));
     const latest = history.at(-1);
     const inbodyReviews = assessments[index].assessments.filter(item => item.extraction_status === 'review');
-    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), email: client.email || '', status: client.status === 'active' ? 'Activo' : 'Inactivo', inbodyReviews, inbody: latest ? { ...latest, history } : null };
+    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', portalActive: Boolean(client.portal_user_id), status: client.status === 'active' ? 'Activo' : 'Inactivo', inbodyReviews, inbody: latest ? { ...latest, history } : null };
   });
   data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, concept: item.concept, amount: Number(item.amount), balance: item.source_system ? Number(item.balance) : item.status === 'pending' ? Number(item.amount) : 0, due: item.due_on, issued: item.issued_on || item.due_on, method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '' }));
   data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired' }));
-  data.sessions = sessions.map(item => { const starts = new Date(item.starts_at); return { id: item.id, clientId: item.client_id, client: item.full_name, routineId: item.routine_id, date: dateKey(starts), time: `${String(starts.getHours()).padStart(2, '0')}:${String(starts.getMinutes()).padStart(2, '0')}`, routine: item.routine_title || 'Evaluación / seguimiento', mode: item.mode, status: item.status, notes: item.notes || '' }; });
+  data.sessions = sessions.map(item => { const starts = new Date(item.starts_at); return { id: item.id, clientId: item.client_id, client: item.full_name, routineId: item.routine_id, date: dateKey(starts), time: `${String(starts.getHours()).padStart(2, '0')}:${String(starts.getMinutes()).padStart(2, '0')}`, routine: item.routine_title || 'Evaluación / seguimiento', mode: item.mode, status: item.status, completionPercent: Number(item.completion_percent || 0), notes: item.notes || '' }; });
   data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: 0, sessions: item.sessions_per_week, exercises: item.exercises || [] }));
+  data.plans = plans.map(item => ({ id: item.id, name: item.name, description: item.description || '', billingModel: item.billing_model, price: Number(item.price), sessionsIncluded: Number(item.sessions_included || 0), validityDays: Number(item.validity_days || 0), active: item.active }));
+  data.compliance = compliance; data.notifications = notifications;
 }
 const initials = name => name.split(' ').slice(0, 2).map(word => word[0]).join('').toUpperCase();
 const escapeHtml = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
@@ -123,12 +128,20 @@ const calendarPeriodLabel = ({ start, end }) => {
   return `${new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short' }).format(start)} – ${new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short', year: 'numeric' }).format(last)}`;
 };
 const sessionsThisWeek = () => { const start = mondayFor(today); const end = new Date(start); end.setDate(start.getDate() + 7); return data.sessions.filter(session => { const date = new Date(`${session.date}T12:00:00`); return date >= start && date < end; }); };
+const sessionStateLabel = session => session.status === 'completed' ? 'Realizada' : session.status === 'no_show' ? 'No cumplió' : session.status === 'cancelled' ? 'Cancelada' : 'Programada';
+const sessionComplianceForm = session => `<form class="session-compliance" data-session-compliance="${session.id}"><label class="completion-check"><input name="completed" type="checkbox" ${session.status === 'completed' ? 'checked' : ''} /><span>Cumplió</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${session.status === 'completed' ? session.completionPercent || 100 : 0}" /><span>%</span></label><button class="secondary" title="Guardar cumplimiento">Guardar</button></form>`;
 function renderDashboard() {
   const confirmed = monthInvoices().filter(item => item.status === 'confirmed').reduce((sum, item) => sum + item.amount, 0);
   const pending = data.invoices.filter(item => item.status === 'pending').reduce((sum, item) => sum + item.balance, 0);
+  const weekSessions = sessionsThisWeek();
+  const completedThisWeek = weekSessions.filter(session => session.completionPercent > 0).length;
   document.getElementById('active-clients').textContent = data.clients.filter(client => client.status === 'Activo').length;
   document.getElementById('client-trend').textContent = `${data.clients.length} expedientes registrados`;
-  document.getElementById('week-sessions').textContent = sessionsThisWeek().length;
+  document.getElementById('week-sessions').textContent = `${data.compliance.activities} actividades registradas`;
+  document.getElementById('week-adherence').textContent = `${data.compliance.compliancePercent}%`;
+  document.getElementById('hero-adherence').textContent = data.compliance.compliancePercent;
+  document.getElementById('hero-session-count').textContent = weekSessions.length;
+  document.getElementById('hero-completed-count').textContent = completedThisWeek;
   document.getElementById('month-collected').textContent = money.format(confirmed);
   document.getElementById('pending-amount').textContent = money.format(pending);
   document.getElementById('pending-count').textContent = `${data.invoices.filter(item => item.status === 'pending').length} factura pendiente`;
@@ -141,18 +154,20 @@ function renderDashboard() {
     return `<div class="progress-item"><span class="initials">${initials(client.name)}</span><div><b>${client.name}</b><small>${client.goal} · InBody ${client.inbody.date}</small></div><span class="delta ${Number(fatDelta) > 0 ? 'warn' : ''}">Músculo ${muscleDelta > 0 ? '+' : ''}${muscleDelta} kg<br>Grasa ${fatDelta > 0 ? '+' : ''}${fatDelta} kg</span></div>`;
   }).join('') : '<p class="empty">Aún no hay evaluaciones InBody.</p>';
   const todaySessions = data.sessions.filter(session => session.date === dateKey(today)).sort((a, b) => a.time.localeCompare(b.time));
-  document.getElementById('today-sessions').innerHTML = todaySessions.length ? todaySessions.map(session => `<div class="agenda-item"><span class="agenda-time">${session.time}</span><div><b>${session.client}</b><span>${session.routine} · ${session.mode.toLowerCase()}</span></div><span class="session-state ${session.status}">${session.status === 'completed' ? 'Realizada' : 'Programada'}</span></div>`).join('') : '<p class="empty">No hay sesiones para hoy.</p>';
+  document.getElementById('today-sessions').innerHTML = todaySessions.length ? todaySessions.map(session => `<div class="agenda-item"><span class="agenda-time">${session.time}</span><div><b>${session.client}</b><span>${session.routine} · ${session.mode.toLowerCase()}</span></div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span></div>`).join('') : '<p class="empty">No hay sesiones para hoy.</p>';
   const noInbody = data.clients.filter(client => !client.inbody).map(client => `<div class="alert-item"><b>${client.name}</b><span>Sin evaluación InBody registrada.</span></div>`).join('');
   document.getElementById('alerts').innerHTML = `${noInbody || '<div class="alert-item"><b>Todo al día</b><span>No hay alertas de seguimiento.</span></div>'}<div class="alert-item"><b>${data.invoices.filter(item => item.status === 'pending').length} cobro pendiente</b><span>Revisa pagos y comprobantes.</span></div>`;
+  document.getElementById('compliance-list').innerHTML = data.compliance.clients.length ? data.compliance.clients.map(client => `<div class="compliance-row"><span class="initials">${initials(client.name)}</span><div><b>${escapeHtml(client.name)}</b><small>${client.completed} de ${client.activities} actividades con avance</small><span class="compliance-track"><i style="width:${client.compliancePercent}%"></i></span></div><strong>${client.compliancePercent}%</strong></div>`).join('') : '<p class="empty">Aún no hay entrenamientos vencidos en este período.</p>';
+  const notificationCount = document.getElementById('notification-count'); notificationCount.textContent = data.notifications.length; notificationCount.hidden = !data.notifications.length;
 }
 function renderClients(filter = '') {
   const clients = data.clients.filter(client => client.name.toLowerCase().includes(filter.toLowerCase()));
   document.getElementById('client-grid').innerHTML = clients.map(client => {
     const pack = clientPackage(client.name);
     const commercial = client.billingModel === 'package'
-      ? `<span class="commercial-label package-label">Paquete</span><b>${pack?.status === 'pending' ? 'Pago pendiente' : `${pack ? remainingSessions(pack) : client.packageSessions || 0} sesiones disponibles`}</b><small>${money.format(client.plan)} por paquete</small>`
-      : `<span class="commercial-label">Mensualidad</span><b>${money.format(client.plan)} / mes</b><small>Renovación recurrente</small>`;
-    return `<article class="client-card"><header><span class="initials">${initials(client.name)}</span><div><h3>${client.name}</h3><small>${client.goal}</small></div><span class="status">${client.status}</span></header><p>${client.inbody ? `Último InBody: ${client.inbody.date}` : 'Aún no se ha cargado un InBody.'}</p><div class="commercial-summary">${commercial}</div><div class="mini-data">${client.inbody ? `<div><b>${client.inbody.weight} kg</b><span>Peso</span></div><div><b>${client.inbody.smm} kg</b><span>Músculo</span></div><div><b>${client.inbody.pbf}%</b><span>Grasa</span></div>` : `<div><b>—</b><span>Evaluación pendiente</span></div>`}</div><div class="client-actions"><button class="secondary" data-client="${client.id}">Ver expediente</button><button class="secondary" data-inbody="${client.id}">+ InBody</button></div></article>`;
+      ? `<span class="commercial-label package-label">Paquete</span><b>${pack?.status === 'pending' ? 'Pago pendiente' : `${pack ? remainingSessions(pack) : client.sessionsIncluded || 0} sesiones disponibles`}</b><small>${escapeHtml(client.planName || 'Plan por sesiones')} · ${money.format(client.plan)}</small>`
+      : `<span class="commercial-label">Mensualidad</span><b>${escapeHtml(client.planName || 'Mensualidad')} · ${money.format(client.plan)}</b><small>Corte día ${client.cutoffDay}</small>`;
+    return `<article class="client-card"><header><span class="initials">${initials(client.name)}</span><div><h3>${client.name}</h3><small>${client.goal}</small></div><span class="status">${client.status}</span></header><p>${client.inbody ? `Último InBody: ${client.inbody.date}` : 'Aún no se ha cargado un InBody.'}${client.portalActive ? ' · Portal activo' : ''}</p><div class="commercial-summary">${commercial}</div><div class="mini-data">${client.inbody ? `<div><b>${client.inbody.weight} kg</b><span>Peso</span></div><div><b>${client.inbody.smm} kg</b><span>Músculo</span></div><div><b>${client.inbody.pbf}%</b><span>Grasa</span></div>` : `<div><b>—</b><span>Evaluación pendiente</span></div>`}</div><div class="client-actions"><button class="secondary" data-client="${client.id}">Ver expediente</button><button class="secondary" data-inbody="${client.id}">+ InBody</button></div></article>`;
   }).join('') || '<p class="empty">No se encontraron clientes.</p>';
 }
 function renderCalendar() {
@@ -168,7 +183,7 @@ function renderCalendar() {
     const key = dateKey(range.start);
     const sessions = visibleSessions.filter(session => session.date === key);
     grid.className = 'calendar-grid calendar-day';
-    grid.innerHTML = `<div class="day-focus"><span>${new Intl.DateTimeFormat('es-PA', { weekday: 'long' }).format(range.start)}</span><strong>${range.start.getDate()}</strong><small>${capitalized(new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric' }).format(range.start))}</small></div><div class="day-timeline">${sessions.length ? sessions.map(session => `<article class="day-session ${session.status}"><time>${session.time}</time><div><b>${session.client}</b><span>${session.routine}</span><small>${session.mode}</small></div><span class="session-state ${session.status}">${session.status === 'completed' ? 'Realizada' : 'Programada'}</span></article>`).join('') : '<div class="calendar-empty"><b>Día disponible</b><span>No hay sesiones programadas.</span><button class="secondary" data-action="new-session">+ Agendar sesión</button></div>'}</div>`;
+    grid.innerHTML = `<div class="day-focus"><span>${new Intl.DateTimeFormat('es-PA', { weekday: 'long' }).format(range.start)}</span><strong>${range.start.getDate()}</strong><small>${capitalized(new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric' }).format(range.start))}</small></div><div class="day-timeline">${sessions.length ? sessions.map(session => `<article class="day-session ${session.status}"><time>${session.time}</time><div><b>${session.client}</b><span>${session.routine}</span><small>${session.mode}</small></div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span></article>`).join('') : '<div class="calendar-empty"><b>Día disponible</b><span>No hay sesiones programadas.</span><button class="secondary" data-action="new-session">+ Agendar sesión</button></div>'}</div>`;
   } else if (calendarMode === 'week') {
     const names = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
     grid.className = 'calendar-grid calendar-week';
@@ -197,7 +212,7 @@ function renderCalendar() {
   const periodName = calendarMode === 'day' ? 'del día' : calendarMode === 'week' ? 'de la semana' : 'del mes';
   document.getElementById('session-control-title').textContent = `Sesiones ${periodName}`;
   document.getElementById('session-control-copy').textContent = visibleSessions.length ? `${visibleSessions.length} sesión${visibleSessions.length !== 1 ? 'es' : ''} en el período visible` : 'No hay sesiones en el período visible';
-  document.getElementById('session-list').innerHTML = visibleSessions.length ? visibleSessions.map(session => `<div class="session-row"><div class="session-date"><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric' }).format(new Date(`${session.date}T12:00:00`))}</b><span>${session.time}</span></div><div class="session-person"><b>${session.client}</b><span>${session.routine} · ${session.mode}</span></div><span class="session-state ${session.status}">${session.status === 'completed' ? 'Realizada' : 'Programada'}</span>${session.status === 'scheduled' ? `<button class="secondary session-complete" data-complete-session="${session.id}">Marcar realizada</button>` : '<span class="session-done">✓</span>'}</div>`).join('') : `<p class="empty">No hay sesiones programadas ${periodName}.</p>`;
+  document.getElementById('session-list').innerHTML = visibleSessions.length ? visibleSessions.map(session => `<div class="session-row"><div class="session-date"><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric' }).format(new Date(`${session.date}T12:00:00`))}</b><span>${session.time}</span></div><div class="session-person"><b>${session.client}</b><span>${session.routine} · ${session.mode}</span></div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span>${session.status === 'cancelled' ? '<span class="session-done">—</span>' : sessionComplianceForm(session)}</div>`).join('') : `<p class="empty">No hay sesiones programadas ${periodName}.</p>`;
 }
 function renderRoutines() {
   document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${routine.title}</h3><p>${routine.description}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''}</footer></article>`).join('');
@@ -209,6 +224,7 @@ function renderBilling() {
   document.getElementById('active-memberships').textContent = data.clients.filter(client => client.billingModel === 'monthly' && client.status === 'Activo').length;
   document.getElementById('active-packages').textContent = data.packages.filter(pack => pack.status === 'confirmed' && remainingSessions(pack) > 0).length;
   document.getElementById('billing-pending').textContent = money.format(pending);
+  document.getElementById('plan-grid').innerHTML = data.plans.length ? data.plans.map(plan => `<article class="plan-card ${plan.active ? '' : 'inactive'}"><div><span class="commercial-label ${plan.billingModel === 'package' ? 'package-label' : ''}">${plan.billingModel === 'package' ? 'Paquete' : 'Mensualidad'}</span><h4>${escapeHtml(plan.name)}</h4><p>${escapeHtml(plan.description || (plan.billingModel === 'package' ? `${plan.sessionsIncluded} sesiones · ${plan.validityDays} días` : 'Cobro mensual'))}</p></div><div class="plan-price"><strong>${money.format(plan.price)}</strong><small>${plan.active ? 'Disponible' : 'Inactivo'}</small></div><button class="text-button" data-edit-plan="${plan.id}">Editar</button></article>`).join('') : '<p class="empty">Crea el primer plan para asignarlo a tus clientes.</p>';
   document.getElementById('invoice-table').innerHTML = data.invoices.map(invoice => { const label = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'; const concept = invoice.invoiceNumber ? `<small>${invoice.source === 'zoho_invoice' ? 'Zoho' : 'Eileen'} · ${invoice.invoiceNumber}</small><br>${invoice.concept}` : invoice.concept; return `<tr><td><b>${invoice.client}</b></td><td>${concept}</td><td>${invoice.due}</td><td>${invoice.method === 'pending' ? '—' : invoice.method}</td><td>${money.format(invoice.amount)}${invoice.status === 'pending' && invoice.balance !== invoice.amount ? `<br><small>Saldo ${money.format(invoice.balance)}</small>` : ''}</td><td><span class="payment-status ${invoice.status}">${label}</span></td><td>${invoice.status === 'pending' && invoice.source !== 'zoho_invoice' ? `<button class="secondary session-use" data-confirm-invoice="${invoice.id}">Confirmar</button>` : ''}</td></tr>`; }).join('');
   document.getElementById('package-table').innerHTML = data.packages.length ? data.packages.map(pack => {
     const remaining = remainingSessions(pack);
@@ -221,17 +237,74 @@ const modal = document.getElementById('modal');
 function openModal(content, wide = false) { modal.classList.toggle('modal-wide', wide); document.getElementById('modal-content').replaceChildren(content); if (!modal.open) modal.showModal(); }
 function formFromTemplate(id) { return document.getElementById(id).content.cloneNode(true); }
 function newClient() {
+  const availablePlans = data.plans.filter(plan => plan.active);
+  if (!availablePlans.length) { navigate('billing'); toast('Crea un plan comercial antes de agregar clientes', true); return; }
   const content = formFromTemplate('new-client-template'); openModal(content);
-  const model = document.getElementById('client-billing-model'); const packageFields = document.getElementById('client-package-fields');
-  const togglePackage = () => { packageFields.hidden = model.value !== 'package'; };
-  model.addEventListener('change', togglePackage); togglePackage();
+  const planSelect = document.getElementById('client-plan'); availablePlans.forEach(plan => planSelect.add(new Option(`${plan.name} · ${money.format(plan.price)}${plan.billingModel === 'package' ? ` · ${plan.sessionsIncluded} sesiones` : '/mes'}`, plan.id)));
   document.getElementById('client-form').addEventListener('submit', async event => {
-    event.preventDefault(); const form = new FormData(event.target); const billingModel = form.get('billingModel');
+    event.preventDefault(); const form = new FormData(event.target); const selectedPlan = data.plans.find(plan => plan.id === form.get('planId'));
     try {
       event.target.classList.add('loading-state');
-      await api('/api/clients', { method: 'POST', body: { fullName: form.get('name'), goal: form.get('goal'), billingModel, standardPrice: Number(form.get('plan')), packageSessions: billingModel === 'package' ? Number(form.get('packageSessions')) : undefined, email: form.get('email') } });
+      await api('/api/clients', { method: 'POST', body: { fullName: form.get('name'), goal: form.get('goal'), planId: form.get('planId'), cutoffDay: Number(form.get('cutoffDay')), billingModel: selectedPlan?.billingModel || 'monthly', standardPrice: selectedPlan?.price || 0, packageSessions: selectedPlan?.sessionsIncluded || undefined, email: form.get('email') } });
       await loadData(); renderAll(); modal.close(); navigate('clients'); toast('Cliente creado y sincronizado');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+function planEditor(plan = null) {
+  const content = formFromTemplate('plan-template'); openModal(content);
+  const form = document.getElementById('plan-form'); const model = document.getElementById('plan-billing-model'); const packageFields = document.getElementById('plan-package-fields');
+  const togglePackage = () => { packageFields.hidden = model.value !== 'package'; };
+  model.addEventListener('change', togglePackage);
+  if (plan) {
+    document.getElementById('plan-form-title').textContent = 'Editar plan';
+    form.elements.name.value = plan.name; form.elements.description.value = plan.description; form.elements.billingModel.value = plan.billingModel; form.elements.price.value = plan.price;
+    form.elements.sessionsIncluded.value = plan.sessionsIncluded || ''; form.elements.validityDays.value = plan.validityDays || 30; form.elements.active.checked = plan.active;
+  }
+  togglePackage();
+  form.addEventListener('submit', async event => {
+    event.preventDefault(); const values = new FormData(event.target); const billingModel = values.get('billingModel');
+    try {
+      event.target.classList.add('loading-state');
+      await api(plan ? `/api/plans/${plan.id}` : '/api/plans', { method: plan ? 'PATCH' : 'POST', body: { name: values.get('name'), description: values.get('description'), billingModel, price: Number(values.get('price')), sessionsIncluded: billingModel === 'package' ? Number(values.get('sessionsIncluded')) : undefined, validityDays: billingModel === 'package' ? Number(values.get('validityDays')) : undefined, active: Boolean(values.get('active')) } });
+      await loadData(); renderAll(); modal.close(); toast(plan ? 'Plan actualizado' : 'Plan creado');
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+function clientPlanEditor(client) {
+  const box = document.createElement('div'); const availablePlans = data.plans.filter(plan => plan.active || plan.id === client.planId);
+  box.innerHTML = `<form id="client-plan-form"><p class="eyebrow">CONDICIONES COMERCIALES</p><h2>Plan y día de corte</h2><p class="form-summary">${escapeHtml(client.name)}</p><label>Plan<select name="planId" required>${availablePlans.map(plan => `<option value="${plan.id}" ${plan.id === client.planId ? 'selected' : ''}>${escapeHtml(plan.name)} · ${money.format(plan.price)}</option>`).join('')}</select></label><label>Día de corte<input name="cutoffDay" type="number" min="1" max="31" value="${client.cutoffDay}" required /><small>Para meses cortos, el recordatorio se ajusta al último día disponible.</small></label><button class="primary wide-button">Guardar condiciones</button></form>`;
+  openModal(box);
+  document.getElementById('client-plan-form').addEventListener('submit', async event => {
+    event.preventDefault(); const form = new FormData(event.target);
+    try { event.target.classList.add('loading-state'); await api(`/api/clients/${client.id}/plan`, { method: 'PATCH', body: { planId: form.get('planId'), cutoffDay: Number(form.get('cutoffDay')) } }); await loadData(); renderAll(); modal.close(); toast('Plan del cliente actualizado'); }
+    catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+function portalAccessEditor(client) {
+  const box = document.createElement('div'); box.innerHTML = `<form id="portal-access-form"><p class="eyebrow">PORTAL PRIVADO</p><h2>${client.portalActive ? 'Actualizar acceso' : 'Activar acceso'}</h2><p class="form-summary">${escapeHtml(client.name)}</p><label>Correo del cliente<input name="email" type="email" required value="${escapeHtml(client.email)}" /></label><label>Contraseña inicial<input name="password" type="password" minlength="10" required autocomplete="new-password" /><small>Mínimo 10 caracteres. El cliente podrá iniciar sesión desde la misma PWA.</small></label><button class="primary wide-button">${client.portalActive ? 'Actualizar credenciales' : 'Crear acceso al portal'}</button></form>`;
+  openModal(box);
+  document.getElementById('portal-access-form').addEventListener('submit', async event => {
+    event.preventDefault(); const form = new FormData(event.target);
+    try { event.target.classList.add('loading-state'); await api(`/api/clients/${client.id}/portal-access`, { method: 'POST', body: { email: form.get('email'), password: form.get('password') } }); await loadData(); renderAll(); modal.close(); toast('Acceso del cliente configurado'); }
+    catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+async function exportCompliance(period = compliancePeriod) {
+  try {
+    const response = await fetch(`${API_BASE}/api/compliance/report.csv?period=${period}`, { headers: { Authorization: `Bearer ${authToken}` } });
+    if (!response.ok) { const payload = await response.json().catch(() => ({})); throw new Error(payload.error || 'No fue posible generar el reporte'); }
+    const url = URL.createObjectURL(await response.blob()); const link = document.createElement('a'); link.href = url; link.download = `cumplimiento-${period}.csv`; link.click(); URL.revokeObjectURL(url); toast('Reporte de cumplimiento exportado');
+  } catch (error) { toast(error.message, true); }
+}
+async function notificationCenter(isPortal = false) {
+  const [notifications, preferences] = await Promise.all([api('/api/notifications'), api('/api/notification-preferences')]);
+  const box = document.createElement('div'); box.innerHTML = `<form id="notification-form"><p class="eyebrow">RECORDATORIOS</p><h2>Notificaciones</h2><div class="notification-list">${notifications.length ? notifications.map(item => `<div class="notification-item ${item.type}"><b>${escapeHtml(item.title)}</b><span>${escapeHtml(item.body)}</span></div>`).join('') : '<p class="empty">No hay recordatorios pendientes.</p>'}</div><div class="notification-settings"><label class="checkbox-line"><input name="inAppEnabled" type="checkbox" ${preferences.in_app_enabled ? 'checked' : ''} /> Mostrar dentro de la aplicación</label><label class="checkbox-line"><input name="browserEnabled" type="checkbox" ${preferences.browser_enabled ? 'checked' : ''} /> Notificaciones del navegador</label><div class="form-row"><label>Avisar sesión con horas de anticipación<input name="sessionReminderHours" type="number" min="1" max="168" value="${preferences.session_reminder_hours}" /></label><label>Avisar pago con días de anticipación<input name="paymentReminderDays" type="number" min="0" max="30" value="${preferences.payment_reminder_days}" /></label></div></div><button class="primary wide-button">Guardar preferencias</button></form>`;
+  openModal(box, true);
+  document.getElementById('notification-form').addEventListener('submit', async event => {
+    event.preventDefault(); const form = new FormData(event.target); let browserEnabled = Boolean(form.get('browserEnabled'));
+    if (browserEnabled && 'Notification' in window && Notification.permission !== 'granted') browserEnabled = (await Notification.requestPermission()) === 'granted';
+    try { await api('/api/notification-preferences', { method: 'PATCH', body: { inAppEnabled: Boolean(form.get('inAppEnabled')), browserEnabled, sessionReminderHours: Number(form.get('sessionReminderHours')), paymentReminderDays: Number(form.get('paymentReminderDays')) } }); modal.close(); toast('Preferencias guardadas'); if (browserEnabled && notifications[0] && 'serviceWorker' in navigator) { const registration = await navigator.serviceWorker.ready; await registration.showNotification(notifications[0].title, { body: notifications[0].body, icon: './icon-192.png', badge: './favicon-32.png' }); } }
+    catch (error) { toast(error.message, true); }
   });
 }
 function newInvoice() {
@@ -365,12 +438,12 @@ function clientDetail(id) {
   const client = data.clients.find(item => item.id === id); const inbody = client.inbody;
   const pack = clientPackage(client.name);
   const commercialDescription = client.billingModel === 'package'
-    ? `${pack?.label || `Paquete ${client.packageSessions || 0} sesiones`} · ${pack ? remainingSessions(pack) : client.packageSessions || 0} disponibles · ${money.format(client.plan)}`
-    : `Mensualidad · ${money.format(client.plan)} al mes`;
+    ? `${client.planName || pack?.label || `Paquete ${client.sessionsIncluded || 0} sesiones`} · ${pack ? remainingSessions(pack) : client.sessionsIncluded || 0} disponibles · ${money.format(client.plan)}`
+    : `${client.planName || 'Mensualidad'} · ${money.format(client.plan)} al mes · corte día ${client.cutoffDay}`;
   const box = document.createElement('div');
   const reviewNotice = client.inbodyReviews.length ? `<button class="secondary wide-button" id="review-inbody">Revisar ${client.inbodyReviews.length} evaluación${client.inbodyReviews.length > 1 ? 'es' : ''} pendiente${client.inbodyReviews.length > 1 ? 's' : ''}</button>` : '';
-  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th></tr></thead><tbody>${inbody.history.map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
-  openModal(box); document.getElementById('open-scan').onclick = () => inbodyImport(client);
+  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th></tr></thead><tbody>${inbody.history.map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<div class="detail-actions"><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="portal-access">${client.portalActive ? 'Actualizar portal' : 'Activar portal cliente'}</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
+  openModal(box); document.getElementById('open-scan').onclick = () => inbodyImport(client); document.getElementById('edit-client-plan').onclick = () => clientPlanEditor(client); document.getElementById('portal-access').onclick = () => portalAccessEditor(client);
   if (client.inbodyReviews.length) document.getElementById('review-inbody').onclick = () => inbodyReview(client, client.inbodyReviews);
 }
 
@@ -441,8 +514,8 @@ document.querySelectorAll('.nav-link').forEach(link => link.addEventListener('cl
 document.querySelectorAll('[data-view-go]').forEach(button => button.addEventListener('click', event => {
   event.preventDefault(); navigate(button.dataset.viewGo);
 }));
-window.addEventListener('popstate', () => view(viewFromHash()));
-window.addEventListener('hashchange', () => view(viewFromHash()));
+window.addEventListener('popstate', () => { if (currentUser?.role !== 'client') view(viewFromHash()); });
+window.addEventListener('hashchange', () => { if (currentUser?.role !== 'client') view(viewFromHash()); });
 document.addEventListener('click', event => {
   const calendarModeButton = event.target.closest('[data-calendar-mode]');
   const calendarShiftButton = event.target.closest('[data-calendar-shift]');
@@ -460,27 +533,108 @@ document.addEventListener('click', event => {
   if (event.target.dataset.action === 'new-invoice') newInvoice();
   if (event.target.dataset.action === 'new-session') newSession();
   if (event.target.dataset.action === 'new-routine') newRoutine();
+  if (event.target.dataset.action === 'new-plan') planEditor();
+  if (event.target.dataset.action === 'export-compliance') exportCompliance();
+  if (event.target.dataset.editPlan) planEditor(data.plans.find(plan => plan.id === event.target.dataset.editPlan));
   if (event.target.dataset.client) clientDetail(event.target.dataset.client);
   if (event.target.dataset.inbody) inbodyImport(data.clients.find(client => client.id === event.target.dataset.inbody));
   if (event.target.dataset.completeSession) completeSession(event.target.dataset.completeSession);
   if (event.target.dataset.confirmInvoice) confirmInvoice(event.target.dataset.confirmInvoice);
 });
+document.addEventListener('submit', async event => {
+  const form = event.target.closest('[data-session-compliance]'); if (!form) return;
+  event.preventDefault(); const completed = form.elements.completed.checked; const completionPercent = completed ? Number(form.elements.completionPercent.value) : 0;
+  try { form.classList.add('loading-state'); await api(`/api/sessions/${form.dataset.sessionCompliance}/compliance`, { method: 'PATCH', body: { completed, completionPercent } }); await loadData(); renderAll(); toast('Cumplimiento actualizado'); }
+  catch (error) { toast(error.message, true); form.classList.remove('loading-state'); }
+});
+document.addEventListener('change', event => {
+  const checkbox = event.target.matches('input[name="completed"]') ? event.target : null;
+  if (checkbox && checkbox.closest('[data-session-compliance], [data-portal-routine], [data-portal-session]')) { const percent = checkbox.closest('form').elements.completionPercent; percent.value = checkbox.checked ? (Number(percent.value) || 100) : 0; }
+});
 document.querySelector('.modal-close').addEventListener('click', () => modal.close());
 document.getElementById('client-search').addEventListener('input', event => renderClients(event.target.value));
+document.getElementById('compliance-period').addEventListener('change', async event => {
+  compliancePeriod = event.target.value;
+  try { data.compliance = await api(`/api/compliance/summary?period=${compliancePeriod}`); renderDashboard(); }
+  catch (error) { toast(error.message, true); }
+});
+document.getElementById('notification-button').addEventListener('click', () => notificationCenter(false));
 document.getElementById('today').textContent = new Intl.DateTimeFormat('es-PA', { weekday: 'long', day: 'numeric', month: 'long' }).format(today);
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js'));
 }
 
+const portalViewTitles = { 'portal-dashboard': 'Mi progreso', 'portal-routines': 'Mis rutinas', 'portal-calendar': 'Mi agenda', 'portal-billing': 'Facturación' };
+const portalViewIds = new Set(Object.keys(portalViewTitles));
+const portalViewFromHash = () => portalViewIds.has(window.location.hash.slice(1)) ? window.location.hash.slice(1) : 'portal-dashboard';
+const portalView = id => {
+  document.querySelectorAll('.portal-view').forEach(item => item.classList.toggle('active', item.id === id));
+  document.querySelectorAll('[data-portal-view]').forEach(item => item.classList.toggle('active', item.dataset.portalView === id));
+  document.getElementById('portal-title').textContent = portalViewTitles[id]; window.scrollTo(0, 0);
+};
+const portalNavigate = (id, { replace = false } = {}) => {
+  const target = portalViewIds.has(id) ? id : 'portal-dashboard'; portalView(target);
+  if (window.location.hash !== `#${target}`) window.history[replace ? 'replaceState' : 'pushState'](null, '', `#${target}`);
+};
+const portalSession = item => ({ id: item.id, startsAt: new Date(item.starts_at), status: item.status, completionPercent: Number(item.completion_percent || 0), routine: item.routine_title || 'Evaluación / seguimiento', mode: item.mode });
+const monthLabel = date => new Intl.DateTimeFormat('es-PA', { month: 'short' }).format(date).replace('.', '');
+function portalActivities() {
+  const sessionActivities = portalData.sessions.filter(item => new Date(item.starts_at) <= today && item.status !== 'cancelled').map(item => ({ date: new Date(item.starts_at), percent: Number(item.completion_percent || 0) }));
+  const routineActivities = portalData.routineCompletions.map(item => ({ date: new Date(`${item.completed_on}T12:00:00`), percent: Number(item.completion_percent || 0) }));
+  return [...sessionActivities, ...routineActivities];
+}
+function renderPortal() {
+  const client = portalData.client; const activities = portalActivities(); const overall = activities.length ? Math.round(activities.reduce((sum, item) => sum + item.percent, 0) / activities.length) : 0;
+  document.getElementById('portal-welcome').textContent = `Hola, ${client.full_name.split(' ')[0]}`; document.getElementById('portal-compliance').textContent = `${overall}%`;
+  const upcoming = portalData.sessions.filter(item => new Date(item.starts_at) >= today && item.status === 'scheduled').length;
+  const pending = portalData.invoices.filter(item => item.status === 'pending').reduce((sum, item) => sum + Number(item.balance ?? item.amount), 0);
+  document.getElementById('portal-metrics').innerHTML = `<article><span>Próximas sesiones</span><strong>${upcoming}</strong><small>en tu agenda</small></article><article><span>Rutinas activas</span><strong>${portalData.routines.length}</strong><small>asignadas</small></article><article><span>Saldo pendiente</span><strong>${money.format(pending)}</strong><small>facturación</small></article>`;
+  const buckets = Array.from({ length: 6 }, (_, index) => { const date = new Date(today.getFullYear(), today.getMonth() - 5 + index, 1, 12); return { key: `${date.getFullYear()}-${date.getMonth()}`, date, values: [] }; });
+  activities.forEach(item => buckets.find(bucket => bucket.key === `${item.date.getFullYear()}-${item.date.getMonth()}`)?.values.push(item.percent));
+  document.getElementById('portal-chart').innerHTML = buckets.map(bucket => { const percent = bucket.values.length ? Math.round(bucket.values.reduce((sum, value) => sum + value, 0) / bucket.values.length) : 0; return `<div class="chart-column"><span>${percent}%</span><i style="height:${Math.max(4, percent)}%"></i><small>${monthLabel(bucket.date)}</small></div>`; }).join('');
+  document.getElementById('portal-inbody').innerHTML = portalData.assessments.length ? `<div class="portal-inbody-grid">${portalData.assessments.slice(-4).reverse().map(item => `<article><span>${String(item.tested_at).slice(0, 10)}</span><b>${Number(item.values.weightKg || 0).toFixed(1)} kg</b><small>${Number(item.values.percentBodyFat || 0).toFixed(1)}% grasa · ${Number(item.values.skeletalMuscleMassKg || 0).toFixed(1)} kg músculo</small></article>`).join('')}</div>` : '<p class="empty">Todavía no hay evaluaciones confirmadas.</p>';
+  document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(routine => { const todayCompletion = portalData.routineCompletions.find(item => item.routine_id === routine.id && item.completed_on === dateKey(today)); return `<article class="card portal-routine-card"><div class="card-head"><div><h3>${escapeHtml(routine.title)}</h3><p>${escapeHtml(routine.description || '')} · ${routine.sessions_per_week} veces por semana</p></div></div><div class="exercise-preview">${(routine.exercises || []).map(exercise => `<span>${escapeHtml(exerciseLabel(exercise))}</span>`).join('')}</div><form data-portal-routine="${routine.id}" class="portal-completion-form"><label class="completion-check"><input name="completed" type="checkbox" ${todayCompletion && Number(todayCompletion.completion_percent) > 0 ? 'checked' : ''} /><span>Entrenamiento realizado hoy</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${Number(todayCompletion?.completion_percent || 100)}" /><span>% completado</span></label><button class="primary">Guardar cumplimiento</button></form></article>`; }).join('') : '<p class="empty">La entrenadora todavía no te ha asignado una rutina.</p>';
+  const ownSessions = new Map(portalData.sessions.map(item => [item.id, portalSession(item)]));
+  document.getElementById('portal-calendar-list').innerHTML = portalData.busySlots.length ? portalData.busySlots.map(slot => { const date = new Date(slot.starts_at); const own = slot.is_mine ? ownSessions.get(slot.id) : null; return `<article class="portal-slot ${own ? 'mine' : 'busy'}"><time><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric', month: 'short' }).format(date)}</b><span>${new Intl.DateTimeFormat('es-PA', { hour: 'numeric', minute: '2-digit' }).format(date)}</span></time><div><b>${own ? escapeHtml(own.routine) : 'Ocupado'}</b><span>${own ? escapeHtml(own.mode) : 'Horario no disponible'}</span></div>${own ? `<form data-portal-session="${own.id}" class="portal-session-form"><label class="completion-check"><input name="completed" type="checkbox" ${own.status === 'completed' ? 'checked' : ''} /><span>Cumplí</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${own.status === 'completed' ? own.completionPercent || 100 : 0}" /><span>%</span></label><button class="secondary">Guardar</button></form>` : ''}</article>`; }).join('') : '<p class="empty">No hay horarios ocupados en los próximos 90 días.</p>';
+  document.getElementById('portal-plan').innerHTML = `<span class="commercial-label ${client.billing_model === 'package' ? 'package-label' : ''}">${client.billing_model === 'package' ? 'Paquete' : 'Mensualidad'}</span><div><h3>${escapeHtml(client.plan_name || 'Plan personalizado')}</h3><p>${money.format(Number(client.standard_price))}${client.billing_model === 'monthly' ? ` · corte día ${client.billing_cutoff_day}` : ` · ${client.sessions_included || 0} sesiones`}</p></div>`;
+  document.getElementById('portal-invoices').innerHTML = portalData.invoices.length ? portalData.invoices.map(invoice => `<tr><td><b>${escapeHtml(invoice.concept)}</b>${invoice.invoice_number ? `<br><small>${escapeHtml(invoice.invoice_number)}</small>` : ''}</td><td>${invoice.issued_on || invoice.due_on}</td><td>${money.format(Number(invoice.amount))}</td><td><span class="payment-status ${invoice.status}">${invoice.status === 'confirmed' ? 'Pagada' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'}</span></td></tr>`).join('') : '<tr><td colspan="4" class="empty">No hay facturas registradas.</td></tr>';
+  const portalCount = document.getElementById('portal-notification-count'); portalCount.textContent = portalData.notifications.length; portalCount.hidden = !portalData.notifications.length;
+}
+async function loadPortalData() {
+  const [summary, notifications] = await Promise.all([api('/api/portal/summary'), api('/api/notifications')]); portalData = { ...summary, notifications }; renderPortal();
+}
+async function enterPortal(user) {
+  const restoredView = portalViewFromHash(); currentUser = user; portalView(restoredView);
+  document.getElementById('auth-screen').hidden = true; document.getElementById('app-shell').hidden = true; document.getElementById('portal-shell').hidden = false;
+  document.getElementById('portal-account-button').textContent = initials(user.fullName || user.full_name || user.email);
+  await loadPortalData(); portalNavigate(restoredView, { replace: true });
+}
+document.querySelectorAll('[data-portal-view]').forEach(link => link.addEventListener('click', event => { event.preventDefault(); portalNavigate(link.dataset.portalView); }));
+document.querySelectorAll('[data-portal-view-go]').forEach(link => link.addEventListener('click', event => { event.preventDefault(); portalNavigate(link.dataset.portalViewGo); }));
+document.getElementById('portal-notification-button').addEventListener('click', () => notificationCenter(true));
+document.addEventListener('submit', async event => {
+  const routineForm = event.target.closest('[data-portal-routine]'); const sessionForm = event.target.closest('[data-portal-session]'); if (!routineForm && !sessionForm) return;
+  event.preventDefault(); const form = routineForm || sessionForm; const completed = form.elements.completed.checked; const completionPercent = completed ? Number(form.elements.completionPercent.value) : 0;
+  try {
+    form.classList.add('loading-state');
+    if (routineForm) await api('/api/portal/routine-completions', { method: 'POST', body: { routineId: routineForm.dataset.portalRoutine, completedOn: dateKey(today), completionPercent } });
+    else await api(`/api/portal/sessions/${sessionForm.dataset.portalSession}/compliance`, { method: 'PATCH', body: { completed, completionPercent } });
+    await loadPortalData(); toast('Cumplimiento actualizado');
+  } catch (error) { toast(error.message, true); form.classList.remove('loading-state'); }
+});
+window.addEventListener('popstate', () => { if (currentUser?.role === 'client') portalView(portalViewFromHash()); });
+window.addEventListener('hashchange', () => { if (currentUser?.role === 'client') portalView(portalViewFromHash()); });
+
 function showAuth(setupRequired) {
-  document.getElementById('auth-screen').hidden = false; document.getElementById('app-shell').hidden = true;
+  document.getElementById('auth-screen').hidden = false; document.getElementById('app-shell').hidden = true; document.getElementById('portal-shell').hidden = true;
   document.getElementById('setup-form').hidden = !setupRequired; document.getElementById('login-form').hidden = setupRequired; document.getElementById('reset-form').hidden = true;
   document.getElementById('auth-title').textContent = setupRequired ? 'Preparemos tu espacio' : 'Bienvenida de nuevo';
   document.getElementById('auth-copy').textContent = setupRequired ? 'Crea la primera cuenta administradora de Eileen Lifestyle.' : 'Accede al centro de control de clientes, sesiones y facturación.';
 }
 async function enterApp(user) {
+  if (user.role === 'client') return enterPortal(user);
   const restoredView = viewFromHash();
-  currentUser = user; view(restoredView); document.getElementById('auth-screen').hidden = true; document.getElementById('app-shell').hidden = false;
+  currentUser = user; view(restoredView); document.getElementById('auth-screen').hidden = true; document.getElementById('portal-shell').hidden = true; document.getElementById('app-shell').hidden = false;
   document.getElementById('account-button').textContent = initials(user.fullName || user.full_name || user.email);
   await loadData(); renderAll(); navigate(restoredView, { replace: true });
 }
@@ -513,9 +667,12 @@ document.getElementById('setup-form').addEventListener('submit', async event => 
     authToken = result.token; localStorage.setItem(authKey, authToken); await enterApp(result.user); toast('Cuenta administradora creada');
   } catch (error) { errorBox.textContent = error.message; } finally { event.target.classList.remove('loading-state'); }
 });
-document.getElementById('account-button').addEventListener('click', () => {
-  localStorage.removeItem(authKey); localStorage.removeItem(legacyAuthKey); authToken = null; currentUser = null; data = { clients: [], invoices: [], packages: [], sessions: [], routines: [] }; showAuth(false);
-});
+const logout = () => {
+  localStorage.removeItem(authKey); localStorage.removeItem(legacyAuthKey); authToken = null; currentUser = null; portalData = null;
+  data = { clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, notifications: [] }; showAuth(false);
+};
+document.getElementById('account-button').addEventListener('click', logout);
+document.getElementById('portal-account-button').addEventListener('click', logout);
 async function start() {
   try {
     const status = await api('/api/auth/setup-status', { auth: false });
