@@ -180,14 +180,15 @@ async function localSummary(ownerId: string) {
   };
 }
 
-function billingPeriodBounds(year: number, month: number | 'all') {
+function billingPeriodBounds(year: number | 'all', month: number | 'all') {
+  if (year === 'all') return { start: '1900-01-01', end: '2101-01-01' };
   const startMonth = month === 'all' ? 0 : month - 1;
   const start = new Date(Date.UTC(year, startMonth, 1));
   const end = month === 'all' ? new Date(Date.UTC(year + 1, 0, 1)) : new Date(Date.UTC(year, startMonth + 1, 1));
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
 }
 
-async function localPeriodSummary(ownerId: string, year: number, month: number | 'all') {
+async function localPeriodSummary(ownerId: string, year: number | 'all', month: number | 'all') {
   const { start, end } = billingPeriodBounds(year, month);
   const [summary] = await sql`
     SELECT
@@ -379,7 +380,7 @@ export async function registerZohoRoutes(app: FastifyInstance) {
     const auth = request.user as AuthUser;
     const now = new Date();
     const query = z.object({
-      year: z.coerce.number().int().min(2000).max(2100).default(now.getFullYear()),
+      year: z.union([z.literal('all'), z.coerce.number().int().min(2000).max(2100)]).default(now.getFullYear()),
       month: z.union([z.literal('all'), z.coerce.number().int().min(1).max(12)]).default(now.getMonth() + 1)
     }).parse(request.query);
     const [connection] = await sql`

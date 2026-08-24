@@ -38,7 +38,9 @@
     const connection = payload.connection || {};
     const local = connection.local_summary || {};
     const period = payload.periodSummary || { ...local, month: selectedMonth, year: Number(selectedYear) };
-    const periodName = period.month === 'all'
+    const periodName = period.year === 'all'
+      ? 'Histórico completo'
+      : period.month === 'all'
       ? `Año ${period.year}`
       : new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric' }).format(new Date(Number(period.year), Number(period.month) - 1, 1));
     const displayPeriod = periodName.charAt(0).toUpperCase() + periodName.slice(1);
