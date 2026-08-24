@@ -116,7 +116,12 @@ async function zohoGet(accessToken: string, apiBaseUrl: string, path: string, or
   if (organizationId) headers['X-com-zoho-invoice-organizationid'] = organizationId;
   const response = await fetch(url, { headers });
   const payload = await response.json() as ZohoRecord;
-  if (!response.ok || (payload.code !== undefined && Number(payload.code) !== 0)) throw new Error(payload.message || `Zoho respondió ${response.status}`);
+  if (!response.ok || (payload.code !== undefined && Number(payload.code) !== 0)) {
+    if (response.status === 429 && Number(payload.code) === 45) {
+      throw new Error('Zoho agotó el límite diario de 1,000 llamadas. La importación optimizada podrá continuar cuando Zoho restablezca el cupo.');
+    }
+    throw new Error(payload.message || `Zoho respondió ${response.status}`);
+  }
   return payload;
 }
 
@@ -130,21 +135,6 @@ async function fetchAllPages(accessToken: string, connection: Connection, path: 
     if (hasMore === false || (hasMore === undefined && current.length < 200)) break;
   }
   return records;
-}
-
-async function hydrateRecords(accessToken: string, connection: Connection, records: ZohoRecord[], path: string, idField: string, objectKeys: string[]) {
-  const hydrated: ZohoRecord[] = [];
-  for (const record of records) {
-    const id = externalId(record[idField]);
-    if (!id) continue;
-    try {
-      const payload = await zohoGet(accessToken, connection.api_base_url, `${path}/${encodeURIComponent(id)}`, connection.organization_id);
-      hydrated.push(objectKeys.map(key => payload[key]).find(value => value && typeof value === 'object') || record);
-    } catch {
-      hydrated.push(record);
-    }
-  }
-  return hydrated;
 }
 
 function invoiceStatus(invoice: ZohoRecord) {
@@ -207,10 +197,8 @@ async function runSync(ownerId: string) {
     const token = await refreshAccessToken(connection);
     const accessToken = String(token.access_token);
     const contacts = (await fetchAllPages(accessToken, connection, '/contacts', ['contacts'])).filter(contact => !contact.contact_type || contact.contact_type === 'customer');
-    const invoiceList = await fetchAllPages(accessToken, connection, '/invoices', ['invoices']);
-    const invoices = await hydrateRecords(accessToken, connection, invoiceList, '/invoices', 'invoice_id', ['invoice']);
-    const paymentList = await fetchAllPages(accessToken, connection, '/customerpayments', ['customerpayments', 'customer_payments']);
-    const payments = await hydrateRecords(accessToken, connection, paymentList, '/customerpayments', 'payment_id', ['payment', 'customerpayment']);
+    const invoices = await fetchAllPages(accessToken, connection, '/invoices', ['invoices']);
+    const payments = await fetchAllPages(accessToken, connection, '/customerpayments', ['customerpayments', 'customer_payments']);
     const recurring = await fetchAllPages(accessToken, connection, '/recurringinvoices', ['recurring_invoices', 'recurringinvoices']);
     const credits = await fetchAllPages(accessToken, connection, '/creditnotes', ['creditnotes', 'credit_notes']);
     const clientMap = new Map<string, string>();
@@ -403,7 +391,7 @@ export async function registerZohoRoutes(app: FastifyInstance) {
 
   const syncTimer = setInterval(() => {
     void (async () => {
-      const connections = await sql`SELECT owner_id FROM integration_connections WHERE provider = ${provider} AND sync_enabled = true AND status <> 'completed' AND (last_sync_at IS NULL OR last_sync_at < now() - interval '6 hours')`;
+      const connections = await sql`SELECT owner_id FROM integration_connections WHERE provider = ${provider} AND sync_enabled = true AND status NOT IN ('completed', 'error') AND (last_sync_at IS NULL OR last_sync_at < now() - interval '6 hours')`;
       for (const connection of connections) runSync(connection.owner_id).catch(error => app.log.error(error));
     })().catch(error => app.log.error(error));
   }, 30 * 60 * 1000);
