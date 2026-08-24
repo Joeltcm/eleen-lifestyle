@@ -556,6 +556,7 @@ function showGoogleCalendarReturn() {
   if (result === 'connected') toast('Google Calendar conectado y sesiones sincronizadas');
   else if (result === 'partial') toast('Google Calendar se conectó; algunas sesiones requieren otra sincronización', true);
   else if (result === 'denied') toast('La autorización de Google fue cancelada', true);
+  else if (result === 'start') toast('Inicia la conexión desde Agenda → Conectar calendario', true);
   else toast('No fue posible completar la conexión con Google Calendar', true);
   url.searchParams.delete('google');
   window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);

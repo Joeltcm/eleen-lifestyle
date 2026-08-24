@@ -250,7 +250,8 @@ export async function registerGoogleCalendarRoutes(app: FastifyInstance) {
   });
 
   app.get('/api/integrations/google-calendar/callback', async (request, reply) => {
-    const query = z.object({ code: z.string().min(1).optional(), state: z.string().min(1), error: z.string().optional() }).parse(request.query);
+    const query = z.object({ code: z.string().min(1).optional(), state: z.string().min(1).optional(), error: z.string().optional() }).parse(request.query);
+    if (!query.state) return reply.redirect(`${config.APP_URL.replace(/\/$/, '')}/?google=start#calendar`);
     const state = app.jwt.verify<{ sub: string; purpose: string }>(query.state);
     if (state.purpose !== 'google_calendar_oauth') return reply.code(400).send({ error: 'Estado OAuth inválido' });
     if (query.error || !query.code) return reply.redirect(`${config.APP_URL.replace(/\/$/, '')}/?google=denied#calendar`);
