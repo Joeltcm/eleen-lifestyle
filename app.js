@@ -41,6 +41,9 @@ let portalData = null;
 let compliancePeriod = 'week';
 let billingMonth = String(today.getMonth() + 1);
 let billingYear = String(today.getFullYear());
+let billingAnalytics = null;
+let billingAnalyticsLoadingYear = null;
+let billingAnalyticsRequest = 0;
 let calendarMode = 'week';
 let calendarCursor = new Date(today);
 calendarCursor.setHours(12, 0, 0, 0);
@@ -119,7 +122,7 @@ async function loadData() {
   data.sessions = sessions.map(item => { const starts = new Date(item.starts_at); return { id: item.id, clientId: item.client_id, client: item.full_name, routineId: item.routine_id, date: dateKey(starts), time: `${String(starts.getHours()).padStart(2, '0')}:${String(starts.getMinutes()).padStart(2, '0')}`, routine: item.routine_title || 'Evaluación / seguimiento', mode: item.mode, status: item.status, completionPercent: Number(item.completion_percent || 0), notes: item.notes || '' }; });
   data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: 0, sessions: item.sessions_per_week, exercises: item.exercises || [] }));
   data.plans = plans.map(item => ({ id: item.id, name: item.name, description: item.description || '', billingModel: item.billing_model, price: Number(item.price), sessionsIncluded: Number(item.sessions_included || 0), validityDays: Number(item.validity_days || 0), active: item.active }));
-  data.compliance = compliance; data.notifications = notifications; showPendingBrowserNotification(notifications);
+  data.compliance = compliance; data.notifications = notifications; billingAnalytics = null; billingAnalyticsLoadingYear = null; billingAnalyticsRequest += 1; showPendingBrowserNotification(notifications);
 }
 const initials = name => name.split(' ').slice(0, 2).map(word => word[0]).join('').toUpperCase();
 const escapeHtml = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
@@ -259,6 +262,54 @@ function renderCalendar() {
 function renderRoutines() {
   document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${routine.title}</h3><p>${routine.description}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''}</footer></article>`).join('');
 }
+function renderBillingInsights() {
+  const chart = document.getElementById('billing-line-chart');
+  const ranking = document.getElementById('top-payers-list');
+  document.getElementById('billing-chart-year').textContent = billingYear;
+  document.getElementById('top-payers-summary').textContent = `Pagos recibidos en ${billingYear}`;
+  if (!billingAnalytics || String(billingAnalytics.year) !== billingYear) {
+    chart.innerHTML = '<p class="empty">Calculando tendencia anual…</p>';
+    ranking.innerHTML = '<p class="empty">Calculando ranking…</p>';
+    return;
+  }
+  const months = billingAnalytics.months || [];
+  const values = months.map(month => Number(month.amount || 0));
+  const maxValue = Math.max(...values, 1);
+  const left = 54; const top = 18; const plotWidth = 650; const plotHeight = 176;
+  const points = values.map((value, index) => ({ x: left + (index * plotWidth / 11), y: top + plotHeight - (value / maxValue * plotHeight), value }));
+  const line = points.map(point => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(' ');
+  const area = `${left},${top + plotHeight} ${line} ${left + plotWidth},${top + plotHeight}`;
+  const monthNames = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+  const compactMoney = value => new Intl.NumberFormat('es-PA', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1 }).format(value);
+  const grid = [0, .5, 1].map(ratio => {
+    const y = top + plotHeight - ratio * plotHeight;
+    return `<g><line x1="${left}" y1="${y}" x2="${left + plotWidth}" y2="${y}" /><text x="${left - 8}" y="${y + 4}" text-anchor="end">${compactMoney(maxValue * ratio)}</text></g>`;
+  }).join('');
+  const labels = monthNames.map((name, index) => `<text x="${points[index].x}" y="${top + plotHeight + 27}" text-anchor="middle">${name}</text>`).join('');
+  const dots = points.map((point, index) => `<circle cx="${point.x}" cy="${point.y}" r="4"><title>${monthNames[index]}: ${money.format(point.value)}</title></circle>`).join('');
+  chart.innerHTML = `<svg viewBox="0 0 720 235" role="img" aria-label="Facturación mensual de ${billingYear}"><g class="billing-chart-grid">${grid}${labels}</g><polygon class="billing-chart-area" points="${area}"/><polyline class="billing-chart-line" points="${line}"/>${dots}</svg>`;
+  document.getElementById('billing-chart-summary').textContent = `${money.format(Number(billingAnalytics.totalBilled || 0))} facturado en ${billingYear}`;
+  const topClients = billingAnalytics.topClients || [];
+  const topAmount = Math.max(...topClients.map(client => Number(client.amount || 0)), 1);
+  ranking.innerHTML = topClients.length ? topClients.map((client, index) => `<div class="top-payer"><span class="top-payer-rank">${index + 1}</span><div class="top-payer-person"><b>${escapeHtml(client.name)}</b><small>${client.paymentCount} pago${client.paymentCount === 1 ? '' : 's'} confirmado${client.paymentCount === 1 ? '' : 's'}</small><i><span style="width:${Math.max(4, Number(client.amount || 0) / topAmount * 100)}%"></span></i></div><strong>${money.format(Number(client.amount || 0))}</strong></div>`).join('') : '<p class="empty">No hay pagos confirmados en este año.</p>';
+}
+async function ensureBillingAnalytics() {
+  const year = billingYear;
+  if (billingAnalytics && String(billingAnalytics.year) === year) return renderBillingInsights();
+  renderBillingInsights();
+  if (billingAnalyticsLoadingYear === year) return;
+  billingAnalyticsLoadingYear = year;
+  const requestId = ++billingAnalyticsRequest;
+  try {
+    const result = await api(`/api/billing/analytics?year=${year}`);
+    if (requestId !== billingAnalyticsRequest || billingYear !== year) return;
+    billingAnalytics = result; renderBillingInsights();
+  } catch (error) {
+    if (requestId !== billingAnalyticsRequest || billingYear !== year) return;
+    document.getElementById('billing-line-chart').innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
+    document.getElementById('top-payers-list').innerHTML = '<p class="empty">No se pudo cargar el ranking.</p>';
+  } finally { if (requestId === billingAnalyticsRequest) billingAnalyticsLoadingYear = null; }
+}
 function renderBilling() {
   const yearSelect = document.getElementById('billing-year');
   const availableYears = [...new Set([today.getFullYear(), ...data.invoices.map(invoice => invoicePeriodDate(invoice).getFullYear()).filter(Number.isFinite)])].sort((a, b) => b - a);
@@ -286,6 +337,7 @@ function renderBilling() {
     const state = pack.status === 'pending' ? 'Pendiente de pago' : remaining ? 'Activo' : 'Agotado';
     return `<tr><td><b>${pack.client}</b></td><td>${pack.label}</td><td>${pack.total}</td><td>${pack.used}</td><td><strong class="session-balance">${remaining}</strong></td><td><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span></td><td><small>${pack.status === 'confirmed' && remaining ? 'Descuento automático' : '—'}</small></td></tr>`;
   }).join('') : '<tr><td colspan="7" class="empty">Aún no hay paquetes de sesiones.</td></tr>';
+  void ensureBillingAnalytics();
 }
 function renderAll() { renderDashboard(); renderClients(); renderCalendar(); renderRoutines(); renderBilling(); }
 const modal = document.getElementById('modal');

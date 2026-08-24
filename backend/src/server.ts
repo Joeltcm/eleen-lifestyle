@@ -353,6 +353,48 @@ app.get('/api/invoices', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`SELECT i.*, c.full_name FROM invoices i JOIN clients c ON c.id = i.client_id WHERE c.owner_id = ${auth.sub} ORDER BY i.created_at DESC`;
 });
+app.get('/api/billing/analytics', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const { year } = z.object({ year: z.coerce.number().int().min(2000).max(2100) }).parse(request.query);
+  const start = `${year}-01-01`; const end = `${year + 1}-01-01`;
+  const [monthlyRows, topClientRows] = await Promise.all([
+    sql`
+      SELECT EXTRACT(month FROM COALESCE(i.issued_on, i.due_on))::integer AS month,
+        count(*)::integer AS invoice_count, COALESCE(sum(i.amount), 0)::numeric AS amount
+      FROM invoices i JOIN clients c ON c.id = i.client_id
+      WHERE c.owner_id = ${auth.sub} AND i.status <> 'void'
+        AND COALESCE(i.issued_on, i.due_on) >= ${start}::date AND COALESCE(i.issued_on, i.due_on) < ${end}::date
+      GROUP BY 1 ORDER BY 1
+    `,
+    sql`
+      WITH received_payments AS (
+        SELECT p.client_id, p.amount, p.paid_on
+        FROM invoice_payments p JOIN clients c ON c.id = p.client_id
+        WHERE c.owner_id = ${auth.sub} AND p.paid_on >= ${start}::date AND p.paid_on < ${end}::date
+        UNION ALL
+        SELECT i.client_id, i.amount, COALESCE(i.confirmed_at::date, i.issued_on, i.due_on) AS paid_on
+        FROM invoices i JOIN clients c ON c.id = i.client_id
+        WHERE c.owner_id = ${auth.sub} AND i.status = 'confirmed' AND i.source_system IS DISTINCT FROM 'zoho_invoice'
+          AND COALESCE(i.confirmed_at::date, i.issued_on, i.due_on) >= ${start}::date
+          AND COALESCE(i.confirmed_at::date, i.issued_on, i.due_on) < ${end}::date
+      )
+      SELECT c.id, c.full_name, count(*)::integer AS payment_count, COALESCE(sum(p.amount), 0)::numeric AS amount
+      FROM received_payments p JOIN clients c ON c.id = p.client_id
+      GROUP BY c.id, c.full_name ORDER BY amount DESC, c.full_name LIMIT 7
+    `
+  ]);
+  const monthMap = new Map(monthlyRows.map(row => [Number(row.month), row]));
+  const months = Array.from({ length: 12 }, (_, index) => {
+    const row = monthMap.get(index + 1);
+    return { month: index + 1, invoiceCount: Number(row?.invoice_count || 0), amount: Number(row?.amount || 0) };
+  });
+  return {
+    year,
+    totalBilled: months.reduce((sum, month) => sum + month.amount, 0),
+    months,
+    topClients: topClientRows.map(row => ({ id: row.id, name: row.full_name, paymentCount: Number(row.payment_count), amount: Number(row.amount) }))
+  };
+});
 app.post('/api/invoices', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = invoiceSchema.parse(request.body);
   const [invoice] = await sql`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) SELECT c.id, ${input.packageId || null}, ${input.concept}, ${input.amount}, ${input.dueOn} FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} RETURNING *`;
