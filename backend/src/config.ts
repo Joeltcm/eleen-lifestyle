@@ -24,7 +24,11 @@ const schema = z.object({
   ZOHO_CLIENT_ID: z.string().optional(),
   ZOHO_CLIENT_SECRET: z.string().optional(),
   ZOHO_ACCOUNTS_URL: z.string().url().default('https://accounts.zoho.com'),
-  ZOHO_REDIRECT_URI: z.string().url().default('https://api-production-b417f.up.railway.app/api/integrations/zoho/callback')
+  ZOHO_REDIRECT_URI: z.string().url().default('https://api-production-b417f.up.railway.app/api/integrations/zoho/callback'),
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
+  GOOGLE_REDIRECT_URI: z.string().url().default('https://api-production-b417f.up.railway.app/api/integrations/google-calendar/callback'),
+  GOOGLE_CALENDAR_ID: z.string().default('primary')
 });
 
 export const config = schema.parse(process.env);

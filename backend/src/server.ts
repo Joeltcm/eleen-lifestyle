@@ -10,6 +10,7 @@ import { sql } from './db.js';
 import { createDownloadUrl, createUploadUrl, downloadObject, storageReady, uploadObject, verifyUpload } from './storage.js';
 import { extractInBodyDocument, extractInBodyImage, inbodyAnalysisReady, prepareInBodyImage, validateExtraction, validateInBodyValues } from './inbody-analysis.js';
 import { registerZohoRoutes } from './zoho-routes.js';
+import { registerGoogleCalendarRoutes, syncSessionToGoogle } from './google-calendar.js';
 import { accountStatementPdf, accountsReceivablePdf, invoicePdf } from './billing-reports.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
@@ -33,6 +34,7 @@ await app.register(cors, {
 });
 await app.register(jwt, { secret: config.JWT_SECRET });
 await registerZohoRoutes(app);
+await registerGoogleCalendarRoutes(app);
 
 app.setErrorHandler((error, _request, reply) => {
   if (error instanceof ZodError) return reply.code(400).send({ error: 'Datos inválidos', details: error.issues });
@@ -63,7 +65,8 @@ app.get('/health', async () => {
     status: 'ok', service: 'eileen-lifestyle-api', databaseTime: database.time,
     documentStorage: storageReady ? 'ready' : 'configuration_required',
     inbodyAnalysis: inbodyAnalysisReady ? 'configured' : 'configuration_required',
-    webPush: webPushReady ? 'configured' : 'configuration_required'
+    webPush: webPushReady ? 'configured' : 'configuration_required',
+    googleCalendar: config.GOOGLE_CLIENT_ID && config.GOOGLE_CLIENT_SECRET ? 'configured' : 'configuration_required'
   };
 });
 
@@ -293,6 +296,8 @@ app.post('/api/sessions', { preHandler: requireStaff }, async (request, reply) =
   const auth = request.user as AuthUser; const input = sessionSchema.parse(request.body);
   const [session] = await sql`INSERT INTO sessions (client_id, routine_id, starts_at, duration_minutes, mode, notes) SELECT c.id, ${input.routineId || null}, ${input.startsAt}, ${input.durationMinutes}, ${input.mode}, ${input.notes || null} FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} RETURNING *`;
   if (!session) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  try { await syncSessionToGoogle(auth.sub, session.id); }
+  catch (error) { app.log.warn({ error, sessionId: session.id }, 'Session created but Google Calendar sync failed'); }
   return reply.code(201).send(session);
 });
 async function recordSessionCompliance(id: string, ownerId: string, markedBy: string, completed: boolean, completionPercent: number) {
