@@ -4,6 +4,6 @@
   "version": "0.1.0",
   "scripts": {
     "build": "node scripts/build-frontend.mjs",
-    "check": "node --check exercise-catalog.js && node --check app.js && node --check sw.js"
+    "check": "node --check exercise-catalog.js && node --check app.js && node --check zoho-migration.js && node --check sw.js"
   }
 }

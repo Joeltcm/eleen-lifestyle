@@ -10,7 +10,12 @@ const schema = z.object({
   R2_ACCOUNT_ID: z.string().optional(),
   R2_BUCKET: z.string().default('eleen-lifestyle-private'),
   R2_ACCESS_KEY_ID: z.string().optional(),
-  R2_SECRET_ACCESS_KEY: z.string().optional()
+  R2_SECRET_ACCESS_KEY: z.string().optional(),
+  APP_URL: z.string().url().default('https://eileen-lifestyle.pages.dev'),
+  ZOHO_CLIENT_ID: z.string().optional(),
+  ZOHO_CLIENT_SECRET: z.string().optional(),
+  ZOHO_ACCOUNTS_URL: z.string().url().default('https://accounts.zoho.com'),
+  ZOHO_REDIRECT_URI: z.string().url().default('https://api-production-b417f.up.railway.app/api/integrations/zoho/callback')
 });
 
 export const config = schema.parse(process.env);

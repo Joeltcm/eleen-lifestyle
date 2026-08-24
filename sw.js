@@ -1,5 +1,5 @@
-const CACHE = 'eileen-lifestyle-v16';
-const FILES = ['./', './index.html', './styles.css', './exercise-catalog.js', './app.js', './manifest.webmanifest', './icon.svg', './icon-maskable.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png', './favicon-32.png', './favicon.ico', './assets/eleen-training.jpg'];
+const CACHE = 'eileen-lifestyle-v17';
+const FILES = ['./', './index.html', './styles.css', './zoho-migration.css', './exercise-catalog.js', './app.js', './zoho-migration.js', './manifest.webmanifest', './icon.svg', './icon-maskable.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png', './favicon-32.png', './favicon.ico', './assets/eleen-training.jpg'];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(FILES)).then(() => self.skipWaiting())));
 self.addEventListener('activate', event => event.waitUntil(Promise.all([
   caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key)))),

@@ -7,6 +7,7 @@ import { z, ZodError } from 'zod';
 import { config } from './config.js';
 import { sql } from './db.js';
 import { createDownloadUrl, createUploadUrl, storageReady, verifyUpload } from './storage.js';
+import { registerZohoRoutes } from './zoho-routes.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
 const app = Fastify({ logger: true, trustProxy: true });
@@ -16,6 +17,7 @@ await app.register(cors, {
   credentials: true
 });
 await app.register(jwt, { secret: config.JWT_SECRET });
+await registerZohoRoutes(app);
 
 app.setErrorHandler((error, _request, reply) => {
   if (error instanceof ZodError) return reply.code(400).send({ error: 'Datos inválidos', details: error.issues });
