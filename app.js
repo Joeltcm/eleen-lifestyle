@@ -47,9 +47,10 @@ const toast = (message, error = false) => {
 };
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
+  const isPassThroughBody = options.body instanceof FormData || (typeof Blob !== 'undefined' && options.body instanceof Blob);
   if (authToken && options.auth !== false) headers.Authorization = `Bearer ${authToken}`;
-  if (options.body !== undefined && !(options.body instanceof FormData)) headers['Content-Type'] = 'application/json';
-  const response = await fetch(`${API_BASE}${path}`, { method: options.method || 'GET', headers, body: options.body === undefined || options.body instanceof FormData ? options.body : JSON.stringify(options.body) });
+  if (options.body !== undefined && !isPassThroughBody) headers['Content-Type'] = 'application/json';
+  const response = await fetch(`${API_BASE}${path}`, { method: options.method || 'GET', headers, body: options.body === undefined || isPassThroughBody ? options.body : JSON.stringify(options.body) });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 401 && options.auth !== false) { localStorage.removeItem(authKey); authToken = null; }
@@ -363,10 +364,12 @@ function inbodyImport(client) {
     const result = document.getElementById('scan-result'); result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>Subiendo ${files.length} archivo${files.length > 1 ? 's' : ''}…</b><span>Conexión privada con el expediente de ${client.name}.</span></div>`;
     try {
       for (const file of files) {
-        const created = await api('/api/documents/upload-url', { method: 'POST', body: { clientId: client.id, kind: 'inbody', fileName: file.name, contentType: file.type, sizeBytes: file.size } });
-        const uploaded = await fetch(created.uploadUrl, { method: 'PUT', headers: { 'Content-Type': file.type }, body: file });
-        if (!uploaded.ok) throw new Error(`No fue posible subir ${file.name}`);
-        await api(`/api/documents/${created.document.id}/complete`, { method: 'POST' });
+        if (file.size > 20 * 1024 * 1024) throw new Error(`${file.name} supera el límite de 20 MB`);
+        const extension = file.name.split('.').pop()?.toLowerCase();
+        const contentType = file.type || ({ pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' })[extension];
+        if (!['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(contentType)) throw new Error(`${file.name} no es un PDF, JPG, PNG o WebP válido`);
+        const created = await api('/api/documents/upload-url', { method: 'POST', body: { clientId: client.id, kind: 'inbody', fileName: file.name, contentType, sizeBytes: file.size } });
+        await api(`/api/documents/${created.document.id}/content`, { method: 'PUT', headers: { 'Content-Type': contentType }, body: file });
       }
       result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>Reporte guardado de forma segura</b><span>Los archivos quedaron asociados a ${client.name}. La extracción OCR y la revisión de métricas se activarán en la siguiente fase.</span></div>`;
     } catch (error) { result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>No se pudo completar la carga</b><span>${error.message}</span></div>`; }

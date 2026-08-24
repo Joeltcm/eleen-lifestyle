@@ -6,14 +6,21 @@ import { randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
 import { config } from './config.js';
 import { sql } from './db.js';
-import { createDownloadUrl, createUploadUrl, storageReady, verifyUpload } from './storage.js';
+import { createDownloadUrl, createUploadUrl, storageReady, uploadObject, verifyUpload } from './storage.js';
 import { registerZohoRoutes } from './zoho-routes.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
 const app = Fastify({ logger: true, trustProxy: true });
+const maxDocumentSize = 20 * 1024 * 1024;
+const documentContentTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'] as const;
+
+app.addContentTypeParser([...documentContentTypes], { parseAs: 'buffer', bodyLimit: maxDocumentSize }, (_request, body, done) => {
+  done(null, body);
+});
 
 await app.register(cors, {
   origin: config.CORS_ORIGIN.split(',').map(origin => origin.trim()),
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'OPTIONS'],
   credentials: true
 });
 await app.register(jwt, { secret: config.JWT_SECRET });
@@ -214,8 +221,8 @@ const uploadSchema = z.object({
   clientId: z.string().uuid(),
   kind: documentKind,
   fileName: z.string().trim().min(1).max(180),
-  contentType: z.enum(['application/pdf', 'image/jpeg', 'image/png', 'image/webp']),
-  sizeBytes: z.coerce.number().int().positive().max(20 * 1024 * 1024).optional()
+  contentType: z.enum(documentContentTypes),
+  sizeBytes: z.coerce.number().int().positive().max(maxDocumentSize).optional()
 });
 
 function safeFileName(fileName: string) {
@@ -238,6 +245,30 @@ app.post('/api/documents/upload-url', { preHandler: requireStaff }, async (reque
   `;
   const uploadUrl = await createUploadUrl(objectKey, input.contentType);
   return reply.code(201).send({ document, uploadUrl, expiresInSeconds: 600 });
+});
+
+app.put('/api/documents/:id/content', { preHandler: requireStaff, bodyLimit: maxDocumentSize }, async (request, reply) => {
+  if (!storageReady) return reply.code(503).send({ error: 'El almacenamiento de documentos aún no está configurado' });
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const contentType = z.enum(documentContentTypes).parse(String(request.headers['content-type'] || '').split(';')[0].trim());
+  const body = request.body;
+  if (!Buffer.isBuffer(body) || body.byteLength === 0) return reply.code(400).send({ error: 'El archivo está vacío' });
+
+  const [document] = await sql`
+    SELECT d.* FROM documents d JOIN clients c ON c.id = d.client_id
+    WHERE d.id = ${id} AND c.owner_id = ${auth.sub}
+  `;
+  if (!document) return reply.code(404).send({ error: 'Documento no encontrado' });
+  if (document.content_type !== contentType) return reply.code(400).send({ error: 'El tipo de archivo no coincide con el documento registrado' });
+
+  const uploaded = await uploadObject(document.object_key, contentType, body);
+  const [updated] = await sql`
+    UPDATE documents SET upload_status = 'ready', size_bytes = ${uploaded.sizeBytes}, content_type = ${uploaded.contentType}
+    WHERE id = ${id}
+    RETURNING id, client_id, kind, original_name, content_type, size_bytes, upload_status, created_at
+  `;
+  return updated;
 });
 
 app.post('/api/documents/:id/complete', { preHandler: requireStaff }, async (request, reply) => {
