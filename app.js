@@ -234,8 +234,8 @@ function renderGoogleCalendar() {
   status.className = `integration-status ${integration.connected ? integration.connection?.status === 'error' ? 'error' : 'connected' : ''}`;
   if (!integration.configured) {
     status.textContent = 'Configuración pendiente';
-    copy.textContent = 'Faltan las credenciales OAuth de Google en Railway.';
-    connect.textContent = 'Configuración pendiente'; connect.disabled = true; disconnect.hidden = true;
+    copy.textContent = 'Pulsa el botón para volver a comprobar las credenciales OAuth de Google.';
+    connect.textContent = 'Comprobar conexión'; connect.disabled = false; disconnect.hidden = true;
   } else if (!integration.connected) {
     status.textContent = 'Sin conectar';
     copy.textContent = 'Autoriza el calendario principal para enviar allí las sesiones de entrenamiento.';
@@ -523,6 +523,11 @@ async function googleCalendarAction() {
   const button = document.getElementById('google-calendar-connect');
   const original = button.textContent;
   try {
+    button.disabled = true;
+    button.textContent = 'Comprobando…';
+    data.googleCalendar = await api('/api/integrations/google-calendar/status');
+    renderGoogleCalendar();
+    if (!data.googleCalendar.configured) throw new Error('Las credenciales OAuth de Google todavía no están disponibles en Railway');
     button.disabled = true;
     if (data.googleCalendar.connected) {
       button.textContent = 'Sincronizando…';
@@ -844,7 +849,20 @@ document.getElementById('show-zoho-invoices').addEventListener('click', () => {
 document.getElementById('notification-button').addEventListener('click', () => notificationCenter(false));
 document.getElementById('today').textContent = new Intl.DateTimeFormat('es-PA', { weekday: 'long', day: 'numeric', month: 'long' }).format(today);
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
-  window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js'));
+  let refreshingApplication = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (refreshingApplication) return;
+    refreshingApplication = true;
+    window.location.reload();
+  });
+  window.addEventListener('load', async () => {
+    try {
+      const registration = await navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' });
+      await registration.update();
+    } catch {
+      await navigator.serviceWorker.register('./sw.js').catch(() => {});
+    }
+  });
 }
 
 const portalViewTitles = { 'portal-dashboard': 'Mi progreso', 'portal-routines': 'Mis rutinas', 'portal-calendar': 'Mi agenda', 'portal-billing': 'Facturación' };
