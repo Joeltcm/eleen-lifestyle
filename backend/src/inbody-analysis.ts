@@ -123,10 +123,10 @@ export function isInBodyHistoryImage(fileName: string) {
   return /body[\s_-]*history/i.test(fileName);
 }
 
-export async function prepareInBodyHistoryImage(body: Buffer) {
+export async function prepareInBodyImage(body: Buffer, fileName: string) {
   const metadata = await sharp(body).metadata();
   const source = sharp(body);
-  const oriented = metadata.width && metadata.height && metadata.height > metadata.width
+  const oriented = isInBodyHistoryImage(fileName) && metadata.width && metadata.height && metadata.height > metadata.width
     ? source.rotate(270)
     : source.rotate();
   const rotated = await oriented

@@ -7,7 +7,7 @@ import { z, ZodError } from 'zod';
 import { config } from './config.js';
 import { sql } from './db.js';
 import { createDownloadUrl, createUploadUrl, downloadObject, storageReady, uploadObject, verifyUpload } from './storage.js';
-import { extractInBodyDocument, extractInBodyImage, inbodyAnalysisReady, isInBodyHistoryImage, prepareInBodyHistoryImage, validateExtraction, validateInBodyValues } from './inbody-analysis.js';
+import { extractInBodyDocument, extractInBodyImage, inbodyAnalysisReady, prepareInBodyImage, validateExtraction, validateInBodyValues } from './inbody-analysis.js';
 import { registerZohoRoutes } from './zoho-routes.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
@@ -420,9 +420,7 @@ app.post('/api/inbody/analyze', { preHandler: requireStaff }, async (request, re
     try {
       const raw = document.content_type === 'application/pdf'
         ? await (async () => { const file = await downloadObject(document.object_key); return extractInBodyDocument(file.body, document.original_name, document.content_type); })()
-        : isInBodyHistoryImage(document.original_name)
-          ? await (async () => { const file = await downloadObject(document.object_key); return extractInBodyImage(await prepareInBodyHistoryImage(file.body), document.original_name); })()
-          : await extractInBodyImage(await createDownloadUrl(document.object_key), document.original_name);
+        : await (async () => { const file = await downloadObject(document.object_key); return extractInBodyImage(await prepareInBodyImage(file.body, document.original_name), document.original_name); })();
       const extracted = validateExtraction(raw, document.original_name);
       for (const measurement of extracted.measurements) {
         const current = merged.get(measurement.testedAt);
