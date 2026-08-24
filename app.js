@@ -47,6 +47,16 @@ const toast = (message, error = false) => {
   const element = document.createElement('div'); element.className = `toast${error ? ' error' : ''}`; element.textContent = message;
   document.body.append(element); setTimeout(() => element.remove(), 3200);
 };
+async function showPendingBrowserNotification(notifications) {
+  if (!notifications.length || !('Notification' in window) || Notification.permission !== 'granted' || !('serviceWorker' in navigator)) return;
+  try {
+    const preferences = await api('/api/notification-preferences'); if (!preferences.browser_enabled) return;
+    const reminder = notifications[0]; const reminderKey = `${reminder.type}:${reminder.title}:${reminder.scheduledFor}`;
+    if (localStorage.getItem('eileen-last-reminder') === reminderKey) return;
+    const registration = await navigator.serviceWorker.ready; await registration.showNotification(reminder.title, { body: reminder.body, icon: './icon-192.png', badge: './favicon-32.png', data: { url: window.location.href } });
+    localStorage.setItem('eileen-last-reminder', reminderKey);
+  } catch {}
+}
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   const isPassThroughBody = options.body instanceof FormData || (typeof Blob !== 'undefined' && options.body instanceof Blob);
@@ -82,7 +92,7 @@ async function loadData() {
   data.sessions = sessions.map(item => { const starts = new Date(item.starts_at); return { id: item.id, clientId: item.client_id, client: item.full_name, routineId: item.routine_id, date: dateKey(starts), time: `${String(starts.getHours()).padStart(2, '0')}:${String(starts.getMinutes()).padStart(2, '0')}`, routine: item.routine_title || 'Evaluación / seguimiento', mode: item.mode, status: item.status, completionPercent: Number(item.completion_percent || 0), notes: item.notes || '' }; });
   data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: 0, sessions: item.sessions_per_week, exercises: item.exercises || [] }));
   data.plans = plans.map(item => ({ id: item.id, name: item.name, description: item.description || '', billingModel: item.billing_model, price: Number(item.price), sessionsIncluded: Number(item.sessions_included || 0), validityDays: Number(item.validity_days || 0), active: item.active }));
-  data.compliance = compliance; data.notifications = notifications;
+  data.compliance = compliance; data.notifications = notifications; showPendingBrowserNotification(notifications);
 }
 const initials = name => name.split(' ').slice(0, 2).map(word => word[0]).join('').toUpperCase();
 const escapeHtml = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
@@ -601,7 +611,7 @@ function renderPortal() {
   const portalCount = document.getElementById('portal-notification-count'); portalCount.textContent = portalData.notifications.length; portalCount.hidden = !portalData.notifications.length;
 }
 async function loadPortalData() {
-  const [summary, notifications] = await Promise.all([api('/api/portal/summary'), api('/api/notifications')]); portalData = { ...summary, notifications }; renderPortal();
+  const [summary, notifications] = await Promise.all([api('/api/portal/summary'), api('/api/notifications')]); portalData = { ...summary, notifications }; renderPortal(); showPendingBrowserNotification(notifications);
 }
 async function enterPortal(user) {
   const restoredView = portalViewFromHash(); currentUser = user; portalView(restoredView);
