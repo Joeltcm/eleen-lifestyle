@@ -327,7 +327,7 @@ app.get('/api/documents/:id/download-url', { preHandler: requireStaff }, async (
   return { documentId: document.id, fileName: document.original_name, downloadUrl: await createDownloadUrl(document.object_key), expiresInSeconds: 300 };
 });
 
-const inbodySchema = z.object({ clientId: z.string().uuid(), documentId: z.string().uuid().optional(), deviceModel: z.string().optional(), testedAt: z.string().datetime(), values: z.record(z.string(), z.union([z.number(), z.string(), z.null()])), confidence: z.record(z.string(), z.number()).default({}), extractionStatus: z.enum(['pending', 'processing', 'ready', 'review', 'failed']).default('ready') });
+const inbodySchema = z.object({ clientId: z.string().uuid(), documentId: z.string().uuid().optional(), deviceModel: z.string().optional(), testedAt: z.string().datetime({ offset: true }), values: z.record(z.string(), z.union([z.number(), z.string(), z.null()])), confidence: z.record(z.string(), z.number()).default({}), extractionStatus: z.enum(['pending', 'processing', 'ready', 'review', 'failed']).default('ready') });
 app.get('/api/clients/:clientId/inbody', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const clientId = z.string().uuid().parse((request.params as { clientId: string }).clientId);
   const [client] = await sql`SELECT id FROM clients WHERE id = ${clientId} AND owner_id = ${auth.sub}`; if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
@@ -467,7 +467,7 @@ app.post('/api/inbody/analyze', { preHandler: requireStaff }, async (request, re
 });
 
 const reviewInBodySchema = z.object({
-  testedAt: z.string().datetime(),
+  testedAt: z.string().datetime({ offset: true }),
   values: z.record(z.string(), z.union([z.number(), z.string(), z.null()])),
   extractionStatus: z.enum(['ready', 'review']).default('ready')
 });
