@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#faf7f6" />
+    <title>Actualizando Eileen Lifestyle</title>
+    <style>
+      :root { color-scheme: light; font-family: system-ui, -apple-system, sans-serif; color: #49343e; background: #faf7f6; }
+      body { min-height: 100vh; margin: 0; display: grid; place-items: center; text-align: center; }
+      main { padding: 32px; }
+      .mark { width: 58px; height: 58px; margin: 0 auto 18px; display: grid; place-items: center; border-radius: 18px; background: #efbfd0; font-weight: 800; }
+      h1 { margin: 0 0 8px; font-size: 24px; }
+      p { margin: 0; color: #7c7077; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="mark" aria-hidden="true">EL</div>
+      <h1>Actualizando la aplicación…</h1>
+      <p>En un momento volverás a la agenda.</p>
+    </main>
+    <script>
+      (async () => {
+        try {
+          if ('serviceWorker' in navigator) {
+            const registrations = await navigator.serviceWorker.getRegistrations();
+            await Promise.all(registrations.map(registration => registration.unregister()));
+          }
+          if ('caches' in window) {
+            const names = await caches.keys();
+            await Promise.all(names
+              .filter(name => name.startsWith('eileen-lifestyle-') || name.startsWith('eleen-lifestyle-'))
+              .map(name => caches.delete(name)));
+          }
+        } finally {
+          window.location.replace('/?fresh=41#calendar');
+        }
+      })();
+    </script>
+  </body>
+</html>
