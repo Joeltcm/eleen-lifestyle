@@ -364,7 +364,8 @@ function clientDetail(id) {
 
 const inbodyReviewFields = [
   ['weightKg', 'Peso', 'kg'], ['skeletalMuscleMassKg', 'Músculo', 'kg'], ['bodyFatMassKg', 'Masa grasa', 'kg'],
-  ['percentBodyFat', 'Grasa', '%'], ['bmi', 'IMC', ''], ['ecwRatio', 'ECW', ''], ['inBodyScore', 'Score', '']
+  ['percentBodyFat', 'Grasa', '%'], ['bmi', 'IMC', ''], ['visceralFatLevel', 'Grasa visceral', 'nivel'],
+  ['ecwRatio', 'ECW', ''], ['inBodyScore', 'Score', '']
 ];
 
 function inbodyReview(client, assessments, pageErrors = []) {

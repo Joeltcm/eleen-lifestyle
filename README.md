@@ -38,7 +38,7 @@ Después abre la URL que indique el servidor en un navegador. La información de
 
 - `CLOUDFLARE_ACCOUNT_ID`
 - `CLOUDFLARE_API_TOKEN`, creado con permisos `Workers AI Read` y `Workers AI Edit`
-- `CLOUDFLARE_VISION_MODEL` es opcional; usa `@cf/moondream/moondream3.1-9B-A2B` por defecto
+- `CLOUDFLARE_VISION_MODEL` es opcional; usa `@cf/google/gemma-4-26b-a4b-it` por defecto
 
 Los documentos se guardan primero en R2. La aplicación omite identificadores personales en la respuesta estructurada, comprueba rangos y relaciones matemáticas, y no genera diagnósticos médicos.
 
