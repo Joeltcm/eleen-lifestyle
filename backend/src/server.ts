@@ -2,6 +2,7 @@ import Fastify, { type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
 import bcrypt from 'bcryptjs';
+import webpush from 'web-push';
 import { randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
 import { config } from './config.js';
@@ -14,6 +15,11 @@ type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: stri
 const app = Fastify({ logger: true, trustProxy: true });
 const maxDocumentSize = 20 * 1024 * 1024;
 const documentContentTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'] as const;
+const webPushReady = Boolean(config.VAPID_PUBLIC_KEY && config.VAPID_PRIVATE_KEY);
+
+if (webPushReady) {
+  webpush.setVapidDetails(config.VAPID_SUBJECT, config.VAPID_PUBLIC_KEY!, config.VAPID_PRIVATE_KEY!);
+}
 
 app.addContentTypeParser([...documentContentTypes], { parseAs: 'buffer', bodyLimit: maxDocumentSize }, (_request, body, done) => {
   done(null, body);
@@ -55,7 +61,8 @@ app.get('/health', async () => {
   return {
     status: 'ok', service: 'eileen-lifestyle-api', databaseTime: database.time,
     documentStorage: storageReady ? 'ready' : 'configuration_required',
-    inbodyAnalysis: inbodyAnalysisReady ? 'configured' : 'configuration_required'
+    inbodyAnalysis: inbodyAnalysisReady ? 'configured' : 'configuration_required',
+    webPush: webPushReady ? 'configured' : 'configuration_required'
   };
 });
 
@@ -448,6 +455,29 @@ app.patch('/api/notification-preferences', { preHandler: requireAuth }, async re
   return preference;
 });
 
+const pushSubscriptionSchema = z.object({
+  endpoint: z.string().url(),
+  keys: z.object({ p256dh: z.string().min(1), auth: z.string().min(1) })
+});
+
+app.get('/api/push/config', { preHandler: requireAuth }, async () => ({
+  configured: webPushReady,
+  publicKey: webPushReady ? config.VAPID_PUBLIC_KEY : null
+}));
+
+app.post('/api/push/subscriptions', { preHandler: requireAuth }, async (request, reply) => {
+  if (!webPushReady) return reply.code(503).send({ error: 'Las notificaciones push todavía no están configuradas' });
+  const auth = request.user as AuthUser; const input = pushSubscriptionSchema.parse(request.body);
+  const [subscription] = await sql`
+    INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth)
+    VALUES (${auth.sub}, ${input.endpoint}, ${input.keys.p256dh}, ${input.keys.auth})
+    ON CONFLICT (endpoint) DO UPDATE SET user_id = EXCLUDED.user_id, p256dh = EXCLUDED.p256dh,
+      auth = EXCLUDED.auth, active = true, updated_at = now()
+    RETURNING id, active, updated_at
+  `;
+  return reply.code(201).send(subscription);
+});
+
 app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const [preference] = await sql`SELECT * FROM notification_preferences WHERE user_id = ${auth.sub}`;
@@ -475,6 +505,101 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
     ...invoices.map(invoice => ({ type: 'payment', title: `Pago de ${invoice.full_name}`, body: `${invoice.concept}: $${Number(invoice.amount).toFixed(2)} · vence ${invoice.due_on}.`, scheduledFor: invoice.due_on }))
   ];
 });
+
+type ReminderCandidate = {
+  user_id: string;
+  kind: 'session' | 'payment';
+  reference_id: string;
+  role: AuthUser['role'];
+  full_name: string;
+  starts_at?: string;
+  due_on?: string;
+  amount?: number | string;
+  concept?: string;
+};
+
+async function sendPushToUser(userId: string, payload: { title: string; body: string; url: string }) {
+  if (!webPushReady) return false;
+  const subscriptions = await sql`SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ${userId} AND active = true`;
+  let delivered = false;
+  await Promise.all(subscriptions.map(async subscription => {
+    try {
+      await webpush.sendNotification({
+        endpoint: subscription.endpoint,
+        keys: { p256dh: subscription.p256dh, auth: subscription.auth }
+      }, JSON.stringify(payload), { TTL: 86_400, urgency: 'normal' });
+      delivered = true;
+    } catch (error) {
+      const statusCode = error instanceof webpush.WebPushError ? error.statusCode : undefined;
+      if (statusCode === 404 || statusCode === 410) {
+        await sql`UPDATE push_subscriptions SET active = false, updated_at = now() WHERE id = ${subscription.id}`;
+      }
+      app.log.warn({ err: error, userId, statusCode }, 'No se pudo entregar una notificación push');
+    }
+  }));
+  return delivered;
+}
+
+async function dispatchReminders() {
+  if (!webPushReady) return;
+  const [sessionRows, paymentRows] = await Promise.all([
+    sql<ReminderCandidate[]>`
+      SELECT u.id AS user_id, 'session' AS kind, s.id AS reference_id, u.role, c.full_name, s.starts_at
+      FROM notification_preferences np
+      JOIN users u ON u.id = np.user_id AND u.active = true
+      JOIN clients c ON (u.role = 'client' AND c.portal_user_id = u.id)
+        OR (u.role IN ('admin', 'trainer') AND c.owner_id = u.id)
+      JOIN sessions s ON s.client_id = c.id
+      WHERE np.browser_enabled = true AND s.status = 'scheduled'
+        AND s.starts_at BETWEEN now() AND now() + make_interval(hours => np.session_reminder_hours)
+        AND EXISTS (SELECT 1 FROM push_subscriptions ps WHERE ps.user_id = u.id AND ps.active = true)
+        AND NOT EXISTS (
+          SELECT 1 FROM notification_deliveries nd
+          WHERE nd.user_id = u.id AND nd.kind = 'session' AND nd.reference_id = s.id
+        )
+    `,
+    sql<ReminderCandidate[]>`
+      SELECT u.id AS user_id, 'payment' AS kind, i.id AS reference_id, u.role, c.full_name,
+        i.due_on, i.amount, i.concept
+      FROM notification_preferences np
+      JOIN users u ON u.id = np.user_id AND u.active = true
+      JOIN clients c ON (u.role = 'client' AND c.portal_user_id = u.id)
+        OR (u.role IN ('admin', 'trainer') AND c.owner_id = u.id)
+      JOIN invoices i ON i.client_id = c.id
+      WHERE np.browser_enabled = true AND i.status = 'pending'
+        AND i.due_on BETWEEN current_date - 30 AND current_date + np.payment_reminder_days
+        AND EXISTS (SELECT 1 FROM push_subscriptions ps WHERE ps.user_id = u.id AND ps.active = true)
+        AND NOT EXISTS (
+          SELECT 1 FROM notification_deliveries nd
+          WHERE nd.user_id = u.id AND nd.kind = 'payment' AND nd.reference_id = i.id
+        )
+    `
+  ]);
+
+  for (const reminder of [...sessionRows, ...paymentRows]) {
+    const [reserved] = await sql`
+      INSERT INTO notification_deliveries (user_id, kind, reference_id)
+      VALUES (${reminder.user_id}, ${reminder.kind}, ${reminder.reference_id})
+      ON CONFLICT DO NOTHING RETURNING user_id
+    `;
+    if (!reserved) continue;
+    const isClient = reminder.role === 'client';
+    const payload = reminder.kind === 'session'
+      ? {
+          title: isClient ? 'Próximo entrenamiento' : `Sesión con ${reminder.full_name}`,
+          body: `Programada para ${new Date(reminder.starts_at!).toLocaleString('es-PA', { timeZone: 'America/Panama' })}.`,
+          url: new URL(isClient ? '/#portal-calendar' : '/#calendar', config.APP_URL).toString()
+        }
+      : {
+          title: isClient ? 'Recordatorio de pago' : `Pago de ${reminder.full_name}`,
+          body: `${reminder.concept}: $${Number(reminder.amount).toFixed(2)} · vence ${reminder.due_on}.`,
+          url: new URL(isClient ? '/#portal-billing' : '/#billing', config.APP_URL).toString()
+        };
+    if (!(await sendPushToUser(reminder.user_id, payload))) {
+      await sql`DELETE FROM notification_deliveries WHERE user_id = ${reminder.user_id} AND kind = ${reminder.kind} AND reference_id = ${reminder.reference_id}`;
+    }
+  }
+}
 
 async function portalClient(userId: string) {
   const [client] = await sql`
@@ -795,5 +920,14 @@ app.patch('/api/inbody/:id', { preHandler: requireStaff }, async (request, reply
   return assessment;
 });
 
-app.addHook('onClose', async () => { await sql.end(); });
+const firstReminderRun = setTimeout(() => dispatchReminders().catch(error => app.log.error(error)), 10_000);
+const reminderInterval = setInterval(() => dispatchReminders().catch(error => app.log.error(error)), config.REMINDER_INTERVAL_MINUTES * 60_000);
+firstReminderRun.unref();
+reminderInterval.unref();
+
+app.addHook('onClose', async () => {
+  clearTimeout(firstReminderRun);
+  clearInterval(reminderInterval);
+  await sql.end();
+});
 await app.listen({ port: config.PORT, host: '::' });

@@ -57,6 +57,29 @@ async function showPendingBrowserNotification(notifications) {
     localStorage.setItem('eileen-last-reminder', reminderKey);
   } catch {}
 }
+const urlBase64ToUint8Array = value => {
+  const padding = '='.repeat((4 - (value.length % 4)) % 4);
+  const base64 = (value + padding).replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(atob(base64), character => character.charCodeAt(0));
+};
+async function ensurePushSubscription() {
+  if (!('serviceWorker' in navigator)) throw new Error('Este navegador no admite notificaciones en segundo plano');
+  const registration = await navigator.serviceWorker.ready;
+  if (!registration.pushManager) throw new Error('En iPhone, instala la PWA en la pantalla de inicio para activar notificaciones');
+  const pushConfig = await api('/api/push/config');
+  if (!pushConfig.configured || !pushConfig.publicKey) throw new Error('Las notificaciones push todavía no están disponibles');
+  let subscription = await registration.pushManager.getSubscription();
+  if (!subscription) {
+    subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(pushConfig.publicKey)
+    });
+  }
+  const serialized = subscription.toJSON();
+  if (!serialized.endpoint || !serialized.keys?.p256dh || !serialized.keys?.auth) throw new Error('No se pudo registrar este dispositivo');
+  await api('/api/push/subscriptions', { method: 'POST', body: { endpoint: serialized.endpoint, keys: serialized.keys } });
+  return registration;
+}
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   const isPassThroughBody = options.body instanceof FormData || (typeof Blob !== 'undefined' && options.body instanceof Blob);
@@ -312,8 +335,17 @@ async function notificationCenter(isPortal = false) {
   openModal(box, true);
   document.getElementById('notification-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target); let browserEnabled = Boolean(form.get('browserEnabled'));
-    if (browserEnabled && 'Notification' in window && Notification.permission !== 'granted') browserEnabled = (await Notification.requestPermission()) === 'granted';
-    try { await api('/api/notification-preferences', { method: 'PATCH', body: { inAppEnabled: Boolean(form.get('inAppEnabled')), browserEnabled, sessionReminderHours: Number(form.get('sessionReminderHours')), paymentReminderDays: Number(form.get('paymentReminderDays')) } }); modal.close(); toast('Preferencias guardadas'); if (browserEnabled && notifications[0] && 'serviceWorker' in navigator) { const registration = await navigator.serviceWorker.ready; await registration.showNotification(notifications[0].title, { body: notifications[0].body, icon: './icon-192.png', badge: './favicon-32.png' }); } }
+    try {
+      let registration;
+      if (browserEnabled) {
+        if (!('Notification' in window)) throw new Error('Este navegador no admite notificaciones');
+        if (Notification.permission !== 'granted' && (await Notification.requestPermission()) !== 'granted') throw new Error('Debes permitir las notificaciones para recibir recordatorios');
+        registration = await ensurePushSubscription();
+      }
+      await api('/api/notification-preferences', { method: 'PATCH', body: { inAppEnabled: Boolean(form.get('inAppEnabled')), browserEnabled, sessionReminderHours: Number(form.get('sessionReminderHours')), paymentReminderDays: Number(form.get('paymentReminderDays')) } });
+      modal.close(); toast(browserEnabled ? 'Recordatorios push activados' : 'Preferencias guardadas');
+      if (browserEnabled && registration) await registration.showNotification('Eileen Lifestyle', { body: 'Las notificaciones quedaron activadas en este dispositivo.', icon: './icon-192.png', badge: './favicon-32.png', data: { url: window.location.href } });
+    }
     catch (error) { toast(error.message, true); }
   });
 }
