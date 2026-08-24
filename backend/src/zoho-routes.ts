@@ -391,7 +391,14 @@ export async function registerZohoRoutes(app: FastifyInstance) {
 
   const syncTimer = setInterval(() => {
     void (async () => {
-      const connections = await sql`SELECT owner_id FROM integration_connections WHERE provider = ${provider} AND sync_enabled = true AND status NOT IN ('completed', 'error') AND (last_sync_at IS NULL OR last_sync_at < now() - interval '6 hours')`;
+      const connections = await sql`
+        SELECT owner_id FROM integration_connections
+        WHERE provider = ${provider} AND sync_enabled = true AND status NOT IN ('completed', 'syncing')
+          AND (
+            (status = 'error' AND updated_at < now() - interval '6 hours')
+            OR (status <> 'error' AND (last_sync_at IS NULL OR last_sync_at < now() - interval '6 hours'))
+          )
+      `;
       for (const connection of connections) runSync(connection.owner_id).catch(error => app.log.error(error));
     })().catch(error => app.log.error(error));
   }, 30 * 60 * 1000);

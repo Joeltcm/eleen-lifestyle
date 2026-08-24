@@ -97,7 +97,9 @@ const exerciseLabel = exercise => typeof exercise === 'string' ? exercise : [exe
 async function loadData() {
   const [clients, invoices, packages, sessions, routines, plans, compliance, notifications] = await Promise.all([
     api('/api/clients'), api('/api/invoices'), api('/api/packages'), api('/api/sessions'), api('/api/routines'),
-    api('/api/plans'), api(`/api/compliance/summary?period=${compliancePeriod}`), api('/api/notifications')
+    api('/api/plans'),
+    api(`/api/compliance/summary?period=${compliancePeriod}`).catch(() => ({ compliancePercent: 0, activities: 0, clients: [] })),
+    api('/api/notifications').catch(() => [])
   ]);
   const assessments = await Promise.all(clients.map(client => api(`/api/clients/${client.id}/inbody`)));
   data.clients = clients.map((client, index) => {
@@ -391,7 +393,8 @@ function newSession() {
 }
 function newRoutine() {
   const content = formFromTemplate('new-routine-template'); openModal(content, true);
-  const clientSelect = document.getElementById('routine-client'); data.clients.filter(client => client.status === 'Activo').forEach(client => clientSelect.add(new Option(client.name, client.id)));
+  const clientSelect = document.getElementById('routine-client');
+  data.clients.forEach(client => clientSelect.add(new Option(`${client.name}${client.status === 'Activo' ? '' : ' · Inactivo'}`, client.id)));
   const categorySelect = document.getElementById('exercise-category');
   const levelSelect = document.getElementById('exercise-level');
   const exerciseSelect = document.getElementById('exercise-choice');
