@@ -479,9 +479,10 @@ function showAuth(setupRequired) {
   document.getElementById('auth-copy').textContent = setupRequired ? 'Crea la primera cuenta administradora de Eileen Lifestyle.' : 'Accede al centro de control de clientes, sesiones y facturación.';
 }
 async function enterApp(user) {
-  currentUser = user; document.getElementById('auth-screen').hidden = true; document.getElementById('app-shell').hidden = false;
+  const restoredView = viewFromHash();
+  currentUser = user; view(restoredView); document.getElementById('auth-screen').hidden = true; document.getElementById('app-shell').hidden = false;
   document.getElementById('account-button').textContent = initials(user.fullName || user.full_name || user.email);
-  await loadData(); renderAll(); navigate(viewFromHash(), { replace: true });
+  await loadData(); renderAll(); navigate(restoredView, { replace: true });
 }
 document.getElementById('login-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = new FormData(event.target); const errorBox = document.getElementById('login-error'); errorBox.textContent = '';
