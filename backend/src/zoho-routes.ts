@@ -10,7 +10,6 @@ const scopes = [
   'ZohoInvoice.settings.READ',
   'ZohoInvoice.contacts.READ',
   'ZohoInvoice.invoices.READ',
-  'ZohoInvoice.recurringinvoices.READ',
   'ZohoInvoice.customerpayments.READ',
   'ZohoInvoice.creditnotes.READ'
 ].join(',');
