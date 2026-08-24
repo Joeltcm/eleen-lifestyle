@@ -4,6 +4,13 @@ type PdfRecord = Record<string, any>;
 type Column = { label: string; key: string; width: number; align?: 'left' | 'right' | 'center'; format?: (value: any, row: PdfRecord) => string };
 
 const colors = { ink: '#493740', muted: '#7a6d73', rose: '#b66f8d', blush: '#f3dce5', pale: '#faf5f7', line: '#eadfe3', green: '#5d876f', amber: '#a97725' };
+const brand = {
+  plum: '#4b3943',
+  pink: '#efbfd0',
+  white: '#fffaf8',
+  ePath: 'M29 33h48v13H44v16h28v12H44v18h35v13H29z',
+  lPath: 'M75 59h15v33h22v13H75z'
+};
 const money = (value: unknown) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(Number(value || 0));
 const date = (value: unknown) => {
   if (!value) return '-';
@@ -35,9 +42,20 @@ function pdfBuffer(draw: (document: PDFKit.PDFDocument) => void) {
   });
 }
 
+function brandMark(document: PDFKit.PDFDocument, x: number, y: number, size: number) {
+  const scale = size / 128;
+  document.save();
+  document.roundedRect(x, y, size, size, 28 * scale).fill(brand.plum);
+  document.translate(x, y).scale(scale);
+  document.circle(93, 35, 13).fill(brand.pink);
+  document.path(brand.ePath).fill(brand.white);
+  document.path(brand.lPath).fill(brand.pink);
+  document.restore();
+}
+
 function brandHeader(document: PDFKit.PDFDocument, title: string, subtitle: string) {
-  document.save().roundedRect(42, 38, 38, 38, 11).fill(colors.rose).restore();
-  document.font('Helvetica-Bold').fontSize(15).fillColor('#ffffff').text('EL', 49, 49, { width: 24, align: 'center' });
+  // Keep PDF exports aligned with the canonical PWA artwork in /icon.svg.
+  brandMark(document, 42, 38, 38);
   document.font('Helvetica-Bold').fontSize(15).fillColor(colors.ink).text('Eileen Lifestyle', 91, 43);
   document.font('Helvetica').fontSize(8).fillColor(colors.muted).text('Entrenamiento personal y bienestar', 91, 62);
   document.moveTo(42, 91).lineTo(document.page.width - 42, 91).strokeColor(colors.line).stroke();
