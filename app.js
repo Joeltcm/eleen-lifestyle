@@ -349,7 +349,7 @@ function renderBilling() {
   document.getElementById('active-packages').textContent = data.packages.filter(pack => pack.status === 'confirmed' && remainingSessions(pack) > 0).length;
   document.getElementById('billing-pending').textContent = money.format(pending);
   document.getElementById('plan-grid').innerHTML = data.plans.length ? data.plans.map(plan => `<article class="plan-card ${plan.active ? '' : 'inactive'}"><div><span class="commercial-label ${plan.billingModel === 'package' ? 'package-label' : ''}">${plan.billingModel === 'package' ? 'Paquete' : 'Mensualidad'}</span><h4>${escapeHtml(plan.name)}</h4><p>${escapeHtml(plan.description || (plan.billingModel === 'package' ? `${plan.sessionsIncluded} sesiones · ${plan.validityDays} días` : 'Cobro mensual'))}</p></div><div class="plan-price"><strong>${money.format(plan.price)}</strong><small>${plan.active ? 'Disponible' : 'Inactivo'}</small></div><button class="text-button" data-edit-plan="${plan.id}">Editar</button></article>`).join('') : '<p class="empty">Crea el primer plan para asignarlo a tus clientes.</p>';
-  document.getElementById('invoice-table').innerHTML = visibleInvoices.length ? visibleInvoices.map(invoice => { const label = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'; const concept = invoice.invoiceNumber ? `<small>${invoice.source === 'zoho_invoice' ? 'Zoho' : 'Eileen'} · ${invoice.invoiceNumber}</small><br>${invoice.concept}` : invoice.concept; return `<tr><td><b>${invoice.client}</b></td><td>${concept}</td><td>${invoice.due}</td><td>${invoice.method === 'pending' ? '—' : invoice.method}</td><td>${money.format(invoice.amount)}${invoice.status === 'pending' && invoice.balance !== invoice.amount ? `<br><small>Saldo ${money.format(invoice.balance)}</small>` : ''}</td><td><span class="payment-status ${invoice.status}">${label}</span></td><td>${invoice.status === 'pending' && invoice.source !== 'zoho_invoice' ? `<button class="secondary session-use" data-confirm-invoice="${invoice.id}">Confirmar</button>` : ''}</td></tr>`; }).join('') : '<tr><td colspan="7" class="empty">No hay facturas con estos filtros.</td></tr>';
+  document.getElementById('invoice-table').innerHTML = visibleInvoices.length ? visibleInvoices.map(invoice => { const label = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'; const concept = invoice.invoiceNumber ? `<small>${invoice.source === 'zoho_invoice' ? 'Zoho' : 'Eileen'} · ${escapeHtml(invoice.invoiceNumber)}</small><br>${escapeHtml(invoice.concept)}` : escapeHtml(invoice.concept); return `<tr><td><b>${escapeHtml(invoice.client)}</b></td><td>${concept}</td><td>${invoice.due}</td><td>${invoice.method === 'pending' ? '—' : escapeHtml(invoice.method)}</td><td>${money.format(invoice.amount)}${invoice.status === 'pending' && invoice.balance !== invoice.amount ? `<br><small>Saldo ${money.format(invoice.balance)}</small>` : ''}</td><td><span class="payment-status ${invoice.status}">${label}</span></td><td><div class="invoice-actions"><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoiceNumber || invoice.id.slice(0, 8))}">Ver PDF</button>${invoice.status === 'pending' && invoice.source !== 'zoho_invoice' ? `<button class="secondary session-use" data-confirm-invoice="${invoice.id}">Confirmar</button>` : ''}</div></td></tr>`; }).join('') : '<tr><td colspan="7" class="empty">No hay facturas con estos filtros.</td></tr>';
   const loadMore = document.getElementById('billing-load-more'); loadMore.hidden = visibleInvoices.length >= periodInvoices.length; loadMore.textContent = `Mostrar más facturas (${periodInvoices.length - visibleInvoices.length} restantes)`;
   document.getElementById('package-table').innerHTML = data.packages.length ? data.packages.map(pack => {
     const remaining = remainingSessions(pack);
@@ -362,6 +362,56 @@ function renderAll() { renderDashboard(); renderClients(); renderCalendar(); ren
 const modal = document.getElementById('modal');
 function openModal(content, wide = false) { modal.classList.toggle('modal-wide', wide); document.getElementById('modal-content').replaceChildren(content); if (!modal.open) modal.showModal(); }
 function formFromTemplate(id) { return document.getElementById(id).content.cloneNode(true); }
+async function protectedBlob(path) {
+  const response = await fetch(`${API_BASE}${path}`, { headers: authToken ? { Authorization: `Bearer ${authToken}` } : {} });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    if (response.status === 401) { localStorage.removeItem(authKey); authToken = null; }
+    throw new Error(payload.error || 'No fue posible generar el documento');
+  }
+  return response.blob();
+}
+function downloadBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob); const link = document.createElement('a');
+  link.href = url; link.download = fileName; document.body.append(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+async function previewProtectedPdf(path, title, fileName) {
+  const loading = document.createElement('div'); loading.className = 'pdf-loading'; loading.innerHTML = `<p class="eyebrow">DOCUMENTO PDF</p><h2>${escapeHtml(title)}</h2><p>Preparando una vista privada…</p>`; openModal(loading, true);
+  try {
+    const blob = await protectedBlob(path); const url = URL.createObjectURL(blob); const content = document.createElement('div'); content.className = 'pdf-preview';
+    content.innerHTML = `<div class="pdf-preview-head"><div><p class="eyebrow">DOCUMENTO PDF</p><h2>${escapeHtml(title)}</h2></div><div class="pdf-actions"><a class="secondary" href="${url}" target="_blank" rel="noopener">Abrir PDF</a><a class="primary" href="${url}" download="${escapeHtml(fileName)}">Descargar</a></div></div><iframe src="${url}" title="${escapeHtml(title)}"></iframe><p class="pdf-mobile-note">Si la vista no aparece en iPhone o iPad, toca “Abrir PDF”.</p>`;
+    openModal(content, true); modal.addEventListener('close', () => URL.revokeObjectURL(url), { once: true });
+  } catch (error) { modal.close(); toast(error.message, true); }
+}
+const selectedReportDates = () => {
+  if (billingYear === 'all') {
+    const available = data.invoices.map(invoicePeriodDate).filter(value => !Number.isNaN(value.getTime())).sort((a, b) => a - b);
+    return { from: available.length ? dateKey(available[0]) : `${today.getFullYear()}-01-01`, to: dateKey(today) };
+  }
+  const year = Number(billingYear);
+  const month = billingMonth === 'all' || billingYear === 'all' ? null : Number(billingMonth);
+  return month
+    ? { from: dateKey(new Date(year, month - 1, 1, 12)), to: dateKey(new Date(year, month, 0, 12)) }
+    : { from: `${year}-01-01`, to: `${year}-12-31` };
+};
+function financialReportDialog(kind) {
+  const isStatement = kind === 'account-statement'; const dates = selectedReportDates(); const box = document.createElement('div');
+  if (isStatement && !data.clients.length) { toast('Agrega un cliente antes de crear un estado de cuenta', true); return; }
+  box.innerHTML = `<form id="financial-report-form"><p class="eyebrow">REPORTES FINANCIEROS</p><h2>${isStatement ? 'Estado de cuenta' : 'Cuentas por cobrar'}</h2><p class="report-form-copy">${isStatement ? 'Selecciona el cliente y período que deseas compartir.' : 'Obtén el detalle de saldos vigentes y su antigüedad a una fecha de corte.'}</p>${isStatement ? `<label>Cliente<select name="clientId" required>${data.clients.map(client => `<option value="${client.id}">${escapeHtml(client.name)}</option>`).join('')}</select></label><div class="form-row"><label>Desde<input name="from" type="date" value="${dates.from}" required /></label><label>Hasta<input name="to" type="date" value="${dates.to}" required /></label></div>` : `<label>Fecha de corte<input name="asOf" type="date" value="${dateKey(today)}" required /></label>`}<div class="report-format-actions"><button class="primary" type="submit" data-format="pdf">Previsualizar PDF</button><button class="secondary" type="submit" data-format="csv">Exportar CSV</button></div></form>`;
+  openModal(box);
+  document.getElementById('financial-report-form').addEventListener('submit', async event => {
+    event.preventDefault(); const format = event.submitter?.dataset.format || 'pdf'; const values = new FormData(event.currentTarget); const query = new URLSearchParams();
+    if (isStatement) { query.set('clientId', values.get('clientId')); query.set('from', values.get('from')); query.set('to', values.get('to')); }
+    else query.set('asOf', values.get('asOf'));
+    const base = isStatement ? 'account-statement' : 'accounts-receivable'; const path = `/api/reports/${base}.${format}?${query}`;
+    const datedName = isStatement ? `estado-de-cuenta-${values.get('from')}-${values.get('to')}` : `cuentas-por-cobrar-${values.get('asOf')}`;
+    try {
+      if (format === 'pdf') await previewProtectedPdf(path, isStatement ? 'Estado de cuenta' : 'Cuentas por cobrar', `${datedName}.pdf`);
+      else { event.submitter.disabled = true; downloadBlob(await protectedBlob(path), `${datedName}.csv`); modal.close(); toast('Reporte CSV exportado'); }
+    } catch (error) { toast(error.message, true); if (event.submitter) event.submitter.disabled = false; }
+  });
+}
 function newClient() {
   const availablePlans = data.plans.filter(plan => plan.active);
   if (!availablePlans.length) { navigate('billing'); toast('Crea un plan comercial antes de agregar clientes', true); return; }
@@ -653,6 +703,8 @@ document.querySelectorAll('[data-view-go]').forEach(button => button.addEventLis
 window.addEventListener('popstate', () => { if (currentUser?.role !== 'client') view(viewFromHash()); });
 window.addEventListener('hashchange', () => { if (currentUser?.role !== 'client') view(viewFromHash()); });
 document.addEventListener('click', event => {
+  const actionButton = event.target.closest('[data-action]');
+  const invoicePdfButton = event.target.closest('[data-invoice-pdf]');
   const calendarModeButton = event.target.closest('[data-calendar-mode]');
   const calendarShiftButton = event.target.closest('[data-calendar-shift]');
   const calendarDateButton = event.target.closest('[data-calendar-date]');
@@ -665,12 +717,15 @@ document.addEventListener('click', event => {
   }
   if (event.target.closest('[data-calendar-today]')) { calendarCursor = new Date(today); calendarCursor.setHours(12, 0, 0, 0); renderCalendar(); }
   if (calendarDateButton) { calendarCursor = new Date(`${calendarDateButton.dataset.calendarDate}T12:00:00`); calendarMode = 'day'; renderCalendar(); }
-  if (event.target.dataset.action === 'new-client') newClient();
-  if (event.target.dataset.action === 'new-invoice') newInvoice();
-  if (event.target.dataset.action === 'new-session') newSession();
-  if (event.target.dataset.action === 'new-routine') newRoutine();
-  if (event.target.dataset.action === 'new-plan') planEditor();
-  if (event.target.dataset.action === 'export-compliance') exportCompliance();
+  if (actionButton?.dataset.action === 'new-client') newClient();
+  if (actionButton?.dataset.action === 'new-invoice') newInvoice();
+  if (actionButton?.dataset.action === 'new-session') newSession();
+  if (actionButton?.dataset.action === 'new-routine') newRoutine();
+  if (actionButton?.dataset.action === 'new-plan') planEditor();
+  if (actionButton?.dataset.action === 'export-compliance') exportCompliance();
+  if (actionButton?.dataset.action === 'account-statement') financialReportDialog('account-statement');
+  if (actionButton?.dataset.action === 'accounts-receivable') financialReportDialog('accounts-receivable');
+  if (invoicePdfButton) previewProtectedPdf(`/api/invoices/${invoicePdfButton.dataset.invoicePdf}/pdf`, `Comprobante ${invoicePdfButton.dataset.invoiceNumber}`, `comprobante-${invoicePdfButton.dataset.invoiceNumber}.pdf`);
   if (event.target.dataset.editPlan) planEditor(data.plans.find(plan => plan.id === event.target.dataset.editPlan));
   if (event.target.dataset.client) clientDetail(event.target.dataset.client);
   if (event.target.dataset.inbody) inbodyImport(data.clients.find(client => client.id === event.target.dataset.inbody));
@@ -746,7 +801,7 @@ function renderPortal() {
   const ownSessions = new Map(portalData.sessions.map(item => [item.id, portalSession(item)]));
   document.getElementById('portal-calendar-list').innerHTML = portalData.busySlots.length ? portalData.busySlots.map(slot => { const date = new Date(slot.starts_at); const own = slot.is_mine ? ownSessions.get(slot.id) : null; return `<article class="portal-slot ${own ? 'mine' : 'busy'}"><time><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric', month: 'short' }).format(date)}</b><span>${new Intl.DateTimeFormat('es-PA', { hour: 'numeric', minute: '2-digit' }).format(date)}</span></time><div><b>${own ? escapeHtml(own.routine) : 'Ocupado'}</b><span>${own ? escapeHtml(own.mode) : 'Horario no disponible'}</span></div>${own ? `<form data-portal-session="${own.id}" class="portal-session-form"><label class="completion-check"><input name="completed" type="checkbox" ${own.status === 'completed' ? 'checked' : ''} /><span>Cumplí</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${own.status === 'completed' ? own.completionPercent || 100 : 0}" /><span>%</span></label><button class="secondary">Guardar</button></form>` : ''}</article>`; }).join('') : '<p class="empty">No hay horarios ocupados en los próximos 90 días.</p>';
   document.getElementById('portal-plan').innerHTML = `<span class="commercial-label ${client.billing_model === 'package' ? 'package-label' : ''}">${client.billing_model === 'package' ? 'Paquete' : 'Mensualidad'}</span><div><h3>${escapeHtml(client.plan_name || 'Plan personalizado')}</h3><p>${money.format(Number(client.standard_price))}${client.billing_model === 'monthly' ? ` · corte día ${client.billing_cutoff_day}` : ` · ${client.sessions_included || 0} sesiones`}</p></div>`;
-  document.getElementById('portal-invoices').innerHTML = portalData.invoices.length ? portalData.invoices.map(invoice => `<tr><td><b>${escapeHtml(invoice.concept)}</b>${invoice.invoice_number ? `<br><small>${escapeHtml(invoice.invoice_number)}</small>` : ''}</td><td>${invoice.issued_on || invoice.due_on}</td><td>${money.format(Number(invoice.amount))}</td><td><span class="payment-status ${invoice.status}">${invoice.status === 'confirmed' ? 'Pagada' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'}</span></td></tr>`).join('') : '<tr><td colspan="4" class="empty">No hay facturas registradas.</td></tr>';
+  document.getElementById('portal-invoices').innerHTML = portalData.invoices.length ? portalData.invoices.map(invoice => `<tr><td><b>${escapeHtml(invoice.concept)}</b>${invoice.invoice_number ? `<br><small>${escapeHtml(invoice.invoice_number)}</small>` : ''}</td><td>${invoice.issued_on || invoice.due_on}</td><td>${money.format(Number(invoice.amount))}</td><td><span class="payment-status ${invoice.status}">${invoice.status === 'confirmed' ? 'Pagada' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'}</span></td><td><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoice_number || invoice.id.slice(0, 8))}">Ver PDF</button></td></tr>`).join('') : '<tr><td colspan="5" class="empty">No hay facturas registradas.</td></tr>';
   const portalCount = document.getElementById('portal-notification-count'); portalCount.textContent = portalData.notifications.length; portalCount.hidden = !portalData.notifications.length;
 }
 async function loadPortalData() {

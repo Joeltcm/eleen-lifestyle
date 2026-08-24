@@ -10,6 +10,7 @@ import { sql } from './db.js';
 import { createDownloadUrl, createUploadUrl, downloadObject, storageReady, uploadObject, verifyUpload } from './storage.js';
 import { extractInBodyDocument, extractInBodyImage, inbodyAnalysisReady, prepareInBodyImage, validateExtraction, validateInBodyValues } from './inbody-analysis.js';
 import { registerZohoRoutes } from './zoho-routes.js';
+import { accountStatementPdf, accountsReceivablePdf, invoicePdf } from './billing-reports.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
 const app = Fastify({ logger: true, trustProxy: true });
@@ -349,6 +350,60 @@ app.patch('/api/sessions/:id/compliance', { preHandler: requireStaff }, async (r
 });
 
 const invoiceSchema = z.object({ clientId: z.string().uuid(), packageId: z.string().uuid().optional(), concept: z.string().min(2), amount: z.coerce.number().min(0), dueOn: z.string().date() });
+const statementQuerySchema = z.object({ clientId: z.string().uuid(), from: z.string().date(), to: z.string().date() }).refine(value => value.from <= value.to, { message: 'La fecha inicial debe ser anterior a la fecha final' });
+const receivablesQuerySchema = z.object({ asOf: z.string().date().default(new Date().toISOString().slice(0, 10)) });
+
+async function accountStatementData(ownerId: string, query: z.infer<typeof statementQuerySchema>) {
+  const [client] = await sql`SELECT id, full_name, email, phone FROM clients WHERE id = ${query.clientId} AND owner_id = ${ownerId}`;
+  if (!client) return null;
+  const rows = await sql`
+    SELECT i.id, COALESCE(i.issued_on, i.created_at::date) AS issued_on, i.due_on,
+      COALESCE(i.invoice_number, 'EIL-' || upper(substr(i.id::text, 1, 8))) AS invoice_number,
+      i.concept, i.amount,
+      CASE WHEN i.source_system = 'zoho_invoice' THEN GREATEST(i.amount - i.balance, 0) WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END AS paid_amount,
+      CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance WHEN i.status = 'confirmed' THEN 0 ELSE i.amount END AS balance_amount,
+      i.status,
+      CASE WHEN i.source_system = 'zoho_invoice' THEN 'Zoho' ELSE 'Eileen' END AS source_label
+    FROM invoices i JOIN clients c ON c.id = i.client_id
+    WHERE c.owner_id = ${ownerId} AND c.id = ${query.clientId} AND i.status <> 'void'
+      AND COALESCE(i.issued_on, i.created_at::date) >= ${query.from}::date
+      AND COALESCE(i.issued_on, i.created_at::date) <= ${query.to}::date
+    ORDER BY issued_on, i.created_at
+  `;
+  return { client, rows };
+}
+
+async function receivablesData(ownerId: string, asOf: string) {
+  const rows = await sql`
+    SELECT i.id, i.client_id, c.full_name, i.due_on,
+      COALESCE(i.invoice_number, 'EIL-' || upper(substr(i.id::text, 1, 8))) AS invoice_number,
+      i.concept, CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance WHEN i.status = 'confirmed' THEN 0 ELSE i.amount END AS balance_amount,
+      (${asOf}::date - i.due_on)::integer AS days_overdue,
+      CASE WHEN i.source_system = 'zoho_invoice' THEN 'Zoho' ELSE 'Eileen' END AS source_label
+    FROM invoices i JOIN clients c ON c.id = i.client_id
+    WHERE c.owner_id = ${ownerId} AND i.status <> 'void'
+      AND CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance WHEN i.status = 'confirmed' THEN 0 ELSE i.amount END > 0
+      AND COALESCE(i.issued_on, i.created_at::date) <= ${asOf}::date
+    ORDER BY days_overdue DESC, c.full_name
+  ` as unknown as Record<string, any>[];
+  return rows.map((row: Record<string, any>): Record<string, any> => {
+    const days = Number(row.days_overdue);
+    const aging = days <= 0 ? 'Por vencer' : days <= 30 ? '1-30 días' : days <= 60 ? '31-60 días' : days <= 90 ? '61-90 días' : 'Más de 90 días';
+    return { ...row, days_overdue: days, balance_amount: Number(row.balance_amount), aging };
+  });
+}
+
+const csvCell = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+const csvDate = (value: unknown) => String(value ?? '').slice(0, 10);
+function sendPdf(reply: any, buffer: Buffer, fileName: string) {
+  const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, '-');
+  reply.header('Content-Type', 'application/pdf');
+  reply.header('Content-Disposition', `inline; filename="${safeName}"`);
+  reply.header('Cache-Control', 'private, no-store');
+  reply.header('X-Content-Type-Options', 'nosniff');
+  return reply.send(buffer);
+}
+
 app.get('/api/invoices', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`SELECT i.*, c.full_name FROM invoices i JOIN clients c ON c.id = i.client_id WHERE c.owner_id = ${auth.sub} ORDER BY i.created_at DESC`;
@@ -394,6 +449,46 @@ app.get('/api/billing/analytics', { preHandler: requireStaff }, async request =>
     months,
     topClients: topClientRows.map(row => ({ id: row.id, name: row.full_name, paymentCount: Number(row.payment_count), amount: Number(row.amount) }))
   };
+});
+app.get('/api/invoices/:id/pdf', { preHandler: requireAuth }, async (request, reply) => {
+  const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const staff = ['admin', 'trainer'].includes(auth.role);
+  const [invoice] = await sql`
+    SELECT i.*, c.full_name, c.email,
+      CASE WHEN i.source_system = 'zoho_invoice' THEN GREATEST(i.amount - i.balance, 0) WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END AS paid_amount,
+      CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance WHEN i.status = 'confirmed' THEN 0 ELSE i.amount END AS balance_amount
+    FROM invoices i JOIN clients c ON c.id = i.client_id
+    WHERE i.id = ${id} AND ((${staff}::boolean AND c.owner_id = ${auth.sub}) OR (${!staff}::boolean AND c.portal_user_id = ${auth.sub}))
+  `;
+  if (!invoice) return reply.code(404).send({ error: 'Factura no encontrada' });
+  const payments = await sql`
+    SELECT p.paid_on, p.method, p.reference, pa.amount
+    FROM payment_allocations pa JOIN invoice_payments p ON p.id = pa.payment_id
+    WHERE pa.invoice_id = ${id} ORDER BY p.paid_on DESC
+  `;
+  return sendPdf(reply, await invoicePdf(invoice, payments), `factura-${invoice.invoice_number || String(invoice.id).slice(0, 8)}.pdf`);
+});
+app.get('/api/reports/account-statement.pdf', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const query = statementQuerySchema.parse(request.query); const report = await accountStatementData(auth.sub, query);
+  if (!report) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  return sendPdf(reply, await accountStatementPdf(report.client, report.rows, query.from, query.to), `estado-de-cuenta-${query.from}-${query.to}.pdf`);
+});
+app.get('/api/reports/account-statement.csv', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const query = statementQuerySchema.parse(request.query); const report = await accountStatementData(auth.sub, query);
+  if (!report) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  const lines = [['Fecha', 'Factura', 'Concepto', 'Facturado USD', 'Pagado USD', 'Saldo USD', 'Estado', 'Origen'].map(csvCell).join(','), ...report.rows.map(row => [csvDate(row.issued_on), row.invoice_number, row.concept, Number(row.amount).toFixed(2), Number(row.paid_amount).toFixed(2), Number(row.balance_amount).toFixed(2), row.status, row.source_label].map(csvCell).join(','))];
+  reply.header('Content-Type', 'text/csv; charset=utf-8'); reply.header('Content-Disposition', `attachment; filename="estado-de-cuenta-${query.from}-${query.to}.csv"`);
+  return `\uFEFF${lines.join('\n')}`;
+});
+app.get('/api/reports/accounts-receivable.pdf', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const { asOf } = receivablesQuerySchema.parse(request.query); const rows = await receivablesData(auth.sub, asOf);
+  return sendPdf(reply, await accountsReceivablePdf(rows, asOf), `cuentas-por-cobrar-${asOf}.pdf`);
+});
+app.get('/api/reports/accounts-receivable.csv', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const { asOf } = receivablesQuerySchema.parse(request.query); const rows = await receivablesData(auth.sub, asOf);
+  const lines = [['Cliente', 'Factura', 'Concepto', 'Vencimiento', 'Días vencidos', 'Antigüedad', 'Saldo USD', 'Origen'].map(csvCell).join(','), ...rows.map(row => [row.full_name, row.invoice_number, row.concept, csvDate(row.due_on), row.days_overdue, row.aging, Number(row.balance_amount).toFixed(2), row.source_label].map(csvCell).join(','))];
+  reply.header('Content-Type', 'text/csv; charset=utf-8'); reply.header('Content-Disposition', `attachment; filename="cuentas-por-cobrar-${asOf}.csv"`);
+  return `\uFEFF${lines.join('\n')}`;
 });
 app.post('/api/invoices', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = invoiceSchema.parse(request.body);
@@ -458,7 +553,6 @@ app.get('/api/compliance/summary', { preHandler: requireStaff }, async request =
   };
 });
 
-const csvCell = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
 app.get('/api/compliance/report.csv', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const query = z.object({ period: reportPeriodSchema.default('month'), clientId: z.string().uuid().optional() }).parse(request.query);
