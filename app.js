@@ -39,6 +39,8 @@ const seed = {
 let data = { clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, notifications: [] };
 let portalData = null;
 let compliancePeriod = 'week';
+let billingMonth = String(today.getMonth() + 1);
+let billingYear = String(today.getFullYear());
 let calendarMode = 'week';
 let calendarCursor = new Date(today);
 calendarCursor.setHours(12, 0, 0, 0);
@@ -140,6 +142,11 @@ const navigate = (id, { replace = false } = {}) => {
   if (window.location.hash !== hash) window.history[replace ? 'replaceState' : 'pushState'](null, '', hash);
 };
 const monthInvoices = () => data.invoices.filter(invoice => { const date = new Date(`${invoice.issued || invoice.due}T12:00:00`); return date.getMonth() === today.getMonth() && date.getFullYear() === today.getFullYear(); });
+const invoicePeriodDate = invoice => new Date(`${invoice.issued || invoice.due}T12:00:00`);
+const billingPeriodInvoices = () => data.invoices.filter(invoice => {
+  const date = invoicePeriodDate(invoice);
+  return date.getFullYear() === Number(billingYear) && (billingMonth === 'all' || date.getMonth() + 1 === Number(billingMonth));
+});
 const remainingSessions = pack => Math.max(0, pack.total - pack.used);
 const clientPackage = name => data.packages.find(pack => pack.client === name && pack.status === 'confirmed' && remainingSessions(pack) > 0) || data.packages.find(pack => pack.client === name && pack.status === 'pending') || data.packages.find(pack => pack.client === name && pack.status !== 'expired');
 const mondayFor = date => { const monday = new Date(date); monday.setDate(date.getDate() - ((date.getDay() + 6) % 7)); monday.setHours(0, 0, 0, 0); return monday; };
@@ -253,14 +260,27 @@ function renderRoutines() {
   document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${routine.title}</h3><p>${routine.description}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''}</footer></article>`).join('');
 }
 function renderBilling() {
-  const billed = monthInvoices().reduce((sum, item) => sum + item.amount, 0);
-  const pending = data.invoices.filter(item => item.status === 'pending').reduce((sum, item) => sum + item.balance, 0);
+  const yearSelect = document.getElementById('billing-year');
+  const availableYears = [...new Set([today.getFullYear(), ...data.invoices.map(invoice => invoicePeriodDate(invoice).getFullYear()).filter(Number.isFinite)])].sort((a, b) => b - a);
+  yearSelect.replaceChildren(...availableYears.map(year => new Option(String(year), String(year))));
+  if (!availableYears.includes(Number(billingYear))) billingYear = String(availableYears[0]);
+  yearSelect.value = billingYear;
+  document.getElementById('billing-month').value = billingMonth;
+  const periodInvoices = billingPeriodInvoices();
+  const billed = periodInvoices.filter(item => item.status !== 'void').reduce((sum, item) => sum + item.amount, 0);
+  const pending = periodInvoices.filter(item => item.status === 'pending').reduce((sum, item) => sum + Number(item.balance ?? item.amount ?? 0), 0);
+  const periodTitle = billingMonth === 'all'
+    ? `Año ${billingYear}`
+    : new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric' }).format(new Date(Number(billingYear), Number(billingMonth) - 1, 1));
+  document.getElementById('billing-period-title').textContent = periodTitle.charAt(0).toUpperCase() + periodTitle.slice(1);
+  document.getElementById('billed-period-label').textContent = billingMonth === 'all' ? 'Facturado en el año' : 'Facturado en el mes';
+  document.getElementById('billing-table-summary').textContent = `${periodInvoices.length} cobro${periodInvoices.length !== 1 ? 's' : ''} · Todos los importes están en USD`;
   document.getElementById('month-billed').textContent = money.format(billed);
   document.getElementById('active-memberships').textContent = data.clients.filter(client => client.billingModel === 'monthly' && client.status === 'Activo').length;
   document.getElementById('active-packages').textContent = data.packages.filter(pack => pack.status === 'confirmed' && remainingSessions(pack) > 0).length;
   document.getElementById('billing-pending').textContent = money.format(pending);
   document.getElementById('plan-grid').innerHTML = data.plans.length ? data.plans.map(plan => `<article class="plan-card ${plan.active ? '' : 'inactive'}"><div><span class="commercial-label ${plan.billingModel === 'package' ? 'package-label' : ''}">${plan.billingModel === 'package' ? 'Paquete' : 'Mensualidad'}</span><h4>${escapeHtml(plan.name)}</h4><p>${escapeHtml(plan.description || (plan.billingModel === 'package' ? `${plan.sessionsIncluded} sesiones · ${plan.validityDays} días` : 'Cobro mensual'))}</p></div><div class="plan-price"><strong>${money.format(plan.price)}</strong><small>${plan.active ? 'Disponible' : 'Inactivo'}</small></div><button class="text-button" data-edit-plan="${plan.id}">Editar</button></article>`).join('') : '<p class="empty">Crea el primer plan para asignarlo a tus clientes.</p>';
-  document.getElementById('invoice-table').innerHTML = data.invoices.map(invoice => { const label = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'; const concept = invoice.invoiceNumber ? `<small>${invoice.source === 'zoho_invoice' ? 'Zoho' : 'Eileen'} · ${invoice.invoiceNumber}</small><br>${invoice.concept}` : invoice.concept; return `<tr><td><b>${invoice.client}</b></td><td>${concept}</td><td>${invoice.due}</td><td>${invoice.method === 'pending' ? '—' : invoice.method}</td><td>${money.format(invoice.amount)}${invoice.status === 'pending' && invoice.balance !== invoice.amount ? `<br><small>Saldo ${money.format(invoice.balance)}</small>` : ''}</td><td><span class="payment-status ${invoice.status}">${label}</span></td><td>${invoice.status === 'pending' && invoice.source !== 'zoho_invoice' ? `<button class="secondary session-use" data-confirm-invoice="${invoice.id}">Confirmar</button>` : ''}</td></tr>`; }).join('');
+  document.getElementById('invoice-table').innerHTML = periodInvoices.length ? periodInvoices.map(invoice => { const label = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'; const concept = invoice.invoiceNumber ? `<small>${invoice.source === 'zoho_invoice' ? 'Zoho' : 'Eileen'} · ${invoice.invoiceNumber}</small><br>${invoice.concept}` : invoice.concept; return `<tr><td><b>${invoice.client}</b></td><td>${concept}</td><td>${invoice.due}</td><td>${invoice.method === 'pending' ? '—' : invoice.method}</td><td>${money.format(invoice.amount)}${invoice.status === 'pending' && invoice.balance !== invoice.amount ? `<br><small>Saldo ${money.format(invoice.balance)}</small>` : ''}</td><td><span class="payment-status ${invoice.status}">${label}</span></td><td>${invoice.status === 'pending' && invoice.source !== 'zoho_invoice' ? `<button class="secondary session-use" data-confirm-invoice="${invoice.id}">Confirmar</button>` : ''}</td></tr>`; }).join('') : '<tr><td colspan="7" class="empty">No hay cobros en el período seleccionado.</td></tr>';
   document.getElementById('package-table').innerHTML = data.packages.length ? data.packages.map(pack => {
     const remaining = remainingSessions(pack);
     const state = pack.status === 'pending' ? 'Pendiente de pago' : remaining ? 'Activo' : 'Agotado';
@@ -602,6 +622,11 @@ document.getElementById('compliance-period').addEventListener('change', async ev
   compliancePeriod = event.target.value;
   try { data.compliance = await api(`/api/compliance/summary?period=${compliancePeriod}`); renderDashboard(); }
   catch (error) { toast(error.message, true); }
+});
+document.getElementById('billing-month').addEventListener('change', event => { billingMonth = event.target.value; renderBilling(); });
+document.getElementById('billing-year').addEventListener('change', event => { billingYear = event.target.value; renderBilling(); });
+document.getElementById('billing-current-period').addEventListener('click', () => {
+  billingMonth = String(today.getMonth() + 1); billingYear = String(today.getFullYear()); renderBilling();
 });
 document.getElementById('notification-button').addEventListener('click', () => notificationCenter(false));
 document.getElementById('today').textContent = new Intl.DateTimeFormat('es-PA', { weekday: 'long', day: 'numeric', month: 'long' }).format(today);

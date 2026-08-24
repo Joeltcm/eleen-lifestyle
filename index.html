@@ -140,13 +140,19 @@
 
         <section class="view" id="billing">
           <div class="section-heading"><p class="eyebrow">COBROS Y PAQUETES · USD</p><button class="primary" data-action="new-invoice">+ Crear cobro</button></div>
+          <div class="billing-period-bar" aria-label="Filtrar facturación por período">
+            <div class="billing-period-copy"><span class="eyebrow">PERÍODO FINANCIERO</span><strong id="billing-period-title">Mes actual</strong></div>
+            <label>Mes<select id="billing-month"><option value="1">Enero</option><option value="2">Febrero</option><option value="3">Marzo</option><option value="4">Abril</option><option value="5">Mayo</option><option value="6">Junio</option><option value="7">Julio</option><option value="8">Agosto</option><option value="9">Septiembre</option><option value="10">Octubre</option><option value="11">Noviembre</option><option value="12">Diciembre</option><option value="all">Todos los meses</option></select></label>
+            <label>Año<select id="billing-year"></select></label>
+            <button class="secondary" type="button" id="billing-current-period">Mes actual</button>
+          </div>
           <article class="card zoho-migration" id="zoho-migration-card">
             <div class="zoho-migration-top"><div class="zoho-migration-title"><span class="zoho-mark">ZOHO</span><div><h3>Migración desde Zoho Invoice</h3><p>Importa clientes, facturas, pagos, saldos, notas de crédito y mensualidades sin duplicarlos.</p><p class="commercial-note">Documentos comerciales no fiscales</p></div></div><span class="zoho-status" id="zoho-status">Consultando…</span></div>
             <div id="zoho-migration-body"><p class="empty">Verificando la conexión privada con Zoho…</p></div>
           </article>
           <article class="card plans-card"><div class="card-head"><div><h3>Planes comerciales</h3><p>Edita mensualidades, paquetes, precios y vigencia</p></div><button class="secondary" data-action="new-plan">+ Crear plan</button></div><div class="plan-grid" id="plan-grid"></div></article>
-          <div class="metrics billing-metrics"><article><span>Facturado este mes</span><strong id="month-billed">$0.00</strong></article><article><span>Mensualidades activas</span><strong id="active-memberships">0</strong></article><article><span>Paquetes activos</span><strong id="active-packages">0</strong></article><article><span>Pendiente</span><strong id="billing-pending">$0.00</strong></article></div>
-          <article class="card"><div class="card-head"><div><h3>Cobros recientes</h3><p>Todos los importes están en USD</p></div></div><div class="table-wrap"><table><thead><tr><th>Cliente</th><th>Concepto</th><th>Vence</th><th>Método</th><th>Monto</th><th>Estado</th><th></th></tr></thead><tbody id="invoice-table"></tbody></table></div></article>
+          <div class="metrics billing-metrics"><article><span id="billed-period-label">Facturado en el período</span><strong id="month-billed">$0.00</strong></article><article><span>Mensualidades activas</span><strong id="active-memberships">0</strong></article><article><span>Paquetes activos</span><strong id="active-packages">0</strong></article><article><span>Pendiente en el período</span><strong id="billing-pending">$0.00</strong></article></div>
+          <article class="card"><div class="card-head"><div><h3>Cobros del período</h3><p id="billing-table-summary">Todos los importes están en USD</p></div></div><div class="table-wrap"><table><thead><tr><th>Cliente</th><th>Concepto</th><th>Vence</th><th>Método</th><th>Monto</th><th>Estado</th><th></th></tr></thead><tbody id="invoice-table"></tbody></table></div></article>
           <article class="card package-card"><div class="card-head"><div><h3>Control de paquetes</h3><p>Sesiones compradas, utilizadas y disponibles</p></div></div><div class="table-wrap"><table><thead><tr><th>Cliente</th><th>Paquete</th><th>Compradas</th><th>Usadas</th><th>Disponibles</th><th>Estado</th><th></th></tr></thead><tbody id="package-table"></tbody></table></div></article>
         </section>
       </main>
