@@ -14,7 +14,8 @@ Primera base de la PWA para la gestión de entrenamiento personal.
 
 - Panel operativo con indicadores de clientes, sesiones, progreso y cobros.
 - Expedientes de cliente con histórico de composición corporal.
-- Visualización de las métricas del formato InBody 580 compartido.
+- Importación automática de reportes InBody 580 en JPG, PNG, WebP o PDF.
+- Extracción visual con Workers AI, validaciones numéricas y revisión rápida antes de confirmar el historial.
 - Agenda semanal preparada para enlazar Google Calendar.
 - Agenda operativa con creación y control de asistencia.
 - Descuento automático de sesiones al completar una cita de un cliente con paquete.
@@ -33,9 +34,15 @@ npx serve .
 
 Después abre la URL que indique el servidor en un navegador. La información de esta primera base se conserva localmente en el navegador.
 
+## Variables del análisis InBody en Railway
+
+- `CLOUDFLARE_ACCOUNT_ID`
+- `CLOUDFLARE_API_TOKEN`, creado con permisos `Workers AI Read` y `Workers AI Edit`
+- `CLOUDFLARE_VISION_MODEL` es opcional; usa `@cf/moondream/moondream3.1-9B-A2B` por defecto
+
+Los documentos se guardan primero en R2. La aplicación omite identificadores personales en la respuesta estructurada, comprueba rangos y relaciones matemáticas, y no genera diagnósticos médicos.
+
 ## Próximas integraciones necesarias
 
-1. Autenticación y base de datos segura para cada entrenadora/cliente.
-2. Servicio OCR/IA para importar automáticamente los reportes InBody 580 desde PDF o imágenes.
-3. Integración OAuth con Google Calendar.
-4. Generación de recibos/facturas y almacenamiento de comprobantes.
+1. Integración OAuth con Google Calendar.
+2. Generación fiscal mediante un PAC autorizado cuando el negocio lo requiera.

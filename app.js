@@ -65,12 +65,14 @@ async function loadData() {
   ]);
   const assessments = await Promise.all(clients.map(client => api(`/api/clients/${client.id}/inbody`)));
   data.clients = clients.map((client, index) => {
-    const history = assessments[index].assessments.map(item => ({
+    const readyAssessments = assessments[index].assessments.filter(item => item.extraction_status === 'ready');
+    const history = readyAssessments.map(item => ({
       date: String(item.tested_at).slice(0, 10), weight: Number(item.values.weightKg), smm: Number(item.values.skeletalMuscleMassKg),
       fat: Number(item.values.bodyFatMassKg), pbf: Number(item.values.percentBodyFat), score: Number(item.values.inBodyScore)
     }));
     const latest = history.at(-1);
-    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), email: client.email || '', status: client.status === 'active' ? 'Activo' : 'Inactivo', inbody: latest ? { ...latest, history } : null };
+    const inbodyReviews = assessments[index].assessments.filter(item => item.extraction_status === 'review');
+    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), email: client.email || '', status: client.status === 'active' ? 'Activo' : 'Inactivo', inbodyReviews, inbody: latest ? { ...latest, history } : null };
   });
   data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, concept: item.concept, amount: Number(item.amount), balance: item.source_system ? Number(item.balance) : item.status === 'pending' ? Number(item.amount) : 0, due: item.due_on, issued: item.issued_on || item.due_on, method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '' }));
   data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired' }));
@@ -78,6 +80,7 @@ async function loadData() {
   data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: 0, sessions: item.sessions_per_week, exercises: item.exercises || [] }));
 }
 const initials = name => name.split(' ').slice(0, 2).map(word => word[0]).join('').toUpperCase();
+const escapeHtml = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 const view = id => {
   document.querySelectorAll('.view').forEach(item => item.classList.toggle('active', item.id === id));
   document.querySelectorAll('.nav-link').forEach(item => item.classList.toggle('active', item.dataset.view === id));
@@ -353,9 +356,37 @@ function clientDetail(id) {
     ? `${pack?.label || `Paquete ${client.packageSessions || 0} sesiones`} · ${pack ? remainingSessions(pack) : client.packageSessions || 0} disponibles · ${money.format(client.plan)}`
     : `Mensualidad · ${money.format(client.plan)} al mes`;
   const box = document.createElement('div');
-  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th></tr></thead><tbody>${inbody.history.map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha importado una evaluación InBody.</p>'}<button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
+  const reviewNotice = client.inbodyReviews.length ? `<button class="secondary wide-button" id="review-inbody">Revisar ${client.inbodyReviews.length} evaluación${client.inbodyReviews.length > 1 ? 'es' : ''} pendiente${client.inbodyReviews.length > 1 ? 's' : ''}</button>` : '';
+  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th></tr></thead><tbody>${inbody.history.map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
   openModal(box); document.getElementById('open-scan').onclick = () => inbodyImport(client);
+  if (client.inbodyReviews.length) document.getElementById('review-inbody').onclick = () => inbodyReview(client, client.inbodyReviews);
 }
+
+const inbodyReviewFields = [
+  ['weightKg', 'Peso', 'kg'], ['skeletalMuscleMassKg', 'Músculo', 'kg'], ['bodyFatMassKg', 'Masa grasa', 'kg'],
+  ['percentBodyFat', 'Grasa', '%'], ['bmi', 'IMC', ''], ['ecwRatio', 'ECW', ''], ['inBodyScore', 'Score', '']
+];
+
+function inbodyReview(client, assessments, pageErrors = []) {
+  const box = document.createElement('div');
+  const rows = assessments.map((item, index) => `<section class="inbody-review-item" data-assessment="${item.id}"><div class="inbody-review-item-head"><b>Medición ${index + 1}</b><label>Fecha<input aria-label="Fecha" data-inbody-date type="date" value="${String(item.tested_at).slice(0, 10)}"></label></div><div class="inbody-review-fields">${inbodyReviewFields.map(([key, label, unit]) => `<label class="inbody-cell"><span>${label}</span><input aria-label="${label}" data-inbody-key="${key}" type="number" step="0.001" value="${item.values[key] ?? ''}"><small>${unit}</small></label>`).join('')}</div></section>`).join('');
+  const notes = assessments.flatMap(item => item.review_notes || []);
+  box.innerHTML = `<form id="inbody-review-form"><p class="eyebrow">REVISIÓN DE DATOS</p><h2>Confirmar historial InBody</h2><p class="inbody-review-copy">Compara estos datos con el reporte de ${escapeHtml(client.name)}. Solo corrige una cifra si no coincide; el resto ya fue capturado automáticamente.</p>${notes.length ? `<div class="inbody-warnings"><b>Revisar con atención</b>${[...new Set(notes)].map(note => `<span>${escapeHtml(note)}</span>`).join('')}</div>` : ''}${pageErrors.length ? `<div class="inbody-warnings"><b>Archivos con lectura incompleta</b>${pageErrors.map(note => `<span>${escapeHtml(note)}</span>`).join('')}</div>` : ''}<div class="inbody-review-list">${rows}</div><p class="inbody-review-note">La confirmación guarda el historial y habilita las comparaciones. No genera diagnósticos médicos.</p><button class="primary wide-button">Confirmar resultados</button></form>`;
+  openModal(box, true);
+  document.getElementById('inbody-review-form').addEventListener('submit', async event => {
+    event.preventDefault(); const button = event.currentTarget.querySelector('button'); button.disabled = true; button.textContent = 'Guardando…';
+    try {
+      for (const row of event.currentTarget.querySelectorAll('[data-assessment]')) {
+        const original = assessments.find(item => item.id === row.dataset.assessment); const values = { ...original.values };
+        row.querySelectorAll('[data-inbody-key]').forEach(input => { if (input.value === '') delete values[input.dataset.inbodyKey]; else values[input.dataset.inbodyKey] = Number(input.value); });
+        const date = row.querySelector('[data-inbody-date]').value;
+        await api(`/api/inbody/${original.id}`, { method: 'PATCH', body: { testedAt: `${date}T12:00:00-05:00`, values, extractionStatus: 'ready' } });
+      }
+      await loadData(); renderAll(); modal.close(); view('clients'); toast('Historial InBody confirmado');
+    } catch (error) { toast(error.message, true); button.disabled = false; button.textContent = 'Confirmar resultados'; }
+  });
+}
+
 function inbodyImport(client) {
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">IMPORTACIÓN AUTOMÁTICA</p><h2>Analizar InBody</h2><p style="color:#6f7b75">Sube las páginas del reporte en PDF, JPG o PNG. Se guardarán en el expediente privado antes de iniciar el análisis.</p><label style="border:2px dashed #d8a7bc;border-radius:9px;padding:24px;text-align:center;color:#8c5870;cursor:pointer"><input id="inbody-file" type="file" accept="application/pdf,image/jpeg,image/png,image/webp" multiple hidden />Seleccionar reporte InBody<br><small style="color:#6f7b75;font-weight:400">Máximo 20 MB por archivo</small></label><div id="scan-result"></div>`;
@@ -363,6 +394,7 @@ function inbodyImport(client) {
     const files = [...event.target.files]; if (!files.length) return;
     const result = document.getElementById('scan-result'); result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>Subiendo ${files.length} archivo${files.length > 1 ? 's' : ''}…</b><span>Conexión privada con el expediente de ${client.name}.</span></div>`;
     try {
+      const documentIds = [];
       for (const file of files) {
         if (file.size > 20 * 1024 * 1024) throw new Error(`${file.name} supera el límite de 20 MB`);
         const extension = file.name.split('.').pop()?.toLowerCase();
@@ -370,9 +402,16 @@ function inbodyImport(client) {
         if (!['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(contentType)) throw new Error(`${file.name} no es un PDF, JPG, PNG o WebP válido`);
         const created = await api('/api/documents/upload-url', { method: 'POST', body: { clientId: client.id, kind: 'inbody', fileName: file.name, contentType, sizeBytes: file.size } });
         await api(`/api/documents/${created.document.id}/content`, { method: 'PUT', headers: { 'Content-Type': contentType }, body: file });
+        documentIds.push(created.document.id);
       }
-      result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>Reporte guardado de forma segura</b><span>Los archivos quedaron asociados a ${client.name}. La extracción OCR y la revisión de métricas se activarán en la siguiente fase.</span></div>`;
-    } catch (error) { result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>No se pudo completar la carga</b><span>${error.message}</span></div>`; }
+      result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>Analizando el reporte…</b><span>Leyendo métricas, fechas e historial y comprobando la coherencia de los resultados.</span></div>`;
+      try {
+        const analyzed = await api('/api/inbody/analyze', { method: 'POST', body: { clientId: client.id, documentIds } });
+        inbodyReview(client, analyzed.assessments, analyzed.pageErrors);
+      } catch (analysisError) {
+        result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>Reporte guardado; análisis pendiente</b><span>${escapeHtml(analysisError.message)}. El archivo está seguro y podrás reintentar cuando el lector automático esté configurado.</span></div>`;
+      }
+    } catch (error) { result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>No se pudo completar la carga</b><span>${escapeHtml(error.message)}</span></div>`; }
   });
 }
 document.querySelectorAll('.nav-link').forEach(link => link.addEventListener('click', event => {

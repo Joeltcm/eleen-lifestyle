@@ -6,7 +6,8 @@ import { randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
 import { config } from './config.js';
 import { sql } from './db.js';
-import { createDownloadUrl, createUploadUrl, storageReady, uploadObject, verifyUpload } from './storage.js';
+import { createDownloadUrl, createUploadUrl, downloadObject, storageReady, uploadObject, verifyUpload } from './storage.js';
+import { extractInBodyDocument, extractInBodyImage, inbodyAnalysisReady, validateExtraction, validateInBodyValues } from './inbody-analysis.js';
 import { registerZohoRoutes } from './zoho-routes.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
@@ -20,7 +21,7 @@ app.addContentTypeParser([...documentContentTypes], { parseAs: 'buffer', bodyLim
 
 await app.register(cors, {
   origin: config.CORS_ORIGIN.split(',').map(origin => origin.trim()),
-  methods: ['GET', 'HEAD', 'POST', 'PUT', 'OPTIONS'],
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'OPTIONS'],
   credentials: true
 });
 await app.register(jwt, { secret: config.JWT_SECRET });
@@ -47,7 +48,11 @@ async function requireStaff(request: FastifyRequest) {
 
 app.get('/health', async () => {
   const [database] = await sql`SELECT now() AS time`;
-  return { status: 'ok', service: 'eileen-lifestyle-api', databaseTime: database.time, documentStorage: storageReady ? 'ready' : 'configuration_required' };
+  return {
+    status: 'ok', service: 'eileen-lifestyle-api', databaseTime: database.time,
+    documentStorage: storageReady ? 'ready' : 'configuration_required',
+    inbodyAnalysis: inbodyAnalysisReady ? 'configured' : 'configuration_required'
+  };
 });
 
 app.get('/api/auth/setup-status', async () => {
@@ -339,6 +344,95 @@ app.post('/api/inbody', { preHandler: requireStaff }, async (request, reply) => 
   const auth = request.user as AuthUser; const input = inbodySchema.parse(request.body);
   const [assessment] = await sql`INSERT INTO inbody_assessments (client_id, document_id, device_model, tested_at, values, confidence, extraction_status) SELECT c.id, ${input.documentId || null}, ${input.deviceModel || null}, ${input.testedAt}, ${sql.json(input.values)}, ${sql.json(input.confidence)}, ${input.extractionStatus} FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} RETURNING *`;
   if (!assessment) return reply.code(404).send({ error: 'Cliente no encontrado' }); return reply.code(201).send(assessment);
+});
+
+const analyzeInBodySchema = z.object({
+  clientId: z.string().uuid(),
+  documentIds: z.array(z.string().uuid()).min(1).max(10)
+});
+
+app.post('/api/inbody/analyze', { preHandler: requireStaff }, async (request, reply) => {
+  if (!inbodyAnalysisReady) return reply.code(503).send({
+    error: 'El análisis automático aún no está configurado',
+    setup: 'Agrega a Railway un token de Cloudflare con permisos Workers AI Read y Edit.'
+  });
+  const auth = request.user as AuthUser; const input = analyzeInBodySchema.parse(request.body);
+  const documents = await sql`
+    SELECT d.* FROM documents d JOIN clients c ON c.id = d.client_id
+    WHERE c.owner_id = ${auth.sub} AND d.client_id = ${input.clientId}
+      AND d.kind = 'inbody' AND d.upload_status = 'ready' AND d.id = ANY(${input.documentIds}::uuid[])
+    ORDER BY d.created_at
+  `;
+  if (documents.length !== input.documentIds.length) return reply.code(404).send({ error: 'Uno o más reportes no están disponibles' });
+
+  const merged = new Map<string, { documentId: string; deviceModel: string | null; values: Record<string, number>; confidence: Record<string, number>; warnings: string[] }>();
+  const pageErrors: string[] = [];
+  for (const document of documents) {
+    try {
+      const raw = document.content_type === 'application/pdf'
+        ? await (async () => { const file = await downloadObject(document.object_key); return extractInBodyDocument(file.body, document.original_name, document.content_type); })()
+        : await extractInBodyImage(await createDownloadUrl(document.object_key));
+      const extracted = validateExtraction(raw);
+      for (const measurement of extracted.measurements) {
+        const current = merged.get(measurement.testedAt);
+        merged.set(measurement.testedAt, {
+          documentId: document.id,
+          deviceModel: extracted.deviceModel || current?.deviceModel || null,
+          values: { ...(current?.values || {}), ...measurement.values },
+          confidence: { ...(current?.confidence || {}), ...measurement.confidence },
+          warnings: [...new Set([...(current?.warnings || []), ...measurement.warnings])]
+        });
+      }
+    } catch (error) {
+      request.log.warn({ error, documentId: document.id }, 'Falló la extracción del reporte InBody');
+      pageErrors.push(`${document.original_name}: ${(error as Error).message}`);
+    }
+  }
+  if (!merged.size) return reply.code(422).send({ error: pageErrors[0] || 'No se encontraron métricas InBody en los archivos' });
+  for (const measurement of merged.values()) {
+    measurement.warnings = [...new Set([...measurement.warnings, ...validateInBodyValues(measurement.values)])];
+  }
+
+  const assessments = await sql.begin(async transaction => {
+    const saved = [];
+    for (const [testedAt, measurement] of [...merged.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      const [assessment] = await transaction`
+        INSERT INTO inbody_assessments (client_id, document_id, device_model, tested_at, values, confidence, extraction_status, review_notes)
+        VALUES (${input.clientId}, ${measurement.documentId}, ${measurement.deviceModel}, ${testedAt}, ${transaction.json(measurement.values)}, ${transaction.json(measurement.confidence)}, 'review', ${transaction.json(measurement.warnings)})
+        ON CONFLICT (client_id, tested_at) DO UPDATE SET
+          document_id = EXCLUDED.document_id,
+          device_model = COALESCE(EXCLUDED.device_model, inbody_assessments.device_model),
+          values = inbody_assessments.values || EXCLUDED.values,
+          confidence = inbody_assessments.confidence || EXCLUDED.confidence,
+          extraction_status = 'review',
+          review_notes = EXCLUDED.review_notes
+        RETURNING *
+      `;
+      saved.push(assessment);
+    }
+    return saved;
+  });
+  return { assessments, pageErrors, requiresReview: true };
+});
+
+const reviewInBodySchema = z.object({
+  testedAt: z.string().datetime(),
+  values: z.record(z.string(), z.union([z.number(), z.string(), z.null()])),
+  extractionStatus: z.enum(['ready', 'review']).default('ready')
+});
+
+app.patch('/api/inbody/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = reviewInBodySchema.parse(request.body);
+  const [assessment] = await sql`
+    UPDATE inbody_assessments a SET tested_at = ${input.testedAt}, values = ${sql.json(input.values)},
+      extraction_status = ${input.extractionStatus}, review_notes = '[]'::jsonb
+    FROM clients c WHERE a.id = ${id} AND c.id = a.client_id AND c.owner_id = ${auth.sub}
+    RETURNING a.*
+  `;
+  if (!assessment) return reply.code(404).send({ error: 'Evaluación InBody no encontrada' });
+  return assessment;
 });
 
 app.addHook('onClose', async () => { await sql.end(); });

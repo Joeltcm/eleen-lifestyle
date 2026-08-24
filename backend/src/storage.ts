@@ -31,6 +31,14 @@ export async function createDownloadUrl(objectKey: string) {
   return getSignedUrl(client, new GetObjectCommand({ Bucket: config.R2_BUCKET, Key: objectKey }), { expiresIn: 300 });
 }
 
+export async function downloadObject(objectKey: string) {
+  if (!client) throw new Error('R2 no está configurado');
+  const result = await client.send(new GetObjectCommand({ Bucket: config.R2_BUCKET, Key: objectKey }));
+  if (!result.Body) throw new Error('El documento está vacío');
+  const bytes = await result.Body.transformToByteArray();
+  return { body: Buffer.from(bytes), contentType: result.ContentType || 'application/octet-stream' };
+}
+
 export async function verifyUpload(objectKey: string) {
   if (!client) throw new Error('R2 no está configurado');
   const result = await client.send(new HeadObjectCommand({ Bucket: config.R2_BUCKET, Key: objectKey }));
