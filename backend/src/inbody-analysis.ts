@@ -177,13 +177,23 @@ function isoDate(value: string) {
   return Number.isNaN(direct.getTime()) ? null : direct.toISOString();
 }
 
-export function validateExtraction(raw: z.infer<typeof extractionSchema>) {
+function allowedMetricsForFile(fileName: string) {
+  const historyPage = fileName.match(/body[\s_-]*history[\s_-]*(\d+)/i);
+  if (!historyPage) return new Set<InBodyMetricKey>(metricKeys);
+  if (historyPage[1] === '0') return new Set<InBodyMetricKey>(['weightKg', 'skeletalMuscleMassKg', 'bodyFatMassKg', 'percentBodyFat', 'ecwRatio']);
+  if (historyPage[1] === '1') return new Set<InBodyMetricKey>(['bmi', 'visceralFatLevel']);
+  return new Set<InBodyMetricKey>();
+}
+
+export function validateExtraction(raw: z.infer<typeof extractionSchema>, fileName = '') {
   const validated: ValidatedMeasurement[] = [];
+  const allowedMetrics = allowedMetricsForFile(fileName);
   for (const measurement of raw.measurements) {
     const warnings = [...raw.warnings]; const testedAt = isoDate(measurement.testedAt);
     if (!testedAt) { warnings.push(`Fecha no reconocida: ${measurement.testedAt}`); continue; }
     const values: InBodyValues = {}; const confidence: Record<string, number> = {};
     for (const key of metricKeys) {
+      if (!allowedMetrics.has(key)) continue;
       const value = numberValue(measurement.values[key]); if (value === null) continue;
       const range = ranges[key];
       if (range && (value < range[0] || value > range[1])) { warnings.push(`${key} fuera de rango plausible (${value})`); continue; }

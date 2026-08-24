@@ -423,7 +423,7 @@ app.post('/api/inbody/analyze', { preHandler: requireStaff }, async (request, re
         : isInBodyHistoryImage(document.original_name)
           ? await (async () => { const file = await downloadObject(document.object_key); return extractInBodyImage(await prepareInBodyHistoryImage(file.body), document.original_name); })()
           : await extractInBodyImage(await createDownloadUrl(document.object_key), document.original_name);
-      const extracted = validateExtraction(raw);
+      const extracted = validateExtraction(raw, document.original_name);
       for (const measurement of extracted.measurements) {
         const current = merged.get(measurement.testedAt);
         merged.set(measurement.testedAt, {
@@ -453,8 +453,8 @@ app.post('/api/inbody/analyze', { preHandler: requireStaff }, async (request, re
         ON CONFLICT (client_id, tested_at) DO UPDATE SET
           document_id = EXCLUDED.document_id,
           device_model = COALESCE(EXCLUDED.device_model, inbody_assessments.device_model),
-          values = inbody_assessments.values || EXCLUDED.values,
-          confidence = inbody_assessments.confidence || EXCLUDED.confidence,
+          values = EXCLUDED.values,
+          confidence = EXCLUDED.confidence,
           extraction_status = 'review',
           review_notes = EXCLUDED.review_notes
         RETURNING *
