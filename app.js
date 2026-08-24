@@ -738,10 +738,26 @@ function inbodyImport(client) {
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">IMPORTACIÓN AUTOMÁTICA</p><h2>Analizar InBody</h2><p style="color:#6f7b75">Sube las páginas del reporte en PDF, JPG o PNG. Se guardarán en el expediente privado antes de iniciar el análisis.</p><p id="inbody-quota" class="inbody-review-note">Consultando el límite diario de análisis…</p><label style="border:2px dashed #d8a7bc;border-radius:9px;padding:24px;text-align:center;color:#8c5870;cursor:pointer"><input id="inbody-file" type="file" accept="application/pdf,image/jpeg,image/png,image/webp" multiple hidden />Seleccionar reporte InBody<br><small style="color:#6f7b75;font-weight:400">Máximo 20 MB por archivo</small></label><div id="scan-result"></div>`;
   openModal(box);
+  const result = document.getElementById('scan-result');
+  const analyzeDocuments = async documentIds => {
+    result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>Analizando el reporte…</b><span>Leyendo métricas, fechas e historial y comprobando la coherencia de los resultados.</span></div>`;
+    try {
+      const analyzed = await api('/api/inbody/analyze', { method: 'POST', body: { clientId: client.id, documentIds } });
+      inbodyReview(client, analyzed.assessments, analyzed.pageErrors, analyzed.skippedPages);
+    } catch (analysisError) {
+      result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>Reporte guardado; análisis pendiente</b><span>${escapeHtml(analysisError.message)}. El archivo permanece seguro y puedes reintentarlo desde esta misma pantalla.</span></div>`;
+    }
+  };
   api('/api/inbody/quota').then(quota => { document.getElementById('inbody-quota').textContent = `Protección de costo: ${quota.remaining} de ${quota.limit} unidades disponibles hoy.`; }).catch(() => {});
+  api(`/api/documents?clientId=${encodeURIComponent(client.id)}`).then(documents => {
+    const latest = documents.find(document => document.kind === 'inbody' && document.upload_status === 'ready');
+    if (!latest || result.children.length) return;
+    result.innerHTML = `<div class="alert-item inbody-retry" style="margin-top:15px"><b>Archivo guardado disponible</b><span>${escapeHtml(latest.original_name)} ya está en el expediente. Puedes analizarlo sin volver a subirlo.</span><button class="secondary" id="retry-saved-inbody">Analizar último archivo guardado</button></div>`;
+    document.getElementById('retry-saved-inbody').addEventListener('click', () => analyzeDocuments([latest.id]));
+  }).catch(() => {});
   document.getElementById('inbody-file').addEventListener('change', async event => {
     const files = [...event.target.files]; if (!files.length) return;
-    const result = document.getElementById('scan-result'); result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>Subiendo ${files.length} archivo${files.length > 1 ? 's' : ''}…</b><span>Conexión privada con el expediente de ${client.name}.</span></div>`;
+    result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>Subiendo ${files.length} archivo${files.length > 1 ? 's' : ''}…</b><span>Conexión privada con el expediente de ${client.name}.</span></div>`;
     try {
       const documentIds = [];
       for (const file of files) {
@@ -753,13 +769,7 @@ function inbodyImport(client) {
         await api(`/api/documents/${created.document.id}/content`, { method: 'PUT', headers: { 'Content-Type': contentType }, body: file });
         documentIds.push(created.document.id);
       }
-      result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>Analizando el reporte…</b><span>Leyendo métricas, fechas e historial y comprobando la coherencia de los resultados.</span></div>`;
-      try {
-        const analyzed = await api('/api/inbody/analyze', { method: 'POST', body: { clientId: client.id, documentIds } });
-        inbodyReview(client, analyzed.assessments, analyzed.pageErrors, analyzed.skippedPages);
-      } catch (analysisError) {
-        result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>Reporte guardado; análisis pendiente</b><span>${escapeHtml(analysisError.message)}. El archivo está seguro y podrás reintentar cuando el lector automático esté configurado.</span></div>`;
-      }
+      await analyzeDocuments(documentIds);
     } catch (error) { result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>No se pudo completar la carga</b><span>${escapeHtml(error.message)}</span></div>`; }
   });
 }
