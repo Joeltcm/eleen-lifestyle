@@ -1,3 +1,4 @@
+const APP_VERSION = '43';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -924,17 +925,48 @@ document.getElementById('notification-button').addEventListener('click', () => n
 document.getElementById('today').textContent = new Intl.DateTimeFormat('es-PA', { weekday: 'long', day: 'numeric', month: 'long' }).format(today);
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   let refreshingApplication = false;
-  navigator.serviceWorker.addEventListener('controllerchange', () => {
+  const reloadForUpdate = () => {
     if (refreshingApplication) return;
     refreshingApplication = true;
     window.location.reload();
+  };
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    reloadForUpdate();
+  });
+  navigator.serviceWorker.addEventListener('message', event => {
+    if (event.data?.type === 'EILEEN_UPDATE_READY' && event.data.version !== APP_VERSION) reloadForUpdate();
   });
   window.addEventListener('load', async () => {
     try {
-      const registration = await navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' });
+      const registration = await navigator.serviceWorker.register(`./sw.js?v=${APP_VERSION}`, { updateViaCache: 'none' });
+      const activateWaitingWorker = () => registration.waiting?.postMessage({ type: 'SKIP_WAITING' });
+      activateWaitingWorker();
+      registration.addEventListener('updatefound', () => {
+        const worker = registration.installing;
+        worker?.addEventListener('statechange', () => {
+          if (worker.state === 'installed' && navigator.serviceWorker.controller) worker.postMessage({ type: 'SKIP_WAITING' });
+        });
+      });
       await registration.update();
+      activateWaitingWorker();
+
+      const checkApplicationVersion = async () => {
+        try {
+          const response = await fetch(`./version.json?t=${Date.now()}`, { cache: 'no-store' });
+          if (!response.ok) return;
+          const latest = await response.json();
+          if (latest.version === APP_VERSION) return;
+          await registration.update();
+          activateWaitingWorker();
+        } catch {}
+      };
+      await checkApplicationVersion();
+      window.setInterval(checkApplicationVersion, 5 * 60 * 1000);
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') checkApplicationVersion();
+      });
     } catch {
-      await navigator.serviceWorker.register('./sw.js').catch(() => {});
+      await navigator.serviceWorker.register(`./sw.js?v=${APP_VERSION}`).catch(() => {});
     }
   });
 }

@@ -1,26 +1,75 @@
-const CACHE = 'eileen-lifestyle-v42';
-const FILES = ['./', './index.html', './styles.css?v=42', './zoho-migration.css?v=42', './exercise-catalog.js?v=42', './app.js?v=42', './zoho-migration.js?v=42', './manifest.webmanifest', './icon.svg', './icon-maskable.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png', './favicon-32.png', './favicon.ico', './assets/eleen-training.jpg'];
-self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(FILES)).then(() => self.skipWaiting())));
-self.addEventListener('activate', event => event.waitUntil(Promise.all([
-  caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key)))),
-  self.clients.claim()
-])));
+const VERSION = '43';
+const CACHE = `eileen-lifestyle-v${VERSION}`;
+const FILES = ['./index.html', './styles.css?v=43', './zoho-migration.css?v=43', './exercise-catalog.js?v=43', './app.js?v=43', './zoho-migration.js?v=43', './manifest.webmanifest', './icon.svg', './icon-maskable.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png', './favicon-32.png', './favicon.ico', './assets/eleen-training.jpg'];
+
+self.addEventListener('install', event => event.waitUntil((async () => {
+  const cache = await caches.open(CACHE);
+  await Promise.all(FILES.map(async file => {
+    const response = await fetch(file, { cache: 'reload' });
+    if (!response.ok) throw new Error(`No se pudo guardar ${file}`);
+    await cache.put(file, response);
+  }));
+  await self.skipWaiting();
+})()));
+
+self.addEventListener('activate', event => event.waitUntil((async () => {
+  const keys = await caches.keys();
+  await Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key)));
+  await self.clients.claim();
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  clients.forEach(client => client.postMessage({ type: 'EILEEN_UPDATE_READY', version: VERSION }));
+})()));
+
+self.addEventListener('message', event => {
+  if (event.data?.type === 'SKIP_WAITING') self.skipWaiting();
+});
+
+const networkFirst = async request => {
+  try {
+    const response = await fetch(request, { cache: 'no-store' });
+    if (response.ok) {
+      const copy = response.clone();
+      const cache = await caches.open(CACHE);
+      await cache.put(request, copy);
+    }
+    return response;
+  } catch {
+    return (await caches.match(request)) || (await caches.match('./index.html'));
+  }
+};
+
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
   const url = new URL(event.request.url);
-  const isApplicationShell = url.origin === self.location.origin
-    && (event.request.mode === 'navigate' || ['document', 'script', 'style'].includes(event.request.destination));
-  if (!isApplicationShell) {
-    event.respondWith(caches.match(event.request).then(saved => saved || fetch(event.request)));
+  if (url.origin !== self.location.origin) return;
+
+  if (url.pathname.endsWith('/version.json')) {
+    event.respondWith(fetch(event.request, { cache: 'no-store' }));
     return;
   }
-  event.respondWith(fetch(event.request).then(response => {
-    if (response.ok) {
-      const copy = response.clone();
-      event.waitUntil(caches.open(CACHE).then(cache => cache.put(event.request, copy)));
-    }
-    return response;
-  }).catch(() => caches.match(event.request).then(saved => saved || caches.match('./index.html'))));
+
+  if (event.request.mode === 'navigate') {
+    event.respondWith((async () => {
+      try {
+        const response = await fetch(event.request, { cache: 'no-store' });
+        if (response.ok) {
+          const cache = await caches.open(CACHE);
+          await cache.put('./index.html', response.clone());
+        }
+        return response;
+      } catch {
+        return caches.match('./index.html');
+      }
+    })());
+    return;
+  }
+
+  if (['document', 'script', 'style'].includes(event.request.destination)) {
+    event.respondWith(networkFirst(event.request));
+    return;
+  }
+
+  event.respondWith(caches.match(event.request).then(saved => saved || fetch(event.request)));
 });
 self.addEventListener('push', event => {
   let payload = { title: 'Eileen Lifestyle', body: 'Tienes un nuevo recordatorio.', url: './' };
