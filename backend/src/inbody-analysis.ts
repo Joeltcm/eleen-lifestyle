@@ -142,7 +142,7 @@ async function deepseekRequest(body: unknown) {
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw apiError(payload, response.status, 'DeepSeek');
-  return payload as { choices?: Array<{ message?: { content?: unknown } }> };
+  return payload as { choices?: Array<{ finish_reason?: string; message?: { content?: unknown } }> };
 }
 
 async function extractWithDeepSeek(imageUrl: string, fileName = '') {
@@ -150,7 +150,11 @@ async function extractWithDeepSeek(imageUrl: string, fileName = '') {
     model: config.DEEPSEEK_VISION_MODEL,
     temperature: 0,
     response_format: { type: 'json_object' },
-    max_tokens: 1500,
+    // Leer cifras de un reporte es transcripción, no razonamiento. Con el modo
+    // de pensamiento activo (el de fábrica) el modelo gastaba el presupuesto
+    // completo razonando y devolvía el contenido vacío.
+    thinking: { type: 'disabled' },
+    max_tokens: 4000,
     messages: [
       { role: 'system', content: 'You extract body-composition report data. Return only valid JSON and never include patient identity.' },
       {
@@ -162,7 +166,11 @@ async function extractWithDeepSeek(imageUrl: string, fileName = '') {
       }
     ]
   });
-  return extractionSchema.parse(jsonFromModel(payload.choices?.[0]?.message?.content));
+  const choice = payload.choices?.[0];
+  if (!choice?.message?.content && choice?.finish_reason === 'length') {
+    throw new Error('El modelo agotó el presupuesto de tokens antes de escribir la respuesta');
+  }
+  return extractionSchema.parse(jsonFromModel(choice?.message?.content));
 }
 
 export async function extractInBodyImage(imageUrl: string, fileName = '') {

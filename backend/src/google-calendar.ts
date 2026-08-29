@@ -457,7 +457,7 @@ export async function registerGoogleCalendarRoutes(app: FastifyInstance) {
       WHERE provider = ${provider} AND sync_enabled = true AND encrypted_refresh_token IS NOT NULL
     `;
     for (const connection of connections) {
-      syncFutureSessions(String(connection.owner_id)).catch(error => app.log.warn({ error, ownerId: connection.owner_id }, 'Background Google Calendar sync failed'));
+      syncFutureSessions(String(connection.owner_id)).catch(error => app.log.warn({ err: error, ownerId: connection.owner_id }, 'Background Google Calendar sync failed'));
     }
   };
   const backgroundSync = setInterval(() => void synchronizeConnectedCalendars(), 120_000);

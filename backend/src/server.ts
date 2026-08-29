@@ -497,7 +497,7 @@ app.post('/api/sessions', { preHandler: requireStaff }, async (request, reply) =
   const [session] = await sql`INSERT INTO sessions (client_id, routine_id, starts_at, duration_minutes, mode, notes) SELECT c.id, ${input.routineId || null}, ${input.startsAt}, ${input.durationMinutes}, ${input.mode}, ${input.notes || null} FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} RETURNING *`;
   if (!session) return reply.code(404).send({ error: 'Cliente no encontrado' });
   try { await syncSessionToGoogle(auth.sub, session.id); }
-  catch (error) { app.log.warn({ error, sessionId: session.id }, 'Session created but Google Calendar sync failed'); }
+  catch (error) { app.log.warn({ err: error, sessionId: session.id }, 'Session created but Google Calendar sync failed'); }
   return reply.code(201).send(session);
 });
 const sessionScheduleSchema = z.object({
@@ -519,7 +519,7 @@ app.patch('/api/sessions/:id', { preHandler: requireStaff }, async (request, rep
   `;
   if (!session) return reply.code(404).send({ error: 'Sesión no encontrada o cancelada' });
   try { await syncSessionToGoogle(auth.sub, session.id); }
-  catch (error) { app.log.warn({ error, sessionId: session.id }, 'Session updated but Google Calendar sync failed'); }
+  catch (error) { app.log.warn({ err: error, sessionId: session.id }, 'Session updated but Google Calendar sync failed'); }
   const [updated] = await sql`SELECT * FROM sessions WHERE id = ${session.id}`;
   return updated;
 });
@@ -530,7 +530,7 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
   const [session] = await sql`UPDATE sessions s SET status = 'cancelled', updated_at = now() FROM clients c WHERE s.id = ${id} AND c.id = s.client_id AND c.owner_id = ${auth.sub} AND s.status <> 'cancelled' RETURNING s.*`;
   if (!session) return reply.code(404).send({ error: 'Sesión no encontrada o ya cancelada' });
   try { await cancelSessionInGoogle(auth.sub, id); }
-  catch (error) { app.log.warn({ error, sessionId: id }, 'Session cancelled but Google Calendar deletion failed'); }
+  catch (error) { app.log.warn({ err: error, sessionId: id }, 'Session cancelled but Google Calendar deletion failed'); }
   return { cancelled: true, session };
 });
 async function recordSessionCompliance(id: string, ownerId: string, markedBy: string, completed: boolean, completionPercent: number) {
@@ -1147,7 +1147,7 @@ app.post('/api/documents/:id/complete', { preHandler: requireStaff }, async (req
     `;
     return updated;
   } catch (error) {
-    request.log.warn({ error, documentId: id }, 'No se encontró el archivo cargado en R2');
+    request.log.warn({ err: error, documentId: id }, 'No se encontró el archivo cargado en R2');
     return reply.code(409).send({ error: 'La carga todavía no aparece en el almacenamiento' });
   }
 });
@@ -1262,7 +1262,7 @@ app.post('/api/inbody/analyze', { preHandler: requireStaff }, async (request, re
         });
       }
     } catch (error) {
-      request.log.warn({ error, documentId: document.id }, 'Falló la extracción del reporte InBody');
+      request.log.warn({ err: error, documentId: document.id }, 'Falló la extracción del reporte InBody');
       pageErrors.push(`${document.original_name}: ${(error as Error).message}`);
     }
   }
