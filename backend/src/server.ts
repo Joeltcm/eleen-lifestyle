@@ -29,7 +29,7 @@ app.addContentTypeParser([...documentContentTypes], { parseAs: 'buffer', bodyLim
 
 await app.register(cors, {
   origin: config.CORS_ORIGIN.split(',').map(origin => origin.trim()),
-  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'OPTIONS'],
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   credentials: true
 });
 await app.register(jwt, { secret: config.JWT_SECRET });
