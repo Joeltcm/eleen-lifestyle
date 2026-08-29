@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
 import { config } from './config.js';
 import { sql } from './db.js';
-import { createDownloadUrl, createUploadUrl, downloadObject, storageReady, uploadObject, verifyUpload } from './storage.js';
+import { createDownloadUrl, createUploadUrl, deleteObject, downloadObject, storageReady, uploadObject, verifyUpload } from './storage.js';
 import { extractInBodyDocument, extractInBodyImage, inbodyAnalysisReady, inbodyAnalysisSetup, prepareInBodyImage, validateExtraction, validateInBodyValues } from './inbody-analysis.js';
 import { registerZohoRoutes } from './zoho-routes.js';
 import { cancelSessionInGoogle, registerGoogleCalendarRoutes, syncSessionToGoogle } from './google-calendar.js';
@@ -358,6 +358,13 @@ app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, repl
 app.delete('/api/clients/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const documents = await sql`
+    SELECT d.object_key FROM documents d JOIN clients c ON c.id = d.client_id
+    WHERE d.client_id = ${id} AND c.owner_id = ${auth.sub}
+  `;
+  if (storageReady) {
+    for (const document of documents) await deleteObject(document.object_key);
+  }
   const [client] = await sql`DELETE FROM clients WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING id, full_name`;
   if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
   return { deleted: true, client };
@@ -1170,6 +1177,25 @@ app.get('/api/documents/:id/download-url', { preHandler: requireStaff }, async (
   return { documentId: document.id, fileName: document.original_name, downloadUrl: await createDownloadUrl(document.object_key), expiresInSeconds: 300 };
 });
 
+app.delete('/api/documents/:id', { preHandler: requireStaff }, async (request, reply) => {
+  if (!storageReady) return reply.code(503).send({ error: 'El almacenamiento de documentos aún no está configurado' });
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [document] = await sql`
+    SELECT d.id, d.object_key, d.original_name
+    FROM documents d JOIN clients c ON c.id = d.client_id
+    WHERE d.id = ${id} AND c.owner_id = ${auth.sub}
+  `;
+  if (!document) return reply.code(404).send({ error: 'Documento no encontrado' });
+  await deleteObject(document.object_key);
+  const removedAssessments = await sql.begin(async transaction => {
+    const assessments = await transaction`DELETE FROM inbody_assessments WHERE document_id = ${id} RETURNING id`;
+    await transaction`DELETE FROM documents WHERE id = ${id}`;
+    return assessments.length;
+  });
+  return { deleted: true, document: { id: document.id, originalName: document.original_name }, removedAssessments };
+});
+
 const inbodySchema = z.object({ clientId: z.string().uuid(), documentId: z.string().uuid().optional(), deviceModel: z.string().optional(), testedAt: z.string().datetime({ offset: true }), values: z.record(z.string(), z.union([z.number(), z.string(), z.null()])), confidence: z.record(z.string(), z.number()).default({}), extractionStatus: z.enum(['pending', 'processing', 'ready', 'review', 'failed']).default('ready') });
 app.get('/api/clients/:clientId/inbody', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const clientId = z.string().uuid().parse((request.params as { clientId: string }).clientId);
@@ -1285,6 +1311,19 @@ app.patch('/api/inbody/:id', { preHandler: requireStaff }, async (request, reply
   `;
   if (!assessment) return reply.code(404).send({ error: 'Evaluación InBody no encontrada' });
   return assessment;
+});
+
+app.delete('/api/inbody/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [assessment] = await sql`
+    DELETE FROM inbody_assessments a
+    USING clients c
+    WHERE a.id = ${id} AND c.id = a.client_id AND c.owner_id = ${auth.sub}
+    RETURNING a.id, a.document_id
+  `;
+  if (!assessment) return reply.code(404).send({ error: 'Evaluación InBody no encontrada' });
+  return { deleted: true, assessment };
 });
 
 const firstReminderRun = setTimeout(() => dispatchReminders().catch(error => app.log.error(error)), 10_000);

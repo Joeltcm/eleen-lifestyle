@@ -1,4 +1,4 @@
-const APP_VERSION = '46';
+const APP_VERSION = '47';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -140,7 +140,7 @@ async function loadData() {
   data.clients = clients.map((client, index) => {
     const readyAssessments = assessments[index].assessments.filter(item => item.extraction_status === 'ready');
     const history = readyAssessments.map(item => ({
-      date: String(item.tested_at).slice(0, 10), weight: Number(item.values.weightKg), smm: Number(item.values.skeletalMuscleMassKg),
+      id: item.id, date: String(item.tested_at).slice(0, 10), weight: Number(item.values.weightKg), smm: Number(item.values.skeletalMuscleMassKg),
       fat: Number(item.values.bodyFatMassKg), pbf: Number(item.values.percentBodyFat), score: Number(item.values.inBodyScore)
     }));
     const latest = history.at(-1);
@@ -819,9 +819,17 @@ function clientDetail(id) {
     : `${client.planName || 'Mensualidad'} · ${money.format(client.plan)} al mes · corte día ${client.cutoffDay}`;
   const box = document.createElement('div');
   const reviewNotice = client.inbodyReviews.length ? `<button class="secondary wide-button" id="review-inbody">Revisar ${client.inbodyReviews.length} evaluación${client.inbodyReviews.length > 1 ? 'es' : ''} pendiente${client.inbodyReviews.length > 1 ? 's' : ''}</button>` : '';
-  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th></tr></thead><tbody>${inbody.history.map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="portal-access">${client.portalActive ? 'Actualizar portal' : 'Activar portal cliente'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
+  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th></th></tr></thead><tbody>${inbody.history.map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td><button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="portal-access">${client.portalActive ? 'Actualizar portal' : 'Activar portal cliente'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
   openModal(box); document.getElementById('open-scan').onclick = () => inbodyImport(client); document.getElementById('edit-client-contact').onclick = () => editClient(client); document.getElementById('edit-client-plan').onclick = () => clientPlanEditor(client); document.getElementById('portal-access').onclick = () => portalAccessEditor(client); document.getElementById('delete-client').onclick = () => deleteResource(`/api/clients/${client.id}`, `¿Eliminar a ${client.name}? También se eliminarán sus documentos, sesiones y cobros asociados.`, 'Cliente eliminado');
   if (client.inbodyReviews.length) document.getElementById('review-inbody').onclick = () => inbodyReview(client, client.inbodyReviews);
+  api(`/api/documents?clientId=${encodeURIComponent(client.id)}`).then(items => {
+    const target = document.getElementById('client-documents');
+    if (!target || !modal.open) return;
+    target.innerHTML = items.length ? `<div class="table-wrap"><table><thead><tr><th>Archivo</th><th>Tipo</th><th>Fecha</th><th></th></tr></thead><tbody>${items.map(item => `<tr><td>${escapeHtml(item.original_name)}</td><td>${item.kind === 'inbody' ? 'InBody' : escapeHtml(item.kind)}</td><td>${String(item.created_at).slice(0, 10)}</td><td><button class="secondary session-use" data-delete-document="${item.id}">Eliminar archivo</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">No hay archivos guardados en este expediente.</p>';
+  }).catch(error => {
+    const target = document.getElementById('client-documents');
+    if (target) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
+  });
 }
 
 const inbodyReviewFields = [
@@ -939,6 +947,8 @@ document.addEventListener('click', event => {
   if (event.target.dataset.editPayment) confirmInvoice(event.target.dataset.editPayment, true);
   if (event.target.dataset.editInvoice) editInvoice(event.target.dataset.editInvoice);
   if (event.target.dataset.deleteInvoice) deleteResource(`/api/invoices/${event.target.dataset.deleteInvoice}`, '¿Anular este cobro? No se eliminará de los reportes históricos.', 'Cobro anulado');
+  if (event.target.dataset.deleteInbody) deleteResource(`/api/inbody/${event.target.dataset.deleteInbody}`, '¿Eliminar esta medición InBody? El archivo original permanecerá en el expediente.', 'Medición InBody eliminada');
+  if (event.target.dataset.deleteDocument) deleteResource(`/api/documents/${event.target.dataset.deleteDocument}`, '¿Eliminar este archivo? Si corresponde a un InBody, también se eliminarán sus métricas asociadas.', 'Archivo del expediente eliminado');
   if (event.target.dataset.cancelSession) deleteResource(`/api/sessions/${event.target.dataset.cancelSession}`, '¿Cancelar esta sesión? También se eliminará de Google Calendar si estaba sincronizada.', 'Sesión cancelada');
 });
 document.addEventListener('submit', async event => {

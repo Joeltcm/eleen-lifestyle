@@ -1,4 +1,4 @@
-import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { config } from './config.js';
 
@@ -43,4 +43,9 @@ export async function verifyUpload(objectKey: string) {
   if (!client) throw new Error('R2 no está configurado');
   const result = await client.send(new HeadObjectCommand({ Bucket: config.R2_BUCKET, Key: objectKey }));
   return { contentType: result.ContentType, sizeBytes: result.ContentLength };
+}
+
+export async function deleteObject(objectKey: string) {
+  if (!client) throw new Error('R2 no está configurado');
+  await client.send(new DeleteObjectCommand({ Bucket: config.R2_BUCKET, Key: objectKey }));
 }
