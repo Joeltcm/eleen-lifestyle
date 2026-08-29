@@ -1,6 +1,6 @@
-const VERSION = '45';
+const VERSION = '46';
 const CACHE = `eileen-lifestyle-v${VERSION}`;
-const FILES = ['./index.html', './styles.css?v=45', './zoho-migration.css?v=45', './exercise-catalog.js?v=45', './app.js?v=45', './zoho-migration.js?v=45', './recurring-billing.js?v=45', './manifest.webmanifest', './icon.svg', './icon-maskable.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png', './favicon-32.png', './favicon.ico', './assets/eleen-training.jpg'];
+const FILES = ['./index.html', './styles.css?v=46', './zoho-migration.css?v=46', './exercise-catalog.js?v=46', './app.js?v=46', './zoho-migration.js?v=46', './recurring-billing.js?v=46', './manifest.webmanifest', './icon.svg', './icon-maskable.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png', './favicon-32.png', './favicon.ico', './assets/eleen-training.jpg'];
 
 self.addEventListener('install', event => event.waitUntil((async () => {
   const cache = await caches.open(CACHE);

@@ -299,6 +299,26 @@ export async function syncSessionToGoogle(ownerId: string, sessionId: string) {
   }
 }
 
+export async function cancelSessionInGoogle(ownerId: string, sessionId: string) {
+  if (!configured()) return null;
+  const connection = await connectionFor(ownerId);
+  if (!connection) return null;
+  const [session] = await sql`
+    SELECT s.google_event_id FROM sessions s JOIN clients c ON c.id = s.client_id
+    WHERE s.id = ${sessionId} AND c.owner_id = ${ownerId}
+  `;
+  if (!session?.google_event_id) return null;
+  const calendarId = encodeURIComponent(connection.organization_id || 'primary');
+  try {
+    await googleRequest(await accessToken(connection), `/calendars/${calendarId}/events/${encodeURIComponent(session.google_event_id)}?sendUpdates=none`, { method: 'DELETE' });
+    await sql`UPDATE sessions SET google_event_id = NULL, google_event_link = NULL, google_synced_at = now(), google_sync_error = NULL WHERE id = ${sessionId}`;
+  } catch (error) {
+    if (error instanceof GoogleCalendarError && error.status === 404) return null;
+    throw error;
+  }
+  return { cancelled: true };
+}
+
 async function syncFutureSessions(ownerId: string): Promise<GoogleSyncResult> {
   if (synchronizationLocks.has(ownerId)) {
     return { synced: 0, failed: 0, total: 0, errors: [], updatedFromGoogle: 0, checkedFromGoogle: 0, conflictsResolved: 0, alreadyRunning: true };

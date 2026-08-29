@@ -10,7 +10,7 @@ import { sql } from './db.js';
 import { createDownloadUrl, createUploadUrl, downloadObject, storageReady, uploadObject, verifyUpload } from './storage.js';
 import { extractInBodyDocument, extractInBodyImage, inbodyAnalysisReady, inbodyAnalysisSetup, prepareInBodyImage, validateExtraction, validateInBodyValues } from './inbody-analysis.js';
 import { registerZohoRoutes } from './zoho-routes.js';
-import { registerGoogleCalendarRoutes, syncSessionToGoogle } from './google-calendar.js';
+import { cancelSessionInGoogle, registerGoogleCalendarRoutes, syncSessionToGoogle } from './google-calendar.js';
 import { accountStatementPdf, accountsReceivablePdf, invoicePdf } from './billing-reports.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
@@ -298,6 +298,14 @@ app.patch('/api/plans/:id', { preHandler: requireStaff }, async (request, reply)
   return plan;
 });
 
+app.delete('/api/plans/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [plan] = await sql`UPDATE service_plans SET active = false, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING id, name`;
+  if (!plan) return reply.code(404).send({ error: 'Plan no encontrado' });
+  return { deleted: true, archived: true, plan };
+});
+
 const clientSchema = z.object({
   fullName: z.string().min(2), email: z.string().email().optional().or(z.literal('')), phone: z.string().optional(),
   goal: z.string().optional(), notes: z.string().optional(), billingModel: z.enum(['monthly', 'package']).default('monthly'),
@@ -336,6 +344,23 @@ app.post('/api/clients', { preHandler: requireStaff }, async (request, reply) =>
   });
   if (!result) return reply.code(404).send({ error: 'Plan no encontrado o inactivo' });
   return reply.code(201).send(result);
+});
+
+app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = clientSchema.pick({ fullName: true, email: true, phone: true, goal: true, notes: true }).parse(request.body);
+  const [client] = await sql`UPDATE clients SET full_name = ${input.fullName}, email = ${input.email || null}, phone = ${input.phone || null}, goal = ${input.goal || null}, notes = ${input.notes || null}, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
+  if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  return client;
+});
+
+app.delete('/api/clients/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [client] = await sql`DELETE FROM clients WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING id, full_name`;
+  if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  return { deleted: true, client };
 });
 
 const clientPlanSchema = z.object({ planId: z.string().uuid(), cutoffDay: z.coerce.number().int().min(1).max(31) });
@@ -416,7 +441,11 @@ const routineExerciseSchema = z.object({
 const routineSchema = z.object({ title: z.string().min(2), description: z.string().optional(), sessionsPerWeek: z.coerce.number().int().min(1).max(7), exercises: z.array(routineExerciseSchema).max(80).default([]), clientId: z.string().uuid().optional() });
 app.get('/api/routines', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
-  return sql`SELECT * FROM routines WHERE owner_id = ${auth.sub} ORDER BY created_at DESC`;
+  return sql`
+    SELECT r.*, COALESCE(array_agg(ra.client_id) FILTER (WHERE ra.active), '{}') AS assigned_client_ids
+    FROM routines r LEFT JOIN routine_assignments ra ON ra.routine_id = r.id
+    WHERE r.owner_id = ${auth.sub} GROUP BY r.id ORDER BY r.created_at DESC
+  `;
 });
 app.post('/api/routines', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = routineSchema.parse(request.body);
@@ -426,6 +455,29 @@ app.post('/api/routines', { preHandler: requireStaff }, async (request, reply) =
     return created;
   });
   return reply.code(201).send(routine);
+});
+
+app.patch('/api/routines/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = routineSchema.parse(request.body);
+  const routine = await sql.begin(async transaction => {
+    const [updated] = await transaction`UPDATE routines SET title = ${input.title}, description = ${input.description || null}, sessions_per_week = ${input.sessionsPerWeek}, exercises = ${transaction.json(input.exercises)}, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
+    if (!updated) return null;
+    await transaction`UPDATE routine_assignments SET active = false, ends_on = current_date WHERE routine_id = ${id} AND active = true`;
+    if (input.clientId) await transaction`INSERT INTO routine_assignments (routine_id, client_id) SELECT ${id}, c.id FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} ON CONFLICT (routine_id, client_id, starts_on) DO UPDATE SET active = true, ends_on = null`;
+    return updated;
+  });
+  if (!routine) return reply.code(404).send({ error: 'Rutina no encontrada' });
+  return routine;
+});
+
+app.delete('/api/routines/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [routine] = await sql`DELETE FROM routines WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING id, title`;
+  if (!routine) return reply.code(404).send({ error: 'Rutina no encontrada' });
+  return { deleted: true, routine };
 });
 
 const sessionSchema = z.object({ clientId: z.string().uuid(), routineId: z.string().uuid().optional(), startsAt: z.string().datetime(), durationMinutes: z.coerce.number().int().positive().default(60), mode: z.string().default('Presencial'), notes: z.string().optional() });
@@ -463,6 +515,16 @@ app.patch('/api/sessions/:id', { preHandler: requireStaff }, async (request, rep
   catch (error) { app.log.warn({ error, sessionId: session.id }, 'Session updated but Google Calendar sync failed'); }
   const [updated] = await sql`SELECT * FROM sessions WHERE id = ${session.id}`;
   return updated;
+});
+
+app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [session] = await sql`UPDATE sessions s SET status = 'cancelled', updated_at = now() FROM clients c WHERE s.id = ${id} AND c.id = s.client_id AND c.owner_id = ${auth.sub} AND s.status <> 'cancelled' RETURNING s.*`;
+  if (!session) return reply.code(404).send({ error: 'Sesión no encontrada o ya cancelada' });
+  try { await cancelSessionInGoogle(auth.sub, id); }
+  catch (error) { app.log.warn({ error, sessionId: id }, 'Session cancelled but Google Calendar deletion failed'); }
+  return { cancelled: true, session };
 });
 async function recordSessionCompliance(id: string, ownerId: string, markedBy: string, completed: boolean, completionPercent: number) {
   return sql.begin(async transaction => {
@@ -664,13 +726,53 @@ app.post('/api/invoices', { preHandler: requireStaff }, async (request, reply) =
   const [invoice] = await sql`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) SELECT c.id, ${input.packageId || null}, ${input.concept}, ${input.amount}, ${input.dueOn} FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} RETURNING *`;
   if (!invoice) return reply.code(404).send({ error: 'Cliente no encontrado' }); return reply.code(201).send(invoice);
 });
-const confirmSchema = z.object({ method: z.enum(['Efectivo', 'Yappy', 'Transferencia bancaria', 'Tarjeta', 'Otro']), reference: z.string().optional() });
-app.post('/api/invoices/:id/confirm', { preHandler: requireStaff }, async (request, reply) => {
-  const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = confirmSchema.parse(request.body);
-  const [invoice] = await sql`UPDATE invoices i SET status = 'confirmed', payment_method = ${input.method}, payment_reference = ${input.reference || null}, confirmed_at = now() FROM clients c WHERE i.id = ${id} AND c.id = i.client_id AND c.owner_id = ${auth.sub} RETURNING i.*`;
-  if (!invoice) return reply.code(404).send({ error: 'Cobro no encontrado' });
-  if (invoice.package_id) await sql`UPDATE session_packages SET status = 'active' WHERE id = ${invoice.package_id} AND status = 'pending'`;
+const invoiceEditSchema = z.object({ concept: z.string().min(2).max(180), amount: z.coerce.number().min(0), dueOn: z.string().date() });
+app.patch('/api/invoices/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = invoiceEditSchema.parse(request.body);
+  const [invoice] = await sql`UPDATE invoices i SET concept = ${input.concept}, amount = ${input.amount}, due_on = ${input.dueOn} FROM clients c WHERE i.id = ${id} AND c.id = i.client_id AND c.owner_id = ${auth.sub} AND i.status = 'pending' AND i.source_system IS DISTINCT FROM 'zoho_invoice' RETURNING i.*`;
+  if (!invoice) return reply.code(404).send({ error: 'Solo se pueden editar cobros locales pendientes' });
   return invoice;
+});
+app.delete('/api/invoices/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [invoice] = await sql`UPDATE invoices i SET status = 'void' FROM clients c WHERE i.id = ${id} AND c.id = i.client_id AND c.owner_id = ${auth.sub} AND i.status = 'pending' AND i.source_system IS DISTINCT FROM 'zoho_invoice' RETURNING i.*`;
+  if (!invoice) return reply.code(404).send({ error: 'Solo se pueden anular cobros locales pendientes' });
+  return { deleted: true, voided: true, invoice };
+});
+
+const paymentSchema = z.object({ method: z.enum(['Efectivo', 'Yappy', 'Transferencia bancaria', 'Tarjeta', 'Otro']), reference: z.string().max(160).optional(), paidOn: z.string().date() });
+async function saveNativeInvoicePayment(ownerId: string, id: string, input: z.infer<typeof paymentSchema>) {
+  return sql.begin(async transaction => {
+    const [invoice] = await transaction`
+      UPDATE invoices i SET status = 'confirmed', payment_method = ${input.method}, payment_reference = ${input.reference || null},
+        confirmed_at = ${`${input.paidOn}T12:00:00-05:00`}, balance = 0
+      FROM clients c WHERE i.id = ${id} AND c.id = i.client_id AND c.owner_id = ${ownerId} AND i.source_system IS DISTINCT FROM 'zoho_invoice'
+      RETURNING i.*
+    `;
+    if (!invoice) return null;
+    const externalId = `eileen-payment:${id}`;
+    const [payment] = await transaction`
+      INSERT INTO invoice_payments (client_id, source_system, external_id, payment_number, amount, paid_on, method, reference)
+      VALUES (${invoice.client_id}, 'eileen', ${externalId}, ${invoice.invoice_number || null}, ${invoice.amount}, ${input.paidOn}, ${input.method}, ${input.reference || null})
+      ON CONFLICT (source_system, external_id) DO UPDATE SET amount = EXCLUDED.amount, paid_on = EXCLUDED.paid_on, method = EXCLUDED.method, reference = EXCLUDED.reference, updated_at = now()
+      RETURNING *
+    `;
+    await transaction`INSERT INTO payment_allocations (payment_id, invoice_id, amount) VALUES (${payment.id}, ${invoice.id}, ${invoice.amount}) ON CONFLICT (payment_id, invoice_id) DO UPDATE SET amount = EXCLUDED.amount`;
+    if (invoice.package_id) await transaction`UPDATE session_packages SET status = 'active' WHERE id = ${invoice.package_id} AND status = 'pending'`;
+    return { invoice, payment };
+  });
+}
+app.post('/api/invoices/:id/confirm', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = paymentSchema.parse(request.body);
+  const result = await saveNativeInvoicePayment(auth.sub, id, input);
+  if (!result) return reply.code(404).send({ error: 'Cobro local no encontrado' });
+  return result.invoice;
+});
+app.patch('/api/invoices/:id/payment', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = paymentSchema.parse(request.body);
+  const result = await saveNativeInvoicePayment(auth.sub, id, input);
+  if (!result) return reply.code(404).send({ error: 'Pago local no encontrado' });
+  return result;
 });
 
 const reportPeriodSchema = z.enum(['week', 'month', '3months', '6months', 'year']);

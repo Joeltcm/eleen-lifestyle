@@ -1,4 +1,4 @@
-const APP_VERSION = '45';
+const APP_VERSION = '46';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -145,12 +145,12 @@ async function loadData() {
     }));
     const latest = history.at(-1);
     const inbodyReviews = assessments[index].assessments.filter(item => item.extraction_status === 'review');
-    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', portalActive: Boolean(client.portal_user_id), status: client.status === 'active' ? 'Activo' : 'Inactivo', inbodyReviews, inbody: latest ? { ...latest, history } : null };
+    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', portalActive: Boolean(client.portal_user_id), status: client.status === 'active' ? 'Activo' : 'Inactivo', inbodyReviews, inbody: latest ? { ...latest, history } : null };
   });
-  data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, concept: item.concept, amount: Number(item.amount), balance: item.source_system ? Number(item.balance) : item.status === 'pending' ? Number(item.amount) : 0, due: item.due_on, issued: item.issued_on || item.due_on, method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '' }));
+  data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, concept: item.concept, amount: Number(item.amount), balance: item.source_system ? Number(item.balance) : item.status === 'pending' ? Number(item.amount) : 0, due: item.due_on, issued: item.issued_on || item.due_on, paidOn: item.confirmed_at ? String(item.confirmed_at).slice(0, 10) : '', method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '' }));
   data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired' }));
   data.sessions = sessions.map(sessionFromApi);
-  data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: 0, sessions: item.sessions_per_week, exercises: item.exercises || [] }));
+  data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: (item.assigned_client_ids || []).length, assignedClientIds: item.assigned_client_ids || [], sessions: item.sessions_per_week, exercises: item.exercises || [] }));
   data.plans = plans.map(item => ({ id: item.id, name: item.name, description: item.description || '', billingModel: item.billing_model, price: Number(item.price), sessionsIncluded: Number(item.sessions_included || 0), validityDays: Number(item.validity_days || 0), active: item.active }));
   data.compliance = compliance; data.notifications = notifications; data.googleCalendar = googleCalendar; billingAnalytics = null; billingAnalyticsLoadingYear = null; billingAnalyticsRequest += 1; showPendingBrowserNotification(notifications);
 }
@@ -245,7 +245,7 @@ function renderClients(filter = '') {
     const commercial = client.billingModel === 'package'
       ? `<span class="commercial-label package-label">Paquete</span><b>${pack?.status === 'pending' ? 'Pago pendiente' : `${pack ? remainingSessions(pack) : client.sessionsIncluded || 0} sesiones disponibles`}</b><small>${escapeHtml(client.planName || 'Plan por sesiones')} · ${money.format(client.plan)}</small>`
       : `<span class="commercial-label">Mensualidad</span><b>${escapeHtml(client.planName || 'Mensualidad')} · ${money.format(client.plan)}</b><small>Corte día ${client.cutoffDay}</small>`;
-    return `<article class="client-card"><header><span class="initials">${initials(client.name)}</span><div><h3>${client.name}</h3><small>${client.goal}</small></div><span class="status">${client.status}</span></header><p>${client.inbody ? `Último InBody: ${client.inbody.date}` : 'Aún no se ha cargado un InBody.'}${client.portalActive ? ' · Portal activo' : ''}</p><div class="commercial-summary">${commercial}</div><div class="mini-data">${client.inbody ? `<div><b>${client.inbody.weight} kg</b><span>Peso</span></div><div><b>${client.inbody.smm} kg</b><span>Músculo</span></div><div><b>${client.inbody.pbf}%</b><span>Grasa</span></div>` : `<div><b>—</b><span>Evaluación pendiente</span></div>`}</div><div class="client-actions"><button class="secondary" data-client="${client.id}">Ver expediente</button><button class="secondary" data-inbody="${client.id}">+ InBody</button></div></article>`;
+    return `<article class="client-card"><header><span class="initials">${initials(client.name)}</span><div><h3>${client.name}</h3><small>${client.goal}</small></div><span class="status">${client.status}</span></header><p>${client.inbody ? `Último InBody: ${client.inbody.date}` : 'Aún no se ha cargado un InBody.'}${client.portalActive ? ' · Portal activo' : ''}</p><div class="commercial-summary">${commercial}</div><div class="mini-data">${client.inbody ? `<div><b>${client.inbody.weight} kg</b><span>Peso</span></div><div><b>${client.inbody.smm} kg</b><span>Músculo</span></div><div><b>${client.inbody.pbf}%</b><span>Grasa</span></div>` : `<div><b>—</b><span>Evaluación pendiente</span></div>`}</div><div class="client-actions"><button class="secondary" data-client="${client.id}">Ver expediente</button><button class="secondary" data-edit-client="${client.id}">Editar</button><button class="secondary" data-inbody="${client.id}">+ InBody</button></div></article>`;
   }).join('') || '<p class="empty">No se encontraron clientes.</p>';
 }
 function renderGoogleCalendar() {
@@ -316,10 +316,10 @@ function renderCalendar() {
   const periodName = calendarMode === 'day' ? 'del día' : calendarMode === 'week' ? 'de la semana' : 'del mes';
   document.getElementById('session-control-title').textContent = `Sesiones ${periodName}`;
   document.getElementById('session-control-copy').textContent = visibleSessions.length ? `${visibleSessions.length} sesión${visibleSessions.length !== 1 ? 'es' : ''} en el período visible` : 'No hay sesiones en el período visible';
-  document.getElementById('session-list').innerHTML = visibleSessions.length ? visibleSessions.map(session => `<div class="session-row"><div class="session-date"><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric' }).format(new Date(`${session.date}T12:00:00`))}</b><span>${session.time} · ${session.durationMinutes} min</span></div><div class="session-person"><b>${session.client}</b><span>${session.routine} · ${session.mode}</span>${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}</div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span>${session.status === 'cancelled' ? '<span class="session-done">—</span>' : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button>${sessionComplianceForm(session)}</div>`}</div>`).join('') : `<p class="empty">No hay sesiones programadas ${periodName}.</p>`;
+  document.getElementById('session-list').innerHTML = visibleSessions.length ? visibleSessions.map(session => `<div class="session-row"><div class="session-date"><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric' }).format(new Date(`${session.date}T12:00:00`))}</b><span>${session.time} · ${session.durationMinutes} min</span></div><div class="session-person"><b>${session.client}</b><span>${session.routine} · ${session.mode}</span>${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}</div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span>${session.status === 'cancelled' ? '<span class="session-done">—</span>' : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button><button type="button" class="secondary" data-cancel-session="${session.id}">Cancelar</button>${sessionComplianceForm(session)}</div>`}</div>`).join('') : `<p class="empty">No hay sesiones programadas ${periodName}.</p>`;
 }
 function renderRoutines() {
-  document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${routine.title}</h3><p>${routine.description}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''}</footer></article>`).join('');
+  document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${routine.title}</h3><p>${routine.description}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''}</footer><div class="client-actions"><button class="secondary" data-edit-routine="${routine.id}">Editar</button><button class="secondary" data-delete-routine="${routine.id}">Eliminar</button></div></article>`).join('');
 }
 function renderBillingInsights() {
   const chart = document.getElementById('billing-line-chart');
@@ -403,7 +403,7 @@ function renderBilling() {
   document.getElementById('active-packages').textContent = data.packages.filter(pack => pack.status === 'confirmed' && remainingSessions(pack) > 0).length;
   document.getElementById('billing-pending').textContent = money.format(pending);
   document.getElementById('plan-grid').innerHTML = data.plans.length ? data.plans.map(plan => `<article class="plan-card ${plan.active ? '' : 'inactive'}"><div><span class="commercial-label ${plan.billingModel === 'package' ? 'package-label' : ''}">${plan.billingModel === 'package' ? 'Paquete' : 'Mensualidad'}</span><h4>${escapeHtml(plan.name)}</h4><p>${escapeHtml(plan.description || (plan.billingModel === 'package' ? `${plan.sessionsIncluded} sesiones · ${plan.validityDays} días` : 'Cobro mensual'))}</p></div><div class="plan-price"><strong>${money.format(plan.price)}</strong><small>${plan.active ? 'Disponible' : 'Inactivo'}</small></div><button class="text-button" data-edit-plan="${plan.id}">Editar</button></article>`).join('') : '<p class="empty">Crea el primer plan para asignarlo a tus clientes.</p>';
-  document.getElementById('invoice-table').innerHTML = visibleInvoices.length ? visibleInvoices.map(invoice => { const label = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'; const concept = invoice.invoiceNumber ? `<small>${invoice.source === 'zoho_invoice' ? 'Zoho' : 'Eileen'} · ${escapeHtml(invoice.invoiceNumber)}</small><br>${escapeHtml(invoice.concept)}` : escapeHtml(invoice.concept); return `<tr><td><b>${escapeHtml(invoice.client)}</b></td><td>${concept}</td><td>${invoice.due}</td><td>${invoice.method === 'pending' ? '—' : escapeHtml(invoice.method)}</td><td>${money.format(invoice.amount)}${invoice.status === 'pending' && invoice.balance !== invoice.amount ? `<br><small>Saldo ${money.format(invoice.balance)}</small>` : ''}</td><td><span class="payment-status ${invoice.status}">${label}</span></td><td><div class="invoice-actions"><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoiceNumber || invoice.id.slice(0, 8))}">Ver PDF</button>${invoice.status === 'pending' && invoice.source !== 'zoho_invoice' ? `<button class="secondary session-use" data-confirm-invoice="${invoice.id}">Confirmar</button>` : ''}</div></td></tr>`; }).join('') : '<tr><td colspan="7" class="empty">No hay facturas con estos filtros.</td></tr>';
+  document.getElementById('invoice-table').innerHTML = visibleInvoices.length ? visibleInvoices.map(invoice => { const label = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'; const concept = invoice.invoiceNumber ? `<small>${invoice.source === 'zoho_invoice' ? 'Zoho' : 'Eileen'} · ${escapeHtml(invoice.invoiceNumber)}</small><br>${escapeHtml(invoice.concept)}` : escapeHtml(invoice.concept); const local = invoice.source !== 'zoho_invoice'; return `<tr><td><b>${escapeHtml(invoice.client)}</b></td><td>${concept}</td><td>${invoice.due}</td><td>${invoice.method === 'pending' ? '—' : escapeHtml(invoice.method)}</td><td>${money.format(invoice.amount)}${invoice.status === 'pending' && invoice.balance !== invoice.amount ? `<br><small>Saldo ${money.format(invoice.balance)}</small>` : ''}</td><td><span class="payment-status ${invoice.status}">${label}</span></td><td><div class="invoice-actions"><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoiceNumber || invoice.id.slice(0, 8))}">Ver PDF</button>${invoice.status === 'pending' && local ? `<button class="secondary session-use" data-confirm-invoice="${invoice.id}">Confirmar pago</button><button class="secondary session-use" data-edit-invoice="${invoice.id}">Editar</button><button class="secondary session-use" data-delete-invoice="${invoice.id}">Anular</button>` : ''}${invoice.status === 'confirmed' && local ? `<button class="secondary session-use" data-edit-payment="${invoice.id}">Editar pago</button>` : ''}</div></td></tr>`; }).join('') : '<tr><td colspan="7" class="empty">No hay facturas con estos filtros.</td></tr>';
   const loadMore = document.getElementById('billing-load-more'); loadMore.hidden = visibleInvoices.length >= periodInvoices.length; loadMore.textContent = `Mostrar más facturas (${periodInvoices.length - visibleInvoices.length} restantes)`;
   document.getElementById('package-table').innerHTML = data.packages.length ? data.packages.map(pack => {
     const remaining = remainingSessions(pack);
@@ -480,6 +480,21 @@ function newClient() {
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
+function editClient(client) {
+  const box = document.createElement('div');
+  box.innerHTML = `<form id="edit-client-form"><p class="eyebrow">CONTACTO Y EXPEDIENTE</p><h2>Editar cliente</h2><label>Nombre completo<input name="fullName" required value="${escapeHtml(client.name)}" /></label><label>Correo electrónico<input name="email" type="email" value="${escapeHtml(client.email)}" /></label><label>Teléfono<input name="phone" value="${escapeHtml(client.phone)}" /></label><label>Meta principal<input name="goal" value="${escapeHtml(client.goal)}" /></label><label>Notas privadas<textarea name="notes" rows="3">${escapeHtml(client.notes)}</textarea></label><button class="primary wide-button">Guardar cambios</button></form>`;
+  openModal(box);
+  document.getElementById('edit-client-form').addEventListener('submit', async event => {
+    event.preventDefault(); const values = new FormData(event.target);
+    try { event.target.classList.add('loading-state'); await api(`/api/clients/${client.id}`, { method: 'PATCH', body: Object.fromEntries(values) }); await loadData(); renderAll(); modal.close(); toast('Cliente actualizado'); }
+    catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+async function deleteResource(path, label, success) {
+  if (!window.confirm(`${label}\n\nEsta acción no se puede deshacer.`)) return;
+  try { await api(path, { method: 'DELETE' }); await loadData(); renderAll(); modal.close(); toast(success); }
+  catch (error) { toast(error.message, true); }
+}
 function planEditor(plan = null) {
   const content = formFromTemplate('plan-template'); openModal(content);
   const form = document.getElementById('plan-form'); const model = document.getElementById('plan-billing-model'); const packageFields = document.getElementById('plan-package-fields');
@@ -499,6 +514,11 @@ function planEditor(plan = null) {
       await loadData(); renderAll(); modal.close(); toast(plan ? 'Plan actualizado' : 'Plan creado');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
+  if (plan) {
+    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'secondary wide-button'; remove.textContent = 'Desactivar plan';
+    remove.addEventListener('click', () => deleteResource(`/api/plans/${plan.id}`, `¿Desactivar “${plan.name}”? Ya no estará disponible para nuevos clientes.`, 'Plan desactivado'));
+    form.append(remove);
+  }
 }
 function clientPlanEditor(client) {
   const box = document.createElement('div'); const availablePlans = data.plans.filter(plan => plan.active || plan.id === client.planId);
@@ -640,7 +660,7 @@ function newInvoice() {
       } else {
         invoice = await api('/api/invoices', { method: 'POST', body: { clientId: form.get('client'), concept: form.get('concept'), amount: Number(form.get('amount')), dueOn: form.get('due') } });
       }
-      if (invoice && method !== 'pending') await api(`/api/invoices/${invoice.id}/confirm`, { method: 'POST', body: { method, reference: form.get('reference') || undefined } });
+      if (invoice && method !== 'pending') await api(`/api/invoices/${invoice.id}/confirm`, { method: 'POST', body: { method, reference: form.get('reference') || undefined, paidOn: dateKey(today) } });
       await loadData(); renderAll(); modal.close(); navigate('billing'); toast('Cobro registrado');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
@@ -679,17 +699,25 @@ function editSessionSchedule(session) {
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
-function newRoutine() {
+function newRoutine(routine = null) {
   const content = formFromTemplate('new-routine-template'); openModal(content, true);
+  if (routine) {
+    content.querySelector('h2').textContent = 'Editar rutina';
+    content.querySelector('[name="title"]').value = routine.title;
+    content.querySelector('[name="description"]').value = routine.description;
+    content.querySelector('[name="sessions"]').value = routine.sessions;
+    content.querySelector('button.primary').textContent = 'Guardar cambios';
+  }
   const clientSelect = document.getElementById('routine-client');
   data.clients.forEach(client => clientSelect.add(new Option(`${client.name}${client.status === 'Activo' ? '' : ' · Inactivo'}`, client.id)));
+  if (routine?.assignedClientIds?.[0]) clientSelect.value = routine.assignedClientIds[0];
   const categorySelect = document.getElementById('exercise-category');
   const levelSelect = document.getElementById('exercise-level');
   const exerciseSelect = document.getElementById('exercise-choice');
   const reference = document.getElementById('exercise-reference');
   const selectedList = document.getElementById('selected-exercises');
   const exerciseCount = document.getElementById('exercise-count');
-  const selectedExercises = [];
+  const selectedExercises = routine ? routine.exercises.map(exercise => typeof exercise === 'string' ? { name: exercise, category: 'Importado', level: '', sets: 3, reps: '10' } : { ...exercise }) : [];
   [...new Set(exerciseCatalog.map(exercise => exercise.category))].forEach(category => categorySelect.add(new Option(category, category)));
   [...new Set(exerciseCatalog.map(exercise => exercise.level))].forEach(level => levelSelect.add(new Option(level, level)));
 
@@ -745,7 +773,7 @@ function newRoutine() {
     if (!selectedExercises.length) { toast('Agrega al menos un ejercicio a la rutina', true); return; }
     try {
       event.target.classList.add('loading-state');
-      await api('/api/routines', { method: 'POST', body: { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: assigned || undefined, exercises: selectedExercises } });
+      await api(routine ? `/api/routines/${routine.id}` : '/api/routines', { method: routine ? 'PATCH' : 'POST', body: { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: assigned || undefined, exercises: selectedExercises } });
       await loadData(); renderAll(); modal.close(); navigate('routines'); toast('Rutina guardada');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
@@ -754,17 +782,33 @@ async function completeSession(id) {
   try { await api(`/api/sessions/${id}/complete`, { method: 'POST' }); await loadData(); renderAll(); toast('Sesión completada'); }
   catch (error) { toast(error.message, true); }
 }
-function confirmInvoice(id) {
+function confirmInvoice(id, editing = false) {
   const invoice = data.invoices.find(item => item.id === id); if (!invoice) return;
   const content = formFromTemplate('confirm-payment-template'); openModal(content);
   document.getElementById('payment-summary').textContent = `${invoice.client} · ${invoice.concept} · ${money.format(invoice.amount)}`;
+  const paymentForm = document.getElementById('payment-form');
+  paymentForm.elements.paidOn.value = invoice.paidOn || dateKey(today);
+  paymentForm.elements.method.value = invoice.method === 'pending' ? 'Efectivo' : invoice.method;
+  paymentForm.elements.reference.value = invoice.reference || '';
+  if (editing) { content.querySelector('h2').textContent = 'Editar pago recibido'; content.querySelector('button').textContent = 'Guardar pago'; }
   document.getElementById('payment-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target);
     try {
       event.target.classList.add('loading-state');
-      await api(`/api/invoices/${id}/confirm`, { method: 'POST', body: { method: form.get('method'), reference: form.get('reference') || undefined } });
+      await api(`/api/invoices/${id}${editing ? '/payment' : '/confirm'}`, { method: editing ? 'PATCH' : 'POST', body: { method: form.get('method'), reference: form.get('reference') || undefined, paidOn: form.get('paidOn') } });
       await loadData(); renderAll(); modal.close(); navigate('billing'); toast('Pago confirmado');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+function editInvoice(id) {
+  const invoice = data.invoices.find(item => item.id === id); if (!invoice) return;
+  const box = document.createElement('div');
+  box.innerHTML = `<form id="edit-invoice-form"><p class="eyebrow">COBRO LOCAL</p><h2>Editar cobro</h2><label>Concepto<input name="concept" required value="${escapeHtml(invoice.concept)}" /></label><div class="form-row"><label>Monto (USD)<input name="amount" type="number" min="0" step="0.01" required value="${invoice.amount}" /></label><label>Vencimiento<input name="dueOn" type="date" required value="${invoice.due}" /></label></div><button class="primary wide-button">Guardar cobro</button></form>`;
+  openModal(box);
+  document.getElementById('edit-invoice-form').addEventListener('submit', async event => {
+    event.preventDefault(); const values = new FormData(event.target);
+    try { event.target.classList.add('loading-state'); await api(`/api/invoices/${id}`, { method: 'PATCH', body: { concept: values.get('concept'), amount: Number(values.get('amount')), dueOn: values.get('dueOn') } }); await loadData(); renderAll(); modal.close(); toast('Cobro actualizado'); }
+    catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
 function clientDetail(id) {
@@ -775,8 +819,8 @@ function clientDetail(id) {
     : `${client.planName || 'Mensualidad'} · ${money.format(client.plan)} al mes · corte día ${client.cutoffDay}`;
   const box = document.createElement('div');
   const reviewNotice = client.inbodyReviews.length ? `<button class="secondary wide-button" id="review-inbody">Revisar ${client.inbodyReviews.length} evaluación${client.inbodyReviews.length > 1 ? 'es' : ''} pendiente${client.inbodyReviews.length > 1 ? 's' : ''}</button>` : '';
-  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th></tr></thead><tbody>${inbody.history.map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<div class="detail-actions"><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="portal-access">${client.portalActive ? 'Actualizar portal' : 'Activar portal cliente'}</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
-  openModal(box); document.getElementById('open-scan').onclick = () => inbodyImport(client); document.getElementById('edit-client-plan').onclick = () => clientPlanEditor(client); document.getElementById('portal-access').onclick = () => portalAccessEditor(client);
+  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th></tr></thead><tbody>${inbody.history.map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="portal-access">${client.portalActive ? 'Actualizar portal' : 'Activar portal cliente'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
+  openModal(box); document.getElementById('open-scan').onclick = () => inbodyImport(client); document.getElementById('edit-client-contact').onclick = () => editClient(client); document.getElementById('edit-client-plan').onclick = () => clientPlanEditor(client); document.getElementById('portal-access').onclick = () => portalAccessEditor(client); document.getElementById('delete-client').onclick = () => deleteResource(`/api/clients/${client.id}`, `¿Eliminar a ${client.name}? También se eliminarán sus documentos, sesiones y cobros asociados.`, 'Cliente eliminado');
   if (client.inbodyReviews.length) document.getElementById('review-inbody').onclick = () => inbodyReview(client, client.inbodyReviews);
 }
 
@@ -886,9 +930,16 @@ document.addEventListener('click', event => {
   if (editSessionButton) editSessionSchedule(data.sessions.find(session => session.id === editSessionButton.dataset.editSession));
   if (event.target.dataset.editPlan) planEditor(data.plans.find(plan => plan.id === event.target.dataset.editPlan));
   if (event.target.dataset.client) clientDetail(event.target.dataset.client);
+  if (event.target.dataset.editClient) editClient(data.clients.find(client => client.id === event.target.dataset.editClient));
+  if (event.target.dataset.editRoutine) newRoutine(data.routines.find(routine => routine.id === event.target.dataset.editRoutine));
+  if (event.target.dataset.deleteRoutine) deleteResource(`/api/routines/${event.target.dataset.deleteRoutine}`, '¿Eliminar esta rutina? Las sesiones ya realizadas conservarán su historial.', 'Rutina eliminada');
   if (event.target.dataset.inbody) inbodyImport(data.clients.find(client => client.id === event.target.dataset.inbody));
   if (event.target.dataset.completeSession) completeSession(event.target.dataset.completeSession);
   if (event.target.dataset.confirmInvoice) confirmInvoice(event.target.dataset.confirmInvoice);
+  if (event.target.dataset.editPayment) confirmInvoice(event.target.dataset.editPayment, true);
+  if (event.target.dataset.editInvoice) editInvoice(event.target.dataset.editInvoice);
+  if (event.target.dataset.deleteInvoice) deleteResource(`/api/invoices/${event.target.dataset.deleteInvoice}`, '¿Anular este cobro? No se eliminará de los reportes históricos.', 'Cobro anulado');
+  if (event.target.dataset.cancelSession) deleteResource(`/api/sessions/${event.target.dataset.cancelSession}`, '¿Cancelar esta sesión? También se eliminará de Google Calendar si estaba sincronizada.', 'Sesión cancelada');
 });
 document.addEventListener('submit', async event => {
   const form = event.target.closest('[data-session-compliance]'); if (!form) return;
