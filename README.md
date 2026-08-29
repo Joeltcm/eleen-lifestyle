@@ -1,6 +1,6 @@
 # Eileen Lifestyle
 
-Primera base de la PWA para la gestión de entrenamiento personal.
+PWA privada para la gestión de entrenamiento personal.
 
 ## Infraestructura
 
@@ -14,8 +14,7 @@ Primera base de la PWA para la gestión de entrenamiento personal.
 
 - Panel operativo con indicadores de clientes, sesiones, progreso y cobros.
 - Expedientes de cliente con histórico de composición corporal.
-- Importación automática de reportes InBody 580 en JPG, PNG, WebP o PDF.
-- Extracción visual con Workers AI, validaciones numéricas y revisión rápida antes de confirmar el historial.
+- Importación de reportes InBody 580 en JPG, PNG o WebP, con extracción visual mediante DeepSeek Vision, validaciones numéricas y revisión antes de confirmar el historial.
 - Google Calendar conectado mediante OAuth, con sincronización automática y manual de sesiones.
 - Agenda operativa con creación y control de asistencia.
 - Descuento automático de sesiones al completar una cita de un cliente con paquete.
@@ -32,18 +31,21 @@ Sirve esta carpeta con cualquier servidor web estático. Por ejemplo:
 npx serve .
 ```
 
-Después abre la URL que indique el servidor en un navegador. La información de esta primera base se conserva localmente en el navegador.
+Después abre la URL que indique el servidor en un navegador. Para ejecutar la API localmente, configura `backend/.env` a partir de `backend/.env.example` y usa `npm --prefix backend run dev`.
+
+## Trabajo compartido entre agentes
+
+Consulta [CONTRIBUTING.md](./CONTRIBUTING.md) antes de cambiar el proyecto con GPT, Claude u otra persona. Resume el relevo técnico usando la plantilla en [docs/agent-handoff.md](./docs/agent-handoff.md).
 
 ## Variables de integraciones en Railway
 
-- `CLOUDFLARE_ACCOUNT_ID`
-- `CLOUDFLARE_API_TOKEN`, creado con permisos `Workers AI Read` y `Workers AI Edit`
-- `CLOUDFLARE_VISION_MODEL` es opcional; usa `@cf/google/gemma-4-26b-a4b-it` por defecto
+- `INBODY_ANALYSIS_PROVIDER=deepseek`
+- `DEEPSEEK_API_KEY`
+- `DEEPSEEK_VISION_MODEL=deepseek-v4-flash-vision-exp` es opcional.
 - `GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET` habilitan Google Calendar.
 - `GOOGLE_REDIRECT_URI` debe coincidir exactamente con el URI autorizado en Google Cloud; por defecto usa `https://api-production-b417f.up.railway.app/api/integrations/google-calendar/callback`.
-- `INBODY_AI_DAILY_LIMIT` limita el consumo diario de toda la aplicación; el valor recomendado y predeterminado es `4`
 
-Los documentos se guardan primero en R2. Antes de llamar a Workers AI, la API reserva atómicamente la cuota diaria en PostgreSQL; una imagen consume una unidad y un PDF reserva dos. Las páginas sin métricas comparables se conservan sin enviarse a IA. La aplicación omite identificadores personales en la respuesta estructurada, comprueba rangos y relaciones matemáticas, y no genera diagnósticos médicos.
+Los documentos se guardan primero en R2. La aplicación omite identificadores personales en la respuesta estructurada, comprueba rangos y relaciones matemáticas, y no genera diagnósticos médicos. El consumo de DeepSeek se administra desde la cuenta de DeepSeek; no hay un límite diario impuesto por la app.
 
 ### Preparar Google Calendar
 
