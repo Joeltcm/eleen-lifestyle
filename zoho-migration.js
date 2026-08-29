@@ -60,8 +60,10 @@
       ${connection.last_error ? `<p class="zoho-error">${escapeText(connection.last_error)}</p>` : ''}
       <div class="zoho-migration-actions">
         ${connection.status !== 'completed' ? `<button class="primary" id="zoho-sync" ${busy || payload.syncInProgress ? 'disabled' : ''}>${payload.syncInProgress ? 'Sincronizando…' : 'Sincronizar ahora'}</button>` : ''}
+        ${connection.status === 'ready' && reconciled ? '<button class="secondary zoho-cutover" id="zoho-cutover">Finalizar migración</button>' : ''}
         <button class="secondary" id="zoho-refresh" ${busy ? 'disabled' : ''}>Actualizar estado</button>
       </div>
+      ${connection.status === 'ready' && reconciled ? '<p class="zoho-cutover-note">El corte final detiene la sincronización con Zoho y activa la emisión mensual en Eileen. Esta acción requiere confirmación.</p>' : ''}
       ${connection.status !== 'completed' ? '<p class="commercial-note">Zoho seguirá funcionando hasta que hagamos el corte final después de validar la facturación de Eileen.</p>' : '<p class="commercial-note">La copia histórica quedó guardada en Eileen y la sincronización con Zoho está cerrada.</p>'}
     `;
   }
@@ -86,7 +88,8 @@
     const connect = event.target.closest('#zoho-connect');
     const sync = event.target.closest('#zoho-sync');
     const refresh = event.target.closest('#zoho-refresh');
-    if (!connect && !sync && !refresh || busy) return;
+    const cutover = event.target.closest('#zoho-cutover');
+    if (!connect && !sync && !refresh && !cutover || busy) return;
     busy = true;
     try {
       if (connect) {
@@ -100,6 +103,16 @@
         const result = await api('/api/integrations/zoho/sync', { method: 'POST' });
         await loadData(); renderAll();
         toast(result.reconciled ? 'Zoho quedó conciliado con Eileen' : 'Importación terminada; revisa las diferencias');
+      }
+      if (cutover) {
+        const confirmed = window.confirm('¿Finalizar la migración? Zoho dejará de sincronizar y Eileen comenzará a generar las mensualidades según el día de corte.');
+        if (!confirmed) return;
+        cutover.disabled = true; cutover.textContent = 'Finalizando…';
+        await api('/api/integrations/zoho/cutover', { method: 'POST', body: { confirmation: 'MIGRAR A EILEEN' } });
+        const generated = await api('/api/billing/recurring/generate', { method: 'POST' });
+        await loadData(); renderAll();
+        document.dispatchEvent(new CustomEvent('recurringbillingrefresh'));
+        toast(generated.generated ? `Migración completada y ${generated.generated} cobro${generated.generated === 1 ? '' : 's'} preparado${generated.generated === 1 ? '' : 's'}` : 'Migración completada; Eileen ya administra las mensualidades');
       }
       await loadStatus(false);
     } catch (error) {

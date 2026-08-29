@@ -59,6 +59,147 @@ async function requireStaff(request: FastifyRequest) {
   return user;
 }
 
+async function recurringBillingStatus(ownerId: string) {
+  const [zohoConnection] = await sql`
+    SELECT status, sync_enabled, last_sync_at
+    FROM integration_connections
+    WHERE owner_id = ${ownerId} AND provider = 'zoho_invoice'
+      AND sync_enabled = true AND status <> 'completed'
+  `;
+  const [summary] = await sql`
+    WITH eligible AS (
+      SELECT c.id, c.billing_cutoff_day, c.standard_price
+      FROM clients c
+      WHERE c.owner_id = ${ownerId} AND c.status = 'active' AND c.billing_model = 'monthly'
+        AND c.standard_price > 0
+        AND EXISTS (
+          SELECT 1 FROM memberships m
+          WHERE m.client_id = c.id AND m.status = 'active' AND m.starts_on <= current_date
+            AND (m.ends_on IS NULL OR m.ends_on >= current_date)
+        )
+    ), periods AS (
+      SELECT generate_series(
+        date_trunc('month', current_date),
+        date_trunc('month', current_date) + interval '1 month',
+        interval '1 month'
+      )::date AS billing_period
+    ), schedule AS (
+      SELECT e.id AS client_id, p.billing_period,
+        make_date(
+          extract(year FROM p.billing_period)::integer,
+          extract(month FROM p.billing_period)::integer,
+          least(e.billing_cutoff_day, extract(day FROM (p.billing_period + interval '1 month - 1 day'))::integer)
+        ) AS due_on,
+        e.standard_price
+      FROM eligible e CROSS JOIN periods p
+    ), covered AS (
+      SELECT s.*,
+        EXISTS (
+          SELECT 1 FROM invoices i
+          WHERE i.client_id = s.client_id AND i.status <> 'void'
+            AND date_trunc('month', COALESCE(i.billing_period, i.issued_on, i.due_on))::date = s.billing_period
+            AND (
+              i.auto_generated = true OR i.source_system = 'zoho_invoice'
+              OR (i.package_id IS NULL AND i.amount = s.standard_price)
+              OR lower(i.concept) LIKE '%mensual%'
+            )
+        ) AS has_invoice
+      FROM schedule s
+    )
+    SELECT
+      (SELECT count(*)::integer FROM eligible) AS active_clients,
+      count(*) FILTER (WHERE billing_period = date_trunc('month', current_date)::date AND has_invoice)::integer AS current_period_invoices,
+      count(*) FILTER (WHERE due_on <= current_date + (${config.BILLING_GENERATION_DAYS_AHEAD})::integer AND NOT has_invoice)::integer AS ready_to_generate,
+      min(due_on) FILTER (WHERE due_on >= current_date) AS next_due_on
+    FROM covered
+  `;
+  return {
+    automatic: !zohoConnection,
+    blockedByZoho: Boolean(zohoConnection),
+    zohoStatus: zohoConnection?.status || null,
+    daysAhead: config.BILLING_GENERATION_DAYS_AHEAD,
+    activeClients: Number(summary?.active_clients || 0),
+    currentPeriodInvoices: Number(summary?.current_period_invoices || 0),
+    readyToGenerate: Number(summary?.ready_to_generate || 0),
+    nextDueOn: summary?.next_due_on || null
+  };
+}
+
+async function generateRecurringInvoices(ownerId?: string) {
+  const selectedOwner = ownerId || null;
+  const invoices = await sql`
+    WITH periods AS (
+      SELECT generate_series(
+        date_trunc('month', current_date),
+        date_trunc('month', current_date) + interval '1 month',
+        interval '1 month'
+      )::date AS billing_period
+    ), schedule AS (
+      SELECT c.id AS client_id, c.owner_id, c.standard_price AS amount,
+        COALESCE(p.name, 'Mensualidad') AS plan_name, periods.billing_period,
+        make_date(
+          extract(year FROM periods.billing_period)::integer,
+          extract(month FROM periods.billing_period)::integer,
+          least(c.billing_cutoff_day, extract(day FROM (periods.billing_period + interval '1 month - 1 day'))::integer)
+        ) AS due_on
+      FROM clients c
+      LEFT JOIN service_plans p ON p.id = c.plan_id
+      CROSS JOIN periods
+      WHERE c.status = 'active' AND c.billing_model = 'monthly' AND c.standard_price > 0
+        AND (${selectedOwner}::uuid IS NULL OR c.owner_id = ${selectedOwner}::uuid)
+        AND NOT EXISTS (
+          SELECT 1 FROM integration_connections ic
+          WHERE ic.owner_id = c.owner_id AND ic.provider = 'zoho_invoice'
+            AND ic.sync_enabled = true AND ic.status <> 'completed'
+        )
+    ), candidates AS (
+      SELECT s.*
+      FROM schedule s
+      WHERE s.due_on <= current_date + (${config.BILLING_GENERATION_DAYS_AHEAD})::integer
+        AND EXISTS (
+          SELECT 1 FROM memberships m
+          WHERE m.client_id = s.client_id AND m.status = 'active' AND m.starts_on <= s.due_on
+            AND (m.ends_on IS NULL OR m.ends_on >= s.billing_period)
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM invoices i
+          WHERE i.client_id = s.client_id AND i.status <> 'void'
+            AND date_trunc('month', COALESCE(i.billing_period, i.issued_on, i.due_on))::date = s.billing_period
+            AND (
+              i.auto_generated = true OR i.source_system = 'zoho_invoice'
+              OR (i.package_id IS NULL AND i.amount = s.amount)
+              OR lower(i.concept) LIKE '%mensual%'
+            )
+        )
+    )
+    INSERT INTO invoices (
+      client_id, concept, amount, due_on, issued_on, subtotal,
+      billing_period, auto_generated
+    )
+    SELECT client_id, plan_name || ' · ' || to_char(billing_period, 'MM/YYYY'), amount, due_on,
+      current_date, amount, billing_period, true
+    FROM candidates
+    ON CONFLICT (client_id, billing_period) WHERE auto_generated = true DO NOTHING
+    RETURNING id, client_id, billing_period, due_on, amount
+  `;
+  return { generated: invoices.length, invoices };
+}
+
+app.get('/api/billing/recurring/status', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  return recurringBillingStatus(auth.sub);
+});
+
+app.post('/api/billing/recurring/generate', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const status = await recurringBillingStatus(auth.sub);
+  if (status.blockedByZoho) {
+    return { ...status, generated: 0, message: 'La facturación automática se activará después del corte final de Zoho.' };
+  }
+  const result = await generateRecurringInvoices(auth.sub);
+  return { ...(await recurringBillingStatus(auth.sub)), generated: result.generated };
+});
+
 app.get('/health', async () => {
   const [database] = await sql`SELECT now() AS time`;
   return {
@@ -1086,12 +1227,18 @@ app.patch('/api/inbody/:id', { preHandler: requireStaff }, async (request, reply
 
 const firstReminderRun = setTimeout(() => dispatchReminders().catch(error => app.log.error(error)), 10_000);
 const reminderInterval = setInterval(() => dispatchReminders().catch(error => app.log.error(error)), config.REMINDER_INTERVAL_MINUTES * 60_000);
+const firstBillingRun = setTimeout(() => generateRecurringInvoices().catch(error => app.log.error(error)), 15_000);
+const billingInterval = setInterval(() => generateRecurringInvoices().catch(error => app.log.error(error)), config.BILLING_INTERVAL_MINUTES * 60_000);
 firstReminderRun.unref();
 reminderInterval.unref();
+firstBillingRun.unref();
+billingInterval.unref();
 
 app.addHook('onClose', async () => {
   clearTimeout(firstReminderRun);
   clearInterval(reminderInterval);
+  clearTimeout(firstBillingRun);
+  clearInterval(billingInterval);
   await sql.end();
 });
 await app.listen({ port: config.PORT, host: '::' });

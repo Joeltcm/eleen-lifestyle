@@ -13,6 +13,8 @@
 .zoho-status.error::before { background: #c95f67; }
 .zoho-migration-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 20px; }
 .zoho-migration-actions button { min-height: 44px; }
+.zoho-cutover-note { margin-top: 13px !important; padding: 12px 14px; border-radius: 12px; background: #fff7e9; color: #7d614e !important; font-size: 11px; line-height: 1.5; }
+.zoho-cutover { border-color: #d9ad82 !important; color: #805e43 !important; }
 .zoho-sync-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 20px; }
 .zoho-sync-metric { padding: 15px; border: 1px solid #ece2e6; border-radius: 14px; background: #fcfafb; }
 .zoho-sync-metric span { display: block; color: #806f76; font-size: 12px; font-weight: 700; }
