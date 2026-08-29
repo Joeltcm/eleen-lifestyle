@@ -118,7 +118,20 @@ async function googleRequest(token: string, path: string, options: RequestInit =
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(options.headers || {}) }
   });
   const payload = await response.json().catch(() => ({})) as GoogleRecord;
-  if (!response.ok) throw new GoogleCalendarError(payload.error?.message || `Google Calendar respondió ${response.status}`, response.status);
+  if (!response.ok) {
+    const reason = String(payload.error?.errors?.[0]?.reason || payload.error?.status || payload.error?.details?.[0]?.reason || '').toLowerCase();
+    const originalMessage = String(payload.error?.message || `Google Calendar respondió ${response.status}`);
+    const normalizedMessage = originalMessage.toLowerCase();
+    let message = originalMessage;
+    if (response.status === 403 && (reason.includes('accessnotconfigured') || reason.includes('service_disabled') || normalizedMessage.includes('has not been used') || normalizedMessage.includes('is disabled'))) {
+      message = 'La API de Google Calendar no está habilitada en el proyecto de Google Cloud. Actívala en “APIs y servicios” y vuelve a sincronizar.';
+    } else if (response.status === 403 && (reason.includes('insufficient') || normalizedMessage.includes('insufficient authentication scopes'))) {
+      message = 'Google no concedió el permiso de calendario. Desconecta la integración y vuelve a autorizarla aceptando el acceso solicitado.';
+    } else if (response.status === 403 && (reason.includes('ratelimit') || reason.includes('quota') || normalizedMessage.includes('quota'))) {
+      message = 'Google Calendar alcanzó temporalmente su límite de solicitudes. Eileen volverá a intentarlo automáticamente.';
+    }
+    throw new GoogleCalendarError(message, response.status);
+  }
   return payload;
 }
 
