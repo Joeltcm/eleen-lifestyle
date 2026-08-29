@@ -1,4 +1,4 @@
-const APP_VERSION = '44';
+const APP_VERSION = '45';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -814,7 +814,7 @@ function inbodyReview(client, assessments, pageErrors = [], skippedPages = []) {
 
 function inbodyImport(client) {
   const box = document.createElement('div');
-  box.innerHTML = `<p class="eyebrow">IMPORTACIÓN AUTOMÁTICA</p><h2>Analizar InBody</h2><p style="color:#6f7b75">Sube las páginas del reporte en PDF, JPG o PNG. Se guardarán en el expediente privado antes de iniciar el análisis.</p><p id="inbody-quota" class="inbody-review-note">Consultando el límite diario de análisis…</p><label style="border:2px dashed #d8a7bc;border-radius:9px;padding:24px;text-align:center;color:#8c5870;cursor:pointer"><input id="inbody-file" type="file" accept="application/pdf,image/jpeg,image/png,image/webp" multiple hidden />Seleccionar reporte InBody<br><small style="color:#6f7b75;font-weight:400">Máximo 20 MB por archivo</small></label><div id="scan-result"></div>`;
+  box.innerHTML = `<p class="eyebrow">IMPORTACIÓN AUTOMÁTICA</p><h2>Analizar InBody</h2><p style="color:#6f7b75">Sube las páginas del reporte en JPG, PNG o WebP. Se guardarán en el expediente privado antes de iniciar el análisis.</p><p class="inbody-review-note">La extracción se revisa antes de guardar el historial. Para DeepSeek, sube las páginas del reporte como imágenes.</p><label style="border:2px dashed #d8a7bc;border-radius:9px;padding:24px;text-align:center;color:#8c5870;cursor:pointer"><input id="inbody-file" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden />Seleccionar reporte InBody<br><small style="color:#6f7b75;font-weight:400">Máximo 20 MB por archivo</small></label><div id="scan-result"></div>`;
   openModal(box);
   const result = document.getElementById('scan-result');
   const analyzeDocuments = async documentIds => {
@@ -826,7 +826,6 @@ function inbodyImport(client) {
       result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>Reporte guardado; análisis pendiente</b><span>${escapeHtml(analysisError.message)}. El archivo permanece seguro y puedes reintentarlo desde esta misma pantalla.</span></div>`;
     }
   };
-  api('/api/inbody/quota').then(quota => { document.getElementById('inbody-quota').textContent = `Protección de costo: ${quota.remaining} de ${quota.limit} unidades disponibles hoy.`; }).catch(() => {});
   api(`/api/documents?clientId=${encodeURIComponent(client.id)}`).then(documents => {
     const latest = documents.find(document => document.kind === 'inbody' && document.upload_status === 'ready');
     if (!latest || result.children.length) return;
@@ -841,8 +840,8 @@ function inbodyImport(client) {
       for (const file of files) {
         if (file.size > 20 * 1024 * 1024) throw new Error(`${file.name} supera el límite de 20 MB`);
         const extension = file.name.split('.').pop()?.toLowerCase();
-        const contentType = file.type || ({ pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' })[extension];
-        if (!['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(contentType)) throw new Error(`${file.name} no es un PDF, JPG, PNG o WebP válido`);
+        const contentType = file.type || ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' })[extension];
+        if (!['image/jpeg', 'image/png', 'image/webp'].includes(contentType)) throw new Error(`${file.name} no es una imagen JPG, PNG o WebP válida`);
         const created = await api('/api/documents/upload-url', { method: 'POST', body: { clientId: client.id, kind: 'inbody', fileName: file.name, contentType, sizeBytes: file.size } });
         await api(`/api/documents/${created.document.id}/content`, { method: 'PUT', headers: { 'Content-Type': contentType }, body: file });
         documentIds.push(created.document.id);

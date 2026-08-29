@@ -2,7 +2,14 @@ import { z } from 'zod';
 import sharp from 'sharp';
 import { config } from './config.js';
 
-export const inbodyAnalysisReady = Boolean(config.CLOUDFLARE_ACCOUNT_ID && config.CLOUDFLARE_API_TOKEN);
+const cloudflareReady = Boolean(config.CLOUDFLARE_ACCOUNT_ID && config.CLOUDFLARE_API_TOKEN);
+const deepseekReady = Boolean(config.DEEPSEEK_API_KEY);
+
+export const inbodyAnalysisProvider = config.INBODY_ANALYSIS_PROVIDER;
+export const inbodyAnalysisReady = inbodyAnalysisProvider === 'deepseek' ? deepseekReady : cloudflareReady;
+export const inbodyAnalysisSetup = inbodyAnalysisProvider === 'deepseek'
+  ? 'Agrega DEEPSEEK_API_KEY a Railway. El análisis visual usa DeepSeek Vision.'
+  : 'Agrega a Railway un token de Cloudflare con permisos Workers AI Read y Edit.';
 
 const metricKeys = [
   'heightCm', 'weightKg', 'skeletalMuscleMassKg', 'bodyFatMassKg', 'percentBodyFat', 'bmi',
@@ -74,11 +81,14 @@ General rules:
 - confidence is an object of 0-to-1 scores by metric; use an empty object when uncertain.
 - Never return patient name, ID, birth date, diagnosis, recommendations, or medical interpretation.`;
 
-function apiError(payload: unknown, status: number) {
-  const body = payload as { errors?: Array<{ message?: string }>; error?: string };
-  const detail = body?.errors?.map(error => error.message).filter(Boolean).join('; ') || body?.error;
-  if (status === 401 || status === 403) return new Error('El token de Cloudflare no tiene permiso para Workers AI');
-  return new Error(detail || `Cloudflare AI respondió con estado ${status}`);
+function apiError(payload: unknown, status: number, provider = 'Cloudflare') {
+  const body = payload as { errors?: Array<{ message?: string }>; error?: string | { message?: string } };
+  const errorMessage = typeof body?.error === 'string' ? body.error : body?.error?.message;
+  const detail = body?.errors?.map(error => error.message).filter(Boolean).join('; ') || errorMessage;
+  if (status === 401 || status === 403) return new Error(provider === 'DeepSeek'
+    ? 'La clave de DeepSeek no es válida o no tiene acceso al modelo de visión'
+    : 'El token de Cloudflare no tiene permiso para Workers AI');
+  return new Error(detail || `${provider} respondió con estado ${status}`);
 }
 
 function jsonFromModel(value: unknown) {
@@ -90,7 +100,7 @@ function jsonFromModel(value: unknown) {
 }
 
 async function cloudflareRequest(path: string, init: RequestInit) {
-  if (!inbodyAnalysisReady) throw new Error('El análisis automático aún no está configurado');
+  if (!cloudflareReady) throw new Error('El análisis de documentos PDF requiere configurar Cloudflare como proveedor alternativo');
   const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${config.CLOUDFLARE_ACCOUNT_ID}${path}`, {
     ...init,
     headers: { Authorization: `Bearer ${config.CLOUDFLARE_API_TOKEN}`, ...(init.headers || {}) },
@@ -101,7 +111,7 @@ async function cloudflareRequest(path: string, init: RequestInit) {
   return payload as { result?: unknown };
 }
 
-export async function extractInBodyImage(imageUrl: string, fileName = '') {
+async function extractWithCloudflare(imageUrl: string, fileName = '') {
   const model = config.CLOUDFLARE_VISION_MODEL.split('/').map(encodeURIComponent).join('/');
   const payload = await cloudflareRequest(`/ai/run/${model}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -117,6 +127,48 @@ export async function extractInBodyImage(imageUrl: string, fileName = '') {
   const outer = payload.result as { result?: unknown } | undefined;
   const result = (outer?.result ?? outer) as { answer?: unknown; response?: unknown; choices?: Array<{ message?: { content?: unknown } }> } | undefined;
   return extractionSchema.parse(jsonFromModel(result?.choices?.[0]?.message?.content ?? result?.answer ?? result?.response ?? result));
+}
+
+async function deepseekRequest(body: unknown) {
+  if (!deepseekReady) throw new Error('Falta configurar la clave de DeepSeek');
+  const response = await fetch('https://api.deepseek.com/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.DEEPSEEK_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(90000)
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw apiError(payload, response.status, 'DeepSeek');
+  return payload as { choices?: Array<{ message?: { content?: unknown } }> };
+}
+
+async function extractWithDeepSeek(imageUrl: string, fileName = '') {
+  const payload = await deepseekRequest({
+    model: config.DEEPSEEK_VISION_MODEL,
+    temperature: 0,
+    response_format: { type: 'json_object' },
+    max_tokens: 1500,
+    messages: [
+      { role: 'system', content: 'You extract body-composition report data. Return only valid JSON and never include patient identity.' },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: `${prompt}\nSource filename: ${fileName || 'not provided'}.` },
+          { type: 'image_url', image_url: { url: imageUrl } }
+        ]
+      }
+    ]
+  });
+  return extractionSchema.parse(jsonFromModel(payload.choices?.[0]?.message?.content));
+}
+
+export async function extractInBodyImage(imageUrl: string, fileName = '') {
+  return inbodyAnalysisProvider === 'deepseek'
+    ? extractWithDeepSeek(imageUrl, fileName)
+    : extractWithCloudflare(imageUrl, fileName);
 }
 
 export function isInBodyHistoryImage(fileName: string) {
@@ -137,6 +189,9 @@ export async function prepareInBodyImage(body: Buffer, fileName: string) {
 }
 
 export async function extractInBodyDocument(body: Buffer, fileName: string, contentType: string) {
+  if (inbodyAnalysisProvider === 'deepseek') {
+    throw new Error('DeepSeek Vision procesa páginas de InBody en JPG, PNG o WebP. Exporta el PDF en imágenes para analizarlo.');
+  }
   const form = new FormData();
   form.append('files', new Blob([Uint8Array.from(body)], { type: contentType }), fileName);
   form.append('conversionOptions', JSON.stringify({ output: { format: 'text' }, pdf: { metadata: false } }));

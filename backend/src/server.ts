@@ -8,7 +8,7 @@ import { z, ZodError } from 'zod';
 import { config } from './config.js';
 import { sql } from './db.js';
 import { createDownloadUrl, createUploadUrl, downloadObject, storageReady, uploadObject, verifyUpload } from './storage.js';
-import { extractInBodyDocument, extractInBodyImage, inbodyAnalysisReady, prepareInBodyImage, validateExtraction, validateInBodyValues } from './inbody-analysis.js';
+import { extractInBodyDocument, extractInBodyImage, inbodyAnalysisReady, inbodyAnalysisSetup, prepareInBodyImage, validateExtraction, validateInBodyValues } from './inbody-analysis.js';
 import { registerZohoRoutes } from './zoho-routes.js';
 import { registerGoogleCalendarRoutes, syncSessionToGoogle } from './google-calendar.js';
 import { accountStatementPdf, accountsReceivablePdf, invoicePdf } from './billing-reports.js';
@@ -1092,47 +1092,16 @@ const analyzeInBodySchema = z.object({
   documentIds: z.array(z.string().uuid()).min(1).max(10)
 });
 
-const inbodyAiFeature = 'inbody_extraction';
-const nextAiQuotaReset = () => {
-  const reset = new Date();
-  reset.setUTCHours(24, 0, 0, 0);
-  return reset.toISOString();
-};
 const inbodyPageNeedsAi = (name: string, contentType: string) => {
   if (contentType === 'application/pdf') return true;
   if (/result[\s_-]*interpretation/i.test(name)) return false;
   const historyPage = name.match(/body[\s_-]*history[\s_-]*(\d+)/i);
   return !historyPage || Number(historyPage[1]) < 2;
 };
-async function getInbodyAiQuota() {
-  const [usage] = await sql`
-    SELECT units FROM ai_usage_daily
-    WHERE usage_date = (now() AT TIME ZONE 'UTC')::date AND feature = ${inbodyAiFeature}
-  `;
-  const used = Number(usage?.units || 0);
-  return { limit: config.INBODY_AI_DAILY_LIMIT, used, remaining: Math.max(0, config.INBODY_AI_DAILY_LIMIT - used), resetsAt: nextAiQuotaReset() };
-}
-async function reserveInbodyAiQuota(units: number) {
-  if (units < 1 || units > config.INBODY_AI_DAILY_LIMIT) return null;
-  const [usage] = await sql`
-    INSERT INTO ai_usage_daily (usage_date, feature, units)
-    VALUES ((now() AT TIME ZONE 'UTC')::date, ${inbodyAiFeature}, ${units})
-    ON CONFLICT (usage_date, feature) DO UPDATE
-      SET units = ai_usage_daily.units + EXCLUDED.units, updated_at = now()
-      WHERE ai_usage_daily.units + EXCLUDED.units <= ${config.INBODY_AI_DAILY_LIMIT}
-    RETURNING units
-  `;
-  if (!usage) return null;
-  const used = Number(usage.units);
-  return { limit: config.INBODY_AI_DAILY_LIMIT, used, remaining: config.INBODY_AI_DAILY_LIMIT - used, resetsAt: nextAiQuotaReset() };
-}
-
-app.get('/api/inbody/quota', { preHandler: requireStaff }, async () => getInbodyAiQuota());
-
 app.post('/api/inbody/analyze', { preHandler: requireStaff }, async (request, reply) => {
   if (!inbodyAnalysisReady) return reply.code(503).send({
     error: 'El análisis automático aún no está configurado',
-    setup: 'Agrega a Railway un token de Cloudflare con permisos Workers AI Read y Edit.'
+    setup: inbodyAnalysisSetup
   });
   const auth = request.user as AuthUser; const input = analyzeInBodySchema.parse(request.body);
   const documents = await sql`
@@ -1145,15 +1114,6 @@ app.post('/api/inbody/analyze', { preHandler: requireStaff }, async (request, re
   const analysisDocuments = documents.filter(document => inbodyPageNeedsAi(document.original_name, document.content_type));
   const skippedPages = documents.filter(document => !inbodyPageNeedsAi(document.original_name, document.content_type)).map(document => document.original_name);
   if (!analysisDocuments.length) return reply.code(422).send({ error: 'Selecciona la hoja principal o una página BodyHistory 0/1 para analizar' });
-  const requestedUnits = analysisDocuments.reduce((total, document) => total + (document.content_type === 'application/pdf' ? 2 : 1), 0);
-  const quota = await reserveInbodyAiQuota(requestedUnits);
-  if (!quota) {
-    const current = await getInbodyAiQuota();
-    return reply.code(429).send({
-      error: `Límite diario de análisis alcanzado para protegerte de cargos. Se habilita nuevamente después de ${new Date(current.resetsAt).toLocaleString('es-PA', { timeZone: 'America/Panama' })}.`,
-      quota: current
-    });
-  }
 
   const merged = new Map<string, { documentId: string; deviceModel: string | null; values: Record<string, number>; confidence: Record<string, number>; warnings: string[] }>();
   const pageErrors: string[] = [];
@@ -1202,7 +1162,7 @@ app.post('/api/inbody/analyze', { preHandler: requireStaff }, async (request, re
     }
     return saved;
   });
-  return { assessments, pageErrors, skippedPages, quota, requiresReview: true };
+  return { assessments, pageErrors, skippedPages, requiresReview: true };
 });
 
 const reviewInBodySchema = z.object({
