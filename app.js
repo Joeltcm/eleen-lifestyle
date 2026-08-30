@@ -1,4 +1,4 @@
-const APP_VERSION = '55';
+const APP_VERSION = '56';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -328,7 +328,7 @@ function renderCalendar() {
   document.getElementById('session-list').innerHTML = visibleSessions.length ? visibleSessions.map(session => `<div class="session-row"><div class="session-date"><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric' }).format(new Date(`${session.date}T12:00:00`))}</b><span>${session.time} · ${session.durationMinutes} min</span></div><div class="session-person"><b>${session.client}</b><span>${session.routine} · ${session.mode}</span>${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}</div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span>${session.status === 'cancelled' ? '<span class="session-done">—</span>' : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button><button type="button" class="secondary" data-cancel-session="${session.id}">Cancelar</button>${sessionComplianceForm(session)}</div>`}</div>`).join('') : `<p class="empty">No hay sesiones programadas ${periodName}.</p>`;
 }
 function renderRoutines() {
-  document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${routine.title}</h3><p>${routine.description}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''}${routine.dueOn ? `<br><span class="routine-due${dateOnly(routine.dueOn) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">Fecha límite: ${dateOnly(routine.dueOn)}</span>` : ''}</footer><div class="client-actions"><button class="secondary" data-edit-routine="${routine.id}">Editar</button><button class="secondary" data-duplicate-routine="${routine.id}">Reutilizar</button><button class="secondary" data-delete-routine="${routine.id}">Eliminar</button></div></article>`).join('');
+  document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${routine.title}</h3><p>${routine.description}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''}${routine.dueOn ? `<br><span class="routine-due${dateOnly(routine.dueOn) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">Fecha límite: ${dateOnly(routine.dueOn)}</span>` : ''}</footer><div class="client-actions"><button class="secondary" data-open-routine="${routine.id}">Ver rutina</button><button class="secondary" data-edit-routine="${routine.id}">Editar</button><button class="secondary" data-duplicate-routine="${routine.id}">Reutilizar</button><button class="secondary" data-delete-routine="${routine.id}">Eliminar</button></div></article>`).join('');
 }
 function renderBillingInsights() {
   const chart = document.getElementById('billing-line-chart');
@@ -808,6 +808,25 @@ function renderCatalogList() {
 
 // La entrenadora necesita ver lo que subió —comprobar el encuadre, si se
 // entiende el movimiento— sin tener que entrar como cliente.
+// La rutina como la ve el cliente, para que la entrenadora pueda revisar los
+// videos de sus ejercicios sin entrar al portal ni buscarlos en el catálogo.
+function routineDetail(routine) {
+  const asignados = (routine.assignedClientIds || []).map(id => data.clients.find(client => client.id === id)?.name).filter(Boolean);
+  const conVideo = (routine.exercises || []).filter(exercise => {
+    const entry = exerciseCatalog.find(item => item.id === exercise.catalogId || item.slug === exercise.catalogId);
+    return entry?.hasVideo;
+  }).length;
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">PLAN DE ENTRENAMIENTO</p><h2>${escapeHtml(routine.title)}</h2>
+    <p style="color:#6f7b75;margin-top:-12px">${escapeHtml(routine.description || '')}<br>${asignados.length ? escapeHtml(asignados.join(', ')) : 'Sin asignar'} · ${routine.sessions} veces por semana</p>
+    ${routine.dueOn ? `<p class="routine-due${dateOnly(routine.dueOn) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">Fecha límite: ${dateOnly(routine.dueOn)}</p>` : ''}
+    <p class="section-note">${routine.exercises.length} ejercicio${routine.exercises.length === 1 ? '' : 's'} · ${conVideo} con video. Esto es lo que ve el cliente en su portal.</p>
+    <div class="exercise-preview">${exerciseRows(routine.exercises || [], exerciseCatalog, 'coachvideo')}</div>
+    <button class="secondary wide-button" id="routine-detail-edit">Editar rutina</button>`;
+  openModal(box, true);
+  document.getElementById('routine-detail-edit').onclick = () => newRoutine(routine);
+}
+
 async function previewExerciseVideo(exercise) {
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">DEMOSTRACIÓN</p><h2>${escapeHtml(exercise.name)}</h2>
@@ -966,7 +985,9 @@ function newRoutine(routine = null, duplicate = false) {
   const currentExercise = () => exerciseCatalog.find(exercise => exercise.id === exerciseSelect.value);
   const renderReference = () => {
     const exercise = currentExercise();
-    reference.innerHTML = exercise ? `<div><b>${escapeHtml(exercise.name)}</b><span>${escapeHtml([exercise.english, exerciseSectionLabels[exercise.section], exercise.pattern].filter(Boolean).join(' · '))}</span></div><span class="exercise-level">${escapeHtml(exercise.level)}</span><small><b>Con máquina:</b> ${escapeHtml(exercise.machine)}<br><b>Sin máquina:</b> ${escapeHtml(exercise.freeWeight)}${exercise.cues ? `<br><b>Ejecución:</b> ${escapeHtml(exercise.cues)}` : ''}<br>${exercise.hasVideo ? '<b>▶ Tiene video de demostración</b>' : 'Sin video: el cliente no podrá verlo ejecutado.'}</small>` : '<p class="empty">No hay ejercicios con estos filtros.</p>';
+    // El video se abre aquí mismo, no en otro modal: reemplazar el modal
+    // borraría la rutina a medio armar.
+    reference.innerHTML = exercise ? `<div><b>${escapeHtml(exercise.name)}</b><span>${escapeHtml([exercise.english, exerciseSectionLabels[exercise.section], exercise.pattern].filter(Boolean).join(' · '))}</span></div><span class="exercise-level">${escapeHtml(exercise.level)}</span><small><b>Con máquina:</b> ${escapeHtml(exercise.machine)}<br><b>Sin máquina:</b> ${escapeHtml(exercise.freeWeight)}${exercise.cues ? `<br><b>Ejecución:</b> ${escapeHtml(exercise.cues)}` : ''}${exercise.hasVideo ? '' : '<br>Sin video: el cliente no podrá verlo ejecutado.'}</small>${exercise.hasVideo ? `<button type="button" class="secondary session-use exercise-video-toggle" data-play-exercise="${exercise.id}" data-video-target="refvideo-${exercise.id}">▶ Ver cómo se hace</button><div class="exercise-video" id="refvideo-${exercise.id}" hidden></div>` : ''}` : '<p class="empty">No hay ejercicios con estos filtros.</p>';
   };
   const renderChoices = () => {
     const choices = exerciseCatalog.filter(exercise =>
@@ -1369,6 +1390,7 @@ document.addEventListener('click', event => {
   if (event.target.dataset.editClient) editClient(data.clients.find(client => client.id === event.target.dataset.editClient));
   if (event.target.dataset.editRoutine) newRoutine(data.routines.find(routine => routine.id === event.target.dataset.editRoutine));
   if (event.target.dataset.duplicateRoutine) newRoutine(data.routines.find(routine => routine.id === event.target.dataset.duplicateRoutine), true);
+  if (event.target.dataset.openRoutine) routineDetail(data.routines.find(routine => routine.id === event.target.dataset.openRoutine));
   if (event.target.dataset.deleteRoutine) deleteResource(`/api/routines/${event.target.dataset.deleteRoutine}`, '¿Eliminar esta rutina? Las sesiones ya realizadas conservarán su historial.', 'Rutina eliminada');
   if (event.target.dataset.inbody) inbodyImport(data.clients.find(client => client.id === event.target.dataset.inbody));
   if (event.target.dataset.completeSession) completeSession(event.target.dataset.completeSession);
@@ -1465,28 +1487,39 @@ const portalViewTitles = { 'portal-dashboard': 'Mi progreso', 'portal-routines':
 // La rutina guarda una copia del ejercicio en JSON; el video vive en el
 // catálogo. catalogId es lo que une a los dos. Un ejercicio personalizado, o
 // uno cuyo ejercicio de catálogo se borró después, simplemente no ofrece video.
-function portalExerciseRows(exercises) {
+// Se usa con dos catálogos distintos: el que recibe el cliente en su portal
+// (has_video, tal como llega de la API) y el que tiene la entrenadora en
+// memoria (hasVideo, ya mapeado). Por eso se leen las dos formas.
+function exerciseRows(exercises, catalog, prefix = 'video') {
   return exercises.map(exercise => {
     if (typeof exercise === 'string') return `<span>${escapeHtml(exercise)}</span>`;
     // Las rutinas creadas antes de mover el catálogo a la base guardaron el
     // slug del archivo estático como catalogId; las nuevas guardan el uuid. La
     // siembra conservó esos mismos slugs, así que buscar por ambos hace que las
     // rutinas viejas también muestren video.
-    const catalogEntry = (portalData?.exercises || []).find(item => item.id === exercise.catalogId || item.slug === exercise.catalogId);
+    const catalogEntry = (catalog || []).find(item => item.id === exercise.catalogId || item.slug === exercise.catalogId);
+    const tieneVideo = Boolean(catalogEntry?.has_video ?? catalogEntry?.hasVideo);
     const dose = [exercise.sets && setsLabel(exercise.sets), exercise.reps].filter(Boolean).join(' · ');
     return `<div class="portal-exercise">
       <b>${escapeHtml(exercise.name)}</b>
       ${dose ? `<small>${escapeHtml(dose)}</small>` : ''}
       ${catalogEntry?.cues ? `<small>${escapeHtml(catalogEntry.cues)}</small>` : ''}
-      ${catalogEntry?.has_video ? `<button type="button" class="secondary session-use exercise-video-toggle" data-play-exercise="${catalogEntry.id}">▶ Ver cómo se hace</button><div class="exercise-video" id="video-${catalogEntry.id}" hidden></div>` : ''}
+      ${tieneVideo ? `<button type="button" class="secondary session-use exercise-video-toggle" data-play-exercise="${catalogEntry.id}" data-video-target="${prefix}-${catalogEntry.id}">▶ Ver cómo se hace</button><div class="exercise-video" id="${prefix}-${catalogEntry.id}" hidden></div>` : ''}
     </div>`;
   }).join('');
+}
+
+function portalExerciseRows(exercises) {
+  return exerciseRows(exercises, portalData?.exercises || []);
 }
 
 // La URL firmada se pide al darle reproducir, no al cargar la pantalla: dura
 // cinco minutos y pedir cuarenta de golpe las vencería antes de usarlas.
 async function playExerciseVideo(exerciseId, button) {
-  const container = document.getElementById(`video-${exerciseId}`);
+  // El contenedor se nombra desde el botón: el mismo ejercicio puede aparecer
+  // en la rutina del cliente y en la vista de la entrenadora, y dos elementos
+  // con el mismo id harían que reproducir uno abriera el otro.
+  const container = document.getElementById(button.dataset.videoTarget || `video-${exerciseId}`);
   if (!container) return;
   if (container.dataset.loaded === 'true') {
     const visible = !container.hidden;
