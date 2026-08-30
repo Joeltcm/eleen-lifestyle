@@ -270,9 +270,14 @@ async function runSync(ownerId: string) {
     // vacío y todos los gastos entraban sin categoría. Se deduce del propio
     // gasto, aceptando los tres nombres que usa Zoho según el módulo.
     const categoriaDeGasto = (gasto: ZohoRecord) => {
-      const id = externalId(gasto.account_id ?? gasto.expense_category_id ?? gasto.category_id);
       const nombre = String(gasto.account_name ?? gasto.expense_category_name ?? gasto.category_name ?? '').trim();
-      return id && nombre ? { id, nombre } : null;
+      if (!nombre) return null;
+      // El listado de gastos trae el nombre de la cuenta pero no su id, así que
+      // exigir ambos dejaba fuera todas las categorías. Sin id, el nombre es la
+      // identidad: en Zoho la cuenta es única por nombre.
+      const id = externalId(gasto.account_id ?? gasto.expense_category_id ?? gasto.category_id)
+        || `cuenta:${nombre.toLowerCase()}`;
+      return { id, nombre };
     };
     // Las que Zoho sí liste, más las deducidas de cada gasto.
     const categorias = new Map<string, { nombre: string; descripcion: string | null }>();
