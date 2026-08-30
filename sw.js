@@ -1,4 +1,4 @@
-const VERSION = '48';
+const VERSION = '49';
 const CACHE = `eileen-lifestyle-v${VERSION}`;
 const FILES = ['./index.html', './styles.css?v=47', './zoho-migration.css?v=47', './exercise-catalog.js?v=47', './app.js?v=47', './zoho-migration.js?v=47', './recurring-billing.js?v=47', './manifest.webmanifest', './icon.svg', './icon-maskable.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png', './favicon-32.png', './favicon.ico', './assets/eleen-training.jpg'];
 

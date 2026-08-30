@@ -1,4 +1,4 @@
-const APP_VERSION = '48';
+const APP_VERSION = '49';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -825,6 +825,10 @@ function editInvoice(id) {
     catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
+// Postgres devuelve las columnas date como Date, y al serializarse a JSON
+// llegan en ISO largo. Un input[type=date] rechaza ese formato y se queda en
+// blanco, así que la fecha guardada desaparecía al abrir el formulario.
+const dateOnly = value => value ? String(value).slice(0, 10) : '';
 const poseLabels = { front: 'Frente', side: 'Perfil', back: 'Espalda', other: 'Otra' };
 const conditionKindLabels = { injury: 'Lesión', condition: 'Padecimiento' };
 const severityLabels = { mild: 'Leve', moderate: 'Moderada', severe: 'Severa' };
@@ -876,7 +880,7 @@ function conditionsSection(target, client) {
     if (!target.isConnected || !modal.open) return;
     target.innerHTML = `${items.length ? `<div class="condition-list">${items.map(item => `<article class="condition-item ${item.status}">
       <header><b>${escapeHtml(item.title)}</b><span class="condition-tag ${item.severity}">${severityLabels[item.severity]}</span></header>
-      <small>${conditionKindLabels[item.kind]}${item.body_area ? ` · ${escapeHtml(item.body_area)}` : ''} · ${conditionStatusLabels[item.status]}${item.started_on ? ` · desde ${item.started_on}` : ' · antecedente sin fecha'}${item.resolved_on ? ` · resuelta ${item.resolved_on}` : ''}</small>
+      <small>${conditionKindLabels[item.kind]}${item.body_area ? ` · ${escapeHtml(item.body_area)}` : ''} · ${conditionStatusLabels[item.status]}${item.started_on ? ` · desde ${dateOnly(item.started_on)}` : ' · antecedente sin fecha'}${item.resolved_on ? ` · resuelta ${dateOnly(item.resolved_on)}` : ''}</small>
       ${item.restrictions ? `<p class="condition-restriction">Restricción: ${escapeHtml(item.restrictions)}</p>` : ''}
       ${item.notes ? `<p>${escapeHtml(item.notes)}</p>` : ''}
       <div class="condition-actions"><button class="secondary session-use" data-edit-condition="${item.id}">Editar</button><button class="secondary session-use" data-delete-condition="${item.id}">Eliminar</button></div>
@@ -910,8 +914,8 @@ function conditionEditor(client, condition) {
       <label>Estado<select name="status"><option value="active"${selected('status', 'active')}>Activa</option><option value="monitoring"${selected('status', 'monitoring')}>En observación</option><option value="recovered"${selected('status', 'recovered')}>Recuperada</option></select></label>
     </div>
     <div class="form-row">
-      <label>Desde<input name="startedOn" type="date" value="${value('started_on')}" /></label>
-      <label>Resuelta el<input name="resolvedOn" type="date" value="${value('resolved_on')}" /></label>
+      <label>Desde<input name="startedOn" type="date" value="${dateOnly(condition?.started_on)}" /></label>
+      <label>Resuelta el<input name="resolvedOn" type="date" value="${dateOnly(condition?.resolved_on)}" /></label>
     </div>
     <p class="section-note">Deja la fecha vacía si es un antecedente y el cliente no recuerda cuándo empezó.</p>
     <label>Restricciones de entrenamiento<textarea name="restrictions" rows="2" maxlength="1000" placeholder="Evitar press por encima de la cabeza">${value('restrictions')}</textarea></label>
@@ -944,8 +948,8 @@ function photosSection(target, client) {
       const linked = near
         ? `<small>InBody ${String(near.testedAt).slice(0, 10)} · ${near.daysApart === 0 ? 'mismo día' : `${near.daysApart} día${near.daysApart === 1 ? '' : 's'} de diferencia`}${Number.isFinite(Number(near.values?.weightKg)) ? ` · ${Number(near.values.weightKg)} kg` : ''}${Number.isFinite(Number(near.values?.percentBodyFat)) ? ` · ${Number(near.values.percentBodyFat)}% grasa` : ''}</small>`
         : '<small>Sin InBody con el cual comparar</small>';
-      return `<figure class="photo-card">${photo.viewUrl ? `<img src="${escapeHtml(photo.viewUrl)}" alt="Foto de progreso del ${photo.taken_on}" loading="lazy" />` : '<div class="photo-missing">Archivo no disponible</div>'}
-        <figcaption><b>${photo.taken_on}</b><span>${poseLabels[photo.pose]}</span>${linked}${photo.notes ? `<small>${escapeHtml(photo.notes)}</small>` : ''}
+      return `<figure class="photo-card">${photo.viewUrl ? `<img src="${escapeHtml(photo.viewUrl)}" alt="Foto de progreso del ${dateOnly(photo.taken_on)}" loading="lazy" />` : '<div class="photo-missing">Archivo no disponible</div>'}
+        <figcaption><b>${dateOnly(photo.taken_on)}</b><span>${poseLabels[photo.pose]}</span>${linked}${photo.notes ? `<small>${escapeHtml(photo.notes)}</small>` : ''}
         <button class="secondary session-use" data-delete-photo="${photo.id}">Eliminar</button></figcaption></figure>`;
     }).join('')}</div>` : '<p class="empty">No hay fotos de progreso en este expediente.</p>'}<button class="secondary wide-button" id="add-photo">+ Subir foto de progreso</button>`;
     document.getElementById('add-photo').onclick = () => photoUploader(client);
