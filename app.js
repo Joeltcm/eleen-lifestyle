@@ -1,4 +1,4 @@
-const APP_VERSION = '69';
+const APP_VERSION = '70';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1131,6 +1131,54 @@ async function completeSession(id) {
   try { await api(`/api/sessions/${id}/complete`, { method: 'POST' }); await loadData(); renderAll(); toast('Sesión completada'); }
   catch (error) { toast(error.message, true); }
 }
+// Cobrar en dos toques: abrir el selector y elegir el método. La fecha es hoy,
+// que es el caso normal. Para un pago de otro día está "Otra fecha", que abre
+// el formulario completo.
+function pendingCollections() {
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">COBROS PENDIENTES</p><h2>Registrar cobros</h2>
+    <p style="color:#6f7b75;margin-top:-12px">Elige el método y queda cobrado con fecha de hoy.</p>
+    <div id="pending-list"></div>`;
+  openModal(box, true);
+  renderPendingCollections();
+}
+
+function renderPendingCollections() {
+  const target = document.getElementById('pending-list');
+  if (!target) return;
+  const pendientes = data.invoices
+    .filter(invoice => invoice.status === 'pending' && invoice.source !== 'zoho_invoice')
+    .sort((a, b) => String(a.due).localeCompare(String(b.due)));
+  const total = pendientes.reduce((suma, invoice) => suma + Number(invoice.balance || invoice.amount), 0);
+  const hoy = dateKey(today);
+
+  target.innerHTML = pendientes.length ? `<p class="section-note">${pendientes.length} pendiente${pendientes.length === 1 ? '' : 's'} · ${money.format(total)} por cobrar.</p>
+    <div class="pending-list">${pendientes.map(invoice => `<article class="pending-item${invoice.due < hoy ? ' overdue' : ''}">
+      <div><b>${escapeHtml(invoice.client)}</b><small>${escapeHtml(invoice.concept)} · vence ${invoice.due}${invoice.due < hoy ? ' · vencida' : ''}</small></div>
+      <span class="pending-amount">${money.format(invoice.balance || invoice.amount)}</span>
+      <div class="pending-actions">
+        <select data-quick-collect="${invoice.id}" aria-label="Cobrar ${escapeHtml(invoice.client)}">
+          <option value="">Cobrar hoy…</option>
+          ${['Efectivo', 'Yappy', 'Transferencia bancaria', 'Tarjeta', 'Otro'].map(m => `<option value="${m}">${m}</option>`).join('')}
+        </select>
+        <button class="secondary session-use" data-other-date="${invoice.id}">Otra fecha</button>
+      </div></article>`).join('')}</div>` : '<p class="empty">No hay cobros pendientes.</p>';
+
+  target.querySelectorAll('[data-quick-collect]').forEach(selector => {
+    selector.onchange = async event => {
+      const metodo = event.target.value; if (!metodo) return;
+      event.target.disabled = true;
+      try {
+        await api(`/api/invoices/${event.target.dataset.quickCollect}/confirm`, { method: 'POST', body: { method: metodo, paidOn: dateKey(today) } });
+        await loadData(); renderAll(); toast(`Cobrado · ${metodo}`); renderPendingCollections();
+      } catch (error) { toast(error.message, true); event.target.disabled = false; event.target.value = ''; }
+    };
+  });
+  target.querySelectorAll('[data-other-date]').forEach(button => {
+    button.onclick = () => confirmInvoice(button.dataset.otherDate);
+  });
+}
+
 function confirmInvoice(id, editing = false) {
   const invoice = data.invoices.find(item => item.id === id); if (!invoice) return;
   const content = formFromTemplate('confirm-payment-template'); openModal(content);
@@ -1609,6 +1657,7 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'new-routine') newRoutine();
   if (actionButton?.dataset.action === 'exercise-catalog') exerciseCatalogManager();
   if (actionButton?.dataset.action === 'daily-log') dailyTrainingLog();
+  if (actionButton?.dataset.action === 'pending-collections') pendingCollections();
   if (actionButton?.dataset.action === 'compliance-report') complianceReport();
   if (actionButton?.dataset.action === 'new-plan') planEditor();
   if (actionButton?.dataset.action === 'export-compliance') exportCompliance();
