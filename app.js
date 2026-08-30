@@ -1,4 +1,4 @@
-const APP_VERSION = '82';
+const APP_VERSION = '83';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -616,8 +616,19 @@ async function exportCompliance(period = compliancePeriod) {
 }
 async function notificationCenter(isPortal = false) {
   const [notifications, preferences] = await Promise.all([api('/api/notifications'), api('/api/notification-preferences')]);
-  const box = document.createElement('div'); box.innerHTML = `<form id="notification-form"><p class="eyebrow">RECORDATORIOS</p><h2>Notificaciones</h2><div class="notification-list">${notifications.length ? notifications.map(item => `<div class="notification-item ${item.type}"><b>${escapeHtml(item.title)}</b><span>${escapeHtml(item.body)}</span></div>`).join('') : '<p class="empty">No hay recordatorios pendientes.</p>'}</div><div class="notification-settings"><label class="checkbox-line"><input name="inAppEnabled" type="checkbox" ${preferences.in_app_enabled ? 'checked' : ''} /> Mostrar dentro de la aplicación</label><label class="checkbox-line"><input name="browserEnabled" type="checkbox" ${preferences.browser_enabled ? 'checked' : ''} /> Notificaciones del navegador</label><div class="form-row"><label>Avisar sesión con horas de anticipación<input name="sessionReminderHours" type="number" min="1" max="168" value="${preferences.session_reminder_hours}" /></label><label>Avisar pago con días de anticipación<input name="paymentReminderDays" type="number" min="0" max="30" value="${preferences.payment_reminder_days}" /></label></div></div><button class="primary wide-button">Guardar preferencias</button></form>`;
+  const box = document.createElement('div'); box.innerHTML = `<form id="notification-form"><p class="eyebrow">RECORDATORIOS</p><h2>Notificaciones</h2><div class="notification-list">${notifications.length ? notifications.map(item => `<div class="notification-item ${item.type}"><b>${escapeHtml(item.title)}</b><span>${escapeHtml(item.body)}</span></div>`).join('') : '<p class="empty">No hay recordatorios pendientes.</p>'}</div><div class="notification-settings"><label class="checkbox-line"><input name="inAppEnabled" type="checkbox" ${preferences.in_app_enabled ? 'checked' : ''} /> Mostrar dentro de la aplicación</label><label class="checkbox-line"><input name="browserEnabled" type="checkbox" ${preferences.browser_enabled ? 'checked' : ''} /> Notificaciones push en este dispositivo</label><p class="section-note">Hay que activarlas en cada teléfono o computadora por separado. En iPhone sólo funcionan con la aplicación instalada en la pantalla de inicio.</p>${preferences.browser_enabled ? '<button type="button" class="secondary wide-button" id="push-test">Enviar notificación de prueba</button>' : ''}<div class="form-row"><label>Avisar sesión con horas de anticipación<input name="sessionReminderHours" type="number" min="1" max="168" value="${preferences.session_reminder_hours}" /></label><label>Avisar pago con días de anticipación<input name="paymentReminderDays" type="number" min="0" max="30" value="${preferences.payment_reminder_days}" /></label></div></div><button class="primary wide-button">Guardar preferencias</button></form>`;
   openModal(box, true);
+  // La prueba recorre el circuito completo desde el servidor. El aviso que sale
+  // al guardar lo dibuja el propio navegador y no demuestra que el push llegue.
+  document.getElementById('push-test')?.addEventListener('click', async event => {
+    const boton = event.currentTarget; const texto = boton.textContent;
+    boton.disabled = true; boton.textContent = 'Enviando…';
+    try {
+      const r = await api('/api/push/test', { method: 'POST' });
+      toast(`Enviada a ${r.dispositivos} dispositivo${r.dispositivos === 1 ? '' : 's'}. Debería aparecer en unos segundos.`);
+    } catch (error) { toast(error.message, true); }
+    boton.disabled = false; boton.textContent = texto;
+  });
   document.getElementById('notification-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target); let browserEnabled = Boolean(form.get('browserEnabled'));
     try {

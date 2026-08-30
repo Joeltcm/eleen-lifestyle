@@ -2038,6 +2038,28 @@ type ReminderCandidate = {
   concept?: string;
 };
 
+// Enviar una notificación de prueba al propio usuario. Existe porque hasta
+// ahora no había forma de saber si el circuito completo funcionaba: se
+// activaba la casilla, se veía un aviso local —que no prueba nada, lo dibuja
+// el propio navegador— y había que esperar a que hubiera una sesión o un cobro
+// próximo para descubrir si el push de verdad llegaba. Esta ruta recorre el
+// camino entero: servidor, servicio de push del navegador y teléfono.
+app.post('/api/push/test', { preHandler: requireAuth }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  if (!webPushReady) return reply.code(503).send({ error: 'Las notificaciones push todavía no están configuradas' });
+  const [{ count }] = await sql`SELECT count(*)::int FROM push_subscriptions WHERE user_id = ${auth.sub} AND active = true`;
+  if (!Number(count)) return reply.code(409).send({ error: 'Este dispositivo todavía no está registrado para notificaciones' });
+  const entregada = await sendPushToUser(auth.sub, {
+    title: 'Eileen Lifestyle',
+    body: 'Notificación de prueba: si la ves, los recordatorios llegarán bien.',
+    url: '/'
+  });
+  // Un 502 y no un 200 con bandera: si no salió, es un fallo y quien llama
+  // debe enterarse sin tener que leer el cuerpo.
+  if (!entregada) return reply.code(502).send({ error: 'No se pudo entregar en ningún dispositivo registrado. Vuelve a activarlas.' });
+  return { delivered: true, dispositivos: Number(count) };
+});
+
 async function sendPushToUser(userId: string, payload: { title: string; body: string; url: string }) {
   if (!webPushReady) return false;
   const subscriptions = await sql`SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ${userId} AND active = true`;
