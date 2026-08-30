@@ -265,6 +265,29 @@ async function runSync(ownerId: string) {
     };
     const expenseCategories = await traerGastos('/expensecategories', ['expense_categories', 'expensecategories', 'categories']);
     const expenses = await traerGastos('/expenses', ['expenses']);
+    // En Zoho Invoice la categoría de un gasto es su cuenta contable, y viaja
+    // dentro del gasto: no hay una lista aparte que pedir. Pedirla devolvía
+    // vacío y todos los gastos entraban sin categoría. Se deduce del propio
+    // gasto, aceptando los tres nombres que usa Zoho según el módulo.
+    const categoriaDeGasto = (gasto: ZohoRecord) => {
+      const id = externalId(gasto.account_id ?? gasto.expense_category_id ?? gasto.category_id);
+      const nombre = String(gasto.account_name ?? gasto.expense_category_name ?? gasto.category_name ?? '').trim();
+      return id && nombre ? { id, nombre } : null;
+    };
+    // Las que Zoho sí liste, más las deducidas de cada gasto.
+    const categorias = new Map<string, { nombre: string; descripcion: string | null }>();
+    for (const categoria of expenseCategories) {
+      const id = externalId(categoria.expense_category_id ?? categoria.category_id ?? categoria.account_id);
+      const nombre = String(categoria.expense_category_name ?? categoria.category_name ?? categoria.name ?? '').trim();
+      if (id && nombre) categorias.set(id, { nombre, descripcion: (categoria.description as string) || null });
+    }
+    for (const gasto of expenses) {
+      const encontrada = categoriaDeGasto(gasto);
+      if (encontrada && !categorias.has(encontrada.id)) categorias.set(encontrada.id, { nombre: encontrada.nombre, descripcion: null });
+    }
+    if (!categorias.size && expenses.length) {
+      console.warn('Gastos de Zoho sin categoría reconocible; campos disponibles:', Object.keys(expenses[0]).join(','));
+    }
     const categoryMap = new Map<string, string>();
     const clientMap = new Map<string, string>();
     const invoiceMap = new Map<string, string>();
@@ -371,13 +394,11 @@ async function runSync(ownerId: string) {
       }
 
       // Categorías primero: los gastos las referencian.
-      for (const categoria of expenseCategories) {
-        const zohoId = externalId(categoria.expense_category_id || categoria.category_id);
-        const nombre = String(categoria.expense_category_name || categoria.category_name || categoria.name || '').trim();
-        if (!zohoId || !nombre) continue;
+      for (const [zohoId, categoria] of categorias) {
+        const nombre = categoria.nombre;
         const [guardada] = await transaction`
           INSERT INTO expense_categories (owner_id, name, description, source_system, external_id)
-          VALUES (${ownerId}, ${nombre}, ${categoria.description || null}, ${sourceSystem}, ${zohoId})
+          VALUES (${ownerId}, ${nombre}, ${categoria.descripcion}, ${sourceSystem}, ${zohoId})
           ON CONFLICT (owner_id, name) DO UPDATE SET
             source_system = EXCLUDED.source_system, external_id = EXCLUDED.external_id, updated_at = now()
           RETURNING id
@@ -388,7 +409,7 @@ async function runSync(ownerId: string) {
       for (const gasto of expenses) {
         const zohoId = externalId(gasto.expense_id);
         if (!zohoId) continue;
-        const categoriaZoho = externalId(gasto.expense_category_id || gasto.category_id);
+        const categoriaZoho = categoriaDeGasto(gasto)?.id || null;
         // El nombre de la cuenta es el mejor rótulo cuando el gasto no trae
         // descripción: en Zoho muchos gastos se registran sólo con la cuenta.
         const descripcion = String(gasto.description || gasto.account_name || gasto.expense_category_name || 'Gasto').trim().slice(0, 300);
@@ -406,7 +427,7 @@ async function runSync(ownerId: string) {
 
     const sourceSummary = {
       clients: contacts.length, invoices: invoices.length - skippedInvoices, payments: payments.length, recurring: recurring.length, credits: credits.length,
-      expenses: expenses.length, expenseCategories: expenseCategories.length, expenseError,
+      expenses: expenses.length, expenseCategories: categorias.size, expenseError,
       totalInvoiced: rounded(invoices.reduce((sum, invoice) => sum + numeric(invoice.total), 0)),
       totalPaid: rounded(payments.reduce((sum, payment) => sum + numeric(payment.amount), 0)),
       totalCredits: rounded(credits.reduce((sum, credit) => sum + numeric(credit.total), 0)), skippedInvoices
