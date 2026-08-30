@@ -1,4 +1,4 @@
-const APP_VERSION = '63';
+const APP_VERSION = '64';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1863,6 +1863,10 @@ async function showAccessLink(token) {
     document.getElementById('auth-title').textContent = 'Define tu contraseña';
     document.getElementById('auth-copy').textContent = 'Elige una contraseña para entrar a tu portal. Solo tú la conocerás.';
     document.getElementById('access-link-greeting').textContent = `${info.clientName} · ${info.email}`;
+    // La sesión guardada se cierra sólo ahora, con el enlace ya confirmado.
+    // Hacerlo antes sacaba de su cuenta a quien tocara un enlace vencido, que
+    // suele ser la entrenadora volviendo a un mensaje viejo.
+    if (authToken) { localStorage.removeItem(authKey); authToken = null; }
   } catch (error) {
     form.hidden = true;
     document.getElementById('auth-title').textContent = 'Enlace no válido';
@@ -1871,6 +1875,11 @@ async function showAccessLink(token) {
     // El enlace inservible se limpia de la barra para que recargar no repita
     // el error, y quede la pantalla normal de acceso.
     history.replaceState(null, '', location.pathname);
+    // Si había sesión, no se perdió: se continúa con ella.
+    if (authToken) {
+      const actual = await api('/api/me').catch(() => null);
+      if (actual) { form.hidden = true; return enterApp(actual.user); }
+    }
     return;
   }
 
@@ -1895,10 +1904,7 @@ async function start() {
   // Se atiende antes que la sesión guardada: quien abre un enlace de acceso
   // quiere entrar como el cliente del enlace, no como quien quedó logueado en
   // ese teléfono —que muy probablemente sea la entrenadora.
-  if (accessToken) {
-    if (authToken) { localStorage.removeItem(authKey); authToken = null; }
-    return showAccessLink(accessToken);
-  }
+  if (accessToken) return showAccessLink(accessToken);
   try {
     const status = await api('/api/auth/setup-status', { auth: false });
     if (!authToken) return showAuth(status.required);
