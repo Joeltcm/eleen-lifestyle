@@ -1413,6 +1413,79 @@ app.patch('/api/invoices/:id/payment', { preHandler: requireStaff }, async (requ
   return result;
 });
 
+// ── Panel de finanzas ─────────────────────────────────────────────────────
+// Ingresos contra gastos, mes a mes.
+//
+// Ingreso = pagos recibidos, no facturas emitidas. Una factura es una promesa
+// y un pago es dinero que entró; compararlos con gastos reales daría un
+// resultado optimista y falso. Incluye los pagos importados de Zoho, que
+// también fueron dinero recibido.
+app.get('/api/finance/summary', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const { months } = z.object({ months: z.coerce.number().int().min(2).max(36).default(12) }).parse(request.query);
+
+  const desde = new Date();
+  desde.setUTCDate(1); desde.setUTCHours(0, 0, 0, 0);
+  desde.setUTCMonth(desde.getUTCMonth() - (months - 1));
+  const inicio = desde.toISOString().slice(0, 10);
+
+  const [ingresos, gastos, porCategoria] = await Promise.all([
+    sql`
+      SELECT to_char(date_trunc('month', p.paid_on), 'YYYY-MM') AS month,
+        COALESCE(sum(p.amount), 0)::numeric AS total, count(*)::int AS cantidad
+      FROM invoice_payments p JOIN clients c ON c.id = p.client_id
+      WHERE c.owner_id = ${auth.sub} AND p.paid_on >= ${inicio}::date
+      GROUP BY 1
+    `,
+    sql`
+      SELECT to_char(date_trunc('month', spent_on), 'YYYY-MM') AS month,
+        COALESCE(sum(amount), 0)::numeric AS total, count(*)::int AS cantidad
+      FROM expenses WHERE owner_id = ${auth.sub} AND spent_on >= ${inicio}::date
+      GROUP BY 1
+    `,
+    sql`
+      SELECT COALESCE(c.name, 'Sin categoría') AS categoria,
+        COALESCE(sum(e.amount), 0)::numeric AS total, count(*)::int AS cantidad
+      FROM expenses e LEFT JOIN expense_categories c ON c.id = e.category_id
+      WHERE e.owner_id = ${auth.sub} AND e.spent_on >= ${inicio}::date
+      GROUP BY 1 ORDER BY 2 DESC LIMIT 12
+    `
+  ]);
+
+  const mapaIngresos = new Map(ingresos.map(row => [row.month as string, row]));
+  const mapaGastos = new Map(gastos.map(row => [row.month as string, row]));
+  const timeline = Array.from({ length: months }, (_, i) => {
+    const fecha = new Date(Date.UTC(desde.getUTCFullYear(), desde.getUTCMonth() + i, 1));
+    const month = `${fecha.getUTCFullYear()}-${String(fecha.getUTCMonth() + 1).padStart(2, '0')}`;
+    const income = Number(mapaIngresos.get(month)?.total || 0);
+    const expense = Number(mapaGastos.get(month)?.total || 0);
+    return {
+      month, income: Number(income.toFixed(2)), expense: Number(expense.toFixed(2)),
+      net: Number((income - expense).toFixed(2)),
+      payments: Number(mapaIngresos.get(month)?.cantidad || 0),
+      expenseCount: Number(mapaGastos.get(month)?.cantidad || 0)
+    };
+  });
+
+  const totalIngresos = timeline.reduce((suma, mes) => suma + mes.income, 0);
+  const totalGastos = timeline.reduce((suma, mes) => suma + mes.expense, 0);
+  const conActividad = timeline.filter(mes => mes.income > 0 || mes.expense > 0);
+
+  return {
+    timeline, categorias: porCategoria,
+    totales: {
+      ingresos: Number(totalIngresos.toFixed(2)),
+      gastos: Number(totalGastos.toFixed(2)),
+      neto: Number((totalIngresos - totalGastos).toFixed(2)),
+      // Cuánto de cada dólar cobrado se queda. Sin ingresos no se calcula, en
+      // vez de mostrar un 0% que parecería un negocio en ruina.
+      margen: totalIngresos > 0 ? Math.round(((totalIngresos - totalGastos) / totalIngresos) * 100) : null,
+      mesesConActividad: conActividad.length,
+      promedioMensualNeto: conActividad.length ? Number(((totalIngresos - totalGastos) / conActividad.length).toFixed(2)) : 0
+    }
+  };
+});
+
 // ── Gastos ────────────────────────────────────────────────────────────────
 // La otra mitad de las finanzas. Hasta ahora la aplicación sólo sabía de
 // ingresos, así que no había con qué comparar.

@@ -1,4 +1,4 @@
-const APP_VERSION = '74';
+const APP_VERSION = '75';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1138,6 +1138,66 @@ async function completeSession(id) {
 // el formulario completo.
 const metodosPago = ['Efectivo', 'Yappy', 'Transferencia bancaria', 'Tarjeta', 'Otro'];
 
+// Barras enfrentadas por mes: ingreso y gasto lado a lado. Se eligió barras
+// sobre líneas porque lo que importa aquí es la diferencia entre dos
+// magnitudes en cada mes, no la tendencia de una sola.
+function financeChartSvg(timeline) {
+  const ancho = 560, alto = 210, izq = 46, der = 12, arriba = 16, abajo = 26;
+  const tope = Math.max(1, ...timeline.map(m => Math.max(m.income, m.expense)));
+  const escalaY = valor => alto - abajo - ((alto - arriba - abajo) * valor) / tope;
+  const anchoMes = (ancho - izq - der) / timeline.length;
+  const anchoBarra = Math.max(3, Math.min(14, anchoMes / 2.6));
+
+  const marcas = [0, 0.5, 1].map(f => {
+    const y = escalaY(tope * f);
+    return `<line x1="${izq}" y1="${y}" x2="${ancho - der}" y2="${y}" stroke="#ece5e7" stroke-width="1"/><text x="${izq - 6}" y="${y + 3}" text-anchor="end" font-size="8" fill="#7c7077">${Math.round(tope * f).toLocaleString('en-US')}</text>`;
+  }).join('');
+
+  const barras = timeline.map((mes, i) => {
+    const centro = izq + anchoMes * i + anchoMes / 2;
+    const yIngreso = escalaY(mes.income), yGasto = escalaY(mes.expense);
+    const base = alto - abajo;
+    return `<rect x="${centro - anchoBarra - 1}" y="${yIngreso}" width="${anchoBarra}" height="${Math.max(0, base - yIngreso)}" rx="2" fill="#8fb89c"/>
+      <rect x="${centro + 1}" y="${yGasto}" width="${anchoBarra}" height="${Math.max(0, base - yGasto)}" rx="2" fill="#dca78f"/>
+      <text x="${centro}" y="${alto - 8}" text-anchor="middle" font-size="8" fill="#7c7077">${mes.month.slice(5)}</text>`;
+  }).join('');
+
+  return `<svg viewBox="0 0 ${ancho} ${alto}" class="finance-chart" role="img" aria-label="Ingresos contra gastos por mes">${marcas}${barras}</svg>
+    <div class="chart-leyenda"><span><i style="background:#8fb89c"></i>Ingresos</span><span><i style="background:#dca78f"></i>Gastos</span></div>`;
+}
+
+function financeDashboard(months = 12) {
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">FINANZAS</p><h2>Ingresos y gastos</h2>
+    <label>Período<select id="fin-meses">${[6, 12, 24, 36].map(n => `<option value="${n}"${n === months ? ' selected' : ''}>Últimos ${n} meses</option>`).join('')}</select></label>
+    <div id="fin-cuerpo"><p class="empty">Calculando…</p></div>`;
+  openModal(box, true);
+  document.getElementById('fin-meses').onchange = event => financeDashboard(Number(event.target.value));
+  api(`/api/finance/summary?months=${months}`).then(datos => {
+    const target = document.getElementById('fin-cuerpo');
+    if (!target?.isConnected || !modal.open) return;
+    const t = datos.totales;
+    const filas = datos.timeline.filter(m => m.income || m.expense).reverse().map(mes => `<tr>
+      <td>${attendanceMonthLabel(mes.month)}</td><td>${money.format(mes.income)}</td><td>${money.format(mes.expense)}</td>
+      <td><span class="delta ${mes.net >= 0 ? 'good' : 'bad'}">${money.format(mes.net)}</span></td></tr>`).join('');
+
+    target.innerHTML = `<div class="metrics" style="grid-template-columns:repeat(2,1fr)">
+        <article><span>Ingresos</span><strong>${money.format(t.ingresos)}</strong></article>
+        <article><span>Gastos</span><strong>${money.format(t.gastos)}</strong></article>
+        <article><span>Neto</span><strong class="${t.neto >= 0 ? 'neto-positivo' : 'neto-negativo'}">${money.format(t.neto)}</strong></article>
+        <article><span>Margen</span><strong>${t.margen === null ? '—' : `${t.margen}%`}</strong><small>${t.margen === null ? 'sin ingresos' : 'de cada dólar cobrado'}</small></article>
+      </div>
+      ${financeChartSvg(datos.timeline)}
+      ${datos.categorias.length ? `<p class="eyebrow" style="margin-top:18px">GASTO POR CATEGORÍA</p><div class="gasto-resumen">${datos.categorias.map(c => `<span><b>${money.format(c.total)}</b>${escapeHtml(c.categoria)} · ${c.cantidad}</span>`).join('')}</div>` : ''}
+      <p class="eyebrow" style="margin-top:18px">MES A MES</p>
+      ${filas ? `<div class="table-wrap"><table><thead><tr><th>Mes</th><th>Ingresos</th><th>Gastos</th><th>Neto</th></tr></thead><tbody>${filas}</tbody></table></div>` : '<p class="empty">Sin movimientos en el período.</p>'}
+      <p class="section-note">Ingreso son pagos recibidos, no facturas emitidas: una factura es una promesa y un pago es dinero que entró.${t.gastos === 0 ? ' Todavía no hay gastos registrados, así que el neto es igual al ingreso.' : ''}</p>`;
+  }).catch(error => {
+    const target = document.getElementById('fin-cuerpo');
+    if (target) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
+  });
+}
+
 // Vincular cobros ya hechos con su saldo de sesiones. Los que se pagaron en
 // Zoho entraron como facturas sueltas: el cliente pagó pero la app no le
 // reconoce sesiones disponibles.
@@ -1848,6 +1908,7 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'pending-collections') pendingCollections();
   if (actionButton?.dataset.action === 'expenses') expensesManager();
   if (actionButton?.dataset.action === 'link-packages') linkPackages();
+  if (actionButton?.dataset.action === 'finance') financeDashboard();
   if (actionButton?.dataset.action === 'compliance-report') complianceReport();
   if (actionButton?.dataset.action === 'new-plan') planEditor();
   if (actionButton?.dataset.action === 'export-compliance') exportCompliance();

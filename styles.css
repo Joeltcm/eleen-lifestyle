@@ -110,3 +110,7 @@ dialog.modal-wide{max-width:920px}
 /* Gastos */
 .gasto-lista{display:grid;gap:8px;max-height:48vh;overflow-y:auto;padding-right:3px;margin-top:10px}.gasto-item{display:grid;grid-template-columns:1fr auto;gap:8px 12px;align-items:center;padding:13px;border-radius:11px;background:rgba(255,253,252,.94);box-shadow:0 4px 13px #6d4a5909}.gasto-item b{display:block;font-size:13px}.gasto-item small{display:block;margin-top:3px;font-size:10px;color:var(--muted)}.gasto-monto{font:600 15px Fraunces;white-space:nowrap;color:#9c6558}.gasto-acciones{grid-column:1/-1;display:flex;gap:7px}.gasto-acciones button,.gasto-item>button{min-height:44px}
 .gasto-resumen{display:flex;flex-wrap:wrap;gap:7px;margin:10px 0}.gasto-resumen span{display:grid;gap:2px;padding:9px 12px;border-radius:10px;background:#f8f1f3;font-size:10px;color:var(--muted)}.gasto-resumen b{font:600 14px Fraunces;color:var(--ink)}
+/* Panel de finanzas */
+.finance-chart{display:block;width:100%;height:auto;margin:14px 0 6px;border-radius:11px;background:rgba(255,253,252,.94);box-shadow:0 4px 13px #6d4a5909;padding:6px}
+.chart-leyenda{display:flex;gap:16px;justify-content:center;margin-bottom:6px;font-size:10px;color:var(--muted)}.chart-leyenda span{display:flex;align-items:center;gap:6px}.chart-leyenda i{width:10px;height:10px;border-radius:3px;display:inline-block}
+.neto-positivo{color:#4b7360}.neto-negativo{color:#9c6558}
