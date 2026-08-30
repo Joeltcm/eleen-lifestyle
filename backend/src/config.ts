@@ -8,7 +8,7 @@ const schema = z.object({
   PORT: z.coerce.number().default(3000),
   NODE_ENV: z.string().default('development'),
   R2_ACCOUNT_ID: z.string().optional(),
-  R2_BUCKET: z.string().default('eleen-lifestyle-private'),
+  R2_BUCKET: z.string().default('eileen-lifestyle-private'),
   R2_ACCESS_KEY_ID: z.string().optional(),
   R2_SECRET_ACCESS_KEY: z.string().optional(),
   CLOUDFLARE_ACCOUNT_ID: z.string().optional(),
