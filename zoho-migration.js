@@ -57,11 +57,15 @@
         <div class="zoho-sync-metric"><span>Total facturado</span><strong>${money.format(Number(period.totalInvoiced || 0))}</strong><span>${displayPeriod} · Histórico: ${money.format(Number(local.totalInvoiced || 0))}</span></div>
       </div>
       <div class="zoho-reconciliation ${reconciled ? 'is-ready' : ''}"><div><b>${reconciled ? 'Datos conciliados con Zoho' : 'Sincronización todavía por conciliar'}</b><small>${escapeText(connection.organization_name || 'Zoho Invoice')} · ${formatDate(connection.last_sync_at)}</small></div><span>${reconciled ? '✓ Coincide' : 'Pendiente'}</span></div>
-      ${connection.last_error ? `<p class="zoho-error">${escapeText(connection.last_error)}</p>` : ''}
+      ${connection.last_error ? `<p class="zoho-error">${escapeText(connection.last_error)}${/invalid_code|invalid_client|invalid_grant/i.test(String(connection.last_error)) ? ' · El permiso guardado ya no sirve. Pulsa “Reconectar Zoho” y autoriza de nuevo; sincronizar antes volverá a fallar.' : ''}</p>` : ''}
       <div class="zoho-migration-actions">
         ${connection.status !== 'completed' ? `<button class="primary" id="zoho-sync" ${busy || payload.syncInProgress ? 'disabled' : ''}>${payload.syncInProgress ? 'Sincronizando…' : 'Sincronizar ahora'}</button>` : ''}
         ${connection.status === 'ready' && reconciled ? '<button class="secondary zoho-cutover" id="zoho-cutover">Finalizar migración</button>' : ''}
         <button class="secondary" id="zoho-refresh" ${busy ? 'disabled' : ''}>Actualizar estado</button>
+        <!-- Reconectar siempre disponible: si el token muere -por credenciales
+             nuevas o permisos añadidos- sin esto no había forma de salir del
+             error desde la interfaz. -->
+        <button class="secondary" id="zoho-reconnect" ${busy ? 'disabled' : ''}>Reconectar Zoho</button>
       </div>
       ${connection.status === 'ready' && reconciled ? '<p class="zoho-cutover-note">El corte final detiene la sincronización con Zoho y activa la emisión mensual en Eileen. Esta acción requiere confirmación.</p>' : ''}
       ${connection.status !== 'completed' ? '<p class="commercial-note">Zoho seguirá funcionando hasta que hagamos el corte final después de validar la facturación de Eileen.</p>' : '<p class="commercial-note">La copia histórica quedó guardada en Eileen y la sincronización con Zoho está cerrada.</p>'}
@@ -85,7 +89,7 @@
   }
 
   card.addEventListener('click', async event => {
-    const connect = event.target.closest('#zoho-connect');
+    const connect = event.target.closest('#zoho-connect') || event.target.closest('#zoho-reconnect');
     const sync = event.target.closest('#zoho-sync');
     const refresh = event.target.closest('#zoho-refresh');
     const cutover = event.target.closest('#zoho-cutover');
