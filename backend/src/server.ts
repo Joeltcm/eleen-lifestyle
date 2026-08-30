@@ -146,6 +146,9 @@ async function generateRecurringInvoices(ownerId?: string) {
       LEFT JOIN service_plans p ON p.id = c.plan_id
       CROSS JOIN periods
       WHERE c.status = 'active' AND c.billing_model = 'monthly' AND c.standard_price > 0
+        -- Quien tiene a otro como responsable de pago no genera cobro propio:
+        -- de una pareja sale una sola factura, a nombre de quien paga.
+        AND c.billing_responsible_client_id IS NULL
         AND (${selectedOwner}::uuid IS NULL OR c.owner_id = ${selectedOwner}::uuid)
         AND NOT EXISTS (
           SELECT 1 FROM integration_connections ic
@@ -182,6 +185,32 @@ async function generateRecurringInvoices(ownerId?: string) {
     ON CONFLICT (client_id, billing_period) WHERE auto_generated = true DO NOTHING
     RETURNING id, client_id, billing_period, due_on, amount
   `;
+  // Renovar el saldo de sesiones junto con el cobro. Sin esto, la mensualidad
+  // con tope de sesiones se cobraba cada mes pero el saldo vencía y no volvía:
+  // el cliente quedaba pagando sin sesiones disponibles. La cantidad se hereda
+  // del último saldo mensual del propio cliente, así que sigue sus cambios sin
+  // configurar nada aparte.
+  for (const invoice of invoices) {
+    const [anterior] = await sql`
+      SELECT total_sessions FROM session_packages
+      WHERE client_id = ${invoice.client_id} AND kind = 'monthly'
+      ORDER BY purchased_on DESC, created_at DESC LIMIT 1
+    `;
+    if (!anterior?.total_sessions) continue;
+    const [vigente] = await sql`
+      SELECT id FROM session_packages
+      WHERE client_id = ${invoice.client_id} AND kind = 'monthly'
+        AND expires_on IS NOT NULL AND expires_on >= ${invoice.due_on}::date
+      LIMIT 1
+    `;
+    if (vigente) continue;
+    await sql`
+      INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on)
+      VALUES (${invoice.client_id},
+        ${'Mensualidad ' + new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric', timeZone: 'America/Panama' }).format(new Date(`${invoice.billing_period}T12:00:00-05:00`))},
+        ${anterior.total_sessions}, ${invoice.amount}, ${invoice.due_on}::date, 'monthly', current_date)
+    `;
+  }
   return { generated: invoices.length, invoices };
 }
 
@@ -313,6 +342,9 @@ const clientSchema = z.object({
   planId: z.string().uuid().optional(), cutoffDay: z.coerce.number().int().min(1).max(31).default(1),
   // Vacío llega como '' desde el formulario y significa "sin meta pactada".
   monthlySessionTarget: z.union([z.literal(''), z.null(), z.coerce.number().int().min(1).max(31)]).optional()
+    .transform(value => (value === '' || value === undefined ? null : value)),
+  // Quién paga por este cliente. Vacío = paga él mismo.
+  billingResponsibleClientId: z.union([z.literal(''), z.null(), z.string().uuid()]).optional()
     .transform(value => (value === '' || value === undefined ? null : value))
 });
 app.get('/api/clients', { preHandler: requireStaff }, async request => {
@@ -352,8 +384,19 @@ app.post('/api/clients', { preHandler: requireStaff }, async (request, reply) =>
 app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const input = clientSchema.pick({ fullName: true, email: true, phone: true, goal: true, notes: true, monthlySessionTarget: true }).parse(request.body);
-  const [client] = await sql`UPDATE clients SET full_name = ${input.fullName}, email = ${input.email || null}, phone = ${input.phone || null}, goal = ${input.goal || null}, notes = ${input.notes || null}, monthly_session_target = ${input.monthlySessionTarget ?? null}, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
+  const input = clientSchema.pick({ fullName: true, email: true, phone: true, goal: true, notes: true, monthlySessionTarget: true, billingResponsibleClientId: true }).parse(request.body);
+  // El pagador debe ser otro cliente de la misma entrenadora, y no puede
+  // apuntarse a sí mismo ni encadenar: quien paga por alguien no puede a su vez
+  // tener pagador, o el saldo quedaría en un tercero imposible de rastrear.
+  if (input.billingResponsibleClientId) {
+    if (input.billingResponsibleClientId === id) return reply.code(400).send({ error: 'Un cliente no puede pagarse a sí mismo' });
+    const [pagador] = await sql`SELECT id, billing_responsible_client_id FROM clients WHERE id = ${input.billingResponsibleClientId} AND owner_id = ${auth.sub}`;
+    if (!pagador) return reply.code(404).send({ error: 'El cliente responsable del pago no existe' });
+    if (pagador.billing_responsible_client_id) return reply.code(409).send({ error: 'Ese cliente ya tiene a otra persona como responsable de su pago' });
+    const [dependientes] = await sql`SELECT id FROM clients WHERE billing_responsible_client_id = ${id} LIMIT 1`;
+    if (dependientes) return reply.code(409).send({ error: 'Este cliente ya paga por alguien más, no puede depender de otro' });
+  }
+  const [client] = await sql`UPDATE clients SET full_name = ${input.fullName}, email = ${input.email || null}, phone = ${input.phone || null}, goal = ${input.goal || null}, notes = ${input.notes || null}, monthly_session_target = ${input.monthlySessionTarget ?? null}, billing_responsible_client_id = ${input.billingResponsibleClientId ?? null}, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
   if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
   return client;
 });
@@ -547,15 +590,15 @@ app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) =
   const [client] = await sql`SELECT id, billing_cutoff_day FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub}`;
   if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
 
-  const esMensualidad = input.kind === 'monthly';
-  const concepto = esMensualidad ? 'Mensualidad' : 'Paquete de sesiones';
+  const esCobroMensual = input.kind === 'monthly';
+  const concepto = esCobroMensual ? 'Mensualidad' : 'Paquete de sesiones';
   // Una mensualidad vence en el próximo corte del cliente: es lo que delimita
   // el período que acaba de pagar. Sin vencimiento, sus sesiones no caducarían
   // nunca y se acumularían mes tras mes.
   const vence = input.expiresOn
     ? input.expiresOn
-    : esMensualidad ? proximoCorte(Number(client.billing_cutoff_day) || 1) : null;
-  const etiqueta = esMensualidad
+    : esCobroMensual ? proximoCorte(Number(client.billing_cutoff_day) || 1) : null;
+  const etiqueta = esCobroMensual
     ? `Mensualidad ${new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric', timeZone: 'America/Panama' }).format(new Date())}`
     : `Paquete ${input.totalSessions} sesiones`;
 
@@ -564,6 +607,9 @@ app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) =
     const [invoice] = await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${input.clientId}, ${created.id}, ${concepto}, ${input.amount}, current_date) RETURNING id`;
     return { ...created, invoice_id: invoice.id };
   });
+  // Una mensualidad con sesiones también asienta precio y membresía: es un
+  // cobro mensual aunque entre por esta puerta y no por /api/invoices.
+  if (esCobroMensual && input.amount > 0) await asentarMensualidad(input.clientId, auth.sub, input.amount);
   return reply.code(201).send(pack);
 });
 
@@ -881,10 +927,31 @@ async function recordSessionCompliance(id: string, ownerId: string, markedBy: st
       return updated;
     }
     if (completed && !current.package_debited) {
-      const [pack] = await transaction`SELECT * FROM session_packages WHERE client_id = ${current.client_id} AND status = 'active' AND used_sessions < total_sessions ORDER BY purchased_on LIMIT 1 FOR UPDATE`;
+      // El saldo vive en quien paga. En una pareja son dos expedientes con dos
+      // asistencias, pero un solo bolsillo: el paquete es del responsable.
+      const [duenoDelSaldo] = await transaction`SELECT COALESCE(billing_responsible_client_id, id) AS id FROM clients WHERE id = ${current.client_id}`;
+      const grupo = duenoDelSaldo.id as string;
+
+      // Y un solo descuento por encuentro: si los dos entrenaron juntos hoy,
+      // el segundo se registra como cumplido pero ya no vuelve a cobrar.
+      const [yaCobradoHoy] = await transaction`
+        SELECT id FROM sessions
+        WHERE debited_group_id = ${grupo} AND starts_at::date = ${current.starts_at}::date
+          AND package_debited = true AND id <> ${id} LIMIT 1
+      `;
+      if (yaCobradoHoy) {
+        const [updated] = await transaction`
+          UPDATE sessions SET status = 'completed', completion_percent = ${completionPercent}, debited_group_id = ${grupo},
+            completed_by_user_id = ${markedBy}, completion_recorded_at = now(), updated_at = now()
+          WHERE id = ${id} RETURNING *
+        `;
+        return updated;
+      }
+
+      const [pack] = await transaction`SELECT * FROM session_packages WHERE client_id = ${grupo} AND status = 'active' AND used_sessions < total_sessions ORDER BY purchased_on LIMIT 1 FOR UPDATE`;
       if (!pack) {
         const [updated] = await transaction`
-          UPDATE sessions SET status = 'completed', completion_percent = ${completionPercent}, completed_by_user_id = ${markedBy}, completion_recorded_at = now(), updated_at = now()
+          UPDATE sessions SET status = 'completed', completion_percent = ${completionPercent}, debited_group_id = ${grupo}, completed_by_user_id = ${markedBy}, completion_recorded_at = now(), updated_at = now()
           WHERE id = ${id} RETURNING *
         `;
         return updated;
@@ -892,7 +959,7 @@ async function recordSessionCompliance(id: string, ownerId: string, markedBy: st
       const nextUsed = pack.used_sessions + 1;
       await transaction`UPDATE session_packages SET used_sessions = ${nextUsed}, status = ${nextUsed >= pack.total_sessions ? 'exhausted' : 'active'} WHERE id = ${pack.id}`;
       const [updated] = await transaction`
-        UPDATE sessions SET status = 'completed', completion_percent = ${completionPercent}, package_id = ${pack.id}, package_debited = true,
+        UPDATE sessions SET status = 'completed', completion_percent = ${completionPercent}, package_id = ${pack.id}, package_debited = true, debited_group_id = ${grupo},
           completed_by_user_id = ${markedBy}, completion_recorded_at = now(), updated_at = now()
         WHERE id = ${id} RETURNING *
       `;
@@ -1143,10 +1210,29 @@ app.get('/api/reports/accounts-receivable.csv', { preHandler: requireStaff }, as
   reply.header('Content-Type', 'text/csv; charset=utf-8'); reply.header('Content-Disposition', `attachment; filename="cuentas-por-cobrar-${asOf}.csv"`);
   return `\uFEFF${lines.join('\n')}`;
 });
+// Un cobro de mensualidad fija además el precio mensual del cliente y le abre
+// membresía si no tenía. Antes no hacía ninguna de las dos cosas: la ficha
+// seguía marcando $0.00 y, peor, la generación recurrente exige precio mayor
+// que cero y membresía activa, así que ese cliente no se volvía a cobrar solo.
+const esMensualidad = (concepto: string) => /mensual/i.test(concepto);
+
+async function asentarMensualidad(clientId: string, ownerId: string, amount: number) {
+  await sql.begin(async transaction => {
+    const [client] = await transaction`SELECT id, billing_cutoff_day FROM clients WHERE id = ${clientId} AND owner_id = ${ownerId} FOR UPDATE`;
+    if (!client) return;
+    await transaction`UPDATE clients SET standard_price = ${amount}, billing_model = 'monthly', updated_at = now() WHERE id = ${clientId}`;
+    const [membresia] = await transaction`SELECT id FROM memberships WHERE client_id = ${clientId} AND status = 'active' LIMIT 1`;
+    if (membresia) await transaction`UPDATE memberships SET amount = ${amount} WHERE id = ${membresia.id}`;
+    else await transaction`INSERT INTO memberships (client_id, amount, renewal_day, status) VALUES (${clientId}, ${amount}, ${Number(client.billing_cutoff_day) || 1}, 'active')`;
+  });
+}
+
 app.post('/api/invoices', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = invoiceSchema.parse(request.body);
   const [invoice] = await sql`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) SELECT c.id, ${input.packageId || null}, ${input.concept}, ${input.amount}, ${input.dueOn} FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} RETURNING *`;
-  if (!invoice) return reply.code(404).send({ error: 'Cliente no encontrado' }); return reply.code(201).send(invoice);
+  if (!invoice) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  if (esMensualidad(input.concept) && input.amount > 0) await asentarMensualidad(input.clientId, auth.sub, input.amount);
+  return reply.code(201).send(invoice);
 });
 const invoiceEditSchema = z.object({ concept: z.string().min(2).max(180), amount: z.coerce.number().min(0), dueOn: z.string().date() });
 app.patch('/api/invoices/:id', { preHandler: requireStaff }, async (request, reply) => {
