@@ -1356,7 +1356,8 @@ app.delete('/api/invoices/:id/permanent', { preHandler: requireStaff }, async (r
     `;
     if (!invoice) return { error: 'Cobro no encontrado', code: 404 };
     if (invoice.source_system === 'zoho_invoice') return { error: 'Los cobros de Zoho no se borran desde aquí: Zoho es su fuente', code: 409 };
-    const [pago] = await transaction`SELECT id FROM payment_allocations WHERE invoice_id = ${id} LIMIT 1`;
+    // payment_allocations tiene clave primaria compuesta y no columna id.
+    const [pago] = await transaction`SELECT payment_id FROM payment_allocations WHERE invoice_id = ${id} LIMIT 1`;
     if (pago) return { error: 'Este cobro tiene pagos registrados. Quita el pago antes de borrarlo', code: 409 };
     if (invoice.status === 'confirmed') return { error: 'Este cobro está confirmado como pagado. Edita el pago antes de borrarlo', code: 409 };
 
