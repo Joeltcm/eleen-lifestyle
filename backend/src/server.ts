@@ -3,7 +3,7 @@ import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
 import bcrypt from 'bcryptjs';
 import webpush from 'web-push';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
 import { config } from './config.js';
 import { sql } from './db.js';
@@ -424,6 +424,102 @@ app.post('/api/clients/:id/portal-access', { preHandler: requireStaff }, async (
   });
   if (!portalUser) return reply.code(404).send({ error: 'Cliente no encontrado' });
   return reply.code(201).send({ user: portalUser });
+});
+
+// ── Enlace de acceso de un solo uso ───────────────────────────────────────
+// La entrenadora genera el enlace y se lo pasa al cliente; el cliente define
+// su propia contraseña. Sirve para el alta inicial y para cada olvido, y en
+// ningún momento ella llega a conocer la contraseña.
+const accessLinkHours = 48;
+const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
+
+app.post('/api/clients/:id/access-link', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+
+  const emitido = await sql.begin(async transaction => {
+    const [client] = await transaction`SELECT * FROM clients WHERE id = ${id} AND owner_id = ${auth.sub} FOR UPDATE`;
+    if (!client) return null;
+    if (!client.email) return { error: 'Registra primero el correo del cliente en su expediente' };
+
+    let userId = client.portal_user_id as string | null;
+    if (!userId) {
+      // Alta inicial por enlace: el usuario nace con una contraseña aleatoria
+      // que nadie conoce ni puede usar. La real la define el cliente al abrir
+      // el enlace, así que la entrenadora nunca inventa ni comunica una clave.
+      const inutilizable = await bcrypt.hash(randomUUID() + randomUUID(), 12);
+      const [creado] = await transaction`
+        INSERT INTO users (email, password_hash, full_name, role)
+        VALUES (${String(client.email).toLowerCase()}, ${inutilizable}, ${client.full_name}, 'client')
+        ON CONFLICT (email) DO NOTHING
+        RETURNING id
+      `;
+      if (!creado) return { error: 'Ese correo ya pertenece a otra cuenta' };
+      userId = creado.id as string;
+      await transaction`UPDATE clients SET portal_user_id = ${userId}, updated_at = now() WHERE id = ${id}`;
+    }
+
+    // Emitir uno nuevo invalida los anteriores: si se generaron dos por error,
+    // sólo el último debe abrir.
+    await transaction`UPDATE portal_access_tokens SET used_at = now() WHERE client_id = ${id} AND used_at IS NULL`;
+    const token = `${randomUUID()}${randomUUID()}`.replace(/-/g, '');
+    await transaction`
+      INSERT INTO portal_access_tokens (client_id, user_id, token_hash, expires_at, created_by_user_id)
+      VALUES (${id}, ${userId}, ${hashToken(token)}, now() + ${`${accessLinkHours} hours`}::interval, ${auth.sub})
+    `;
+    return { token, clientName: client.full_name as string, email: client.email as string, nuevo: !client.portal_user_id };
+  });
+
+  if (!emitido) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  if ('error' in emitido) return reply.code(409).send({ error: emitido.error });
+  return reply.code(201).send({
+    url: new URL(`/#acceso=${emitido.token}`, config.APP_URL).toString(),
+    clientName: emitido.clientName, email: emitido.email,
+    expiresInHours: accessLinkHours, firstTime: emitido.nuevo
+  });
+});
+
+// Público: quien tiene el enlace todavía no puede iniciar sesión.
+app.get('/api/auth/access-link/:token', async (request, reply) => {
+  const token = z.string().min(20).max(80).parse((request.params as { token: string }).token);
+  const [row] = await sql`
+    SELECT t.id, t.used_at, t.expires_at, c.full_name, u.email
+    FROM portal_access_tokens t JOIN clients c ON c.id = t.client_id JOIN users u ON u.id = t.user_id
+    WHERE t.token_hash = ${hashToken(token)}
+  `;
+  // El mismo mensaje para inexistente, usado y vencido: distinguirlos le diría
+  // a quien pruebe enlaces al azar cuáles existieron.
+  if (!row || row.used_at || new Date(row.expires_at) < new Date()) {
+    return reply.code(410).send({ error: 'Este enlace ya no es válido. Pídele uno nuevo a tu entrenadora.' });
+  }
+  return { clientName: row.full_name, email: row.email };
+});
+
+const accessLinkPasswordSchema = z.object({ password: z.string().min(10).max(200) });
+app.post('/api/auth/access-link/:token', async (request, reply) => {
+  const token = z.string().min(20).max(80).parse((request.params as { token: string }).token);
+  const input = accessLinkPasswordSchema.parse(request.body);
+  const passwordHash = await bcrypt.hash(input.password, 12);
+
+  const resultado = await sql.begin(async transaction => {
+    // FOR UPDATE y la comprobación de used_at dentro de la transacción: dos
+    // envíos simultáneos del mismo enlace no deben poder consumirlo dos veces.
+    const [row] = await transaction`
+      SELECT t.*, u.email, u.role FROM portal_access_tokens t JOIN users u ON u.id = t.user_id
+      WHERE t.token_hash = ${hashToken(token)} FOR UPDATE OF t
+    `;
+    if (!row || row.used_at || new Date(row.expires_at) < new Date()) return null;
+    await transaction`UPDATE portal_access_tokens SET used_at = now() WHERE id = ${row.id}`;
+    const [user] = await transaction`
+      UPDATE users SET password_hash = ${passwordHash}, active = true, updated_at = now()
+      WHERE id = ${row.user_id} RETURNING id, email, full_name, role
+    `;
+    return user;
+  });
+
+  if (!resultado) return reply.code(410).send({ error: 'Este enlace ya no es válido. Pídele uno nuevo a tu entrenadora.' });
+  const jwtToken = app.jwt.sign({ sub: resultado.id, email: resultado.email, role: resultado.role }, { expiresIn: '12h' });
+  return { user: { id: resultado.id, email: resultado.email, fullName: resultado.full_name, role: resultado.role }, token: jwtToken };
 });
 
 const packageSchema = z.object({ clientId: z.string().uuid(), totalSessions: z.coerce.number().int().positive(), amount: z.coerce.number().positive(), expiresOn: z.string().date().optional() });

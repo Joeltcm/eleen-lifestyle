@@ -88,3 +88,5 @@ dialog.modal-wide{max-width:920px}
 .routine-due{display:inline-block;margin-top:6px;border-radius:99px;padding:4px 9px;font:700 9px 'DM Sans';text-transform:uppercase;letter-spacing:.4px;background:#e6efe9;color:#4b7360}.routine-due.overdue{background:#f7e6e1;color:#9c6558}
 /* Menú de cuenta */
 .account-card{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:4px 0 14px;padding:14px;border-radius:11px;background:rgba(255,253,252,.94);box-shadow:0 4px 13px #6d4a5909}.account-card b{display:block;font-size:13px}.account-card small{display:block;margin-top:3px;font-size:10px;color:var(--muted)}
+/* Enlace de acceso de un solo uso */
+.access-link{margin:12px 0;padding:13px;border-radius:10px;background:#f7f1f3;border:1px dashed #d8a7bc}.access-link code{display:block;font:500 11px/1.5 'DM Mono',monospace;color:#6e5963;word-break:break-all;user-select:all}

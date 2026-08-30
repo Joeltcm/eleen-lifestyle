@@ -1,4 +1,4 @@
-const APP_VERSION = '57';
+const APP_VERSION = '58';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -539,6 +539,41 @@ function clientPlanEditor(client) {
     catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
+// La entrenadora genera el enlace y lo comparte; el cliente define su propia
+// contraseña. Antes ella tenía que inventarla y comunicarla, y cada olvido la
+// obligaba a repetir el trámite a mano.
+async function portalAccessLink(client) {
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">ACCESO AL PORTAL</p><h2>Enlace para ${escapeHtml(client.name)}</h2>
+    <div id="access-link-body"><p class="empty">Generando enlace…</p></div>`;
+  openModal(box);
+  try {
+    const enlace = await api(`/api/clients/${client.id}/access-link`, { method: 'POST' });
+    const target = document.getElementById('access-link-body');
+    if (!target || !modal.open) return;
+    target.innerHTML = `<p style="color:#6f7b75;margin-top:-8px">${enlace.firstTime ? 'Primer acceso' : 'Recuperación de acceso'} · para <b>${escapeHtml(enlace.email)}</b></p>
+      <div class="access-link"><code id="access-link-url">${escapeHtml(enlace.url)}</code></div>
+      <button class="primary wide-button" id="access-link-copy">Copiar enlace</button>
+      <p class="section-note">Pásaselo por WhatsApp o como prefieras. Al abrirlo, ${escapeHtml(client.name)} define su propia contraseña y entra directo.<br><br>
+        Vence en ${enlace.expiresInHours} horas y sirve <b>una sola vez</b>. Generar uno nuevo anula el anterior. Tú nunca llegas a ver su contraseña.</p>`;
+    document.getElementById('access-link-copy').onclick = async event => {
+      try {
+        await navigator.clipboard.writeText(enlace.url);
+        event.target.textContent = 'Enlace copiado ✓';
+      } catch {
+        // Sin permiso de portapapeles —común en iOS fuera de un gesto directo—
+        // se selecciona el texto para que pueda copiarlo a mano.
+        const rango = document.createRange(); rango.selectNodeContents(document.getElementById('access-link-url'));
+        const seleccion = window.getSelection(); seleccion.removeAllRanges(); seleccion.addRange(rango);
+        event.target.textContent = 'Selecciónalo y cópialo';
+      }
+    };
+  } catch (error) {
+    const target = document.getElementById('access-link-body');
+    if (target) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
+  }
+}
+
 function portalAccessEditor(client) {
   const box = document.createElement('div'); box.innerHTML = `<form id="portal-access-form"><p class="eyebrow">PORTAL PRIVADO</p><h2>${client.portalActive ? 'Actualizar acceso' : 'Activar acceso'}</h2><p class="form-summary">${escapeHtml(client.name)}</p><label>Correo del cliente<input name="email" type="email" required value="${escapeHtml(client.email)}" /></label><label>Contraseña inicial<input name="password" type="password" minlength="10" required autocomplete="new-password" /><small>Mínimo 10 caracteres. El cliente podrá iniciar sesión desde la misma PWA.</small></label><button class="primary wide-button">${client.portalActive ? 'Actualizar credenciales' : 'Crear acceso al portal'}</button></form>`;
   openModal(box);
@@ -1263,8 +1298,8 @@ function clientDetail(id) {
     : `${client.planName || 'Mensualidad'} · ${money.format(client.plan)} al mes · corte día ${client.cutoffDay}`;
   const box = document.createElement('div');
   const reviewNotice = client.inbodyReviews.length ? `<button class="secondary wide-button" id="review-inbody">Revisar ${client.inbodyReviews.length} evaluación${client.inbodyReviews.length > 1 ? 'es' : ''} pendiente${client.inbodyReviews.length > 1 ? 's' : ''}</button>` : '';
-  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">CAMBIO DESDE LA MEDICIÓN ANTERIOR</p>${inbodyComparison(inbody)}<p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th>vs. anterior</th><th></th></tr></thead><tbody>${inbody.history.slice().reverse().map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td class="delta-cell">${reading.delta ? `${deltaChip('weight', reading.delta.weight)}${deltaChip('smm', reading.delta.smm)}${deltaChip('pbf', reading.delta.pbf)}` : '<span class="delta neutral">primera</span>'}</td><td><button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">ASISTENCIA MENSUAL</p><div id="client-attendance"><p class="empty">Calculando cumplimiento…</p></div><p class="eyebrow" style="margin-top:20px">LESIONES Y PADECIMIENTOS</p><div id="client-conditions"><p class="empty">Cargando expediente clínico…</p></div><p class="eyebrow" style="margin-top:20px">FOTOS DE PROGRESO</p><div id="client-photos"><p class="empty">Cargando fotos…</p></div><p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="portal-access">${client.portalActive ? 'Actualizar portal' : 'Activar portal cliente'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
-  openModal(box); document.getElementById('open-scan').onclick = () => inbodyImport(client); document.getElementById('edit-client-contact').onclick = () => editClient(client); document.getElementById('edit-client-plan').onclick = () => clientPlanEditor(client); document.getElementById('portal-access').onclick = () => portalAccessEditor(client); document.getElementById('delete-client').onclick = () => deleteResource(`/api/clients/${client.id}`, `¿Eliminar a ${client.name}? También se eliminarán sus documentos, sesiones y cobros asociados.`, 'Cliente eliminado');
+  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">CAMBIO DESDE LA MEDICIÓN ANTERIOR</p>${inbodyComparison(inbody)}<p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th>vs. anterior</th><th></th></tr></thead><tbody>${inbody.history.slice().reverse().map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td class="delta-cell">${reading.delta ? `${deltaChip('weight', reading.delta.weight)}${deltaChip('smm', reading.delta.smm)}${deltaChip('pbf', reading.delta.pbf)}` : '<span class="delta neutral">primera</span>'}</td><td><button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">ASISTENCIA MENSUAL</p><div id="client-attendance"><p class="empty">Calculando cumplimiento…</p></div><p class="eyebrow" style="margin-top:20px">LESIONES Y PADECIMIENTOS</p><div id="client-conditions"><p class="empty">Cargando expediente clínico…</p></div><p class="eyebrow" style="margin-top:20px">FOTOS DE PROGRESO</p><div id="client-photos"><p class="empty">Cargando fotos…</p></div><p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="portal-link">${client.portalActive ? 'Enviar enlace de acceso' : 'Activar portal con enlace'}</button><button class="secondary" id="portal-access">${client.portalActive ? 'Poner contraseña a mano' : 'Activar con contraseña'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
+  openModal(box); document.getElementById('open-scan').onclick = () => inbodyImport(client); document.getElementById('edit-client-contact').onclick = () => editClient(client); document.getElementById('edit-client-plan').onclick = () => clientPlanEditor(client); document.getElementById('portal-access').onclick = () => portalAccessEditor(client); document.getElementById('portal-link').onclick = () => portalAccessLink(client); document.getElementById('delete-client').onclick = () => deleteResource(`/api/clients/${client.id}`, `¿Eliminar a ${client.name}? También se eliminarán sus documentos, sesiones y cobros asociados.`, 'Cliente eliminado');
   if (client.inbodyReviews.length) document.getElementById('review-inbody').onclick = () => inbodyReview(client, client.inbodyReviews);
   attendanceSection(document.getElementById('client-attendance'), client.id);
   conditionsSection(document.getElementById('client-conditions'), client);
@@ -1613,6 +1648,7 @@ window.addEventListener('hashchange', () => { if (currentUser?.role === 'client'
 function showAuth(setupRequired) {
   document.getElementById('auth-screen').hidden = false; document.getElementById('app-shell').hidden = true; document.getElementById('portal-shell').hidden = true;
   document.getElementById('setup-form').hidden = !setupRequired; document.getElementById('login-form').hidden = setupRequired; document.getElementById('reset-form').hidden = true;
+  document.getElementById('access-link-form').hidden = true;
   document.getElementById('auth-title').textContent = setupRequired ? 'Preparemos tu espacio' : 'Bienvenida de nuevo';
   document.getElementById('auth-copy').textContent = setupRequired ? 'Crea la primera cuenta administradora de Eileen Lifestyle.' : 'Accede al centro de control de clientes, sesiones y facturación.';
 }
@@ -1673,7 +1709,58 @@ document.getElementById('account-button').addEventListener('click', accountMenu)
 document.getElementById('portal-account-button').addEventListener('click', accountMenu);
 document.getElementById('google-calendar-connect').addEventListener('click', googleCalendarAction);
 document.getElementById('google-calendar-disconnect').addEventListener('click', disconnectGoogleCalendar);
+// El token viaja en el fragmento y no en la ruta: lo que va después de # no
+// llega al servidor ni queda en sus registros.
+const accessTokenFromHash = () => (location.hash.match(/^#acceso=([A-Za-z0-9]+)$/) || [])[1] || null;
+
+async function showAccessLink(token) {
+  document.getElementById('auth-screen').hidden = false;
+  document.getElementById('app-shell').hidden = true; document.getElementById('portal-shell').hidden = true;
+  for (const id of ['login-form', 'setup-form', 'reset-form']) document.getElementById(id).hidden = true;
+  const form = document.getElementById('access-link-form'); form.hidden = false;
+  const errorBox = document.getElementById('access-link-error');
+
+  try {
+    const info = await api(`/api/auth/access-link/${token}`, { auth: false });
+    document.getElementById('auth-title').textContent = 'Define tu contraseña';
+    document.getElementById('auth-copy').textContent = 'Elige una contraseña para entrar a tu portal. Solo tú la conocerás.';
+    document.getElementById('access-link-greeting').textContent = `${info.clientName} · ${info.email}`;
+  } catch (error) {
+    form.hidden = true;
+    document.getElementById('auth-title').textContent = 'Enlace no válido';
+    document.getElementById('auth-copy').textContent = error.message;
+    document.getElementById('login-form').hidden = false;
+    // El enlace inservible se limpia de la barra para que recargar no repita
+    // el error, y quede la pantalla normal de acceso.
+    history.replaceState(null, '', location.pathname);
+    return;
+  }
+
+  form.addEventListener('submit', async event => {
+    event.preventDefault(); errorBox.textContent = '';
+    const values = new FormData(event.target);
+    if (values.get('password') !== values.get('confirm')) { errorBox.textContent = 'Las dos contraseñas no coinciden.'; return; }
+    try {
+      event.target.classList.add('loading-state');
+      const result = await api(`/api/auth/access-link/${token}`, { method: 'POST', auth: false, body: { password: values.get('password') } });
+      authToken = result.token; localStorage.setItem(authKey, authToken);
+      history.replaceState(null, '', location.pathname);
+      form.hidden = true;
+      await enterApp(result.user);
+      toast('Contraseña guardada');
+    } catch (error) { errorBox.textContent = error.message; event.target.classList.remove('loading-state'); }
+  }, { once: false });
+}
+
 async function start() {
+  const accessToken = accessTokenFromHash();
+  // Se atiende antes que la sesión guardada: quien abre un enlace de acceso
+  // quiere entrar como el cliente del enlace, no como quien quedó logueado en
+  // ese teléfono —que muy probablemente sea la entrenadora.
+  if (accessToken) {
+    if (authToken) { localStorage.removeItem(authKey); authToken = null; }
+    return showAccessLink(accessToken);
+  }
   try {
     const status = await api('/api/auth/setup-status', { auth: false });
     if (!authToken) return showAuth(status.required);
