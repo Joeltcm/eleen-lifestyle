@@ -1,4 +1,4 @@
-import Fastify, { type FastifyRequest } from 'fastify';
+import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
 import bcrypt from 'bcryptjs';
@@ -251,8 +251,62 @@ app.get('/api/auth/setup-status', async () => {
 });
 
 const setupSchema = z.object({ email: z.string().email(), password: z.string().min(10), fullName: z.string().min(2) });
+// ── Freno a la fuerza bruta ───────────────────────────────────────────────
+// Se cuenta por correo y por IP. Por correo, para que nadie martillee una
+// cuenta concreta; por IP, para que no se libre probando muchos correos
+// distintos. Los topes son holgados: quien se equivoca de contraseña de verdad
+// no llega a ocho fallos en un cuarto de hora, y quien prueba a ciegas sí.
+const LIMITE_CORREO = 8;
+const LIMITE_IP = 25;
+const VENTANA_MINUTOS = 15;
+
+async function registrarIntento(endpoint: string, email: string | null, ip: string | null, succeeded: boolean) {
+  await sql`
+    INSERT INTO auth_attempts (endpoint, email, ip, succeeded)
+    VALUES (${endpoint}, ${email ? email.toLowerCase() : null}, ${ip || null}, ${succeeded})
+  `;
+}
+
+// Devuelve los segundos que faltan para poder reintentar, o 0 si puede pasar.
+async function esperaPorAbuso(email: string | null, ip: string | null) {
+  const desde = `${VENTANA_MINUTOS} minutes`;
+  const [fila] = await sql`
+    SELECT
+      count(*) FILTER (WHERE email = ${email ? email.toLowerCase() : null})::int AS por_correo,
+      count(*) FILTER (WHERE ip = ${ip || null})::int AS por_ip,
+      max(created_at) AS ultimo
+    FROM auth_attempts
+    WHERE NOT succeeded AND created_at > now() - ${desde}::interval
+      AND (email = ${email ? email.toLowerCase() : null} OR ip = ${ip || null})
+  `;
+  const excedido = Number(fila?.por_correo || 0) >= LIMITE_CORREO || Number(fila?.por_ip || 0) >= LIMITE_IP;
+  if (!excedido || !fila?.ultimo) return 0;
+  // La ventana corre desde el último fallo: insistir alarga la espera.
+  const listoEn = new Date(fila.ultimo as string).getTime() + VENTANA_MINUTOS * 60_000;
+  return Math.max(0, Math.ceil((listoEn - Date.now()) / 1000));
+}
+
+function respuestaDeEspera(reply: FastifyReply, segundos: number) {
+  const minutos = Math.max(1, Math.ceil(segundos / 60));
+  reply.header('Retry-After', String(segundos));
+  return reply.code(429).send({
+    error: `Demasiados intentos fallidos. Vuelve a probar en ${minutos} minuto${minutos === 1 ? '' : 's'}.`
+  });
+}
+
+// Purga los intentos viejos. No hacen falta para nada una vez pasada la
+// ventana, y sin esto la tabla crecería para siempre.
+async function purgarIntentos() {
+  await sql`DELETE FROM auth_attempts WHERE created_at < now() - interval '30 days'`;
+}
+
 app.post('/api/auth/setup', async (request, reply) => {
-  if (request.headers['x-setup-token'] !== config.SETUP_TOKEN) return reply.code(403).send({ error: 'Token de configuración inválido' });
+  const esperaSetup = await esperaPorAbuso(null, request.ip);
+  if (esperaSetup) return respuestaDeEspera(reply, esperaSetup);
+  if (request.headers['x-setup-token'] !== config.SETUP_TOKEN) {
+    await registrarIntento('setup', null, request.ip, false);
+    return reply.code(403).send({ error: 'Token de configuración inválido' });
+  }
   const [{ count }] = await sql`SELECT count(*)::integer AS count FROM users`;
   if (count > 0) return reply.code(409).send({ error: 'La cuenta administradora ya fue creada' });
   const input = setupSchema.parse(request.body);
@@ -269,15 +323,34 @@ app.post('/api/auth/setup', async (request, reply) => {
 const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) });
 app.post('/api/auth/login', async (request, reply) => {
   const input = loginSchema.parse(request.body);
+  const espera = await esperaPorAbuso(input.email, request.ip);
+  // Se frena antes de comprobar la contraseña: si no, el propio tiempo de
+  // respuesta seguiría diciendo si el correo existe.
+  if (espera) return respuestaDeEspera(reply, espera);
+
   const [user] = await sql`SELECT id, email, full_name, role, password_hash, active FROM users WHERE email = ${input.email.toLowerCase()}`;
-  if (!user || !user.active || !(await bcrypt.compare(input.password, user.password_hash))) return reply.code(401).send({ error: 'Correo o contraseña incorrectos' });
+  if (!user || !user.active || !(await bcrypt.compare(input.password, user.password_hash))) {
+    await registrarIntento('login', input.email, request.ip, false);
+    return reply.code(401).send({ error: 'Correo o contraseña incorrectos' });
+  }
+  // Entrar borra los fallos de ese correo: quien se equivocó tres veces y
+  // acertó a la cuarta no debe arrastrar el contador el resto de la tarde.
+  await sql`DELETE FROM auth_attempts WHERE email = ${input.email.toLowerCase()} AND NOT succeeded`;
+  await registrarIntento('login', input.email, request.ip, true);
   const token = app.jwt.sign({ sub: user.id, email: user.email, role: user.role }, { expiresIn: sessionLifetime });
   return { user: { id: user.id, email: user.email, fullName: user.full_name, role: user.role }, token };
 });
 
 const resetPasswordSchema = z.object({ email: z.string().email(), password: z.string().min(10) });
 app.post('/api/auth/reset-password', async (request, reply) => {
-  if (request.headers['x-setup-token'] !== config.SETUP_TOKEN) return reply.code(403).send({ error: 'Token de recuperación inválido' });
+  // Esta ruta cambia la contraseña de la primera cuenta administradora con
+  // sólo acertar el token, así que es la más golosa de las tres.
+  const esperaReset = await esperaPorAbuso(null, request.ip);
+  if (esperaReset) return respuestaDeEspera(reply, esperaReset);
+  if (request.headers['x-setup-token'] !== config.SETUP_TOKEN) {
+    await registrarIntento('reset-password', null, request.ip, false);
+    return reply.code(403).send({ error: 'Token de recuperación inválido' });
+  }
   const input = resetPasswordSchema.parse(request.body);
   const passwordHash = await bcrypt.hash(input.password, 12);
   const [user] = await sql`
@@ -2797,6 +2870,10 @@ const firstReminderRun = setTimeout(() => dispatchReminders().catch(error => app
 const reminderInterval = setInterval(() => dispatchReminders().catch(error => app.log.error(error)), config.REMINDER_INTERVAL_MINUTES * 60_000);
 const firstBillingRun = setTimeout(() => generateRecurringInvoices().catch(error => app.log.error(error)), 15_000);
 const billingInterval = setInterval(() => generateRecurringInvoices().catch(error => app.log.error(error)), config.BILLING_INTERVAL_MINUTES * 60_000);
+// Los intentos de acceso viejos no sirven para nada pasada la ventana; se
+// barren una vez al día para que la tabla no crezca sin fin.
+const purgaIntentos = setInterval(() => purgarIntentos().catch(error => app.log.error(error)), 24 * 60 * 60_000);
+purgaIntentos.unref();
 firstReminderRun.unref();
 reminderInterval.unref();
 firstBillingRun.unref();
