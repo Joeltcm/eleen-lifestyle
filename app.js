@@ -1,4 +1,4 @@
-const APP_VERSION = '51';
+const APP_VERSION = '53';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -121,7 +121,8 @@ async function api(path, options = {}) {
   }
   return payload;
 }
-const exerciseLabel = exercise => typeof exercise === 'string' ? exercise : [exercise.name, exercise.sets && `${exercise.sets} series`, exercise.reps].filter(Boolean).join(' · ');
+const setsLabel = sets => `${sets} serie${Number(sets) === 1 ? '' : 's'}`;
+const exerciseLabel = exercise => typeof exercise === 'string' ? exercise : [exercise.name, exercise.sets && setsLabel(exercise.sets), exercise.reps].filter(Boolean).join(' · ');
 const sessionFromApi = item => {
   const starts = panamaDateTimeParts(item.starts_at);
   return {
@@ -1412,8 +1413,12 @@ const portalViewTitles = { 'portal-dashboard': 'Mi progreso', 'portal-routines':
 function portalExerciseRows(exercises) {
   return exercises.map(exercise => {
     if (typeof exercise === 'string') return `<span>${escapeHtml(exercise)}</span>`;
-    const catalogEntry = (portalData?.exercises || []).find(item => item.id === exercise.catalogId);
-    const dose = [exercise.sets && `${exercise.sets} series`, exercise.reps].filter(Boolean).join(' · ');
+    // Las rutinas creadas antes de mover el catálogo a la base guardaron el
+    // slug del archivo estático como catalogId; las nuevas guardan el uuid. La
+    // siembra conservó esos mismos slugs, así que buscar por ambos hace que las
+    // rutinas viejas también muestren video.
+    const catalogEntry = (portalData?.exercises || []).find(item => item.id === exercise.catalogId || item.slug === exercise.catalogId);
+    const dose = [exercise.sets && setsLabel(exercise.sets), exercise.reps].filter(Boolean).join(' · ');
     return `<div class="portal-exercise">
       <b>${escapeHtml(exercise.name)}</b>
       ${dose ? `<small>${escapeHtml(dose)}</small>` : ''}
