@@ -1,4 +1,4 @@
-const APP_VERSION = '64';
+const APP_VERSION = '65';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -822,7 +822,7 @@ function exerciseCatalogManager() {
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">ENTRENAMIENTO</p><h2>Catálogo de ejercicios</h2>
     <p style="color:#6f7b75;margin-top:-12px">Los ejercicios y sus videos de demostración. Lo que subas aquí es lo que verá el cliente en su rutina.</p>
-    <div class="catalog-toolbar"><select id="catalog-section-filter"></select><button class="secondary" id="catalog-new">+ Nuevo ejercicio</button></div>
+    <div class="catalog-toolbar"><input id="catalog-search" type="search" placeholder="Buscar ejercicio…" autocomplete="off" /><select id="catalog-section-filter"></select><button class="secondary" id="catalog-new">+ Nuevo ejercicio</button></div>
     <div id="catalog-list"><p class="empty">Cargando catálogo…</p></div>`;
   openModal(box, true);
 
@@ -831,6 +831,9 @@ function exerciseCatalogManager() {
   exerciseSectionOrder.filter(section => section !== 'total_body').forEach(section => filter.add(new Option(exerciseSectionLabels[section], section)));
   document.getElementById('catalog-new').onclick = () => exerciseEditor(null);
   filter.onchange = () => renderCatalogList();
+  // input y no change: con 77 ejercicios, esperar al Enter obliga a mirar la
+  // lista entera mientras se escribe.
+  document.getElementById('catalog-search').addEventListener('input', () => renderCatalogList());
   renderCatalogList();
 }
 
@@ -838,10 +841,20 @@ function renderCatalogList() {
   const target = document.getElementById('catalog-list');
   if (!target) return;
   const section = document.getElementById('catalog-section-filter')?.value || '';
-  const shown = exerciseCatalog.filter(exercise => !section || exercise.section === section);
+  // Se busca sin acentos y sin distinguir mayúsculas: escribir "bulgara" debe
+  // encontrar "Sentadilla Búlgara". Y también por nombre en inglés, que es como
+  // vienen rotulados muchos aparatos del gimnasio.
+  const normalizar = texto => String(texto || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const busqueda = normalizar(document.getElementById('catalog-search')?.value.trim());
+  const shown = exerciseCatalog.filter(exercise => {
+    if (section && exercise.section !== section) return false;
+    if (!busqueda) return true;
+    return normalizar([exercise.name, exercise.english, exercise.pattern, exercise.machine, exercise.freeWeight].join(' ')).includes(busqueda);
+  });
   const withVideo = exerciseCatalog.filter(exercise => exercise.hasVideo).length;
 
-  target.innerHTML = `<p class="section-note">${exerciseCatalog.length} ejercicios · ${withVideo} con video · ${exerciseCatalog.length - withVideo} sin video.</p>
+  const filtrando = busqueda || section;
+  target.innerHTML = `<p class="section-note">${filtrando ? `${shown.length} de ${exerciseCatalog.length} ejercicios` : `${exerciseCatalog.length} ejercicios`} · ${withVideo} con video · ${exerciseCatalog.length - withVideo} sin video.</p>
     ${shown.length ? `<div class="catalog-list">${shown.map(exercise => `<article class="catalog-item">
       <div class="catalog-item-copy"><b>${escapeHtml(exercise.name)}</b><small>${escapeHtml([exerciseSectionLabels[exercise.section], exercise.pattern, exercise.level].filter(Boolean).join(' · '))}</small></div>
       <span class="catalog-video ${exercise.hasVideo ? 'ready' : ''}">${exercise.hasVideo ? `▶ ${exercise.videoDurationSeconds ? `${Math.round(exercise.videoDurationSeconds)} s` : 'con video'}` : 'sin video'}</span>
@@ -849,7 +862,7 @@ function renderCatalogList() {
         <button class="secondary session-use" data-edit-exercise="${exercise.id}">Editar</button>
         ${exercise.hasVideo ? `<button class="secondary session-use" data-preview-exercise="${exercise.id}">Ver video</button>` : ''}
         <button class="secondary session-use" data-video-exercise="${exercise.id}">${exercise.hasVideo ? 'Reemplazar video' : 'Subir video'}</button>
-      </div></article>`).join('')}</div>` : '<p class="empty">No hay ejercicios en esta sección.</p>'}`;
+      </div></article>`).join('')}</div>` : `<p class="empty">${busqueda ? `Ningún ejercicio coincide con “${escapeHtml(document.getElementById('catalog-search').value.trim())}”.` : 'No hay ejercicios en esta sección.'}</p>`}`;
 
   target.querySelectorAll('[data-edit-exercise]').forEach(button => {
     button.onclick = () => exerciseEditor(exerciseCatalog.find(exercise => exercise.id === button.dataset.editExercise));
