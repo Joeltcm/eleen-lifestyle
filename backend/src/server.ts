@@ -651,6 +651,25 @@ app.get('/api/clients/:clientId/balances', { preHandler: requireStaff }, async (
   `;
 });
 
+// Borrar un saldo de sesiones. Sólo si nadie lo usó: con sesiones consumidas,
+// borrarlo escondería entrenamientos que sí ocurrieron y descuadraría el
+// cumplimiento. La factura que lo originó no se toca —el cobro existió— y su
+// referencia queda en nulo sola, por la clave foránea.
+app.delete('/api/packages/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [pack] = await sql`
+    SELECT sp.id, sp.label, sp.used_sessions FROM session_packages sp JOIN clients c ON c.id = sp.client_id
+    WHERE sp.id = ${id} AND c.owner_id = ${auth.sub}
+  `;
+  if (!pack) return reply.code(404).send({ error: 'Saldo no encontrado' });
+  if (Number(pack.used_sessions) > 0) {
+    return reply.code(409).send({ error: `Este saldo ya tiene ${pack.used_sessions} sesión(es) usada(s). Reprogramarlo o dejarlo vencer conserva el registro; borrarlo lo perdería.` });
+  }
+  await sql`DELETE FROM session_packages WHERE id = ${id}`;
+  return { deleted: true, label: pack.label };
+});
+
 const routineExerciseSchema = z.object({
   catalogId: z.string().max(80).optional(), name: z.string().min(1).max(120), english: z.string().max(120).optional(),
   category: z.string().max(80).optional(), level: z.string().max(40).optional(), machine: z.string().max(180).optional(),

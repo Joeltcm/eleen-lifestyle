@@ -1,4 +1,4 @@
-const APP_VERSION = '73';
+const APP_VERSION = '74';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -423,7 +423,9 @@ function renderBilling() {
   document.getElementById('package-table').innerHTML = data.packages.length ? data.packages.map(pack => {
     const remaining = remainingSessions(pack);
     const state = pack.status === 'pending' ? 'Pendiente de pago' : remaining ? 'Activo' : 'Agotado';
-    return `<tr><td><b>${pack.client}</b></td><td>${pack.label}</td><td>${pack.total}</td><td>${pack.used}</td><td><strong class="session-balance">${remaining}</strong></td><td><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span></td><td><small>${pack.status === 'confirmed' && remaining ? 'Descuento automático' : '—'}</small></td></tr>`;
+    const borrable = Number(pack.used) === 0
+      ? `<button class="secondary session-use" data-borrar-paquete="${pack.id}">Eliminar</button>` : '';
+    return `<tr><td><b>${pack.client}</b></td><td>${pack.label}</td><td>${pack.total}</td><td>${pack.used}</td><td><strong class="session-balance">${remaining}</strong></td><td><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span></td><td>${borrable}<small>${pack.status === 'confirmed' && remaining ? 'Descuento automático' : '—'}</small></td></tr>`;
   }).join('') : '<tr><td colspan="7" class="empty">Aún no hay paquetes de sesiones.</td></tr>';
   void ensureBillingAnalytics();
 }
@@ -1464,6 +1466,7 @@ function balancesSection(target, client) {
           ${vencido ? `<small class="balance-warning">${restantes} sesión${restantes === 1 ? '' : 'es'} sin dar · cuenta como incumplimiento</small>` : ''}</div>
         <span class="session-balance">${restantes}</span>
         ${saldo.expires_on ? `<button class="secondary session-use" data-reschedule="${saldo.id}">Reprogramar</button>` : ''}
+        ${Number(saldo.used_sessions) === 0 ? `<button class="secondary session-use" data-borrar-paquete="${saldo.id}">Eliminar</button>` : ''}
       </article>`;
     }).join('')}</div>` : '<p class="empty">Este cliente no tiene saldos de sesiones.</p>'}`;
     target.querySelectorAll('[data-reschedule]').forEach(button => {
@@ -1864,6 +1867,13 @@ document.addEventListener('click', event => {
   if (event.target.dataset.confirmInvoice) confirmInvoice(event.target.dataset.confirmInvoice);
   if (event.target.dataset.editPayment) confirmInvoice(event.target.dataset.editPayment, true);
   if (event.target.dataset.editInvoice) editInvoice(event.target.dataset.editInvoice);
+  if (event.target.dataset.borrarPaquete) {
+    if (confirm('¿Eliminar este saldo de sesiones?\n\nSólo se puede si nadie lo ha usado. El cobro que lo originó no se borra.')) {
+      api(`/api/packages/${event.target.dataset.borrarPaquete}`, { method: 'DELETE' })
+        .then(async () => { await loadData(); renderAll(); toast('Saldo eliminado'); if (modal.open) modal.close(); })
+        .catch(error => toast(error.message, true));
+    }
+  }
   if (event.target.dataset.purgeInvoice) {
     const factura = data.invoices.find(item => item.id === event.target.dataset.purgeInvoice);
     if (confirm(`¿Borrar definitivamente "${factura?.concept}" de ${factura?.client}?\n\nEsto no deja rastro. Úsalo sólo para cobros de prueba o duplicados por error, nunca para un cobro real: para eso está Anular.`)) {

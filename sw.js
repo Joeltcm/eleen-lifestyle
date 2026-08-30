@@ -1,4 +1,4 @@
-const VERSION = '73';
+const VERSION = '74';
 const CACHE = `eileen-lifestyle-v${VERSION}`;
 // Las URLs versionadas se arman con VERSION. Estuvieron fijas en ?v=47 mientras
 // VERSION seguía subiendo, así que la precarga guardaba direcciones que la
