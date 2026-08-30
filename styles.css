@@ -130,3 +130,29 @@ dialog.modal-wide{max-width:920px}
   .categoria-acciones{grid-column:1/-1;width:100%;justify-content:space-between;margin-top:8px}
   .ambito-select{flex:1 1 auto;max-width:none;min-height:44px}
 }
+
+/* Rutinas: cuatro acciones en una tarjeta estrecha. Sin permitir que bajen de
+   línea, "Ver rutina" partía en dos y los botones llegaban al borde. */
+.routine-card .client-actions{flex-wrap:wrap;gap:6px}
+.routine-card .client-actions button{flex:0 1 auto;white-space:nowrap}
+
+/* Tablas en el teléfono: cada fila pasa a ser una ficha.
+   Antes seguían siendo tablas de 500 px dentro de un contenedor con scroll
+   lateral, así que las acciones —"Ver PDF", "Editar pago", "Editar"— vivían en
+   la última columna, fuera de la pantalla, y había que arrastrar de lado para
+   descubrirlas. Estaban ahí, pero era como si no. */
+@media(max-width:600px){
+  .stack-mobile thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  .stack-mobile,.stack-mobile tbody,.stack-mobile tr,.stack-mobile td{display:block;width:auto}
+  .stack-mobile tr{margin-bottom:10px;padding:13px;border-radius:12px;background:rgba(255,253,252,.94);box-shadow:0 4px 13px #6d4a5909}
+  .stack-mobile td{border:0;padding:5px 0;display:grid;grid-template-columns:minmax(78px,auto) 1fr;gap:10px;align-items:baseline;font-size:13px}
+  .stack-mobile td:before{content:attr(data-label);font:500 10px 'DM Mono';letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
+  .stack-mobile td[data-label="Acciones"]{grid-template-columns:1fr;gap:6px;margin-top:6px;padding-top:10px;border-top:1px solid var(--line)}
+  .stack-mobile td[data-label="Acciones"]:before{display:none}
+  .stack-mobile .invoice-actions{display:flex;flex-wrap:wrap;gap:6px}
+  .stack-mobile .invoice-actions button{flex:1 1 auto;min-height:44px}
+  .stack-mobile td.empty:before{display:none}
+  /* La fila vacía no debe parecer una ficha con datos. */
+  .stack-mobile tr:has(td.empty){background:none;box-shadow:none;padding:0}
+  .table-wrap:has(.stack-mobile){overflow-x:visible}
+}

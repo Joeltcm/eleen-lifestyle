@@ -305,7 +305,14 @@ const planSchema = z.object({
   sessionsIncluded: z.coerce.number().int().positive().optional(), validityDays: z.coerce.number().int().positive().optional(),
   active: z.boolean().default(true)
 }).superRefine((plan, context) => {
-  if (plan.billingModel === 'package' && !plan.sessionsIncluded) context.addIssue({ code: 'custom', path: ['sessionsIncluded'], message: 'Indica la cantidad de sesiones' });
+  // La mensualidad también tiene un número de sesiones: es el que la
+  // entrenadora acordó por mes y contra el que se mide el cumplimiento. Antes
+  // sólo el paquete lo pedía, así que un cliente de mensualidad no tenía meta
+  // salvo que alguien la escribiera a mano en su ficha.
+  if (!plan.sessionsIncluded) context.addIssue({
+    code: 'custom', path: ['sessionsIncluded'],
+    message: plan.billingModel === 'package' ? 'Indica la cantidad de sesiones' : 'Indica las sesiones por mes'
+  });
 });
 
 app.get('/api/plans', { preHandler: requireStaff }, async request => {
@@ -317,7 +324,7 @@ app.post('/api/plans', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = planSchema.parse(request.body);
   const [plan] = await sql`
     INSERT INTO service_plans (owner_id, name, description, billing_model, price, sessions_included, validity_days, active)
-    VALUES (${auth.sub}, ${input.name}, ${input.description || null}, ${input.billingModel}, ${input.price}, ${input.billingModel === 'package' ? input.sessionsIncluded! : null}, ${input.billingModel === 'package' ? input.validityDays || 30 : null}, ${input.active})
+    VALUES (${auth.sub}, ${input.name}, ${input.description || null}, ${input.billingModel}, ${input.price}, ${input.sessionsIncluded!}, ${input.billingModel === 'package' ? input.validityDays || 30 : null}, ${input.active})
     RETURNING *
   `;
   return reply.code(201).send(plan);
@@ -327,7 +334,7 @@ app.patch('/api/plans/:id', { preHandler: requireStaff }, async (request, reply)
   const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = planSchema.parse(request.body);
   const [plan] = await sql`
     UPDATE service_plans SET name = ${input.name}, description = ${input.description || null}, billing_model = ${input.billingModel},
-      price = ${input.price}, sessions_included = ${input.billingModel === 'package' ? input.sessionsIncluded! : null},
+      price = ${input.price}, sessions_included = ${input.sessionsIncluded!},
       validity_days = ${input.billingModel === 'package' ? input.validityDays || 30 : null}, active = ${input.active}, updated_at = now()
     WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *
   `;
@@ -377,6 +384,12 @@ app.post('/api/clients', { preHandler: requireStaff }, async (request, reply) =>
       VALUES (${auth.sub}, ${input.fullName}, ${input.email || null}, ${input.phone || null}, ${input.goal || null}, ${input.notes || null}, ${billingModel}, ${standardPrice}, ${selectedPlan?.id || null}, ${input.cutoffDay}) RETURNING *
     `;
     if (billingModel === 'monthly') {
+      // Las sesiones del plan mensual son la meta contra la que se mide el
+      // cumplimiento. Sin esto el número del plan y el del cumplimiento serían
+      // dos cifras distintas que nadie mantiene sincronizadas.
+      if (selectedPlan?.sessions_included) {
+        await transaction`UPDATE clients SET monthly_session_target = ${selectedPlan.sessions_included} WHERE id = ${client.id}`;
+      }
       await transaction`INSERT INTO memberships (client_id, amount, renewal_day) VALUES (${client.id}, ${standardPrice}, ${input.cutoffDay})`;
     } else if (packageSessions) {
       const expiresOn = selectedPlan?.validity_days ? new Date(Date.now() + Number(selectedPlan.validity_days) * 86400000).toISOString().slice(0, 10) : null;
@@ -436,6 +449,9 @@ app.patch('/api/clients/:id/plan', { preHandler: requireStaff }, async (request,
     `;
     if (!client) return null;
     if (plan.billing_model === 'monthly') {
+      if (plan.sessions_included) {
+        await transaction`UPDATE clients SET monthly_session_target = ${plan.sessions_included} WHERE id = ${id}`;
+      }
       await transaction`
         INSERT INTO memberships (client_id, amount, renewal_day)
         SELECT ${id}, ${plan.price}, ${input.cutoffDay}
@@ -642,6 +658,54 @@ app.patch('/api/packages/:id/reschedule', { preHandler: requireStaff }, async (r
     RETURNING *
   `;
   if (!pack) return reply.code(404).send({ error: 'Saldo no encontrado' });
+  return pack;
+});
+
+// Editar un saldo ya creado. Hasta ahora sólo se podía reprogramar la fecha o
+// borrarlo entero si no tenía uso, y un error de tecleo en las sesiones
+// contratadas obligaba a rehacer el cobro. Las usadas también se corrigen: si
+// una asistencia se marcó de más, el cliente perdía una sesión pagada.
+const editPackageSchema = z.object({
+  label: z.string().trim().min(2).max(120).optional(),
+  totalSessions: z.coerce.number().int().min(1).max(400).optional(),
+  usedSessions: z.coerce.number().int().min(0).max(400).optional(),
+  expiresOn: z.union([z.literal(''), z.null(), z.string().date()]).optional()
+    .transform(value => (value === '' || value === undefined ? null : value))
+});
+app.patch('/api/packages/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = editPackageSchema.parse(request.body);
+  const tocaVencimiento = 'expiresOn' in (request.body as Record<string, unknown>);
+
+  const [actual] = await sql`
+    SELECT total_sessions, used_sessions FROM session_packages
+    WHERE id = ${id} AND client_id IN (SELECT id FROM clients WHERE owner_id = ${auth.sub})
+  `;
+  if (!actual) return reply.code(404).send({ error: 'Saldo no encontrado' });
+
+  const total = input.totalSessions ?? Number(actual.total_sessions);
+  const usadas = input.usedSessions ?? Number(actual.used_sessions);
+  // Usadas por encima de contratadas dejaría un saldo negativo en pantalla y
+  // un cliente sin sesiones que sí pagó.
+  if (usadas > total) return reply.code(400).send({ error: 'Las sesiones usadas no pueden superar las contratadas' });
+
+  const [pack] = await sql`
+    UPDATE session_packages SET
+      label = COALESCE(${input.label ?? null}, label),
+      total_sessions = ${total},
+      used_sessions = ${usadas},
+      expires_on = CASE WHEN ${tocaVencimiento} THEN ${input.expiresOn}::date ELSE expires_on END,
+      -- El estado se recalcula siempre: subir las contratadas revive un saldo
+      -- agotado, y bajarlas lo agota.
+      -- Los ::int no son decorativos: sin ellos postgres.js manda los
+      -- parámetros sin tipo y la comparación se hace como texto, donde '8'
+      -- es mayor que '12'. Un saldo con 8 de 12 usadas se quedaba agotado.
+      status = CASE WHEN status = 'pending' THEN 'pending'
+                    WHEN ${usadas}::int >= ${total}::int THEN 'exhausted' ELSE 'active' END
+    WHERE id = ${id} AND client_id IN (SELECT id FROM clients WHERE owner_id = ${auth.sub})
+    RETURNING *
+  `;
   return pack;
 });
 
