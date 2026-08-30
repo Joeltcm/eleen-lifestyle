@@ -301,7 +301,7 @@ app.get('/api/me', { preHandler: requireAuth }, async request => {
 
 const planSchema = z.object({
   name: z.string().trim().min(2).max(80), description: z.string().trim().max(240).optional(),
-  billingModel: z.enum(['monthly', 'package']), price: z.coerce.number().min(0),
+  billingModel: z.enum(['monthly', 'package', 'single']), price: z.coerce.number().min(0),
   sessionsIncluded: z.coerce.number().int().positive().optional(), validityDays: z.coerce.number().int().positive().optional(),
   active: z.boolean().default(true)
 }).superRefine((plan, context) => {
@@ -309,7 +309,9 @@ const planSchema = z.object({
   // entrenadora acordó por mes y contra el que se mide el cumplimiento. Antes
   // sólo el paquete lo pedía, así que un cliente de mensualidad no tenía meta
   // salvo que alguien la escribiera a mano en su ficha.
-  if (!plan.sessionsIncluded) context.addIssue({
+  // Las sesiones individuales no llevan número: se cobra una cada vez que
+  // ocurre, no hay bolsa ni meta mensual que declarar por adelantado.
+  if (plan.billingModel !== 'single' && !plan.sessionsIncluded) context.addIssue({
     code: 'custom', path: ['sessionsIncluded'],
     message: plan.billingModel === 'package' ? 'Indica la cantidad de sesiones' : 'Indica las sesiones por mes'
   });
@@ -324,7 +326,7 @@ app.post('/api/plans', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = planSchema.parse(request.body);
   const [plan] = await sql`
     INSERT INTO service_plans (owner_id, name, description, billing_model, price, sessions_included, validity_days, active)
-    VALUES (${auth.sub}, ${input.name}, ${input.description || null}, ${input.billingModel}, ${input.price}, ${input.sessionsIncluded!}, ${input.billingModel === 'package' ? input.validityDays || 30 : null}, ${input.active})
+    VALUES (${auth.sub}, ${input.name}, ${input.description || null}, ${input.billingModel}, ${input.price}, ${input.billingModel === 'single' ? null : input.sessionsIncluded!}, ${input.billingModel === 'package' ? input.validityDays || 30 : null}, ${input.active})
     RETURNING *
   `;
   return reply.code(201).send(plan);
@@ -334,7 +336,7 @@ app.patch('/api/plans/:id', { preHandler: requireStaff }, async (request, reply)
   const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = planSchema.parse(request.body);
   const [plan] = await sql`
     UPDATE service_plans SET name = ${input.name}, description = ${input.description || null}, billing_model = ${input.billingModel},
-      price = ${input.price}, sessions_included = ${input.sessionsIncluded!},
+      price = ${input.price}, sessions_included = ${input.billingModel === 'single' ? null : input.sessionsIncluded!},
       validity_days = ${input.billingModel === 'package' ? input.validityDays || 30 : null}, active = ${input.active}, updated_at = now()
     WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *
   `;
@@ -352,7 +354,7 @@ app.delete('/api/plans/:id', { preHandler: requireStaff }, async (request, reply
 
 const clientSchema = z.object({
   fullName: z.string().min(2), email: z.string().email().optional().or(z.literal('')), phone: z.string().optional(),
-  goal: z.string().optional(), notes: z.string().optional(), billingModel: z.enum(['monthly', 'package']).default('monthly'),
+  goal: z.string().optional(), notes: z.string().optional(), billingModel: z.enum(['monthly', 'package', 'single']).default('monthly'),
   standardPrice: z.coerce.number().min(0).default(0), packageSessions: z.coerce.number().int().positive().optional(),
   planId: z.string().uuid().optional(), cutoffDay: z.coerce.number().int().min(1).max(31).default(1),
   // Vacío llega como '' desde el formulario y significa "sin meta pactada".
@@ -460,6 +462,15 @@ app.patch('/api/clients/:id/plan', { preHandler: requireStaff }, async (request,
       await transaction`UPDATE memberships SET amount = ${plan.price}, renewal_day = ${input.cutoffDay}, status = 'active' WHERE client_id = ${id} AND status = 'active'`;
     } else {
       await transaction`UPDATE memberships SET status = 'paused' WHERE client_id = ${id} AND status = 'active'`;
+      // Las sesiones individuales no abren saldo ni cobro por adelantado: no
+      // hay bolsa que crear. Sin este corte se insertaría un paquete con
+      // total_sessions nulo y una factura por una sesión que aún no ocurrió.
+      // También se limpia la meta mensual: la que hubiera quedado del plan
+      // anterior seguiría midiendo el cumplimiento contra algo ya no pactado.
+      if (plan.billing_model === 'single') {
+        await transaction`UPDATE clients SET monthly_session_target = NULL WHERE id = ${id}`;
+        return client;
+      }
       const [existingPackage] = await transaction`SELECT id FROM session_packages WHERE client_id = ${id} AND status IN ('pending', 'active') AND label = ${plan.name} ORDER BY created_at DESC LIMIT 1`;
       if (!existingPackage) {
         const expiresOn = plan.validity_days ? new Date(Date.now() + Number(plan.validity_days) * 86400000).toISOString().slice(0, 10) : null;

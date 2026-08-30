@@ -156,3 +156,7 @@ dialog.modal-wide{max-width:920px}
   .stack-mobile tr:has(td.empty){background:none;box-shadow:none;padding:0}
   .table-wrap:has(.stack-mobile){overflow-x:visible}
 }
+
+/* Sesiones individuales: la tercera modalidad. Se distingue de mensualidad y
+   paquete para que no haya que leer la letra pequeña. */
+.commercial-label.single-label{background:#f4ece2;color:#7d6144}

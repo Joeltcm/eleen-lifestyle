@@ -1,4 +1,4 @@
-const APP_VERSION = '84';
+const APP_VERSION = '85';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -165,6 +165,7 @@ async function loadData() {
   data.compliance = compliance; data.notifications = notifications; data.googleCalendar = googleCalendar; billingAnalytics = null; billingAnalyticsLoadingYear = null; billingAnalyticsRequest += 1; showPendingBrowserNotification(notifications);
 }
 const initials = name => name.split(' ').slice(0, 2).map(word => word[0]).join('').toUpperCase();
+const modalidadPlan = modelo => modelo === 'package' ? 'Paquete' : modelo === 'single' ? 'Sesión suelta' : 'Mensualidad';
 const escapeHtml = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 const viewTitles = { dashboard: 'Buenos días', clients: 'Clientes', calendar: 'Agenda', routines: 'Rutinas', billing: 'Facturación' };
 const viewIds = new Set(Object.keys(viewTitles));
@@ -254,6 +255,8 @@ function renderClients(filter = '') {
     const pack = clientPackage(client.name);
     const commercial = client.billingModel === 'package'
       ? `<span class="commercial-label package-label">Paquete</span><b>${pack?.status === 'pending' ? 'Pago pendiente' : `${pack ? remainingSessions(pack) : client.sessionsIncluded || 0} sesiones disponibles`}</b><small>${escapeHtml(client.planName || 'Plan por sesiones')} · ${money.format(client.plan)}</small>`
+      : client.billingModel === 'single'
+      ? `<span class="commercial-label single-label">Sesión suelta</span><b>${escapeHtml(client.planName || 'Sesiones individuales')} · ${money.format(client.plan)}</b><small>Por sesión, sin corte mensual</small>`
       : `<span class="commercial-label">Mensualidad</span><b>${escapeHtml(client.planName || 'Mensualidad')} · ${money.format(client.plan)}</b><small>Corte día ${client.cutoffDay}</small>`;
     return `<article class="client-card"><header><span class="initials">${escapeHtml(initials(client.name))}</span><div><h3>${escapeHtml(client.name)}</h3><small>${escapeHtml(client.goal)}</small></div><span class="status">${client.status}</span></header><p>${client.inbody ? `Último InBody: ${client.inbody.date}` : 'Aún no se ha cargado un InBody.'}${client.portalActive ? ' · Portal activo' : ''}</p><div class="commercial-summary">${commercial}</div><div class="mini-data">${client.inbody ? `<div><b>${client.inbody.weight} kg</b><span>Peso</span></div><div><b>${client.inbody.smm} kg</b><span>Músculo</span></div><div><b>${client.inbody.pbf}%</b><span>Grasa</span></div>` : `<div><b>—</b><span>Evaluación pendiente</span></div>`}</div><div class="client-actions"><button class="secondary" data-client="${client.id}">Ver expediente</button><button class="secondary" data-edit-client="${client.id}">Editar</button><button class="secondary" data-inbody="${client.id}">+ InBody</button></div></article>`;
   }).join('') || '<p class="empty">No se encontraron clientes.</p>';
@@ -417,7 +420,7 @@ function renderBilling() {
   document.getElementById('active-memberships').textContent = data.clients.filter(client => client.billingModel === 'monthly' && client.status === 'Activo').length;
   document.getElementById('active-packages').textContent = data.packages.filter(pack => pack.status === 'confirmed' && remainingSessions(pack) > 0).length;
   document.getElementById('billing-pending').textContent = money.format(pending);
-  document.getElementById('plan-grid').innerHTML = data.plans.length ? data.plans.map(plan => `<article class="plan-card ${plan.active ? '' : 'inactive'}"><div><span class="commercial-label ${plan.billingModel === 'package' ? 'package-label' : ''}">${plan.billingModel === 'package' ? 'Paquete' : 'Mensualidad'}</span><h4>${escapeHtml(plan.name)}</h4><p>${escapeHtml(plan.description || (plan.billingModel === 'package' ? `${plan.sessionsIncluded} sesiones · ${plan.validityDays} días` : `${plan.sessionsIncluded} sesiones / mes`))}</p></div><div class="plan-price"><strong>${money.format(plan.price)}</strong><small>${plan.active ? 'Disponible' : 'Inactivo'}</small></div><button class="text-button" data-edit-plan="${plan.id}">Editar</button></article>`).join('') : '<p class="empty">Crea el primer plan para asignarlo a tus clientes.</p>';
+  document.getElementById('plan-grid').innerHTML = data.plans.length ? data.plans.map(plan => `<article class="plan-card ${plan.active ? '' : 'inactive'}"><div><span class="commercial-label ${plan.billingModel === 'package' ? 'package-label' : ''}${plan.billingModel === 'single' ? ' single-label' : ''}">${modalidadPlan(plan.billingModel)}</span><h4>${escapeHtml(plan.name)}</h4><p>${escapeHtml(plan.description || (plan.billingModel === 'package' ? `${plan.sessionsIncluded} sesiones · ${plan.validityDays} días` : plan.billingModel === 'single' ? 'Se cobra por sesión' : `${plan.sessionsIncluded} sesiones / mes`))}</p></div><div class="plan-price"><strong>${money.format(plan.price)}</strong><small>${plan.active ? 'Disponible' : 'Inactivo'}</small></div><button class="text-button" data-edit-plan="${plan.id}">Editar</button></article>`).join('') : '<p class="empty">Crea el primer plan para asignarlo a tus clientes.</p>';
   document.getElementById('invoice-table').innerHTML = visibleInvoices.length ? visibleInvoices.map(invoice => { const label = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'; const concept = invoice.invoiceNumber ? `<small>${invoice.source === 'zoho_invoice' ? 'Zoho' : 'Eileen'} · ${escapeHtml(invoice.invoiceNumber)}</small><br>${escapeHtml(invoice.concept)}` : escapeHtml(invoice.concept); const local = invoice.source !== 'zoho_invoice'; return `<tr><td data-label="Cliente"><b>${escapeHtml(invoice.client)}</b></td><td data-label="Concepto">${concept}</td><td data-label="Vence">${invoice.due}</td><td data-label="Método">${invoice.method === 'pending' ? '—' : escapeHtml(invoice.method)}</td><td data-label="Monto">${money.format(invoice.amount)}${invoice.status === 'pending' && invoice.balance !== invoice.amount ? `<br><small>Saldo ${money.format(invoice.balance)}</small>` : ''}</td><td data-label="Estado"><span class="payment-status ${invoice.status}">${label}</span></td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoiceNumber || invoice.id.slice(0, 8))}">Ver PDF</button>${invoice.status === 'pending' && local ? `<button class="secondary session-use" data-confirm-invoice="${invoice.id}">Confirmar pago</button><button class="secondary session-use" data-edit-invoice="${invoice.id}">Editar</button><button class="secondary session-use" data-delete-invoice="${invoice.id}">Anular</button><button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar</button>` : ''}${invoice.status === 'void' && local ? `<button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar definitivamente</button>` : ''}${invoice.status === 'confirmed' && local ? `<button class="secondary session-use" data-edit-payment="${invoice.id}">Editar pago</button>` : ''}</div></td></tr>`; }).join('') : '<tr><td colspan="7" class="empty">No hay facturas con estos filtros.</td></tr>';
   const loadMore = document.getElementById('billing-load-more'); loadMore.hidden = visibleInvoices.length >= periodInvoices.length; loadMore.textContent = `Mostrar más facturas (${periodInvoices.length - visibleInvoices.length} restantes)`;
   document.getElementById('package-table').innerHTML = data.packages.length ? data.packages.map(pack => {
@@ -487,7 +490,7 @@ function newClient() {
   const availablePlans = data.plans.filter(plan => plan.active);
   if (!availablePlans.length) { navigate('billing'); toast('Crea un plan comercial antes de agregar clientes', true); return; }
   const content = formFromTemplate('new-client-template'); openModal(content);
-  const planSelect = document.getElementById('client-plan'); availablePlans.forEach(plan => planSelect.add(new Option(`${plan.name} · ${money.format(plan.price)}${plan.billingModel === 'package' ? ` · ${plan.sessionsIncluded} sesiones` : '/mes'}`, plan.id)));
+  const planSelect = document.getElementById('client-plan'); availablePlans.forEach(plan => planSelect.add(new Option(`${plan.name} · ${money.format(plan.price)}${plan.billingModel === 'package' ? ` · ${plan.sessionsIncluded} sesiones` : plan.billingModel === 'single' ? ' por sesión' : '/mes'}`, plan.id)));
   document.getElementById('client-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target); const selectedPlan = data.plans.find(plan => plan.id === form.get('planId'));
     try {
@@ -526,11 +529,19 @@ function planEditor(plan = null) {
   // la vigencia en días sigue siendo cosa del paquete.
   const togglePackage = () => {
     const esPaquete = model.value === 'package';
+    const esSuelta = model.value === 'single';
     packageFields.hidden = !esPaquete;
-    document.getElementById('plan-sessions-label').childNodes[0].nodeValue = esPaquete ? 'Sesiones incluidas' : 'Sesiones por mes';
+    // En sesiones individuales no hay número que declarar: se cobra una cada
+    // vez que ocurre. Pedirlo obligaría a inventar una cifra que después
+    // mediría un cumplimiento que nadie pactó.
+    const etiqueta = document.getElementById('plan-sessions-label');
+    etiqueta.hidden = esSuelta;
+    etiqueta.querySelector('input').required = !esSuelta;
+    etiqueta.childNodes[0].nodeValue = esPaquete ? 'Sesiones incluidas' : 'Sesiones por mes';
     document.getElementById('plan-sessions-hint').textContent = esPaquete
       ? 'Total del paquete. Se reparte entre los meses de vigencia para medir el cumplimiento.'
       : 'Es la meta contra la que se mide el cumplimiento del cliente.';
+    document.getElementById('plan-price-label').childNodes[0].nodeValue = esSuelta ? 'Precio por sesión (USD)' : 'Precio (USD)';
   };
   model.addEventListener('change', togglePackage);
   if (plan) {
@@ -543,7 +554,7 @@ function planEditor(plan = null) {
     event.preventDefault(); const values = new FormData(event.target); const billingModel = values.get('billingModel');
     try {
       event.target.classList.add('loading-state');
-      await api(plan ? `/api/plans/${plan.id}` : '/api/plans', { method: plan ? 'PATCH' : 'POST', body: { name: values.get('name'), description: values.get('description'), billingModel, price: Number(values.get('price')), sessionsIncluded: Number(values.get('sessionsIncluded')), validityDays: billingModel === 'package' ? Number(values.get('validityDays')) : undefined, active: Boolean(values.get('active')) } });
+      await api(plan ? `/api/plans/${plan.id}` : '/api/plans', { method: plan ? 'PATCH' : 'POST', body: { name: values.get('name'), description: values.get('description'), billingModel, price: Number(values.get('price')), sessionsIncluded: billingModel === 'single' ? undefined : Number(values.get('sessionsIncluded')), validityDays: billingModel === 'package' ? Number(values.get('validityDays')) : undefined, active: Boolean(values.get('active')) } });
       await loadData(); renderAll(); modal.close(); toast(plan ? 'Plan actualizado' : 'Plan creado');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
@@ -738,7 +749,7 @@ function newInvoice() {
   };
   concept.addEventListener('change', togglePackage); togglePackage();
   const amountInput = document.querySelector('#invoice-form [name="amount"]'); const dueInput = document.querySelector('#invoice-form [name="due"]'); const sessionsInput = document.querySelector('#invoice-form [name="sessions"]');
-  const fillClientPlan = () => { const client = data.clients.find(item => item.id === selection.value); if (!client) return; amountInput.value = client.plan; concept.value = client.billingModel === 'package' ? 'Paquete de sesiones' : 'Mensualidad'; sessionsInput.value = client.packageSessions || client.sessionsIncluded || 0; togglePackage(); };
+  const fillClientPlan = () => { const client = data.clients.find(item => item.id === selection.value); if (!client) return; amountInput.value = client.plan; concept.value = client.billingModel === 'package' ? 'Paquete de sesiones' : client.billingModel === 'single' ? 'Sesión individual' : 'Mensualidad'; sessionsInput.value = client.packageSessions || client.sessionsIncluded || 0; togglePackage(); };
   dueInput.value = dateKey(today); selection.addEventListener('change', fillClientPlan); fillClientPlan();
   document.getElementById('invoice-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target); const method = form.get('method');
@@ -1870,6 +1881,8 @@ function clientDetail(id) {
     : dependientes.length ? `<br><span class="pago-nota">Paga también por ${escapeHtml(dependientes.map(d => d.name).join(', '))}</span>` : '';
   const commercialDescription = client.billingModel === 'package'
     ? `${client.planName || pack?.label || `Paquete ${client.sessionsIncluded || 0} sesiones`} · ${pack ? remainingSessions(pack) : client.sessionsIncluded || 0} disponibles · ${money.format(client.plan)}`
+    : client.billingModel === 'single'
+    ? `${client.planName || 'Sesiones individuales'} · ${money.format(client.plan)} por sesión`
     : `${client.planName || 'Mensualidad'} · ${money.format(client.plan)} al mes · corte día ${client.cutoffDay}`;
   const box = document.createElement('div');
   const reviewNotice = client.inbodyReviews.length ? `<button class="secondary wide-button" id="review-inbody">Revisar ${client.inbodyReviews.length} evaluación${client.inbodyReviews.length > 1 ? 'es' : ''} pendiente${client.inbodyReviews.length > 1 ? 's' : ''}</button>` : '';
