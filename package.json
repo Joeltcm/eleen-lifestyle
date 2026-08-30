@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "scripts": {
     "build": "node scripts/build-frontend.mjs",
-    "check": "node --check exercise-catalog.js && node --check app.js && node --check zoho-migration.js && node --check recurring-billing.js && node --check sw.js",
+    "check": "node --check exercise-catalog.js && node --check video-compressor.js && node --check app.js && node --check zoho-migration.js && node --check recurring-billing.js && node --check sw.js",
     "verify": "npm run check && npm run build && npm --prefix backend run check && npm --prefix backend run build"
   }
 }

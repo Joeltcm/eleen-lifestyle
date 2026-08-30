@@ -490,6 +490,174 @@ app.delete('/api/routines/:id', { preHandler: requireStaff }, async (request, re
   return { deleted: true, routine };
 });
 
+// ── Catálogo de ejercicios ────────────────────────────────────────────────
+const exerciseSections = ['tren_inferior', 'tren_superior', 'core', 'cardio', 'hit'] as const;
+const videoContentTypes = ['video/mp4', 'video/webm'] as const;
+const maxVideoSize = 40 * 1024 * 1024;
+
+const exerciseSchema = z.object({
+  name: z.string().trim().min(2).max(120),
+  english: z.string().trim().max(120).optional().nullable(),
+  section: z.enum(exerciseSections),
+  pattern: z.string().trim().max(60).optional().nullable(),
+  level: z.string().trim().max(40).default('Todos'),
+  machine: z.string().trim().max(180).optional().nullable(),
+  freeWeight: z.string().trim().max(180).optional().nullable(),
+  cues: z.string().trim().max(600).optional().nullable(),
+  archived: z.boolean().optional()
+});
+
+// slug estable a partir del nombre, para que un ejercicio creado a mano tenga
+// la misma clase de identificador que los sembrados y las rutinas viejas
+// puedan seguir enganchando por catalogId.
+function slugFrom(name: string) {
+  return name.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'ejercicio';
+}
+
+const exerciseColumns = sql`
+  id, slug, name, english, section, pattern, level, machine, free_weight, cues,
+  archived, sort_order, video_content_type, video_size_bytes, video_duration_seconds,
+  video_uploaded_at, (video_object_key IS NOT NULL) AS has_video
+`;
+
+app.get('/api/exercises', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const query = z.object({ section: z.enum(exerciseSections).optional(), includeArchived: z.coerce.boolean().default(false) }).parse(request.query);
+  return sql`
+    SELECT ${exerciseColumns} FROM exercises
+    WHERE owner_id = ${auth.sub}
+      AND (${query.includeArchived} OR archived = false)
+      AND (${query.section || null}::text IS NULL OR section = ${query.section || null})
+    ORDER BY section, sort_order, name
+  `;
+});
+
+app.post('/api/exercises', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const input = exerciseSchema.parse(request.body);
+  const [exercise] = await sql`
+    INSERT INTO exercises (owner_id, slug, name, english, section, pattern, level, machine, free_weight, cues)
+    VALUES (${auth.sub}, ${slugFrom(input.name)}, ${input.name}, ${input.english || null}, ${input.section},
+            ${input.pattern || null}, ${input.level}, ${input.machine || null}, ${input.freeWeight || null}, ${input.cues || null})
+    ON CONFLICT (owner_id, slug) DO NOTHING
+    RETURNING ${exerciseColumns}
+  `;
+  if (!exercise) return reply.code(409).send({ error: 'Ya existe un ejercicio con ese nombre' });
+  return reply.code(201).send(exercise);
+});
+
+app.patch('/api/exercises/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = exerciseSchema.partial().parse(request.body);
+  const [exercise] = await sql`
+    UPDATE exercises SET
+      name = COALESCE(${input.name ?? null}, name),
+      english = COALESCE(${input.english ?? null}, english),
+      section = COALESCE(${input.section ?? null}, section),
+      pattern = COALESCE(${input.pattern ?? null}, pattern),
+      level = COALESCE(${input.level ?? null}, level),
+      machine = COALESCE(${input.machine ?? null}, machine),
+      free_weight = COALESCE(${input.freeWeight ?? null}, free_weight),
+      cues = COALESCE(${input.cues ?? null}, cues),
+      archived = COALESCE(${input.archived ?? null}, archived),
+      updated_at = now()
+    WHERE id = ${id} AND owner_id = ${auth.sub}
+    RETURNING ${exerciseColumns}
+  `;
+  if (!exercise) return reply.code(404).send({ error: 'Ejercicio no encontrado' });
+  return exercise;
+});
+
+app.delete('/api/exercises/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [exercise] = await sql`DELETE FROM exercises WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING id, name, video_object_key`;
+  if (!exercise) return reply.code(404).send({ error: 'Ejercicio no encontrado' });
+  if (exercise.video_object_key && storageReady) {
+    await deleteObject(exercise.video_object_key).catch(error => app.log.warn({ err: error, exerciseId: id }, 'No se pudo borrar el video del ejercicio'));
+  }
+  return { deleted: true, exercise: { id: exercise.id, name: exercise.name } };
+});
+
+// El video sube directo del navegador a R2 con una URL firmada. Pasarlo por
+// Railway costaría ancho de banda y CPU por cada clip sin ganar nada.
+app.post('/api/exercises/:id/video-upload-url', { preHandler: requireStaff }, async (request, reply) => {
+  if (!storageReady) return reply.code(503).send({ error: 'El almacenamiento de video aún no está configurado' });
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = z.object({ contentType: z.enum(videoContentTypes), sizeBytes: z.coerce.number().int().positive().max(maxVideoSize) }).parse(request.body);
+  const [exercise] = await sql`SELECT id FROM exercises WHERE id = ${id} AND owner_id = ${auth.sub}`;
+  if (!exercise) return reply.code(404).send({ error: 'Ejercicio no encontrado' });
+  const objectKey = `exercises/${id}/${randomUUID()}.${input.contentType === 'video/webm' ? 'webm' : 'mp4'}`;
+  return { objectKey, uploadUrl: await createUploadUrl(objectKey, input.contentType), expiresInSeconds: 600 };
+});
+
+app.post('/api/exercises/:id/video', { preHandler: requireStaff }, async (request, reply) => {
+  if (!storageReady) return reply.code(503).send({ error: 'El almacenamiento de video aún no está configurado' });
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = z.object({ objectKey: z.string().min(1).max(300), durationSeconds: z.coerce.number().positive().max(600).optional() }).parse(request.body);
+  if (!input.objectKey.startsWith(`exercises/${id}/`)) return reply.code(400).send({ error: 'La ruta del video no corresponde a este ejercicio' });
+  const [exercise] = await sql`SELECT id, video_object_key FROM exercises WHERE id = ${id} AND owner_id = ${auth.sub}`;
+  if (!exercise) return reply.code(404).send({ error: 'Ejercicio no encontrado' });
+
+  // Se confirma contra R2 antes de guardar: si la subida firmada falló a medias
+  // no debe quedar un ejercicio anunciando un video que no se puede reproducir.
+  const uploaded = await verifyUpload(input.objectKey).catch(() => null);
+  if (!uploaded?.sizeBytes) return reply.code(409).send({ error: 'El video no llegó completo al almacenamiento' });
+
+  const previousKey = exercise.video_object_key as string | null;
+  const [updated] = await sql`
+    UPDATE exercises SET video_object_key = ${input.objectKey}, video_content_type = ${uploaded.contentType || 'video/mp4'},
+      video_size_bytes = ${uploaded.sizeBytes}, video_duration_seconds = ${input.durationSeconds ?? null},
+      video_uploaded_at = now(), updated_at = now()
+    WHERE id = ${id} AND owner_id = ${auth.sub}
+    RETURNING ${exerciseColumns}
+  `;
+  if (previousKey && previousKey !== input.objectKey) {
+    await deleteObject(previousKey).catch(error => app.log.warn({ err: error, exerciseId: id }, 'No se pudo borrar el video anterior'));
+  }
+  return updated;
+});
+
+app.delete('/api/exercises/:id/video', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  // RETURNING sobre un UPDATE entrega la fila ya modificada, así que la clave
+  // del objeto se lee antes de limpiarla; si no, quedaría huérfana en R2.
+  const [exercise] = await sql`SELECT video_object_key FROM exercises WHERE id = ${id} AND owner_id = ${auth.sub}`;
+  if (!exercise) return reply.code(404).send({ error: 'Ejercicio no encontrado' });
+  const [updated] = await sql`
+    UPDATE exercises SET video_object_key = NULL, video_content_type = NULL, video_size_bytes = NULL,
+      video_duration_seconds = NULL, video_uploaded_at = NULL, updated_at = now()
+    WHERE id = ${id} AND owner_id = ${auth.sub}
+    RETURNING ${exerciseColumns}
+  `;
+  if (exercise.video_object_key && storageReady) {
+    await deleteObject(exercise.video_object_key).catch(error => app.log.warn({ err: error, exerciseId: id }, 'No se pudo borrar el video del ejercicio'));
+  }
+  return updated;
+});
+
+// La ve tanto la entrenadora como sus clientes: el cliente necesita el video
+// para ejecutar el ejercicio sin asistencia, que es el punto de la función.
+app.get('/api/exercises/:id/video-url', { preHandler: requireAuth }, async (request, reply) => {
+  if (!storageReady) return reply.code(503).send({ error: 'El almacenamiento de video aún no está configurado' });
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [exercise] = await sql`SELECT id, owner_id, video_object_key, video_content_type FROM exercises WHERE id = ${id}`;
+  if (!exercise?.video_object_key) return reply.code(404).send({ error: 'Este ejercicio todavía no tiene video' });
+
+  const allowed = ['admin', 'trainer'].includes(auth.role)
+    ? exercise.owner_id === auth.sub
+    : (await portalClient(auth.sub))?.owner_id === exercise.owner_id;
+  if (!allowed) return reply.code(403).send({ error: 'Sin acceso a este video' });
+
+  return { exerciseId: id, contentType: exercise.video_content_type, videoUrl: await createDownloadUrl(exercise.video_object_key), expiresInSeconds: 300 };
+});
+
 const sessionSchema = z.object({ clientId: z.string().uuid(), routineId: z.string().uuid().optional(), startsAt: z.string().datetime(), durationMinutes: z.coerce.number().int().positive().default(60), mode: z.string().default('Presencial'), notes: z.string().optional() });
 app.get('/api/sessions', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
@@ -1030,13 +1198,21 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   const auth = request.user as AuthUser;
   if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
   const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
-  const [invoices, routines, sessions, busySlots, assessments, completions] = await Promise.all([
+  const [invoices, routines, sessions, busySlots, assessments, completions, exercises] = await Promise.all([
     sql`SELECT id, concept, amount, balance, currency, due_on, status, payment_method, invoice_number, issued_on FROM invoices WHERE client_id = ${client.id} ORDER BY COALESCE(issued_on, due_on) DESC LIMIT 60`,
     sql`SELECT ra.id AS assignment_id, r.id, r.title, r.description, r.sessions_per_week, r.exercises FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id WHERE ra.client_id = ${client.id} AND ra.active = true AND (ra.ends_on IS NULL OR ra.ends_on >= current_date) ORDER BY ra.starts_on DESC`,
     sql`SELECT s.id, s.routine_id, s.starts_at, s.duration_minutes, s.mode, s.status, s.completion_percent, r.title AS routine_title FROM sessions s LEFT JOIN routines r ON r.id = s.routine_id WHERE s.client_id = ${client.id} AND s.starts_at >= now() - interval '1 year' ORDER BY s.starts_at`,
     sql`SELECT s.id, s.starts_at, s.duration_minutes, (s.client_id = ${client.id}) AS is_mine FROM sessions s JOIN clients c ON c.id = s.client_id WHERE c.owner_id = ${client.owner_id} AND s.status <> 'cancelled' AND s.starts_at BETWEEN now() AND now() + interval '90 days' ORDER BY s.starts_at`,
     sql`SELECT tested_at, values FROM inbody_assessments WHERE client_id = ${client.id} AND extraction_status = 'ready' ORDER BY tested_at`,
-    sql`SELECT routine_id, completed_on, completion_percent FROM routine_completions WHERE client_id = ${client.id} AND completed_on >= current_date - interval '1 year' ORDER BY completed_on`
+    sql`SELECT routine_id, completed_on, completion_percent FROM routine_completions WHERE client_id = ${client.id} AND completed_on >= current_date - interval '1 year' ORDER BY completed_on`,
+    // El catálogo entero, no sólo lo asignado: la rutina guarda los ejercicios
+    // como copia en JSON, y es por catalogId que el portal sabe cuáles tienen
+    // video que mostrar. La URL firmada se pide aparte, al darle reproducir.
+    sql`
+      SELECT id, slug, name, english, section, level, machine, free_weight, cues,
+             video_duration_seconds, (video_object_key IS NOT NULL) AS has_video
+      FROM exercises WHERE owner_id = ${client.owner_id} AND archived = false
+    `
   ]);
   const profile = {
     id: client.id, full_name: client.full_name, email: client.email, goal: client.goal, status: client.status,
@@ -1046,7 +1222,7 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   const privateBusySlots = busySlots.map(slot => slot.is_mine
     ? { id: slot.id, starts_at: slot.starts_at, duration_minutes: slot.duration_minutes, is_mine: true }
     : { starts_at: slot.starts_at, duration_minutes: slot.duration_minutes, is_mine: false });
-  return { client: profile, invoices, routines, sessions, busySlots: privateBusySlots, assessments, routineCompletions: completions };
+  return { client: profile, invoices, routines, sessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, exercises };
 });
 
 const routineCompletionSchema = z.object({ routineId: z.string().uuid(), completedOn: z.string().date(), completionPercent: z.coerce.number().int().min(0).max(100), notes: z.string().max(300).optional() });

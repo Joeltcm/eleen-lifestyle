@@ -1,6 +1,10 @@
-const VERSION = '50';
+const VERSION = '51';
 const CACHE = `eileen-lifestyle-v${VERSION}`;
-const FILES = ['./index.html', './styles.css?v=47', './zoho-migration.css?v=47', './exercise-catalog.js?v=47', './app.js?v=47', './zoho-migration.js?v=47', './recurring-billing.js?v=47', './manifest.webmanifest', './icon.svg', './icon-maskable.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png', './favicon-32.png', './favicon.ico', './assets/eleen-training.jpg'];
+// Las URLs versionadas se arman con VERSION. Estuvieron fijas en ?v=47 mientras
+// VERSION seguía subiendo, así que la precarga guardaba direcciones que la
+// página ya no pedía: descargaba de más y no le servía a nadie.
+const VERSIONED = ['./styles.css', './zoho-migration.css', './exercise-catalog.js', './video-compressor.js', './app.js', './zoho-migration.js', './recurring-billing.js'].map(file => `${file}?v=${VERSION}`);
+const FILES = ['./index.html', ...VERSIONED, './manifest.webmanifest', './icon.svg', './icon-maskable.svg', './icon-192.png', './icon-512.png', './apple-touch-icon.png', './favicon-32.png', './favicon.ico', './assets/eleen-training.jpg'];
 
 self.addEventListener('install', event => event.waitUntil((async () => {
   const cache = await caches.open(CACHE);

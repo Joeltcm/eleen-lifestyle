@@ -1,4 +1,4 @@
-const APP_VERSION = '50';
+const APP_VERSION = '51';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -12,7 +12,18 @@ const panamaDateTimeParts = value => {
 const API_BASE = 'https://api-production-b417f.up.railway.app';
 const authKey = 'eileen-lifestyle-session';
 const legacyAuthKey = 'eleen-lifestyle-session';
-const exerciseCatalog = window.EXERCISE_CATALOG || [];
+// El catálogo vive en la base de datos y se carga con el resto de los datos.
+// exercise-catalog.js queda como respaldo para que el constructor de rutinas
+// siga sirviendo de algo si la API no responde.
+let exerciseCatalog = [];
+const legacySectionBySlug = { 'Tren inferior': 'tren_inferior', 'Empuje': 'tren_superior', 'Tirón': 'tren_superior', 'Core': 'core', 'Acondicionamiento': 'hit' };
+const fallbackCatalog = (window.EXERCISE_CATALOG || []).map(exercise => ({
+  ...exercise, section: legacySectionBySlug[exercise.category] || 'hit', pattern: exercise.category, hasVideo: false
+}));
+// "Total body" no es una sección del catálogo: es la ausencia de filtro, y por
+// eso muestra todos los ejercicios.
+const exerciseSectionLabels = { total_body: 'Total body', tren_superior: 'Tren superior', tren_inferior: 'Tren inferior', core: 'Core', cardio: 'Cardio', hit: 'HIT' };
+const exerciseSectionOrder = ['total_body', 'tren_superior', 'tren_inferior', 'core', 'cardio', 'hit'];
 let authToken = localStorage.getItem(authKey) || localStorage.getItem(legacyAuthKey);
 if (authToken && !localStorage.getItem(authKey)) {
   localStorage.setItem(authKey, authToken);
@@ -136,6 +147,14 @@ async function loadData() {
     api('/api/notifications').catch(() => []),
     api('/api/integrations/google-calendar/status').catch(() => ({ configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } }))
   ]);
+  const catalog = await api('/api/exercises').catch(() => null);
+  exerciseCatalog = catalog ? catalog.map(exercise => ({
+    id: exercise.id, slug: exercise.slug, name: exercise.name, english: exercise.english || '',
+    section: exercise.section, pattern: exercise.pattern || '', level: exercise.level,
+    machine: exercise.machine || 'No aplica', freeWeight: exercise.free_weight || 'No aplica',
+    cues: exercise.cues || '', hasVideo: Boolean(exercise.has_video),
+    videoDurationSeconds: exercise.video_duration_seconds ? Number(exercise.video_duration_seconds) : null
+  })) : fallbackCatalog;
   const assessments = await Promise.all(clients.map(client => api(`/api/clients/${client.id}/inbody`)));
   data.clients = clients.map((client, index) => {
     const readyAssessments = assessments[index].assessments.filter(item => item.extraction_status === 'ready');
@@ -333,7 +352,7 @@ function renderCalendar() {
   document.getElementById('session-list').innerHTML = visibleSessions.length ? visibleSessions.map(session => `<div class="session-row"><div class="session-date"><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric' }).format(new Date(`${session.date}T12:00:00`))}</b><span>${session.time} · ${session.durationMinutes} min</span></div><div class="session-person"><b>${session.client}</b><span>${session.routine} · ${session.mode}</span>${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}</div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span>${session.status === 'cancelled' ? '<span class="session-done">—</span>' : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button><button type="button" class="secondary" data-cancel-session="${session.id}">Cancelar</button>${sessionComplianceForm(session)}</div>`}</div>`).join('') : `<p class="empty">No hay sesiones programadas ${periodName}.</p>`;
 }
 function renderRoutines() {
-  document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${routine.title}</h3><p>${routine.description}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''}</footer><div class="client-actions"><button class="secondary" data-edit-routine="${routine.id}">Editar</button><button class="secondary" data-delete-routine="${routine.id}">Eliminar</button></div></article>`).join('');
+  document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${routine.title}</h3><p>${routine.description}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''}</footer><div class="client-actions"><button class="secondary" data-edit-routine="${routine.id}">Editar</button><button class="secondary" data-duplicate-routine="${routine.id}">Reutilizar</button><button class="secondary" data-delete-routine="${routine.id}">Eliminar</button></div></article>`).join('');
 }
 function renderBillingInsights() {
   const chart = document.getElementById('billing-line-chart');
@@ -713,18 +732,170 @@ function editSessionSchedule(session) {
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
-function newRoutine(routine = null) {
+const megabytes = bytes => `${(Number(bytes) / (1024 * 1024)).toFixed(1)} MB`;
+
+function exerciseCatalogManager() {
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">ENTRENAMIENTO</p><h2>Catálogo de ejercicios</h2>
+    <p style="color:#6f7b75;margin-top:-12px">Los ejercicios y sus videos de demostración. Lo que subas aquí es lo que verá el cliente en su rutina.</p>
+    <div class="catalog-toolbar"><select id="catalog-section-filter"></select><button class="secondary" id="catalog-new">+ Nuevo ejercicio</button></div>
+    <div id="catalog-list"><p class="empty">Cargando catálogo…</p></div>`;
+  openModal(box, true);
+
+  const filter = document.getElementById('catalog-section-filter');
+  filter.add(new Option('Todas las secciones', ''));
+  exerciseSectionOrder.filter(section => section !== 'total_body').forEach(section => filter.add(new Option(exerciseSectionLabels[section], section)));
+  document.getElementById('catalog-new').onclick = () => exerciseEditor(null);
+  filter.onchange = () => renderCatalogList();
+  renderCatalogList();
+}
+
+function renderCatalogList() {
+  const target = document.getElementById('catalog-list');
+  if (!target) return;
+  const section = document.getElementById('catalog-section-filter')?.value || '';
+  const shown = exerciseCatalog.filter(exercise => !section || exercise.section === section);
+  const withVideo = exerciseCatalog.filter(exercise => exercise.hasVideo).length;
+
+  target.innerHTML = `<p class="section-note">${exerciseCatalog.length} ejercicios · ${withVideo} con video · ${exerciseCatalog.length - withVideo} sin video.</p>
+    ${shown.length ? `<div class="catalog-list">${shown.map(exercise => `<article class="catalog-item">
+      <div class="catalog-item-copy"><b>${escapeHtml(exercise.name)}</b><small>${escapeHtml([exerciseSectionLabels[exercise.section], exercise.pattern, exercise.level].filter(Boolean).join(' · '))}</small></div>
+      <span class="catalog-video ${exercise.hasVideo ? 'ready' : ''}">${exercise.hasVideo ? `▶ ${exercise.videoDurationSeconds ? `${Math.round(exercise.videoDurationSeconds)} s` : 'con video'}` : 'sin video'}</span>
+      <div class="catalog-item-actions">
+        <button class="secondary session-use" data-edit-exercise="${exercise.id}">Editar</button>
+        <button class="secondary session-use" data-video-exercise="${exercise.id}">${exercise.hasVideo ? 'Reemplazar video' : 'Subir video'}</button>
+      </div></article>`).join('')}</div>` : '<p class="empty">No hay ejercicios en esta sección.</p>'}`;
+
+  target.querySelectorAll('[data-edit-exercise]').forEach(button => {
+    button.onclick = () => exerciseEditor(exerciseCatalog.find(exercise => exercise.id === button.dataset.editExercise));
+  });
+  target.querySelectorAll('[data-video-exercise]').forEach(button => {
+    button.onclick = () => exerciseVideoUploader(exerciseCatalog.find(exercise => exercise.id === button.dataset.videoExercise));
+  });
+}
+
+async function reloadCatalog() {
+  const catalog = await api('/api/exercises');
+  exerciseCatalog = catalog.map(exercise => ({
+    id: exercise.id, slug: exercise.slug, name: exercise.name, english: exercise.english || '',
+    section: exercise.section, pattern: exercise.pattern || '', level: exercise.level,
+    machine: exercise.machine || 'No aplica', freeWeight: exercise.free_weight || 'No aplica',
+    cues: exercise.cues || '', hasVideo: Boolean(exercise.has_video),
+    videoDurationSeconds: exercise.video_duration_seconds ? Number(exercise.video_duration_seconds) : null
+  }));
+}
+
+function exerciseEditor(exercise) {
+  const box = document.createElement('div');
+  const value = field => escapeHtml(exercise?.[field] ?? '');
+  const chosen = (field, option) => (exercise?.[field] || '') === option ? ' selected' : '';
+  box.innerHTML = `<form id="exercise-form"><p class="eyebrow">CATÁLOGO</p><h2>${exercise ? 'Editar ejercicio' : 'Nuevo ejercicio'}</h2>
+    <label>Nombre<input name="name" required maxlength="120" value="${value('name')}" placeholder="Sentadilla búlgara" /></label>
+    <div class="form-row">
+      <label>Nombre en inglés<input name="english" maxlength="120" value="${value('english')}" /></label>
+      <label>Sección<select name="section" required>${exerciseSectionOrder.filter(section => section !== 'total_body').map(section => `<option value="${section}"${chosen('section', section)}>${exerciseSectionLabels[section]}</option>`).join('')}</select></label>
+    </div>
+    <div class="form-row">
+      <label>Patrón<input name="pattern" maxlength="60" value="${value('pattern')}" placeholder="Empuje, Tirón, Cadera…" /></label>
+      <label>Nivel<select name="level">${['Todos', 'Principiante', 'Intermedio', 'Intermedio/Av', 'Avanzado'].map(level => `<option value="${level}"${(exercise?.level || 'Todos') === level ? ' selected' : ''}>${level}</option>`).join('')}</select></label>
+    </div>
+    <label>Con máquina<input name="machine" maxlength="180" value="${value('machine')}" /></label>
+    <label>Sin máquina<input name="freeWeight" maxlength="180" value="${value('freeWeight')}" /></label>
+    <label>Claves de ejecución<textarea name="cues" rows="2" maxlength="600" placeholder="Lo que el cliente debe cuidar al ejecutarlo">${value('cues')}</textarea></label>
+    <button class="primary wide-button">${exercise ? 'Guardar cambios' : 'Crear ejercicio'}</button>
+    ${exercise ? '<button type="button" class="secondary wide-button" id="delete-exercise">Eliminar del catálogo</button>' : ''}</form>`;
+  openModal(box);
+
+  if (exercise) document.getElementById('delete-exercise').onclick = async () => {
+    if (!confirm(`¿Eliminar "${exercise.name}" del catálogo? Si tiene video, también se borra. Las rutinas ya guardadas conservan su copia.`)) return;
+    try { await api(`/api/exercises/${exercise.id}`, { method: 'DELETE' }); await reloadCatalog(); modal.close(); toast('Ejercicio eliminado'); exerciseCatalogManager(); }
+    catch (error) { toast(error.message, true); }
+  };
+
+  document.getElementById('exercise-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const values = new FormData(event.target);
+    const body = {
+      name: values.get('name').trim(), english: values.get('english').trim() || null,
+      section: values.get('section'), pattern: values.get('pattern').trim() || null,
+      level: values.get('level'), machine: values.get('machine').trim() || null,
+      freeWeight: values.get('freeWeight').trim() || null, cues: values.get('cues').trim() || null
+    };
+    try {
+      event.target.classList.add('loading-state');
+      if (exercise) await api(`/api/exercises/${exercise.id}`, { method: 'PATCH', body });
+      else await api('/api/exercises', { method: 'POST', body });
+      await reloadCatalog(); modal.close(); toast(exercise ? 'Ejercicio actualizado' : 'Ejercicio creado'); exerciseCatalogManager();
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+
+function exerciseVideoUploader(exercise) {
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">DEMOSTRACIÓN</p><h2>Video de ${escapeHtml(exercise.name)}</h2>
+    <p style="color:#6f7b75">Un clip corto ejecutando el ejercicio. El cliente lo verá en su rutina para hacerlo sin asistencia.</p>
+    <p class="section-note">Se comprime en tu teléfono antes de subir y se le quita el audio: pesa mucho menos y el cliente lo abre sin gastar sus datos. Máximo 90 segundos.</p>
+    <label style="border:2px dashed #d8a7bc;border-radius:9px;padding:24px;text-align:center;color:#8c5870;cursor:pointer">
+      <input id="video-file" type="file" accept="video/*" hidden />${exercise.hasVideo ? 'Seleccionar un video nuevo' : 'Seleccionar video'}<br><small style="color:#6f7b75;font-weight:400">Se acepta lo que grabe tu teléfono</small></label>
+    <div id="video-result"></div>
+    ${exercise.hasVideo ? '<button type="button" class="secondary wide-button" id="remove-video">Quitar el video actual</button>' : ''}`;
+  openModal(box);
+  const result = document.getElementById('video-result');
+
+  if (exercise.hasVideo) document.getElementById('remove-video').onclick = async () => {
+    if (!confirm(`¿Quitar el video de "${exercise.name}"?`)) return;
+    try { await api(`/api/exercises/${exercise.id}/video`, { method: 'DELETE' }); await reloadCatalog(); modal.close(); toast('Video eliminado'); exerciseCatalogManager(); }
+    catch (error) { toast(error.message, true); }
+  };
+
+  document.getElementById('video-file').addEventListener('change', async event => {
+    const file = event.target.files[0]; if (!file) return;
+    const say = (title, detail) => { result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>${escapeHtml(title)}</b><span>${escapeHtml(detail)}</span></div>`; };
+    try {
+      say('Comprimiendo…', `${file.name} · ${megabytes(file.size)} de origen. Toma más o menos lo que dura el clip.`);
+      const compressed = await VideoCompressor.compress(file, {
+        onProgress: fraction => say('Comprimiendo…', `${Math.round(fraction * 100)}% de ${file.name}`)
+      });
+      if (compressed.blob.size > 40 * 1024 * 1024) throw new Error(`Aun comprimido pesa ${megabytes(compressed.blob.size)} y el máximo son 40 MB. Graba un clip más corto.`);
+
+      const ahorro = compressed.finalSize && compressed.originalSize && compressed.finalSize < compressed.originalSize
+        ? ` (de ${megabytes(compressed.originalSize)} a ${megabytes(compressed.finalSize)})` : '';
+      say('Subiendo…', `${megabytes(compressed.blob.size)}${ahorro}`);
+
+      const target = await api(`/api/exercises/${exercise.id}/video-upload-url`, { method: 'POST', body: { contentType: compressed.contentType, sizeBytes: compressed.blob.size } });
+      // Va directo a R2 con la URL firmada; sin el encabezado de autorización,
+      // que R2 rechazaría por no venir en la firma.
+      const upload = await fetch(target.uploadUrl, { method: 'PUT', headers: { 'Content-Type': compressed.contentType }, body: compressed.blob });
+      if (!upload.ok) throw new Error(`El almacenamiento rechazó la subida (${upload.status})`);
+
+      await api(`/api/exercises/${exercise.id}/video`, { method: 'POST', body: { objectKey: target.objectKey, durationSeconds: compressed.durationSeconds || undefined } });
+      await reloadCatalog(); modal.close(); toast(`Video de ${exercise.name} guardado`); exerciseCatalogManager();
+    } catch (error) {
+      say('No se pudo guardar el video', error.message);
+      event.target.value = '';
+    }
+  });
+}
+
+// duplicate = true reutiliza una rutina existente como punto de partida para
+// otro cliente: copia los ejercicios pero nace sin asignar y se guarda como
+// rutina nueva, sin tocar la original.
+function newRoutine(routine = null, duplicate = false) {
+  const editing = Boolean(routine) && !duplicate;
   const content = formFromTemplate('new-routine-template'); openModal(content, true);
   if (routine) {
-    content.querySelector('h2').textContent = 'Editar rutina';
-    content.querySelector('[name="title"]').value = routine.title;
+    content.querySelector('h2').textContent = editing ? 'Editar rutina' : 'Reutilizar rutina';
+    content.querySelector('[name="title"]').value = editing ? routine.title : `${routine.title} (copia)`;
     content.querySelector('[name="description"]').value = routine.description;
     content.querySelector('[name="sessions"]').value = routine.sessions;
-    content.querySelector('button.primary').textContent = 'Guardar cambios';
+    content.querySelector('button.primary').textContent = editing ? 'Guardar cambios' : 'Guardar rutina completa';
   }
   const clientSelect = document.getElementById('routine-client');
   data.clients.forEach(client => clientSelect.add(new Option(`${client.name}${client.status === 'Activo' ? '' : ' · Inactivo'}`, client.id)));
-  if (routine?.assignedClientIds?.[0]) clientSelect.value = routine.assignedClientIds[0];
+  // Una copia nace sin cliente a propósito: se está reutilizando justamente
+  // porque va para otra persona, y heredar al cliente original invitaría a
+  // pisarle la rutina sin darse cuenta.
+  if (editing && routine?.assignedClientIds?.[0]) clientSelect.value = routine.assignedClientIds[0];
   const categorySelect = document.getElementById('exercise-category');
   const levelSelect = document.getElementById('exercise-level');
   const exerciseSelect = document.getElementById('exercise-choice');
@@ -732,17 +903,22 @@ function newRoutine(routine = null) {
   const selectedList = document.getElementById('selected-exercises');
   const exerciseCount = document.getElementById('exercise-count');
   const selectedExercises = routine ? routine.exercises.map(exercise => typeof exercise === 'string' ? { name: exercise, category: 'Importado', level: '', sets: 3, reps: '10' } : { ...exercise }) : [];
-  [...new Set(exerciseCatalog.map(exercise => exercise.category))].forEach(category => categorySelect.add(new Option(category, category)));
+  const sectionsWithExercises = exerciseSectionOrder.filter(section => section === 'total_body' || exerciseCatalog.some(exercise => exercise.section === section));
+  sectionsWithExercises.forEach(section => categorySelect.add(new Option(exerciseSectionLabels[section], section)));
+  categorySelect.value = 'total_body';
   [...new Set(exerciseCatalog.map(exercise => exercise.level))].forEach(level => levelSelect.add(new Option(level, level)));
 
   const currentExercise = () => exerciseCatalog.find(exercise => exercise.id === exerciseSelect.value);
   const renderReference = () => {
     const exercise = currentExercise();
-    reference.innerHTML = exercise ? `<div><b>${exercise.name}</b><span>${exercise.english}</span></div><span class="exercise-level">${exercise.level}</span><small><b>Con máquina:</b> ${exercise.machine}<br><b>Sin máquina:</b> ${exercise.freeWeight}</small>` : '<p class="empty">No hay ejercicios con estos filtros.</p>';
+    reference.innerHTML = exercise ? `<div><b>${escapeHtml(exercise.name)}</b><span>${escapeHtml([exercise.english, exerciseSectionLabels[exercise.section], exercise.pattern].filter(Boolean).join(' · '))}</span></div><span class="exercise-level">${escapeHtml(exercise.level)}</span><small><b>Con máquina:</b> ${escapeHtml(exercise.machine)}<br><b>Sin máquina:</b> ${escapeHtml(exercise.freeWeight)}${exercise.cues ? `<br><b>Ejecución:</b> ${escapeHtml(exercise.cues)}` : ''}<br>${exercise.hasVideo ? '<b>▶ Tiene video de demostración</b>' : 'Sin video: el cliente no podrá verlo ejecutado.'}</small>` : '<p class="empty">No hay ejercicios con estos filtros.</p>';
   };
   const renderChoices = () => {
-    const choices = exerciseCatalog.filter(exercise => exercise.category === categorySelect.value && (!levelSelect.value || exercise.level === levelSelect.value));
-    exerciseSelect.replaceChildren(...choices.map(exercise => new Option(`${exercise.name} · ${exercise.english}`, exercise.id)));
+    const choices = exerciseCatalog.filter(exercise =>
+      (categorySelect.value === 'total_body' || exercise.section === categorySelect.value)
+      && (!levelSelect.value || exercise.level === levelSelect.value));
+    exerciseSelect.replaceChildren(...choices.map(exercise => new Option(
+      `${exercise.hasVideo ? '▶ ' : ''}${exercise.name}${exercise.english ? ` · ${exercise.english}` : ''}`, exercise.id)));
     renderReference();
   };
   const renderSelected = () => {
@@ -763,9 +939,12 @@ function newRoutine(routine = null) {
       row.append(order, copy, dose, remove); selectedList.append(row);
     });
   };
+  // Se copia explícitamente lo que la rutina necesita guardar. catalogId es lo
+  // que después permite al portal encontrar el video del ejercicio.
   const prescription = exercise => ({
-    ...exercise,
-    catalogId: exercise.id,
+    catalogId: exercise.id, name: exercise.name, english: exercise.english,
+    category: exerciseSectionLabels[exercise.section] || exercise.section,
+    level: exercise.level, machine: exercise.machine, freeWeight: exercise.freeWeight,
     sets: Number(document.getElementById('exercise-sets').value) || 3,
     reps: document.getElementById('exercise-reps').value.trim() || '10'
   });
@@ -787,7 +966,7 @@ function newRoutine(routine = null) {
     if (!selectedExercises.length) { toast('Agrega al menos un ejercicio a la rutina', true); return; }
     try {
       event.target.classList.add('loading-state');
-      await api(routine ? `/api/routines/${routine.id}` : '/api/routines', { method: routine ? 'PATCH' : 'POST', body: { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: assigned || undefined, exercises: selectedExercises } });
+      await api(editing ? `/api/routines/${routine.id}` : '/api/routines', { method: editing ? 'PATCH' : 'POST', body: { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: assigned || undefined, exercises: selectedExercises } });
       await loadData(); renderAll(); modal.close(); navigate('routines'); toast('Rutina guardada');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
@@ -1122,6 +1301,7 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'new-invoice') newInvoice();
   if (actionButton?.dataset.action === 'new-session') newSession();
   if (actionButton?.dataset.action === 'new-routine') newRoutine();
+  if (actionButton?.dataset.action === 'exercise-catalog') exerciseCatalogManager();
   if (actionButton?.dataset.action === 'new-plan') planEditor();
   if (actionButton?.dataset.action === 'export-compliance') exportCompliance();
   if (actionButton?.dataset.action === 'account-statement') financialReportDialog('account-statement');
@@ -1132,6 +1312,7 @@ document.addEventListener('click', event => {
   if (event.target.dataset.client) clientDetail(event.target.dataset.client);
   if (event.target.dataset.editClient) editClient(data.clients.find(client => client.id === event.target.dataset.editClient));
   if (event.target.dataset.editRoutine) newRoutine(data.routines.find(routine => routine.id === event.target.dataset.editRoutine));
+  if (event.target.dataset.duplicateRoutine) newRoutine(data.routines.find(routine => routine.id === event.target.dataset.duplicateRoutine), true);
   if (event.target.dataset.deleteRoutine) deleteResource(`/api/routines/${event.target.dataset.deleteRoutine}`, '¿Eliminar esta rutina? Las sesiones ya realizadas conservarán su historial.', 'Rutina eliminada');
   if (event.target.dataset.inbody) inbodyImport(data.clients.find(client => client.id === event.target.dataset.inbody));
   if (event.target.dataset.completeSession) completeSession(event.target.dataset.completeSession);
@@ -1224,6 +1405,53 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
 }
 
 const portalViewTitles = { 'portal-dashboard': 'Mi progreso', 'portal-routines': 'Mis rutinas', 'portal-calendar': 'Mi agenda', 'portal-billing': 'Facturación' };
+
+// La rutina guarda una copia del ejercicio en JSON; el video vive en el
+// catálogo. catalogId es lo que une a los dos. Un ejercicio personalizado, o
+// uno cuyo ejercicio de catálogo se borró después, simplemente no ofrece video.
+function portalExerciseRows(exercises) {
+  return exercises.map(exercise => {
+    if (typeof exercise === 'string') return `<span>${escapeHtml(exercise)}</span>`;
+    const catalogEntry = (portalData?.exercises || []).find(item => item.id === exercise.catalogId);
+    const dose = [exercise.sets && `${exercise.sets} series`, exercise.reps].filter(Boolean).join(' · ');
+    return `<div class="portal-exercise">
+      <b>${escapeHtml(exercise.name)}</b>
+      ${dose ? `<small>${escapeHtml(dose)}</small>` : ''}
+      ${catalogEntry?.cues ? `<small>${escapeHtml(catalogEntry.cues)}</small>` : ''}
+      ${catalogEntry?.has_video ? `<button type="button" class="secondary session-use exercise-video-toggle" data-play-exercise="${catalogEntry.id}">▶ Ver cómo se hace</button><div class="exercise-video" id="video-${catalogEntry.id}" hidden></div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+// La URL firmada se pide al darle reproducir, no al cargar la pantalla: dura
+// cinco minutos y pedir cuarenta de golpe las vencería antes de usarlas.
+async function playExerciseVideo(exerciseId, button) {
+  const container = document.getElementById(`video-${exerciseId}`);
+  if (!container) return;
+  if (container.dataset.loaded === 'true') {
+    const visible = !container.hidden;
+    container.hidden = visible;
+    if (visible) container.querySelector('video')?.pause();
+    button.textContent = visible ? '▶ Ver cómo se hace' : 'Ocultar video';
+    return;
+  }
+  button.disabled = true; button.textContent = 'Cargando…';
+  try {
+    const source = await api(`/api/exercises/${exerciseId}/video-url`);
+    container.innerHTML = `<video controls playsinline preload="metadata" src="${escapeHtml(source.videoUrl)}"></video>`;
+    container.dataset.loaded = 'true'; container.hidden = false;
+    button.textContent = 'Ocultar video';
+    container.querySelector('video').play().catch(() => {});
+  } catch (error) {
+    toast(error.message, true);
+    button.textContent = '▶ Ver cómo se hace';
+  } finally { button.disabled = false; }
+}
+
+document.addEventListener('click', event => {
+  const button = event.target.closest('[data-play-exercise]');
+  if (button) playExerciseVideo(button.dataset.playExercise, button);
+});
 const portalViewIds = new Set(Object.keys(portalViewTitles));
 const portalViewFromHash = () => portalViewIds.has(window.location.hash.slice(1)) ? window.location.hash.slice(1) : 'portal-dashboard';
 const portalView = id => {
@@ -1252,7 +1480,7 @@ function renderPortal() {
   activities.forEach(item => buckets.find(bucket => bucket.key === `${item.date.getFullYear()}-${item.date.getMonth()}`)?.values.push(item.percent));
   document.getElementById('portal-chart').innerHTML = buckets.map(bucket => { const percent = bucket.values.length ? Math.round(bucket.values.reduce((sum, value) => sum + value, 0) / bucket.values.length) : 0; return `<div class="chart-column"><span>${percent}%</span><i style="height:${Math.max(4, percent)}%"></i><small>${monthLabel(bucket.date)}</small></div>`; }).join('');
   document.getElementById('portal-inbody').innerHTML = portalData.assessments.length ? `<div class="portal-inbody-grid">${portalData.assessments.slice(-4).reverse().map(item => `<article><span>${String(item.tested_at).slice(0, 10)}</span><b>${Number(item.values.weightKg || 0).toFixed(1)} kg</b><small>${Number(item.values.percentBodyFat || 0).toFixed(1)}% grasa · ${Number(item.values.skeletalMuscleMassKg || 0).toFixed(1)} kg músculo</small></article>`).join('')}</div>` : '<p class="empty">Todavía no hay evaluaciones confirmadas.</p>';
-  document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(routine => { const todayCompletion = portalData.routineCompletions.find(item => item.routine_id === routine.id && item.completed_on === dateKey(today)); return `<article class="card portal-routine-card"><div class="card-head"><div><h3>${escapeHtml(routine.title)}</h3><p>${escapeHtml(routine.description || '')} · ${routine.sessions_per_week} veces por semana</p></div></div><div class="exercise-preview">${(routine.exercises || []).map(exercise => `<span>${escapeHtml(exerciseLabel(exercise))}</span>`).join('')}</div><form data-portal-routine="${routine.id}" class="portal-completion-form"><label class="completion-check"><input name="completed" type="checkbox" ${todayCompletion && Number(todayCompletion.completion_percent) > 0 ? 'checked' : ''} /><span>Entrenamiento realizado hoy</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${Number(todayCompletion?.completion_percent || 100)}" /><span>% completado</span></label><button class="primary">Guardar cumplimiento</button></form></article>`; }).join('') : '<p class="empty">La entrenadora todavía no te ha asignado una rutina.</p>';
+  document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(routine => { const todayCompletion = portalData.routineCompletions.find(item => item.routine_id === routine.id && item.completed_on === dateKey(today)); return `<article class="card portal-routine-card"><div class="card-head"><div><h3>${escapeHtml(routine.title)}</h3><p>${escapeHtml(routine.description || '')} · ${routine.sessions_per_week} veces por semana</p></div></div><div class="exercise-preview">${portalExerciseRows(routine.exercises || [])}</div><form data-portal-routine="${routine.id}" class="portal-completion-form"><label class="completion-check"><input name="completed" type="checkbox" ${todayCompletion && Number(todayCompletion.completion_percent) > 0 ? 'checked' : ''} /><span>Entrenamiento realizado hoy</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${Number(todayCompletion?.completion_percent || 100)}" /><span>% completado</span></label><button class="primary">Guardar cumplimiento</button></form></article>`; }).join('') : '<p class="empty">La entrenadora todavía no te ha asignado una rutina.</p>';
   const ownSessions = new Map(portalData.sessions.map(item => [item.id, portalSession(item)]));
   document.getElementById('portal-calendar-list').innerHTML = portalData.busySlots.length ? portalData.busySlots.map(slot => { const date = new Date(slot.starts_at); const own = slot.is_mine ? ownSessions.get(slot.id) : null; return `<article class="portal-slot ${own ? 'mine' : 'busy'}"><time><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric', month: 'short' }).format(date)}</b><span>${new Intl.DateTimeFormat('es-PA', { hour: 'numeric', minute: '2-digit' }).format(date)}</span></time><div><b>${own ? escapeHtml(own.routine) : 'Ocupado'}</b><span>${own ? escapeHtml(own.mode) : 'Horario no disponible'}</span></div>${own ? `<form data-portal-session="${own.id}" class="portal-session-form"><label class="completion-check"><input name="completed" type="checkbox" ${own.status === 'completed' ? 'checked' : ''} /><span>Cumplí</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${own.status === 'completed' ? own.completionPercent || 100 : 0}" /><span>%</span></label><button class="secondary">Guardar</button></form>` : ''}</article>`; }).join('') : '<p class="empty">No hay horarios ocupados en los próximos 90 días.</p>';
   document.getElementById('portal-plan').innerHTML = `<span class="commercial-label ${client.billing_model === 'package' ? 'package-label' : ''}">${client.billing_model === 'package' ? 'Paquete' : 'Mensualidad'}</span><div><h3>${escapeHtml(client.plan_name || 'Plan personalizado')}</h3><p>${money.format(Number(client.standard_price))}${client.billing_model === 'monthly' ? ` · corte día ${client.billing_cutoff_day}` : ` · ${client.sessions_included || 0} sesiones`}</p></div>`;
