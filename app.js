@@ -1,4 +1,4 @@
-const APP_VERSION = '56';
+const APP_VERSION = '57';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1491,7 +1491,7 @@ const portalViewTitles = { 'portal-dashboard': 'Mi progreso', 'portal-routines':
 // (has_video, tal como llega de la API) y el que tiene la entrenadora en
 // memoria (hasVideo, ya mapeado). Por eso se leen las dos formas.
 function exerciseRows(exercises, catalog, prefix = 'video') {
-  return exercises.map(exercise => {
+  return exercises.map((exercise, position) => {
     if (typeof exercise === 'string') return `<span>${escapeHtml(exercise)}</span>`;
     // Las rutinas creadas antes de mover el catálogo a la base guardaron el
     // slug del archivo estático como catalogId; las nuevas guardan el uuid. La
@@ -1500,11 +1500,16 @@ function exerciseRows(exercises, catalog, prefix = 'video') {
     const catalogEntry = (catalog || []).find(item => item.id === exercise.catalogId || item.slug === exercise.catalogId);
     const tieneVideo = Boolean(catalogEntry?.has_video ?? catalogEntry?.hasVideo);
     const dose = [exercise.sets && setsLabel(exercise.sets), exercise.reps].filter(Boolean).join(' · ');
+    // La posición entra en el id porque una rutina puede repetir el mismo
+    // ejercicio —el mismo movimiento en dos rangos de repeticiones es normal— y
+    // dos contenedores con el mismo id harían que el segundo botón abriera el
+    // video del primero.
+    const videoId = `${prefix}-${catalogEntry?.id}-${position}`;
     return `<div class="portal-exercise">
       <b>${escapeHtml(exercise.name)}</b>
       ${dose ? `<small>${escapeHtml(dose)}</small>` : ''}
       ${catalogEntry?.cues ? `<small>${escapeHtml(catalogEntry.cues)}</small>` : ''}
-      ${tieneVideo ? `<button type="button" class="secondary session-use exercise-video-toggle" data-play-exercise="${catalogEntry.id}" data-video-target="${prefix}-${catalogEntry.id}">▶ Ver cómo se hace</button><div class="exercise-video" id="${prefix}-${catalogEntry.id}" hidden></div>` : ''}
+      ${tieneVideo ? `<button type="button" class="secondary session-use exercise-video-toggle" data-play-exercise="${catalogEntry.id}" data-video-target="${videoId}">▶ Ver cómo se hace</button><div class="exercise-video" id="${videoId}" hidden></div>` : ''}
     </div>`;
   }).join('');
 }
