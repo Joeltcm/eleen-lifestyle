@@ -1,4 +1,4 @@
-const APP_VERSION = '47';
+const APP_VERSION = '48';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -139,10 +139,24 @@ async function loadData() {
   const assessments = await Promise.all(clients.map(client => api(`/api/clients/${client.id}/inbody`)));
   data.clients = clients.map((client, index) => {
     const readyAssessments = assessments[index].assessments.filter(item => item.extraction_status === 'ready');
-    const history = readyAssessments.map(item => ({
-      id: item.id, date: String(item.tested_at).slice(0, 10), weight: Number(item.values.weightKg), smm: Number(item.values.skeletalMuscleMassKg),
-      fat: Number(item.values.bodyFatMassKg), pbf: Number(item.values.percentBodyFat), score: Number(item.values.inBodyScore)
-    }));
+    // El delta se calcula sobre el historial ya filtrado a 'ready'. El campo
+    // changes que manda la API compara contra la medición inmediatamente
+    // anterior aunque esté en revisión, y entonces no cuadraría con las filas
+    // que la pantalla muestra.
+    const history = readyAssessments.map((item, position, all) => {
+      const previous = all[position - 1];
+      const reading = {
+        id: item.id, date: String(item.tested_at).slice(0, 10), weight: Number(item.values.weightKg), smm: Number(item.values.skeletalMuscleMassKg),
+        fat: Number(item.values.bodyFatMassKg), pbf: Number(item.values.percentBodyFat), score: Number(item.values.inBodyScore)
+      };
+      if (!previous) return { ...reading, delta: null, previousDate: null };
+      const delta = {};
+      for (const [key, source] of [['weight', 'weightKg'], ['smm', 'skeletalMuscleMassKg'], ['fat', 'bodyFatMassKg'], ['pbf', 'percentBodyFat'], ['score', 'inBodyScore']]) {
+        const current = Number(item.values[source]); const before = Number(previous.values[source]);
+        if (Number.isFinite(current) && Number.isFinite(before)) delta[key] = Number((current - before).toFixed(2));
+      }
+      return { ...reading, delta, previousDate: String(previous.tested_at).slice(0, 10) };
+    });
     const latest = history.at(-1);
     const inbodyReviews = assessments[index].assessments.filter(item => item.extraction_status === 'review');
     return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', portalActive: Boolean(client.portal_user_id), status: client.status === 'active' ? 'Activo' : 'Inactivo', inbodyReviews, inbody: latest ? { ...latest, history } : null };
@@ -811,6 +825,176 @@ function editInvoice(id) {
     catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
+const poseLabels = { front: 'Frente', side: 'Perfil', back: 'Espalda', other: 'Otra' };
+const conditionKindLabels = { injury: 'Lesión', condition: 'Padecimiento' };
+const severityLabels = { mild: 'Leve', moderate: 'Moderada', severe: 'Severa' };
+const conditionStatusLabels = { active: 'Activa', monitoring: 'En observación', recovered: 'Recuperada' };
+const attendanceMonthLabel = month => {
+  const [year, position] = month.split('-');
+  return capitalized(new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric' }).format(new Date(Number(year), Number(position) - 1, 1)));
+};
+
+// Dirección favorable por métrica. El peso queda neutro a propósito: subir o
+// bajar sólo es bueno según la meta del cliente, y la app no debe opinar.
+const metricDirection = { weight: 0, smm: 1, fat: -1, pbf: -1, score: 1 };
+const metricUnits = { weight: ' kg', smm: ' kg', fat: ' kg', pbf: '%', score: '' };
+
+function deltaChip(key, value) {
+  if (!Number.isFinite(value)) return '<span class="delta neutral">—</span>';
+  if (value === 0) return '<span class="delta neutral">sin cambio</span>';
+  const direction = metricDirection[key] ?? 0;
+  const tone = direction === 0 ? 'neutral' : (value > 0) === (direction > 0) ? 'good' : 'bad';
+  return `<span class="delta ${tone}">${value > 0 ? '▲' : '▼'} ${Math.abs(value).toFixed(1)}${metricUnits[key] || ''}</span>`;
+}
+
+function inbodyComparison(inbody) {
+  const latest = inbody.history.at(-1);
+  if (!latest?.delta) return '<p class="empty">Hace falta una segunda medición para comparar.</p>';
+  const fields = [['weight', 'Peso'], ['smm', 'Masa muscular'], ['fat', 'Masa grasa'], ['pbf', 'Grasa corporal'], ['score', 'InBody Score']];
+  return `<p class="comparison-caption">Contra la medición del ${latest.previousDate}</p><div class="comparison-grid">${fields.map(([key, label]) =>
+    `<article><span>${label}</span>${deltaChip(key, latest.delta[key])}</article>`).join('')}</div>`;
+}
+
+function attendanceSection(target, clientId) {
+  api(`/api/clients/${encodeURIComponent(clientId)}/attendance?months=6`).then(report => {
+    if (!target.isConnected || !modal.open) return;
+    const rows = report.timeline.map(month => {
+      const compliance = month.complianceRate === null ? '<span class="delta neutral">sin referencia</span>'
+        : `<span class="delta ${month.complianceRate >= 0.9 ? 'good' : month.complianceRate >= 0.7 ? 'neutral' : 'bad'}">${Math.round(month.complianceRate * 100)}%</span>`;
+      return `<tr><td>${attendanceMonthLabel(month.month)}</td><td>${month.completed}${month.expected === null ? '' : ` / ${month.expected}`}</td><td>${compliance}</td><td>${month.noShow || '—'}</td><td>${month.cancelled || '—'}</td></tr>`;
+    }).join('');
+    const basis = report.timeline.at(-1)?.basis;
+    const note = basis === 'package' ? `Meta mensual derivada del paquete contratado (${escapeHtml(report.timeline.at(-1).packageLabel || 'sin nombre')}), repartido entre los meses que cubre.`
+      : basis === 'routine' ? `Sin vencimiento en el paquete, la meta usa la cadencia de la rutina activa: ${report.sessionsPerWeek} por semana.`
+      : 'No hay paquete con vencimiento ni rutina activa, así que no hay meta contra la cual medir.';
+    target.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Mes</th><th>Cumplidas</th><th>Cumplimiento</th><th>Faltas</th><th>Canceladas</th></tr></thead><tbody>${rows}</tbody></table></div><p class="section-note">${escapeHtml(note)}</p>`;
+  }).catch(error => { if (target.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; });
+}
+
+function conditionsSection(target, client) {
+  api(`/api/clients/${encodeURIComponent(client.id)}/conditions`).then(items => {
+    if (!target.isConnected || !modal.open) return;
+    target.innerHTML = `${items.length ? `<div class="condition-list">${items.map(item => `<article class="condition-item ${item.status}">
+      <header><b>${escapeHtml(item.title)}</b><span class="condition-tag ${item.severity}">${severityLabels[item.severity]}</span></header>
+      <small>${conditionKindLabels[item.kind]}${item.body_area ? ` · ${escapeHtml(item.body_area)}` : ''} · ${conditionStatusLabels[item.status]}${item.started_on ? ` · desde ${item.started_on}` : ' · antecedente sin fecha'}${item.resolved_on ? ` · resuelta ${item.resolved_on}` : ''}</small>
+      ${item.restrictions ? `<p class="condition-restriction">Restricción: ${escapeHtml(item.restrictions)}</p>` : ''}
+      ${item.notes ? `<p>${escapeHtml(item.notes)}</p>` : ''}
+      <div class="condition-actions"><button class="secondary session-use" data-edit-condition="${item.id}">Editar</button><button class="secondary session-use" data-delete-condition="${item.id}">Eliminar</button></div>
+    </article>`).join('')}</div>` : '<p class="empty">No hay lesiones ni padecimientos registrados.</p>'}<button class="secondary wide-button" id="add-condition">+ Registrar lesión o padecimiento</button>`;
+    document.getElementById('add-condition').onclick = () => conditionEditor(client, null);
+    target.querySelectorAll('[data-edit-condition]').forEach(button => {
+      button.onclick = () => conditionEditor(client, items.find(item => item.id === button.dataset.editCondition));
+    });
+    target.querySelectorAll('[data-delete-condition]').forEach(button => {
+      button.onclick = async () => {
+        if (!confirm('¿Eliminar este registro del expediente?')) return;
+        try { await api(`/api/conditions/${button.dataset.deleteCondition}`, { method: 'DELETE' }); toast('Registro eliminado'); conditionsSection(target, client); }
+        catch (error) { toast(error.message, true); }
+      };
+    });
+  }).catch(error => { if (target.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; });
+}
+
+function conditionEditor(client, condition) {
+  const box = document.createElement('div');
+  const value = (field, fallback = '') => escapeHtml(condition?.[field] ?? fallback);
+  const selected = (field, option) => (condition?.[field] || (field === 'kind' ? 'injury' : field === 'severity' ? 'moderate' : 'active')) === option ? ' selected' : '';
+  box.innerHTML = `<form id="condition-form"><p class="eyebrow">EXPEDIENTE CLÍNICO</p><h2>${condition ? 'Editar registro' : 'Registrar lesión o padecimiento'}</h2>
+    <label>Título<input name="title" required maxlength="160" value="${value('title')}" placeholder="Tendinitis de hombro derecho" /></label>
+    <div class="form-row">
+      <label>Tipo<select name="kind"><option value="injury"${selected('kind', 'injury')}>Lesión</option><option value="condition"${selected('kind', 'condition')}>Padecimiento</option></select></label>
+      <label>Zona<input name="bodyArea" maxlength="120" value="${value('body_area')}" placeholder="Hombro" /></label>
+    </div>
+    <div class="form-row">
+      <label>Severidad<select name="severity"><option value="mild"${selected('severity', 'mild')}>Leve</option><option value="moderate"${selected('severity', 'moderate')}>Moderada</option><option value="severe"${selected('severity', 'severe')}>Severa</option></select></label>
+      <label>Estado<select name="status"><option value="active"${selected('status', 'active')}>Activa</option><option value="monitoring"${selected('status', 'monitoring')}>En observación</option><option value="recovered"${selected('status', 'recovered')}>Recuperada</option></select></label>
+    </div>
+    <div class="form-row">
+      <label>Desde<input name="startedOn" type="date" value="${value('started_on')}" /></label>
+      <label>Resuelta el<input name="resolvedOn" type="date" value="${value('resolved_on')}" /></label>
+    </div>
+    <p class="section-note">Deja la fecha vacía si es un antecedente y el cliente no recuerda cuándo empezó.</p>
+    <label>Restricciones de entrenamiento<textarea name="restrictions" rows="2" maxlength="1000" placeholder="Evitar press por encima de la cabeza">${value('restrictions')}</textarea></label>
+    <label>Notas<textarea name="notes" rows="2" maxlength="2000">${value('notes')}</textarea></label>
+    <button class="primary wide-button">${condition ? 'Guardar cambios' : 'Registrar'}</button></form>`;
+  openModal(box);
+  document.getElementById('condition-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const values = new FormData(event.target);
+    const body = {
+      kind: values.get('kind'), title: values.get('title').trim(), bodyArea: values.get('bodyArea').trim() || null,
+      severity: values.get('severity'), status: values.get('status'),
+      startedOn: values.get('startedOn') || null, resolvedOn: values.get('resolvedOn') || null,
+      restrictions: values.get('restrictions').trim() || null, notes: values.get('notes').trim() || null
+    };
+    try {
+      event.target.classList.add('loading-state');
+      if (condition) await api(`/api/conditions/${condition.id}`, { method: 'PATCH', body });
+      else await api(`/api/clients/${client.id}/conditions`, { method: 'POST', body });
+      modal.close(); toast(condition ? 'Registro actualizado' : 'Registro agregado'); clientDetail(client.id);
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+
+function photosSection(target, client) {
+  api(`/api/clients/${encodeURIComponent(client.id)}/progress-photos`).then(photos => {
+    if (!target.isConnected || !modal.open) return;
+    target.innerHTML = `${photos.length ? `<div class="photo-grid">${photos.map(photo => {
+      const near = photo.nearest_inbody;
+      const linked = near
+        ? `<small>InBody ${String(near.testedAt).slice(0, 10)} · ${near.daysApart === 0 ? 'mismo día' : `${near.daysApart} día${near.daysApart === 1 ? '' : 's'} de diferencia`}${Number.isFinite(Number(near.values?.weightKg)) ? ` · ${Number(near.values.weightKg)} kg` : ''}${Number.isFinite(Number(near.values?.percentBodyFat)) ? ` · ${Number(near.values.percentBodyFat)}% grasa` : ''}</small>`
+        : '<small>Sin InBody con el cual comparar</small>';
+      return `<figure class="photo-card">${photo.viewUrl ? `<img src="${escapeHtml(photo.viewUrl)}" alt="Foto de progreso del ${photo.taken_on}" loading="lazy" />` : '<div class="photo-missing">Archivo no disponible</div>'}
+        <figcaption><b>${photo.taken_on}</b><span>${poseLabels[photo.pose]}</span>${linked}${photo.notes ? `<small>${escapeHtml(photo.notes)}</small>` : ''}
+        <button class="secondary session-use" data-delete-photo="${photo.id}">Eliminar</button></figcaption></figure>`;
+    }).join('')}</div>` : '<p class="empty">No hay fotos de progreso en este expediente.</p>'}<button class="secondary wide-button" id="add-photo">+ Subir foto de progreso</button>`;
+    document.getElementById('add-photo').onclick = () => photoUploader(client);
+    target.querySelectorAll('[data-delete-photo]').forEach(button => {
+      button.onclick = async () => {
+        if (!confirm('¿Eliminar esta foto de progreso? El archivo permanece en el expediente.')) return;
+        try { await api(`/api/progress-photos/${button.dataset.deletePhoto}`, { method: 'DELETE' }); toast('Foto eliminada'); photosSection(target, client); }
+        catch (error) { toast(error.message, true); }
+      };
+    });
+  }).catch(error => { if (target.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; });
+}
+
+function photoUploader(client) {
+  const box = document.createElement('div');
+  const today = new Date().toISOString().slice(0, 10);
+  box.innerHTML = `<form id="photo-form"><p class="eyebrow">SEGUIMIENTO VISUAL</p><h2>Foto de progreso</h2>
+    <p style="color:#6f7b75">Se guarda en el expediente privado de ${escapeHtml(client.name)} y se compara contra el InBody más cercano a su fecha.</p>
+    <div class="form-row">
+      <label>Fecha de la foto<input name="takenOn" type="date" required value="${today}" max="${today}" /></label>
+      <label>Vista<select name="pose"><option value="front">Frente</option><option value="side">Perfil</option><option value="back">Espalda</option><option value="other">Otra</option></select></label>
+    </div>
+    <p class="section-note">Usa la fecha en que se tomó la foto, no la de hoy: así se empareja con el InBody correcto.</p>
+    <label>Nota<input name="notes" maxlength="500" placeholder="Opcional" /></label>
+    <label style="border:2px dashed #d8a7bc;border-radius:9px;padding:24px;text-align:center;color:#8c5870;cursor:pointer">
+      <input id="photo-file" type="file" accept="image/jpeg,image/png,image/webp" hidden />Seleccionar foto<br><small style="color:#6f7b75;font-weight:400">JPG, PNG o WebP · máximo 20 MB</small></label>
+    <div id="photo-result"></div></form>`;
+  openModal(box);
+  const result = document.getElementById('photo-result');
+  document.getElementById('photo-file').addEventListener('change', async event => {
+    const file = event.target.files[0]; if (!file) return;
+    const values = new FormData(document.getElementById('photo-form'));
+    result.innerHTML = '<div class="alert-item" style="margin-top:15px"><b>Subiendo foto…</b><span>Conexión privada con el expediente.</span></div>';
+    try {
+      if (file.size > 20 * 1024 * 1024) throw new Error(`${file.name} supera el límite de 20 MB`);
+      const extension = file.name.split('.').pop()?.toLowerCase();
+      const contentType = file.type || ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' })[extension];
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(contentType)) throw new Error(`${file.name} no es una imagen JPG, PNG o WebP válida`);
+      const created = await api('/api/documents/upload-url', { method: 'POST', body: { clientId: client.id, kind: 'progress_photo', fileName: file.name, contentType, sizeBytes: file.size } });
+      await api(`/api/documents/${created.document.id}/content`, { method: 'PUT', headers: { 'Content-Type': contentType }, body: file });
+      await api(`/api/clients/${client.id}/progress-photos`, { method: 'POST', body: { documentId: created.document.id, takenOn: values.get('takenOn'), pose: values.get('pose'), notes: values.get('notes').trim() || null } });
+      modal.close(); toast('Foto de progreso guardada'); clientDetail(client.id);
+    } catch (error) {
+      result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>No se pudo guardar la foto</b><span>${escapeHtml(error.message)}</span></div>`;
+      event.target.value = '';
+    }
+  });
+}
+
 function clientDetail(id) {
   const client = data.clients.find(item => item.id === id); const inbody = client.inbody;
   const pack = clientPackage(client.name);
@@ -819,9 +1003,12 @@ function clientDetail(id) {
     : `${client.planName || 'Mensualidad'} · ${money.format(client.plan)} al mes · corte día ${client.cutoffDay}`;
   const box = document.createElement('div');
   const reviewNotice = client.inbodyReviews.length ? `<button class="secondary wide-button" id="review-inbody">Revisar ${client.inbodyReviews.length} evaluación${client.inbodyReviews.length > 1 ? 'es' : ''} pendiente${client.inbodyReviews.length > 1 ? 's' : ''}</button>` : '';
-  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th></th></tr></thead><tbody>${inbody.history.map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td><button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="portal-access">${client.portalActive ? 'Actualizar portal' : 'Activar portal cliente'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
+  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">CAMBIO DESDE LA MEDICIÓN ANTERIOR</p>${inbodyComparison(inbody)}<p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th>vs. anterior</th><th></th></tr></thead><tbody>${inbody.history.slice().reverse().map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td class="delta-cell">${reading.delta ? `${deltaChip('weight', reading.delta.weight)}${deltaChip('smm', reading.delta.smm)}${deltaChip('pbf', reading.delta.pbf)}` : '<span class="delta neutral">primera</span>'}</td><td><button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">ASISTENCIA MENSUAL</p><div id="client-attendance"><p class="empty">Calculando cumplimiento…</p></div><p class="eyebrow" style="margin-top:20px">LESIONES Y PADECIMIENTOS</p><div id="client-conditions"><p class="empty">Cargando expediente clínico…</p></div><p class="eyebrow" style="margin-top:20px">FOTOS DE PROGRESO</p><div id="client-photos"><p class="empty">Cargando fotos…</p></div><p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="portal-access">${client.portalActive ? 'Actualizar portal' : 'Activar portal cliente'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
   openModal(box); document.getElementById('open-scan').onclick = () => inbodyImport(client); document.getElementById('edit-client-contact').onclick = () => editClient(client); document.getElementById('edit-client-plan').onclick = () => clientPlanEditor(client); document.getElementById('portal-access').onclick = () => portalAccessEditor(client); document.getElementById('delete-client').onclick = () => deleteResource(`/api/clients/${client.id}`, `¿Eliminar a ${client.name}? También se eliminarán sus documentos, sesiones y cobros asociados.`, 'Cliente eliminado');
   if (client.inbodyReviews.length) document.getElementById('review-inbody').onclick = () => inbodyReview(client, client.inbodyReviews);
+  attendanceSection(document.getElementById('client-attendance'), client.id);
+  conditionsSection(document.getElementById('client-conditions'), client);
+  photosSection(document.getElementById('client-photos'), client);
   api(`/api/documents?clientId=${encodeURIComponent(client.id)}`).then(items => {
     const target = document.getElementById('client-documents');
     if (!target || !modal.open) return;

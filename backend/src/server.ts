@@ -1326,6 +1326,242 @@ app.delete('/api/inbody/:id', { preHandler: requireStaff }, async (request, repl
   return { deleted: true, assessment };
 });
 
+async function ownedClient(clientId: string, ownerId: string) {
+  const [client] = await sql`SELECT id, billing_model FROM clients WHERE id = ${clientId} AND owner_id = ${ownerId}`;
+  return client;
+}
+
+// Cumplimiento de asistencia mensual contra el paquete contratado.
+app.get('/api/clients/:clientId/attendance', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const clientId = z.string().uuid().parse((request.params as { clientId: string }).clientId);
+  const months = z.coerce.number().int().min(1).max(24).default(6).parse((request.query as { months?: string }).months ?? 6);
+  const client = await ownedClient(clientId, auth.sub);
+  if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
+
+  const [monthly, packages, cadence] = await Promise.all([
+    sql`
+      SELECT to_char(date_trunc('month', starts_at), 'YYYY-MM') AS month,
+             count(*)::int AS booked,
+             count(*) FILTER (WHERE status = 'completed')::int AS completed,
+             count(*) FILTER (WHERE status = 'no_show')::int AS no_show,
+             count(*) FILTER (WHERE status = 'cancelled')::int AS cancelled,
+             count(*) FILTER (WHERE status = 'scheduled')::int AS scheduled
+      FROM sessions
+      WHERE client_id = ${clientId}
+        AND starts_at >= date_trunc('month', current_date) - make_interval(months => ${months - 1})
+      GROUP BY 1
+    `,
+    sql`
+      SELECT id, label, total_sessions, used_sessions, status, purchased_on, expires_on
+      FROM session_packages WHERE client_id = ${clientId} ORDER BY purchased_on
+    `,
+    sql`
+      SELECT r.sessions_per_week
+      FROM routine_assignments a JOIN routines r ON r.id = a.routine_id
+      WHERE a.client_id = ${clientId} AND a.active = true
+      ORDER BY a.starts_on DESC LIMIT 1
+    `
+  ]);
+
+  const byMonth = new Map(monthly.map(row => [row.month as string, row]));
+  const packageRows = packages as unknown as Array<{ id: string; label: string; total_sessions: number; used_sessions: number; status: string; purchased_on: string; expires_on: string | null }>;
+  const sessionsPerWeek = Number(cadence[0]?.sessions_per_week) || null;
+
+  // El paquete fija cuántas sesiones tocan al mes: el total repartido entre los
+  // meses que cubre. Sin fecha de vencimiento no hay ritmo pactado, así que se
+  // cae a la cadencia de la rutina activa. Si tampoco hay, no se inventa una
+  // meta: el mes queda sin referencia y la interfaz lo dice.
+  function expectedFor(monthKey: string) {
+    const monthStart = new Date(`${monthKey}-01T00:00:00Z`);
+    const monthEnd = new Date(Date.UTC(monthStart.getUTCFullYear(), monthStart.getUTCMonth() + 1, 0));
+    const covering = packageRows.find(row => {
+      const from = new Date(`${row.purchased_on}T00:00:00Z`);
+      const to = row.expires_on ? new Date(`${row.expires_on}T00:00:00Z`) : null;
+      return from <= monthEnd && (!to || to >= monthStart);
+    });
+    if (covering?.expires_on) {
+      const from = new Date(`${covering.purchased_on}T00:00:00Z`);
+      const to = new Date(`${covering.expires_on}T00:00:00Z`);
+      const span = Math.max(1, (to.getUTCFullYear() - from.getUTCFullYear()) * 12 + (to.getUTCMonth() - from.getUTCMonth()) + 1);
+      return { expected: Math.round(covering.total_sessions / span), basis: 'package' as const, packageLabel: covering.label };
+    }
+    if (sessionsPerWeek) {
+      const daysInMonth = monthEnd.getUTCDate();
+      return { expected: Math.round(sessionsPerWeek * (daysInMonth / 7)), basis: 'routine' as const, packageLabel: null };
+    }
+    return { expected: null, basis: 'none' as const, packageLabel: covering?.label ?? null };
+  }
+
+  const today = new Date();
+  const timeline = Array.from({ length: months }, (_, index) => {
+    const date = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - (months - 1 - index), 1));
+    const month = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+    const row = byMonth.get(month);
+    const completed = Number(row?.completed ?? 0);
+    const noShow = Number(row?.no_show ?? 0);
+    const cancelled = Number(row?.cancelled ?? 0);
+    const held = completed + noShow;
+    const { expected, basis, packageLabel } = expectedFor(month);
+    return {
+      month,
+      booked: Number(row?.booked ?? 0),
+      completed,
+      noShow,
+      cancelled,
+      scheduled: Number(row?.scheduled ?? 0),
+      expected,
+      basis,
+      packageLabel,
+      // Asistencia: de las sesiones que llegaron a su fecha, cuántas se cumplieron.
+      attendanceRate: held ? Number((completed / held).toFixed(3)) : null,
+      // Cumplimiento: cuánto de lo pactado se ejecutó de verdad.
+      complianceRate: expected ? Number((completed / expected).toFixed(3)) : null
+    };
+  });
+
+  return { timeline, packages: packageRows, sessionsPerWeek, billingModel: client.billing_model };
+});
+
+const conditionSchema = z.object({
+  kind: z.enum(['injury', 'condition']).default('injury'),
+  title: z.string().trim().min(1).max(160),
+  bodyArea: z.string().trim().max(120).optional().nullable(),
+  severity: z.enum(['mild', 'moderate', 'severe']).default('moderate'),
+  status: z.enum(['active', 'monitoring', 'recovered']).default('active'),
+  startedOn: z.string().date().optional().nullable(),
+  resolvedOn: z.string().date().optional().nullable(),
+  restrictions: z.string().trim().max(1000).optional().nullable(),
+  notes: z.string().trim().max(2000).optional().nullable()
+});
+
+app.get('/api/clients/:clientId/conditions', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const clientId = z.string().uuid().parse((request.params as { clientId: string }).clientId);
+  if (!(await ownedClient(clientId, auth.sub))) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  return sql`
+    SELECT * FROM client_conditions WHERE client_id = ${clientId}
+    ORDER BY (status = 'recovered'), started_on DESC NULLS LAST, created_at DESC
+  `;
+});
+
+app.post('/api/clients/:clientId/conditions', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const clientId = z.string().uuid().parse((request.params as { clientId: string }).clientId);
+  if (!(await ownedClient(clientId, auth.sub))) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  const input = conditionSchema.parse(request.body);
+  const [condition] = await sql`
+    INSERT INTO client_conditions (client_id, kind, title, body_area, severity, status, started_on, resolved_on, restrictions, notes)
+    VALUES (${clientId}, ${input.kind}, ${input.title}, ${input.bodyArea || null}, ${input.severity}, ${input.status},
+            ${input.startedOn || null}, ${input.resolvedOn || null}, ${input.restrictions || null}, ${input.notes || null})
+    RETURNING *
+  `;
+  return reply.code(201).send(condition);
+});
+
+app.patch('/api/conditions/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = conditionSchema.partial().parse(request.body);
+  // Sin join a clients: la pertenencia se comprueba con una subconsulta. Un
+  // FROM clients aquí vuelve ambiguas status, notes, created_at y updated_at,
+  // que existen en las dos tablas, y Postgres rechaza la sentencia entera.
+  const [condition] = await sql`
+    UPDATE client_conditions SET
+      kind = COALESCE(${input.kind ?? null}, kind),
+      title = COALESCE(${input.title ?? null}, title),
+      body_area = COALESCE(${input.bodyArea ?? null}, body_area),
+      severity = COALESCE(${input.severity ?? null}, severity),
+      status = COALESCE(${input.status ?? null}, status),
+      started_on = COALESCE(${input.startedOn ?? null}::date, started_on),
+      resolved_on = COALESCE(${input.resolvedOn ?? null}::date, resolved_on),
+      restrictions = COALESCE(${input.restrictions ?? null}, restrictions),
+      notes = COALESCE(${input.notes ?? null}, notes),
+      updated_at = now()
+    WHERE id = ${id} AND client_id IN (SELECT id FROM clients WHERE owner_id = ${auth.sub})
+    RETURNING *
+  `;
+  if (!condition) return reply.code(404).send({ error: 'Registro no encontrado' });
+  return condition;
+});
+
+app.delete('/api/conditions/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [condition] = await sql`
+    DELETE FROM client_conditions USING clients c
+    WHERE client_conditions.id = ${id} AND c.id = client_conditions.client_id AND c.owner_id = ${auth.sub}
+    RETURNING client_conditions.id
+  `;
+  if (!condition) return reply.code(404).send({ error: 'Registro no encontrado' });
+  return { deleted: true };
+});
+
+const progressPhotoSchema = z.object({
+  documentId: z.string().uuid(),
+  takenOn: z.string().date().optional(),
+  pose: z.enum(['front', 'side', 'back', 'other']).default('front'),
+  notes: z.string().trim().max(500).optional().nullable()
+});
+
+app.get('/api/clients/:clientId/progress-photos', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const clientId = z.string().uuid().parse((request.params as { clientId: string }).clientId);
+  if (!(await ownedClient(clientId, auth.sub))) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  // El InBody más cercano se resuelve al leer, no al guardar: cuando entra una
+  // medición nueva, las fotos ya guardadas se re-emparejan solas con ella.
+  const photos = await sql`
+    SELECT p.id, p.taken_on, p.pose, p.notes, p.created_at,
+           d.id AS document_id, d.original_name, d.content_type, d.upload_status, d.object_key,
+           (
+             SELECT json_build_object('id', a.id, 'testedAt', a.tested_at, 'values', a.values,
+                                      'daysApart', abs(a.tested_at::date - p.taken_on))
+             FROM inbody_assessments a
+             WHERE a.client_id = p.client_id AND a.extraction_status <> 'failed'
+             ORDER BY abs(a.tested_at::date - p.taken_on)
+             LIMIT 1
+           ) AS nearest_inbody
+    FROM progress_photos p JOIN documents d ON d.id = p.document_id
+    WHERE p.client_id = ${clientId}
+    ORDER BY p.taken_on DESC, p.created_at DESC
+  `;
+  return Promise.all(photos.map(async photo => {
+    const { object_key: objectKey, ...rest } = photo;
+    return { ...rest, viewUrl: storageReady && photo.upload_status === 'ready' ? await createDownloadUrl(objectKey) : null };
+  }));
+});
+
+app.post('/api/clients/:clientId/progress-photos', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const clientId = z.string().uuid().parse((request.params as { clientId: string }).clientId);
+  const input = progressPhotoSchema.parse(request.body);
+  const [document] = await sql`
+    SELECT d.id, d.kind FROM documents d JOIN clients c ON c.id = d.client_id
+    WHERE d.id = ${input.documentId} AND d.client_id = ${clientId} AND c.owner_id = ${auth.sub}
+  `;
+  if (!document) return reply.code(404).send({ error: 'Archivo no encontrado en el expediente' });
+  if (document.kind !== 'progress_photo') return reply.code(400).send({ error: 'El archivo no está registrado como foto de progreso' });
+  const [photo] = await sql`
+    INSERT INTO progress_photos (client_id, document_id, taken_on, pose, notes)
+    VALUES (${clientId}, ${input.documentId}, COALESCE(${input.takenOn || null}::date, current_date), ${input.pose}, ${input.notes || null})
+    ON CONFLICT (document_id) DO UPDATE SET taken_on = EXCLUDED.taken_on, pose = EXCLUDED.pose, notes = EXCLUDED.notes
+    RETURNING *
+  `;
+  return reply.code(201).send(photo);
+});
+
+app.delete('/api/progress-photos/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [photo] = await sql`
+    DELETE FROM progress_photos USING clients c
+    WHERE progress_photos.id = ${id} AND c.id = progress_photos.client_id AND c.owner_id = ${auth.sub}
+    RETURNING progress_photos.id, progress_photos.document_id
+  `;
+  if (!photo) return reply.code(404).send({ error: 'Foto no encontrada' });
+  return { deleted: true, documentId: photo.document_id };
+});
+
 const firstReminderRun = setTimeout(() => dispatchReminders().catch(error => app.log.error(error)), 10_000);
 const reminderInterval = setInterval(() => dispatchReminders().catch(error => app.log.error(error)), config.REMINDER_INTERVAL_MINUTES * 60_000);
 const firstBillingRun = setTimeout(() => generateRecurringInvoices().catch(error => app.log.error(error)), 15_000);
