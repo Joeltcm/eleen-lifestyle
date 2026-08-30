@@ -1,4 +1,4 @@
-const APP_VERSION = '62';
+const APP_VERSION = '63';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1242,7 +1242,10 @@ function complianceChartSvg(timeline) {
     const etiqueta = `<text x="${px(i)}" y="${alto - 8}" text-anchor="middle" font-size="8" fill="#7c7077">${mes.month.slice(5)}</text>`;
     if (mes.compliancePercent === null) return etiqueta;
     const y = py(Number(mes.compliancePercent));
-    return `${etiqueta}<circle cx="${px(i)}" cy="${y}" r="3.5" fill="#c98aa6"/><text x="${px(i)}" y="${y - 8}" text-anchor="middle" font-size="8" font-weight="700" fill="#3d3238">${mes.compliancePercent}%</text>`;
+    // El primer valor se ancla a la izquierda y el último a la derecha: centrados
+    // se salían del área, y el del primer mes se encimaba con la escala del eje.
+    const anclaje = i === 0 ? 'start' : i === timeline.length - 1 ? 'end' : 'middle';
+    return `${etiqueta}<circle cx="${px(i)}" cy="${y}" r="3.5" fill="#c98aa6"/><text x="${px(i)}" y="${y - 8}" text-anchor="${anclaje}" font-size="8" font-weight="700" fill="#3d3238">${mes.compliancePercent}%</text>`;
   }).join('');
 
   return `<svg viewBox="0 0 ${ancho} ${alto}" class="compliance-chart" role="img" aria-label="Cumplimiento mes a mes">${rejilla}${lineas}${puntos}</svg>`;

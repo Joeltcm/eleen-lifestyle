@@ -236,8 +236,12 @@ function complianceChart(document: PDFKit.PDFDocument, timeline: PdfRecord[]) {
     if (mes.compliancePercent === null) return;
     const { py } = punto(indice, Number(mes.compliancePercent));
     document.circle(px, py, 3).fill(colors.rose);
+    // El primero se alinea a la izquierda y el último a la derecha: centrados se
+    // salían del área, y el del primer mes se encimaba con la escala del eje.
+    const alineacion = indice === 0 ? 'left' : indice === timeline.length - 1 ? 'right' : 'center';
+    const offset = indice === 0 ? 0 : indice === timeline.length - 1 ? -32 : -16;
     document.font('Helvetica-Bold').fontSize(7).fillColor(colors.ink)
-      .text(`${mes.compliancePercent}%`, px - 16, py - 14, { width: 32, align: 'center' });
+      .text(`${mes.compliancePercent}%`, px + offset, py - 14, { width: 32, align: alineacion as 'left' | 'right' | 'center' });
   });
 
   document.y = y + alto + 14;
