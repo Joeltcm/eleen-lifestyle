@@ -1,4 +1,4 @@
-const APP_VERSION = '60';
+const APP_VERSION = '61';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -693,21 +693,37 @@ function newInvoice() {
   const content = formFromTemplate('new-invoice-template'); openModal(content);
   const selection = document.getElementById('invoice-client'); data.clients.forEach(client => selection.add(new Option(client.name, client.id)));
   const concept = document.getElementById('invoice-concept'); const packageFields = document.getElementById('invoice-package-fields');
-  const togglePackage = () => { packageFields.hidden = concept.value !== 'Paquete de sesiones'; };
+  // La mensualidad también tiene tope de sesiones, así que el campo aparece
+  // para las dos. Dejarlo en 0 mantiene el comportamiento anterior: cobro sin
+  // saldo, sin descuento y sin nada que vencer.
+  const conSesiones = () => ['Paquete de sesiones', 'Mensualidad'].includes(concept.value);
+  const togglePackage = () => {
+    packageFields.hidden = !conSesiones();
+    const rotulo = packageFields.querySelector('label');
+    if (rotulo) rotulo.childNodes[0].nodeValue = concept.value === 'Mensualidad' ? 'Sesiones incluidas al mes' : 'Sesiones incluidas';
+    const nota = document.getElementById('invoice-sessions-note');
+    if (nota) nota.textContent = concept.value === 'Mensualidad'
+      ? 'Vence en el próximo corte del cliente. Déjalo en 0 si esta mensualidad no limita sesiones.'
+      : 'Se descuentan al completar cada sesión.';
+  };
   concept.addEventListener('change', togglePackage); togglePackage();
   const amountInput = document.querySelector('#invoice-form [name="amount"]'); const dueInput = document.querySelector('#invoice-form [name="due"]'); const sessionsInput = document.querySelector('#invoice-form [name="sessions"]');
-  const fillClientPlan = () => { const client = data.clients.find(item => item.id === selection.value); if (!client) return; amountInput.value = client.plan; concept.value = client.billingModel === 'package' ? 'Paquete de sesiones' : 'Mensualidad'; if (client.packageSessions) sessionsInput.value = client.packageSessions; togglePackage(); };
+  const fillClientPlan = () => { const client = data.clients.find(item => item.id === selection.value); if (!client) return; amountInput.value = client.plan; concept.value = client.billingModel === 'package' ? 'Paquete de sesiones' : 'Mensualidad'; sessionsInput.value = client.packageSessions || client.sessionsIncluded || 0; togglePackage(); };
   dueInput.value = dateKey(today); selection.addEventListener('change', fillClientPlan); fillClientPlan();
   document.getElementById('invoice-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target); const method = form.get('method');
     try {
       event.target.classList.add('loading-state');
       let invoice;
-      if (form.get('concept') === 'Paquete de sesiones') {
-        const pack = await api('/api/packages', { method: 'POST', body: { clientId: form.get('client'), totalSessions: Number(form.get('sessions')), amount: Number(form.get('amount')) } });
+      const concepto = form.get('concept');
+      const sesiones = Number(form.get('sessions')) || 0;
+      // Con sesiones se crea un saldo que se descuenta y vence; sin ellas, la
+      // mensualidad sigue siendo un cobro simple como hasta ahora.
+      if (concepto === 'Paquete de sesiones' || (concepto === 'Mensualidad' && sesiones > 0)) {
+        const pack = await api('/api/packages', { method: 'POST', body: { clientId: form.get('client'), totalSessions: sesiones, amount: Number(form.get('amount')), kind: concepto === 'Mensualidad' ? 'monthly' : 'package' } });
         invoice = { id: pack.invoice_id };
       } else {
-        invoice = await api('/api/invoices', { method: 'POST', body: { clientId: form.get('client'), concept: form.get('concept'), amount: Number(form.get('amount')), dueOn: form.get('due') } });
+        invoice = await api('/api/invoices', { method: 'POST', body: { clientId: form.get('client'), concept: concepto, amount: Number(form.get('amount')), dueOn: form.get('due') } });
       }
       if (invoice && method !== 'pending') await api(`/api/invoices/${invoice.id}/confirm`, { method: 'POST', body: { method, reference: form.get('reference') || undefined, paidOn: dateKey(today) } });
       await loadData(); renderAll(); modal.close(); navigate('billing'); toast('Cobro registrado');
@@ -1154,6 +1170,49 @@ function inbodyComparison(inbody) {
     `<article><span>${label}</span>${deltaChip(key, latest.delta[key])}</article>`).join('')}</div>`;
 }
 
+// Saldos en el expediente, en lista y no en tabla: la tabla de paquetes se
+// desplaza en horizontal en el teléfono y su última columna queda escondida.
+function balancesSection(target, client) {
+  api(`/api/clients/${encodeURIComponent(client.id)}/balances`).then(saldos => {
+    if (!target.isConnected || !modal.open) return;
+    target.innerHTML = `${saldos.length ? `<div class="balance-list">${saldos.map(saldo => {
+      const restantes = Number(saldo.remaining);
+      const vencido = saldo.vencido_con_saldo;
+      return `<article class="balance-item${vencido ? ' expired' : ''}">
+        <div><b>${escapeHtml(saldo.label)}</b><small>${saldo.kind === 'monthly' ? 'Mensualidad' : 'Paquete'} · ${saldo.used_sessions} de ${saldo.total_sessions} usadas${saldo.expires_on ? ` · ${vencido ? 'venció' : 'vence'} ${dateOnly(saldo.expires_on)}` : ' · sin vencimiento'}</small>
+          ${vencido ? `<small class="balance-warning">${restantes} sesión${restantes === 1 ? '' : 'es'} sin dar · cuenta como incumplimiento</small>` : ''}</div>
+        <span class="session-balance">${restantes}</span>
+        ${saldo.expires_on ? `<button class="secondary session-use" data-reschedule="${saldo.id}">Reprogramar</button>` : ''}
+      </article>`;
+    }).join('')}</div>` : '<p class="empty">Este cliente no tiene saldos de sesiones.</p>'}`;
+    target.querySelectorAll('[data-reschedule]').forEach(button => {
+      button.onclick = () => reschedulePackage(saldos.find(saldo => saldo.id === button.dataset.reschedule), client);
+    });
+  }).catch(error => { if (target.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; });
+}
+
+function reschedulePackage(saldo, client) {
+  const restantes = Number(saldo.remaining);
+  const enUnMes = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+  const box = document.createElement('div');
+  box.innerHTML = `<form id="reschedule-form"><p class="eyebrow">SALDO DE SESIONES</p><h2>Reprogramar</h2>
+    <p class="form-summary">${escapeHtml(saldo.label)} · ${restantes} sesión${restantes === 1 ? '' : 'es'} sin dar</p>
+    <label>Nueva fecha de vencimiento<input name="expiresOn" type="date" required value="${enUnMes}" /></label>
+    <label>Motivo<input name="note" maxlength="120" placeholder="Opcional · ej. no se agendaron por viaje de la entrenadora" /></label>
+    <p class="section-note">Al correr la fecha, esas ${restantes} sesión${restantes === 1 ? '' : 'es'} vuelven a estar disponibles y dejan de contar como incumplimiento en el porcentaje de ${escapeHtml(client.name)}.</p>
+    <button class="primary wide-button">Reprogramar</button></form>`;
+  openModal(box);
+  document.getElementById('reschedule-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const values = new FormData(event.target);
+    try {
+      event.target.classList.add('loading-state');
+      await api(`/api/packages/${saldo.id}/reschedule`, { method: 'PATCH', body: { expiresOn: values.get('expiresOn'), note: values.get('note').trim() || null } });
+      await loadData(); renderAll(); modal.close(); toast('Saldo reprogramado'); clientDetail(client.id);
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+
 function attendanceSection(target, clientId) {
   api(`/api/clients/${encodeURIComponent(clientId)}/attendance?months=6`).then(report => {
     if (!target.isConnected || !modal.open) return;
@@ -1303,9 +1362,10 @@ function clientDetail(id) {
     : `${client.planName || 'Mensualidad'} · ${money.format(client.plan)} al mes · corte día ${client.cutoffDay}`;
   const box = document.createElement('div');
   const reviewNotice = client.inbodyReviews.length ? `<button class="secondary wide-button" id="review-inbody">Revisar ${client.inbodyReviews.length} evaluación${client.inbodyReviews.length > 1 ? 'es' : ''} pendiente${client.inbodyReviews.length > 1 ? 's' : ''}</button>` : '';
-  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">CAMBIO DESDE LA MEDICIÓN ANTERIOR</p>${inbodyComparison(inbody)}<p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th>vs. anterior</th><th></th></tr></thead><tbody>${inbody.history.slice().reverse().map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td class="delta-cell">${reading.delta ? `${deltaChip('weight', reading.delta.weight)}${deltaChip('smm', reading.delta.smm)}${deltaChip('pbf', reading.delta.pbf)}` : '<span class="delta neutral">primera</span>'}</td><td><button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">ASISTENCIA MENSUAL</p><div id="client-attendance"><p class="empty">Calculando cumplimiento…</p></div><p class="eyebrow" style="margin-top:20px">LESIONES Y PADECIMIENTOS</p><div id="client-conditions"><p class="empty">Cargando expediente clínico…</p></div><p class="eyebrow" style="margin-top:20px">FOTOS DE PROGRESO</p><div id="client-photos"><p class="empty">Cargando fotos…</p></div><p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="portal-link">${client.portalActive ? 'Enviar enlace de acceso' : 'Activar portal con enlace'}</button><button class="secondary" id="portal-access">${client.portalActive ? 'Poner contraseña a mano' : 'Activar con contraseña'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
+  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">CAMBIO DESDE LA MEDICIÓN ANTERIOR</p>${inbodyComparison(inbody)}<p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th>vs. anterior</th><th></th></tr></thead><tbody>${inbody.history.slice().reverse().map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td class="delta-cell">${reading.delta ? `${deltaChip('weight', reading.delta.weight)}${deltaChip('smm', reading.delta.smm)}${deltaChip('pbf', reading.delta.pbf)}` : '<span class="delta neutral">primera</span>'}</td><td><button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">SALDO DE SESIONES</p><div id="client-balances"><p class="empty">Cargando saldos…</p></div><p class="eyebrow" style="margin-top:20px">ASISTENCIA MENSUAL</p><div id="client-attendance"><p class="empty">Calculando cumplimiento…</p></div><p class="eyebrow" style="margin-top:20px">LESIONES Y PADECIMIENTOS</p><div id="client-conditions"><p class="empty">Cargando expediente clínico…</p></div><p class="eyebrow" style="margin-top:20px">FOTOS DE PROGRESO</p><div id="client-photos"><p class="empty">Cargando fotos…</p></div><p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="portal-link">${client.portalActive ? 'Enviar enlace de acceso' : 'Activar portal con enlace'}</button><button class="secondary" id="portal-access">${client.portalActive ? 'Poner contraseña a mano' : 'Activar con contraseña'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
   openModal(box); document.getElementById('open-scan').onclick = () => inbodyImport(client); document.getElementById('edit-client-contact').onclick = () => editClient(client); document.getElementById('edit-client-plan').onclick = () => clientPlanEditor(client); document.getElementById('portal-access').onclick = () => portalAccessEditor(client); document.getElementById('portal-link').onclick = () => portalAccessLink(client); document.getElementById('delete-client').onclick = () => deleteResource(`/api/clients/${client.id}`, `¿Eliminar a ${client.name}? También se eliminarán sus documentos, sesiones y cobros asociados.`, 'Cliente eliminado');
   if (client.inbodyReviews.length) document.getElementById('review-inbody').onclick = () => inbodyReview(client, client.inbodyReviews);
+  balancesSection(document.getElementById('client-balances'), client);
   attendanceSection(document.getElementById('client-attendance'), client.id);
   conditionsSection(document.getElementById('client-conditions'), client);
   photosSection(document.getElementById('client-photos'), client);

@@ -522,21 +522,87 @@ app.post('/api/auth/access-link/:token', async (request, reply) => {
   return { user: { id: resultado.id, email: resultado.email, fullName: resultado.full_name, role: resultado.role }, token: jwtToken };
 });
 
-const packageSchema = z.object({ clientId: z.string().uuid(), totalSessions: z.coerce.number().int().positive(), amount: z.coerce.number().positive(), expiresOn: z.string().date().optional() });
+// Siguiente día de corte del cliente. Si hoy ya pasó el corte de este mes, cae
+// en el del mes que viene. Se recorta al último día cuando el mes es más corto
+// que el día pactado: un corte el 31 en febrero es el 28.
+function proximoCorte(diaDeCorte: number) {
+  const hoy = new Date();
+  const enMes = (anio: number, mes: number) => new Date(Date.UTC(anio, mes, Math.min(diaDeCorte, new Date(Date.UTC(anio, mes + 1, 0)).getUTCDate())));
+  let corte = enMes(hoy.getUTCFullYear(), hoy.getUTCMonth());
+  if (corte <= hoy) corte = enMes(hoy.getUTCFullYear(), hoy.getUTCMonth() + 1);
+  return corte.toISOString().slice(0, 10);
+}
+
+const packageSchema = z.object({
+  clientId: z.string().uuid(), totalSessions: z.coerce.number().int().positive(), amount: z.coerce.number().positive(),
+  expiresOn: z.string().date().optional(),
+  kind: z.enum(['package', 'monthly']).default('package')
+});
 app.get('/api/packages', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`SELECT p.*, c.full_name FROM session_packages p JOIN clients c ON c.id = p.client_id WHERE c.owner_id = ${auth.sub} ORDER BY p.created_at DESC`;
 });
 app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = packageSchema.parse(request.body);
-  const [client] = await sql`SELECT id FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub}`;
+  const [client] = await sql`SELECT id, billing_cutoff_day FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub}`;
   if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
+
+  const esMensualidad = input.kind === 'monthly';
+  const concepto = esMensualidad ? 'Mensualidad' : 'Paquete de sesiones';
+  // Una mensualidad vence en el próximo corte del cliente: es lo que delimita
+  // el período que acaba de pagar. Sin vencimiento, sus sesiones no caducarían
+  // nunca y se acumularían mes tras mes.
+  const vence = input.expiresOn
+    ? input.expiresOn
+    : esMensualidad ? proximoCorte(Number(client.billing_cutoff_day) || 1) : null;
+  const etiqueta = esMensualidad
+    ? `Mensualidad ${new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric', timeZone: 'America/Panama' }).format(new Date())}`
+    : `Paquete ${input.totalSessions} sesiones`;
+
   const pack = await sql.begin(async transaction => {
-    const [created] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on) VALUES (${input.clientId}, ${`Paquete ${input.totalSessions} sesiones`}, ${input.totalSessions}, ${input.amount}, ${input.expiresOn || null}) RETURNING *`;
-    const [invoice] = await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${input.clientId}, ${created.id}, 'Paquete de sesiones', ${input.amount}, current_date) RETURNING id`;
+    const [created] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind) VALUES (${input.clientId}, ${etiqueta}, ${input.totalSessions}, ${input.amount}, ${vence}, ${input.kind}) RETURNING *`;
+    const [invoice] = await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${input.clientId}, ${created.id}, ${concepto}, ${input.amount}, current_date) RETURNING id`;
     return { ...created, invoice_id: invoice.id };
   });
   return reply.code(201).send(pack);
+});
+
+// Reprogramar un saldo: se corre el vencimiento y las sesiones que quedaban
+// vuelven a estar vivas. Existe porque el cumplimiento castiga al cliente por
+// las sesiones que no se dieron, y muchas veces no se dieron por causa de la
+// entrenadora —un mes que no alcanzó a agendarle—. Al mover la fecha, el saldo
+// deja de estar vencido y el incumplimiento desaparece del cálculo.
+const reschedulePackageSchema = z.object({ expiresOn: z.string().date(), note: z.string().trim().max(300).optional().nullable() });
+app.patch('/api/packages/:id/reschedule', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = reschedulePackageSchema.parse(request.body);
+  const [pack] = await sql`
+    UPDATE session_packages SET
+      expires_on = ${input.expiresOn}::date,
+      -- Un saldo vencido vuelve a estar activo al reprogramarlo; si ya se
+      -- había agotado, agotado se queda.
+      status = CASE WHEN used_sessions >= total_sessions THEN 'exhausted' ELSE 'active' END,
+      label = CASE WHEN ${input.note ?? null}::text IS NULL THEN label ELSE label || ' · ' || ${input.note ?? null} END
+    WHERE id = ${id} AND client_id IN (SELECT id FROM clients WHERE owner_id = ${auth.sub})
+    RETURNING *
+  `;
+  if (!pack) return reply.code(404).send({ error: 'Saldo no encontrado' });
+  return pack;
+});
+
+app.get('/api/clients/:clientId/balances', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const clientId = z.string().uuid().parse((request.params as { clientId: string }).clientId);
+  if (!(await ownedClient(clientId, auth.sub))) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  return sql`
+    SELECT id, label, kind, total_sessions, used_sessions, amount, status, purchased_on, expires_on,
+      (total_sessions - used_sessions) AS remaining,
+      (expires_on IS NOT NULL AND expires_on < current_date AND used_sessions < total_sessions) AS vencido_con_saldo
+    FROM session_packages
+    WHERE client_id = ${clientId} AND status <> 'cancelled'
+    ORDER BY purchased_on DESC, created_at DESC
+  `;
 });
 
 const routineExerciseSchema = z.object({
@@ -1177,6 +1243,23 @@ async function complianceRows(ownerId: string, period: z.infer<typeof reportPeri
           SELECT 1 FROM routine_completions rc
           WHERE rc.routine_id = ra.routine_id AND rc.client_id = ra.client_id AND rc.completion_percent > 0
         )
+      UNION ALL
+      -- Sesiones contratadas que vencieron sin darse. Una fila por cada una:
+      -- un paquete de 8 que venció con 5 usadas aporta 3 incumplimientos, y
+      -- junto a las 5 completadas —que ya entran por la rama de sesiones— deja
+      -- el cumplimiento en 5 de 8. Vale igual para mensualidad, que desde el
+      -- cambio de hoy también lleva saldo con vencimiento.
+      SELECT c.id AS client_id, c.full_name, sp.expires_on::timestamptz AS occurred_at,
+        CASE WHEN sp.kind = 'monthly' THEN 'Mensualidad' ELSE 'Paquete' END::text AS source,
+        sp.label AS activity, 'missed'::text AS status, 0::smallint AS completion_percent, false AS late
+      FROM session_packages sp
+      JOIN clients c ON c.id = sp.client_id
+      CROSS JOIN LATERAL generate_series(1, sp.total_sessions - sp.used_sessions) AS faltante
+      WHERE c.owner_id = ${ownerId}
+        AND sp.expires_on IS NOT NULL
+        AND sp.expires_on >= ${start}::date AND sp.expires_on < current_date
+        AND sp.status <> 'cancelled'
+        AND sp.used_sessions < sp.total_sessions
     )
     SELECT * FROM activities WHERE (${clientId || null}::uuid IS NULL OR client_id = ${clientId || null}) ORDER BY occurred_at DESC, full_name
   `;
