@@ -1,4 +1,4 @@
-const APP_VERSION = '71';
+const APP_VERSION = '72';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1136,6 +1136,74 @@ async function completeSession(id) {
 // el formulario completo.
 const metodosPago = ['Efectivo', 'Yappy', 'Transferencia bancaria', 'Tarjeta', 'Otro'];
 
+// Vincular cobros ya hechos con su saldo de sesiones. Los que se pagaron en
+// Zoho entraron como facturas sueltas: el cliente pagó pero la app no le
+// reconoce sesiones disponibles.
+function linkPackages(origen = 'zoho_invoice') {
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">CIERRE DE MIGRACIÓN</p><h2>Vincular cobros con sus sesiones</h2>
+    <p style="color:#6f7b75;margin-top:-12px">Cobros sin saldo de sesiones. Al vincularlos, el cliente recupera sus sesiones en la app sin volver a pagarlos.</p>
+    <label>Origen<select id="link-origen">
+      <option value="zoho_invoice"${origen === 'zoho_invoice' ? ' selected' : ''}>Cobros de Zoho</option>
+      <option value="eileen"${origen === 'eileen' ? ' selected' : ''}>Cobros de Eileen</option>
+      <option value="all"${origen === 'all' ? ' selected' : ''}>Todos</option>
+    </select></label>
+    <div id="link-lista"><p class="empty">Buscando cobros…</p></div>`;
+  openModal(box, true);
+  document.getElementById('link-origen').onchange = event => linkPackages(event.target.value);
+  renderLinkPackages(origen);
+}
+
+function renderLinkPackages(origen) {
+  const target = document.getElementById('link-lista');
+  api(`/api/invoices/unlinked?source=${origen}`).then(cobros => {
+    if (!target?.isConnected || !modal.open) return;
+    target.innerHTML = cobros.length ? `<p class="section-note">${cobros.length} cobro${cobros.length === 1 ? '' : 's'} sin saldo vinculado. Vincula sólo los que corresponden a paquetes o mensualidades con sesiones.</p>
+      <div class="gasto-lista">${cobros.slice(0, 200).map(cobro => `<article class="gasto-item">
+        <div><b>${escapeHtml(cobro.full_name)}</b><small>${escapeHtml(cobro.concept)} · ${cobro.due_on ? dateOnly(cobro.due_on) : ''}${cobro.invoice_number ? ` · ${escapeHtml(cobro.invoice_number)}` : ''}</small></div>
+        <span class="gasto-monto">${money.format(cobro.amount)}</span>
+        <div class="gasto-acciones"><button class="secondary session-use" data-vincular="${cobro.id}">Vincular sesiones</button></div>
+      </article>`).join('')}</div>
+      ${cobros.length > 200 ? '<p class="section-note">Se muestran los 200 más recientes.</p>' : ''}` : '<p class="empty">No hay cobros sin vincular en este origen.</p>';
+    target.querySelectorAll('[data-vincular]').forEach(b => {
+      b.onclick = () => linkPackageEditor(cobros.find(c => c.id === b.dataset.vincular), origen);
+    });
+  }).catch(error => { if (target?.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; });
+}
+
+function linkPackageEditor(cobro, origen) {
+  const vencido = cobro.due_on && dateOnly(cobro.due_on) < dateKey(today);
+  const box = document.createElement('div');
+  box.innerHTML = `<form id="link-form"><p class="eyebrow">VINCULAR SESIONES</p><h2>${escapeHtml(cobro.full_name)}</h2>
+    <p class="form-summary">${escapeHtml(cobro.concept)} · ${money.format(cobro.amount)}${cobro.due_on ? ` · ${dateOnly(cobro.due_on)}` : ''}</p>
+    <div class="form-row">
+      <label>Sesiones del cobro<input name="totalSessions" type="number" min="1" max="500" required value="8" /></label>
+      <label>Ya usadas<input name="usedSessions" type="number" min="0" max="500" required value="8" /></label>
+    </div>
+    <label>Tipo<select name="kind"><option value="monthly">Mensualidad</option><option value="package">Paquete</option></select></label>
+    <label>Vence el<input name="expiresOn" type="date" /><small>Vacío: un mes después de emitido el cobro.</small></label>
+    ${vencido ? `<p class="section-note"><b>Este cobro es de un período pasado.</b> Deja "ya usadas" igual al total si esas sesiones se dieron. Si pones menos, las restantes contarán como incumplidas y bajarán el cumplimiento de ${escapeHtml(cobro.full_name)}.</p>` : '<p class="section-note">Si el período sigue vigente, pon en "ya usadas" las que realmente se dieron.</p>'}
+    <button class="primary wide-button">Vincular</button></form>`;
+  openModal(box);
+  const form = document.getElementById('link-form');
+  // Al cambiar el total, las usadas lo siguen mientras no se toquen a mano:
+  // el caso normal en un cobro viejo es que se dieron todas.
+  let usadasTocadas = false;
+  form.elements.usedSessions.oninput = () => { usadasTocadas = true; };
+  form.elements.totalSessions.oninput = event => { if (!usadasTocadas) form.elements.usedSessions.value = event.target.value; };
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const v = new FormData(event.target);
+    try {
+      event.target.classList.add('loading-state');
+      await api(`/api/invoices/${cobro.id}/link-package`, { method: 'POST', body: {
+        totalSessions: Number(v.get('totalSessions')), usedSessions: Number(v.get('usedSessions')),
+        kind: v.get('kind'), expiresOn: v.get('expiresOn') || null } });
+      await loadData(); renderAll(); modal.close(); toast('Sesiones vinculadas'); linkPackages(origen);
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+
 // Gastos: la otra mitad de las finanzas. En lista y no en tabla, por el
 // teléfono.
 function expensesManager(desde = null, hasta = null) {
@@ -1776,6 +1844,7 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'daily-log') dailyTrainingLog();
   if (actionButton?.dataset.action === 'pending-collections') pendingCollections();
   if (actionButton?.dataset.action === 'expenses') expensesManager();
+  if (actionButton?.dataset.action === 'link-packages') linkPackages();
   if (actionButton?.dataset.action === 'compliance-report') complianceReport();
   if (actionButton?.dataset.action === 'new-plan') planEditor();
   if (actionButton?.dataset.action === 'export-compliance') exportCompliance();

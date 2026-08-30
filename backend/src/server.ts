@@ -1128,6 +1128,76 @@ app.get('/api/invoices', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`SELECT i.*, c.full_name FROM invoices i JOIN clients c ON c.id = i.client_id WHERE c.owner_id = ${auth.sub} ORDER BY i.created_at DESC`;
 });
+// Vincular un cobro ya hecho —típicamente importado de Zoho— con su saldo de
+// sesiones. El saldo sólo nacía cuando el cobro se creaba aquí, así que los
+// clientes que pagaron en Zoho quedaron sin sesiones disponibles en la app.
+// Esto cierra ese hueco sin volver a cobrarles.
+const linkPackageSchema = z.object({
+  totalSessions: z.coerce.number().int().min(1).max(500),
+  // Cuántas de esas sesiones ya se dieron. Para un período pasado lo normal es
+  // que estén consumidas; darlas por no usadas las contaría como incumplidas y
+  // hundiría el cumplimiento del cliente por algo que sí ocurrió.
+  usedSessions: z.coerce.number().int().min(0).max(500).default(0),
+  kind: z.enum(['package', 'monthly']).default('monthly'),
+  expiresOn: z.union([z.literal(''), z.null(), z.string().date()]).optional().transform(v => (v === '' || v === undefined ? null : v))
+});
+
+app.post('/api/invoices/:id/link-package', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = linkPackageSchema.parse(request.body);
+  if (input.usedSessions > input.totalSessions) return reply.code(400).send({ error: 'Las sesiones usadas no pueden superar el total' });
+
+  const resultado = await sql.begin(async transaction => {
+    const [invoice] = await transaction`
+      SELECT i.*, c.billing_cutoff_day FROM invoices i JOIN clients c ON c.id = i.client_id
+      WHERE i.id = ${id} AND c.owner_id = ${auth.sub} FOR UPDATE OF i
+    `;
+    if (!invoice) return { pack: null, clientId: '', amount: 0, error: 'Cobro no encontrado', code: 404 };
+    if (invoice.package_id) return { pack: null, clientId: '', amount: 0, error: 'Este cobro ya tiene un saldo de sesiones vinculado', code: 409 };
+
+    const comprado = String(invoice.issued_on || invoice.due_on || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    // Sin fecha dada, la mensualidad vence un mes después de emitida: es el
+    // período que ese cobro cubrió.
+    const vence = input.expiresOn || (input.kind === 'monthly'
+      ? new Date(new Date(`${comprado}T12:00:00Z`).setUTCMonth(new Date(`${comprado}T12:00:00Z`).getUTCMonth() + 1)).toISOString().slice(0, 10)
+      : null);
+    const agotado = input.usedSessions >= input.totalSessions;
+
+    const [pack] = await transaction`
+      INSERT INTO session_packages (client_id, label, total_sessions, used_sessions, amount, status, purchased_on, expires_on, kind)
+      VALUES (${invoice.client_id}, ${String(invoice.concept || 'Cobro').slice(0, 120)}, ${input.totalSessions}, ${input.usedSessions},
+        ${invoice.amount}, ${agotado ? 'exhausted' : 'active'}, ${comprado}::date, ${vence}, ${input.kind})
+      RETURNING *
+    `;
+    await transaction`UPDATE invoices SET package_id = ${pack.id} WHERE id = ${id}`;
+    return { pack, clientId: invoice.client_id as string, amount: Number(invoice.amount), error: undefined as string | undefined, code: 0 };
+  });
+
+  if (resultado.error) return reply.code(resultado.code || 400).send({ error: resultado.error });
+  // Un cobro mensual vinculado también asienta el precio y la membresía: es lo
+  // que permite que ese cliente entre al cobro automático al cerrar Zoho.
+  if (input.kind === 'monthly' && resultado.amount > 0) await asentarMensualidad(resultado.clientId, auth.sub, resultado.amount);
+  return reply.code(201).send(resultado.pack);
+});
+
+// Cobros sin saldo de sesiones vinculado, para cerrar la migración.
+app.get('/api/invoices/unlinked', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const query = z.object({ source: z.enum(['zoho_invoice', 'eileen', 'all']).default('all') }).parse(request.query);
+  return sql`
+    SELECT i.id, i.concept, i.amount, i.due_on, i.issued_on, i.status, i.source_system, i.invoice_number,
+      c.id AS client_id, c.full_name, c.standard_price, c.billing_model
+    FROM invoices i JOIN clients c ON c.id = i.client_id
+    WHERE c.owner_id = ${auth.sub}
+      AND i.package_id IS NULL
+      AND i.status <> 'void'
+      AND (${query.source === 'all'} OR COALESCE(i.source_system, 'eileen') = ${query.source})
+    ORDER BY i.due_on DESC, c.full_name
+    LIMIT 400
+  `;
+});
+
 app.get('/api/billing/analytics', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   const { year } = z.object({ year: z.coerce.number().int().min(2000).max(2100) }).parse(request.query);
