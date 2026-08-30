@@ -1455,7 +1455,16 @@ app.get('/api/finance/summary', { preHandler: requireStaff }, async request => {
         COALESCE((SELECT min(spent_on) FROM expenses WHERE owner_id = ${auth.sub}), current_date)
       ) AS inicio
     `;
-    desde = new Date(`${String(primero?.inicio || new Date().toISOString()).slice(0, 10)}T00:00:00Z`);
+    // postgres.js devuelve un Date para las columnas date, y String(fecha) da
+    // "Wed Jan 01 2024 ...": cortar diez caracteres de ahí produce una fecha
+    // inválida y toISOString() más abajo revienta. De ahí el 500 del rango
+    // "todo" siempre que hubiera algún movimiento registrado.
+    const inicioBruto = primero?.inicio;
+    const inicioIso = inicioBruto instanceof Date
+      ? inicioBruto.toISOString()
+      : String(inicioBruto ?? new Date().toISOString());
+    desde = new Date(`${inicioIso.slice(0, 10)}T00:00:00Z`);
+    if (Number.isNaN(desde.getTime())) desde = new Date(Date.UTC(anioActual, 0, 1));
     desde.setUTCDate(1);
   } else {
     desde = new Date();
