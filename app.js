@@ -1,4 +1,4 @@
-const APP_VERSION = '86';
+const APP_VERSION = '87';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -776,11 +776,68 @@ function newSession() {
   const clientSelect = document.getElementById('session-client'); data.clients.filter(client => client.status === 'Activo').forEach(client => clientSelect.add(new Option(client.name, client.id)));
   const routineSelect = document.getElementById('session-routine'); data.routines.forEach(routine => routineSelect.add(new Option(routine.title, routine.id)));
   document.querySelector('#session-form [name="date"]').value = dateKey(calendarCursor);
+
+  // Repetición semanal. La fecha de arriba es el primer día; los días marcados
+  // se generan desde ahí hasta la fecha de corte.
+  const dias = () => [...document.querySelectorAll('#session-weekdays input:checked')].map(c => Number(c.value));
+  const fechaInput = document.querySelector('#session-form [name="date"]');
+  const hastaLabel = document.getElementById('session-until-label');
+  const hastaInput = hastaLabel.querySelector('input');
+  const pista = document.getElementById('session-repeat-hint');
+  const boton = document.getElementById('session-submit');
+
+  const fechasRepetidas = () => {
+    const marcados = dias();
+    if (!marcados.length || !fechaInput.value || !hastaInput.value) return [];
+    // Se recorre en mediodía para que el cambio de horario no desplace el día.
+    const cursor = new Date(`${fechaInput.value}T12:00:00`);
+    const fin = new Date(`${hastaInput.value}T12:00:00`);
+    const salida = [];
+    while (cursor <= fin && salida.length < 60) {
+      if (marcados.includes(cursor.getDay())) salida.push(dateKey(cursor));
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    return salida;
+  };
+
+  const refrescar = () => {
+    const marcados = dias();
+    hastaLabel.hidden = !marcados.length;
+    if (marcados.length && !hastaInput.value && fechaInput.value) {
+      // Cuatro semanas por defecto: un mes de entrenamientos es lo que se
+      // agenda de una sentada, y siempre se puede acortar.
+      const sugerida = new Date(`${fechaInput.value}T12:00:00`);
+      sugerida.setDate(sugerida.getDate() + 27);
+      hastaInput.value = dateKey(sugerida);
+    }
+    const total = marcados.length ? fechasRepetidas().length : 1;
+    pista.textContent = marcados.length ? `Se agendarán ${total} sesion${total === 1 ? '' : 'es'}.` : '';
+    boton.textContent = total > 1 ? `Agendar ${total} sesiones` : 'Agendar sesión';
+  };
+  document.querySelectorAll('#session-weekdays input').forEach(c => c.addEventListener('change', refrescar));
+  fechaInput.addEventListener('change', refrescar);
+  hastaInput.addEventListener('change', refrescar);
+  refrescar();
+
   document.getElementById('session-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target);
     try {
       event.target.classList.add('loading-state');
       const routineId = form.get('routine');
+      const repetidas = fechasRepetidas();
+      if (repetidas.length) {
+        const resultado = await api('/api/sessions/batch', { method: 'POST', body: {
+          clientId: form.get('client'),
+          routineId: routineId === 'Evaluación / seguimiento' ? undefined : routineId,
+          startsAt: repetidas.map(dia => panamaDateTimeIso(dia, form.get('time'))),
+          durationMinutes: Number(form.get('durationMinutes')), mode: form.get('mode'), notes: form.get('notes') || undefined
+        } });
+        await loadData(); renderAll(); modal.close(); navigate('calendar');
+        toast(resultado.omitidas
+          ? `${resultado.creadas} sesiones agendadas · ${resultado.omitidas} ya existían`
+          : `${resultado.creadas} sesiones agendadas`);
+        return;
+      }
       await api('/api/sessions', { method: 'POST', body: { clientId: form.get('client'), routineId: routineId === 'Evaluación / seguimiento' ? undefined : routineId, startsAt: panamaDateTimeIso(form.get('date'), form.get('time')), durationMinutes: Number(form.get('durationMinutes')), mode: form.get('mode'), notes: form.get('notes') || undefined } });
       await loadData(); renderAll(); modal.close(); navigate('calendar'); toast('Sesión agendada');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }

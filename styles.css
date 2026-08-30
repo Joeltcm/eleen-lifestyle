@@ -160,3 +160,14 @@ dialog.modal-wide{max-width:920px}
 /* Sesiones individuales: la tercera modalidad. Se distingue de mensualidad y
    paquete para que no haya que leer la letra pequeña. */
 .commercial-label.single-label{background:#f4ece2;color:#7d6144}
+
+/* Agendar varios días a la vez. Los días son botones cuadrados y no una lista
+   de casillas: en el teléfono hay que poder tocarlos con el pulgar. */
+.repetir-semanal{border:1px solid var(--line);border-radius:12px;padding:13px 14px;margin:0;display:grid;gap:10px}
+.repetir-semanal legend{font-size:12px;font-weight:600;padding:0 6px;color:var(--ink)}
+.dias-semana{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
+.dias-semana label{display:grid;place-items:center;margin:0}
+.dias-semana input{position:absolute;opacity:0;width:0;height:0}
+.dias-semana span{display:grid;place-items:center;width:100%;min-height:44px;border-radius:10px;border:1px solid var(--line);background:var(--card);font:600 13px 'DM Sans';cursor:pointer;user-select:none}
+.dias-semana input:checked+span{background:var(--lime);border-color:transparent;color:#49343e}
+.dias-semana input:focus-visible+span{outline:2px solid #d8a7bc;outline-offset:2px}

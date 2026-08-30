@@ -982,6 +982,58 @@ app.post('/api/sessions', { preHandler: requireStaff }, async (request, reply) =
   catch (error) { app.log.warn({ err: error, sessionId: session.id }, 'Session created but Google Calendar sync failed'); }
   return reply.code(201).send(session);
 });
+// Agendar varias fechas de una vez, para el caso normal: "Julio entrena lunes,
+// miércoles y viernes a las 8". Antes había que repetir el modal una vez por
+// sesión, doce veces para un mes.
+//
+// Las fechas llegan ya calculadas desde el navegador y no se deducen aquí a
+// partir de días de la semana: el horario es de Panamá y la conversión ya vive
+// en el frontend. Duplicarla en el servidor sería tener dos sitios donde
+// equivocarse con la zona horaria.
+const sessionBatchSchema = z.object({
+  clientId: z.string().uuid(),
+  routineId: z.string().uuid().optional(),
+  startsAt: z.array(z.string().datetime()).min(1).max(60),
+  durationMinutes: z.coerce.number().int().positive().default(60),
+  mode: z.string().default('Presencial'),
+  notes: z.string().optional()
+});
+app.post('/api/sessions/batch', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const input = sessionBatchSchema.parse(request.body);
+  const [client] = await sql`SELECT id FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub}`;
+  if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
+
+  const fechas = [...new Set(input.startsAt)].sort();
+  const creadas = await sql.begin(async transaction => {
+    const hechas: Record<string, unknown>[] = [];
+    for (const cuando of fechas) {
+      // Si ya hay sesión viva a esa hora para ese cliente, no se duplica:
+      // reenviar el formulario no debe dejarle el calendario doble.
+      const [existente] = await transaction`
+        SELECT id FROM sessions
+        WHERE client_id = ${input.clientId} AND starts_at = ${cuando} AND status <> 'cancelled'
+      `;
+      if (existente) continue;
+      const [sesion] = await transaction`
+        INSERT INTO sessions (client_id, routine_id, starts_at, duration_minutes, mode, notes)
+        VALUES (${input.clientId}, ${input.routineId || null}, ${cuando}, ${input.durationMinutes}, ${input.mode}, ${input.notes || null})
+        RETURNING *
+      `;
+      hechas.push(sesion);
+    }
+    return hechas;
+  });
+
+  // El calendario se sincroniza fuera de la transacción: un fallo de Google no
+  // debe deshacer sesiones que en la aplicación ya son válidas.
+  for (const sesion of creadas) {
+    try { await syncSessionToGoogle(auth.sub, sesion.id as string); }
+    catch (error) { app.log.warn({ err: error, sessionId: sesion.id }, 'Sesión creada pero falló la sincronización con Google Calendar'); }
+  }
+  return reply.code(201).send({ creadas: creadas.length, omitidas: fechas.length - creadas.length, sesiones: creadas });
+});
+
 const sessionScheduleSchema = z.object({
   startsAt: z.string().datetime(),
   durationMinutes: z.coerce.number().int().min(15).max(480),
