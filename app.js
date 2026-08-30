@@ -1,4 +1,4 @@
-const APP_VERSION = '80';
+const APP_VERSION = '81';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1195,8 +1195,8 @@ function financeDashboard(rango = 'meses:12') {
       <div class="metrics" style="grid-template-columns:repeat(2,1fr)">
         <article><span>Ingresos</span><strong>${money.format(t.ingresos)}</strong></article>
         <article><span>Gastos del negocio</span><strong>${money.format(t.gastosNegocio)}</strong></article>
-        <article><span>Neto del negocio</span><strong class="${t.netoNegocio >= 0 ? 'neto-positivo' : 'neto-negativo'}">${money.format(t.netoNegocio)}</strong></article>
-        <article><span>Margen</span><strong>${t.margenNegocio === null ? '—' : `${t.margenNegocio}%`}</strong><small>${t.margenNegocio === null ? 'sin ingresos' : 'de cada dólar cobrado'}</small></article>
+        <article><span>Neto del negocio</span><strong class="${t.netoNegocio >= 0 ? 'neto-positivo' : 'neto-negativo'}">${t.gastosSinClasificar > 0 ? '—' : money.format(t.netoNegocio)}</strong>${t.gastosSinClasificar > 0 ? '<small>falta clasificar</small>' : ''}</article>
+        <article><span>Margen</span><strong>${t.margenNegocio === null ? '—' : `${t.margenNegocio}%`}</strong><small>${t.margenNegocio === null ? (t.gastosSinClasificar > 0 ? 'falta clasificar' : 'sin ingresos') : 'de cada dólar cobrado'}</small></article>
       </div>
       ${t.gastosSinClasificar > 0 ? `<p class="section-note aviso-ambito">${money.format(t.gastosSinClasificar)} en categorías sin marcar como negocio o personal, fuera de este margen. Clasifícalas en <b>Gastos → Categorías</b>.</p>` : ''}
       <p class="eyebrow" style="margin-top:18px">PERSONAL Y TOTAL</p>

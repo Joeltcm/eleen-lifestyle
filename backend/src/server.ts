@@ -1551,9 +1551,12 @@ app.get('/api/finance/summary', { preHandler: requireStaff }, async request => {
       gastosPersonal: Number(gastosPersonal.toFixed(2)),
       gastosSinClasificar: Number(gastosSinClasificar.toFixed(2)),
       netoNegocio: Number((totalIngresos - gastosNegocio).toFixed(2)),
-      // El margen del negocio sólo es creíble cuando no queda gasto por
-      // clasificar: con categorías sin ámbito estaría contando de menos.
-      margenNegocio: totalIngresos > 0 ? Math.round(((totalIngresos - gastosNegocio) / totalIngresos) * 100) : null,
+      // Mientras quede gasto sin clasificar no se da margen del negocio: con
+      // todo sin marcar saldría un 100% impecable y falso, que es peor que el
+      // número mezclado que esto vino a corregir. Sin dato es más honesto.
+      margenNegocio: totalIngresos > 0 && gastosSinClasificar === 0
+        ? Math.round(((totalIngresos - gastosNegocio) / totalIngresos) * 100)
+        : null,
       mesesConActividad: conActividad.length,
       promedioMensualNeto: conActividad.length ? Number(((totalIngresos - totalGastos) / conActividad.length).toFixed(2)) : 0
     }
