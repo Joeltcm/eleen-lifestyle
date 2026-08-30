@@ -448,11 +448,12 @@ const routineExerciseSchema = z.object({
   category: z.string().max(80).optional(), level: z.string().max(40).optional(), machine: z.string().max(180).optional(),
   freeWeight: z.string().max(180).optional(), sets: z.coerce.number().int().min(1).max(20).optional(), reps: z.string().max(40).optional(), notes: z.string().max(300).optional()
 });
-const routineSchema = z.object({ title: z.string().min(2), description: z.string().optional(), sessionsPerWeek: z.coerce.number().int().min(1).max(7), exercises: z.array(routineExerciseSchema).max(80).default([]), clientId: z.string().uuid().optional() });
+const routineSchema = z.object({ title: z.string().min(2), description: z.string().optional(), sessionsPerWeek: z.coerce.number().int().min(1).max(7), exercises: z.array(routineExerciseSchema).max(80).default([]), clientId: z.string().uuid().optional(), dueOn: z.union([z.literal(''), z.null(), z.string().date()]).optional().transform(value => (value === '' || value === undefined ? null : value)) });
 app.get('/api/routines', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`
-    SELECT r.*, COALESCE(array_agg(ra.client_id) FILTER (WHERE ra.active), '{}') AS assigned_client_ids
+    SELECT r.*, COALESCE(array_agg(ra.client_id) FILTER (WHERE ra.active), '{}') AS assigned_client_ids,
+      max(ra.due_on) FILTER (WHERE ra.active) AS due_on
     FROM routines r LEFT JOIN routine_assignments ra ON ra.routine_id = r.id
     WHERE r.owner_id = ${auth.sub} GROUP BY r.id ORDER BY r.created_at DESC
   `;
@@ -461,7 +462,7 @@ app.post('/api/routines', { preHandler: requireStaff }, async (request, reply) =
   const auth = request.user as AuthUser; const input = routineSchema.parse(request.body);
   const routine = await sql.begin(async transaction => {
     const [created] = await transaction`INSERT INTO routines (owner_id, title, description, sessions_per_week, exercises) VALUES (${auth.sub}, ${input.title}, ${input.description || null}, ${input.sessionsPerWeek}, ${transaction.json(input.exercises)}) RETURNING *`;
-    if (input.clientId) await transaction`INSERT INTO routine_assignments (routine_id, client_id) SELECT ${created.id}, id FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub}`;
+    if (input.clientId) await transaction`INSERT INTO routine_assignments (routine_id, client_id, due_on) SELECT ${created.id}, id, ${input.dueOn ?? null}::date FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub}`;
     return created;
   });
   return reply.code(201).send(routine);
@@ -475,7 +476,7 @@ app.patch('/api/routines/:id', { preHandler: requireStaff }, async (request, rep
     const [updated] = await transaction`UPDATE routines SET title = ${input.title}, description = ${input.description || null}, sessions_per_week = ${input.sessionsPerWeek}, exercises = ${transaction.json(input.exercises)}, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
     if (!updated) return null;
     await transaction`UPDATE routine_assignments SET active = false, ends_on = current_date WHERE routine_id = ${id} AND active = true`;
-    if (input.clientId) await transaction`INSERT INTO routine_assignments (routine_id, client_id) SELECT ${id}, c.id FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} ON CONFLICT (routine_id, client_id, starts_on) DO UPDATE SET active = true, ends_on = null`;
+    if (input.clientId) await transaction`INSERT INTO routine_assignments (routine_id, client_id, due_on) SELECT ${id}, c.id, ${input.dueOn ?? null}::date FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} ON CONFLICT (routine_id, client_id, starts_on) DO UPDATE SET active = true, ends_on = null, due_on = EXCLUDED.due_on`;
     return updated;
   });
   if (!routine) return reply.code(404).send({ error: 'Rutina no encontrada' });
@@ -758,6 +759,87 @@ app.patch('/api/sessions/:id/compliance', { preHandler: requireStaff }, async (r
   return session;
 });
 
+// ── Registro diario de entrenamientos presenciales ────────────────────────
+// La entrenadora atiende a la mayoría en persona y no alcanza a crear una
+// rutina para cada día. Esta pantalla le deja marcar quién entrenó y que eso
+// cuente igual en el cumplimiento, que ya sumaba sesiones sin rutina.
+const dailyDateSchema = z.object({ date: z.string().date().default(() => new Date().toISOString().slice(0, 10)) });
+
+app.get('/api/trainings/daily', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const { date } = dailyDateSchema.parse(request.query);
+  return sql`
+    SELECT c.id AS client_id, c.full_name, c.status, c.billing_model,
+      COALESCE((SELECT sum(total_sessions - used_sessions) FROM session_packages sp WHERE sp.client_id = c.id AND sp.status = 'active'), 0)::integer AS available_sessions,
+      s.id AS session_id, s.status AS session_status, s.completion_percent, s.quick_logged,
+      COALESCE(r.title, '') AS routine_title
+    FROM clients c
+    LEFT JOIN LATERAL (
+      SELECT * FROM sessions WHERE client_id = c.id AND starts_at::date = ${date}::date
+      ORDER BY quick_logged DESC, starts_at LIMIT 1
+    ) s ON true
+    LEFT JOIN routines r ON r.id = s.routine_id
+    WHERE c.owner_id = ${auth.sub} AND c.status = 'active'
+    ORDER BY c.full_name
+  `;
+});
+
+const dailyLogSchema = z.object({
+  date: z.string().date(),
+  clientIds: z.array(z.string().uuid()).max(200)
+});
+
+app.post('/api/trainings/daily', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const input = dailyLogSchema.parse(request.body);
+  // Mediodía de Panamá: la sesión debe caer en el día marcado sin importar
+  // desde qué huso horario se guarde.
+  const startsAt = `${input.date}T12:00:00-05:00`;
+
+  const result = await sql.begin(async transaction => {
+    const owned = await transaction`SELECT id FROM clients WHERE owner_id = ${auth.sub} AND id = ANY(${input.clientIds}::uuid[])`;
+    const ownedIds = owned.map(row => row.id as string);
+
+    // Se crean las que faltan. Si ese día ya hay una sesión agendada de verdad
+    // no se toca: esta pantalla no debe alterar la agenda real.
+    const created: string[] = [];
+    for (const clientId of ownedIds) {
+      const [existing] = await transaction`SELECT id FROM sessions WHERE client_id = ${clientId} AND starts_at::date = ${input.date}::date LIMIT 1`;
+      if (existing) continue;
+      const [session] = await transaction`
+        INSERT INTO sessions (client_id, starts_at, duration_minutes, mode, status, completion_percent, quick_logged, completed_by_user_id, completion_recorded_at)
+        VALUES (${clientId}, ${startsAt}::timestamptz, 60, 'Presencial', 'completed', 100, true, ${auth.sub}, now())
+        RETURNING id
+      `;
+      created.push(session.id as string);
+    }
+
+    // Desmarcar sólo borra lo que esta pantalla creó. Una sesión agendada o
+    // completada por otra vía se queda donde está.
+    const removed = await transaction`
+      DELETE FROM sessions USING clients c
+      WHERE sessions.client_id = c.id AND c.owner_id = ${auth.sub}
+        AND sessions.quick_logged = true
+        AND sessions.starts_at::date = ${input.date}::date
+        AND NOT (sessions.client_id = ANY(${ownedIds}::uuid[]))
+      RETURNING sessions.id, sessions.package_id, sessions.package_debited
+    `;
+    // Devolver al paquete lo que se había descontado al marcar.
+    for (const session of removed) {
+      if (session.package_debited && session.package_id) {
+        await transaction`UPDATE session_packages SET used_sessions = GREATEST(0, used_sessions - 1), status = 'active' WHERE id = ${session.package_id}`;
+      }
+    }
+    return { created, removed: removed.length };
+  });
+
+  // El descuento del paquete reutiliza la misma ruta que completar una sesión
+  // desde la agenda, para que no haya dos maneras distintas de consumirlo.
+  for (const sessionId of result.created) await recordSessionCompliance(sessionId, auth.sub, auth.sub, true, 100);
+
+  return reply.code(201).send({ date: input.date, registrados: result.created.length, eliminados: result.removed });
+});
+
 const invoiceSchema = z.object({ clientId: z.string().uuid(), packageId: z.string().uuid().optional(), concept: z.string().min(2), amount: z.coerce.number().min(0), dueOn: z.string().date() });
 const statementQuerySchema = z.object({ clientId: z.string().uuid(), from: z.string().date(), to: z.string().date() }).refine(value => value.from <= value.to, { message: 'La fecha inicial debe ser anterior a la fecha final' });
 const receivablesQuerySchema = z.object({ asOf: z.string().date().default(new Date().toISOString().slice(0, 10)) });
@@ -969,14 +1051,36 @@ async function complianceRows(ownerId: string, period: z.infer<typeof reportPeri
   return sql`
     WITH activities AS (
       SELECT c.id AS client_id, c.full_name, s.starts_at AS occurred_at, 'Sesión'::text AS source,
-        COALESCE(r.title, 'Evaluación / seguimiento') AS activity, s.status, s.completion_percent
+        COALESCE(r.title, CASE WHEN s.quick_logged THEN 'Entrenamiento presencial' ELSE 'Evaluación / seguimiento' END) AS activity,
+        s.status, s.completion_percent, false AS late
       FROM sessions s JOIN clients c ON c.id = s.client_id LEFT JOIN routines r ON r.id = s.routine_id
       WHERE c.owner_id = ${ownerId} AND s.starts_at >= ${start} AND s.starts_at <= now() AND s.status <> 'cancelled'
       UNION ALL
       SELECT c.id AS client_id, c.full_name, rc.completed_on::timestamptz AS occurred_at, 'Rutina'::text AS source,
-        r.title AS activity, 'completed'::text AS status, rc.completion_percent
+        r.title AS activity, 'completed'::text AS status, rc.completion_percent,
+        -- Cumplir tarde sigue siendo cumplir: no baja el porcentaje, sólo se
+        -- señala aparte para que la entrenadora vea a quien siempre se atrasa.
+        COALESCE(asignada.due_on IS NOT NULL AND rc.completed_on > asignada.due_on, false) AS late
       FROM routine_completions rc JOIN clients c ON c.id = rc.client_id JOIN routines r ON r.id = rc.routine_id
+      LEFT JOIN LATERAL (
+        SELECT ra.due_on FROM routine_assignments ra
+        WHERE ra.routine_id = rc.routine_id AND ra.client_id = rc.client_id
+        ORDER BY ra.starts_on DESC LIMIT 1
+      ) AS asignada ON true
       WHERE c.owner_id = ${ownerId} AND rc.completed_on >= ${start}::date AND rc.completed_on <= current_date
+      UNION ALL
+      -- Rutinas con fecha límite vencida que nunca se registraron. Sin esto una
+      -- rutina que jamás se hizo simplemente no aparecía, así que no bajaba el
+      -- promedio y el número se veía mejor de lo que era.
+      SELECT c.id AS client_id, c.full_name, ra.due_on::timestamptz AS occurred_at, 'Rutina'::text AS source,
+        r.title AS activity, 'missed'::text AS status, 0::smallint AS completion_percent, false AS late
+      FROM routine_assignments ra JOIN clients c ON c.id = ra.client_id JOIN routines r ON r.id = ra.routine_id
+      WHERE c.owner_id = ${ownerId} AND ra.due_on IS NOT NULL
+        AND ra.due_on >= ${start}::date AND ra.due_on < current_date
+        AND NOT EXISTS (
+          SELECT 1 FROM routine_completions rc
+          WHERE rc.routine_id = ra.routine_id AND rc.client_id = ra.client_id AND rc.completion_percent > 0
+        )
     )
     SELECT * FROM activities WHERE (${clientId || null}::uuid IS NULL OR client_id = ${clientId || null}) ORDER BY occurred_at DESC, full_name
   `;
@@ -985,18 +1089,26 @@ async function complianceRows(ownerId: string, period: z.infer<typeof reportPeri
 app.get('/api/compliance/summary', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser; const query = z.object({ period: reportPeriodSchema.default('week') }).parse(request.query);
   const rows = await complianceRows(auth.sub, query.period);
-  const clients = new Map<string, { clientId: string; name: string; total: number; sum: number; completed: number }>();
+  const clients = new Map<string, { clientId: string; name: string; total: number; sum: number; completed: number; late: number; missed: number }>();
   for (const row of rows) {
-    const current = clients.get(row.client_id) || { clientId: row.client_id, name: row.full_name, total: 0, sum: 0, completed: 0 };
-    current.total += 1; current.sum += Number(row.completion_percent); if (Number(row.completion_percent) > 0) current.completed += 1;
+    const current = clients.get(row.client_id) || { clientId: row.client_id, name: row.full_name, total: 0, sum: 0, completed: 0, late: 0, missed: 0 };
+    current.total += 1; current.sum += Number(row.completion_percent);
+    if (Number(row.completion_percent) > 0) current.completed += 1;
+    if (row.late) current.late += 1;
+    if (row.status === 'missed') current.missed += 1;
     clients.set(row.client_id, current);
   }
   const clientSummaries = [...clients.values()].map(item => ({
     clientId: item.clientId, name: item.name, activities: item.total, completed: item.completed,
+    // Puntualidad aparte del porcentaje: quien cumple siempre tarde no debe
+    // verse igual que quien no cumple, pero tampoco igual que quien es puntual.
+    late: item.late, missed: item.missed,
     compliancePercent: item.total ? Math.round(item.sum / item.total) : 0
   })).sort((a, b) => b.compliancePercent - a.compliancePercent || a.name.localeCompare(b.name));
   return {
     period: query.period, activities: rows.length,
+    late: rows.filter(row => row.late).length,
+    missed: rows.filter(row => row.status === 'missed').length,
     compliancePercent: rows.length ? Math.round(rows.reduce((sum, row) => sum + Number(row.completion_percent), 0) / rows.length) : 0,
     clients: clientSummaries
   };
@@ -1200,7 +1312,7 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
   const [invoices, routines, sessions, busySlots, assessments, completions, exercises] = await Promise.all([
     sql`SELECT id, concept, amount, balance, currency, due_on, status, payment_method, invoice_number, issued_on FROM invoices WHERE client_id = ${client.id} ORDER BY COALESCE(issued_on, due_on) DESC LIMIT 60`,
-    sql`SELECT ra.id AS assignment_id, r.id, r.title, r.description, r.sessions_per_week, r.exercises FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id WHERE ra.client_id = ${client.id} AND ra.active = true AND (ra.ends_on IS NULL OR ra.ends_on >= current_date) ORDER BY ra.starts_on DESC`,
+    sql`SELECT ra.id AS assignment_id, ra.due_on, r.id, r.title, r.description, r.sessions_per_week, r.exercises FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id WHERE ra.client_id = ${client.id} AND ra.active = true AND (ra.ends_on IS NULL OR ra.ends_on >= current_date) ORDER BY ra.starts_on DESC`,
     sql`SELECT s.id, s.routine_id, s.starts_at, s.duration_minutes, s.mode, s.status, s.completion_percent, r.title AS routine_title FROM sessions s LEFT JOIN routines r ON r.id = s.routine_id WHERE s.client_id = ${client.id} AND s.starts_at >= now() - interval '1 year' ORDER BY s.starts_at`,
     sql`SELECT s.id, s.starts_at, s.duration_minutes, (s.client_id = ${client.id}) AS is_mine FROM sessions s JOIN clients c ON c.id = s.client_id WHERE c.owner_id = ${client.owner_id} AND s.status <> 'cancelled' AND s.starts_at BETWEEN now() AND now() + interval '90 days' ORDER BY s.starts_at`,
     sql`SELECT tested_at, values FROM inbody_assessments WHERE client_id = ${client.id} AND extraction_status = 'ready' ORDER BY tested_at`,

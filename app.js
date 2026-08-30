@@ -1,4 +1,4 @@
-const APP_VERSION = '53';
+const APP_VERSION = '54';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -184,7 +184,7 @@ async function loadData() {
   data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, concept: item.concept, amount: Number(item.amount), balance: item.source_system ? Number(item.balance) : item.status === 'pending' ? Number(item.amount) : 0, due: item.due_on, issued: item.issued_on || item.due_on, paidOn: item.confirmed_at ? String(item.confirmed_at).slice(0, 10) : '', method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '' }));
   data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired' }));
   data.sessions = sessions.map(sessionFromApi);
-  data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: (item.assigned_client_ids || []).length, assignedClientIds: item.assigned_client_ids || [], sessions: item.sessions_per_week, exercises: item.exercises || [] }));
+  data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: (item.assigned_client_ids || []).length, assignedClientIds: item.assigned_client_ids || [], sessions: item.sessions_per_week, dueOn: item.due_on || null, exercises: item.exercises || [] }));
   data.plans = plans.map(item => ({ id: item.id, name: item.name, description: item.description || '', billingModel: item.billing_model, price: Number(item.price), sessionsIncluded: Number(item.sessions_included || 0), validityDays: Number(item.validity_days || 0), active: item.active }));
   data.compliance = compliance; data.notifications = notifications; data.googleCalendar = googleCalendar; billingAnalytics = null; billingAnalyticsLoadingYear = null; billingAnalyticsRequest += 1; showPendingBrowserNotification(notifications);
 }
@@ -269,7 +269,7 @@ function renderDashboard() {
   document.getElementById('today-sessions').innerHTML = todaySessions.length ? todaySessions.map(session => `<div class="agenda-item"><span class="agenda-time">${session.time}</span><div><b>${session.client}</b><span>${session.routine} · ${session.mode.toLowerCase()}</span></div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span></div>`).join('') : '<p class="empty">No hay sesiones para hoy.</p>';
   const noInbody = data.clients.filter(client => !client.inbody).map(client => `<div class="alert-item"><b>${client.name}</b><span>Sin evaluación InBody registrada.</span></div>`).join('');
   document.getElementById('alerts').innerHTML = `${noInbody || '<div class="alert-item"><b>Todo al día</b><span>No hay alertas de seguimiento.</span></div>'}<div class="alert-item"><b>${data.invoices.filter(item => item.status === 'pending').length} cobro pendiente</b><span>Revisa pagos y comprobantes.</span></div>`;
-  document.getElementById('compliance-list').innerHTML = data.compliance.clients.length ? data.compliance.clients.map(client => `<div class="compliance-row"><span class="initials">${initials(client.name)}</span><div><b>${escapeHtml(client.name)}</b><small>${client.completed} de ${client.activities} actividades con avance</small><span class="compliance-track"><i style="width:${client.compliancePercent}%"></i></span></div><strong>${client.compliancePercent}%</strong></div>`).join('') : '<p class="empty">Aún no hay entrenamientos vencidos en este período.</p>';
+  document.getElementById('compliance-list').innerHTML = data.compliance.clients.length ? data.compliance.clients.map(client => `<div class="compliance-row"><span class="initials">${initials(client.name)}</span><div><b>${escapeHtml(client.name)}</b><small>${client.completed} de ${client.activities} actividades con avance${client.late ? ` · ${client.late} fuera de fecha` : ''}${client.missed ? ` · ${client.missed} sin hacer` : ''}</small><span class="compliance-track"><i style="width:${client.compliancePercent}%"></i></span></div><strong>${client.compliancePercent}%</strong></div>`).join('') : '<p class="empty">Aún no hay entrenamientos vencidos en este período.</p>';
   const notificationCount = document.getElementById('notification-count'); notificationCount.textContent = data.notifications.length; notificationCount.hidden = !data.notifications.length;
 }
 function renderClients(filter = '') {
@@ -353,7 +353,7 @@ function renderCalendar() {
   document.getElementById('session-list').innerHTML = visibleSessions.length ? visibleSessions.map(session => `<div class="session-row"><div class="session-date"><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric' }).format(new Date(`${session.date}T12:00:00`))}</b><span>${session.time} · ${session.durationMinutes} min</span></div><div class="session-person"><b>${session.client}</b><span>${session.routine} · ${session.mode}</span>${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}</div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span>${session.status === 'cancelled' ? '<span class="session-done">—</span>' : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button><button type="button" class="secondary" data-cancel-session="${session.id}">Cancelar</button>${sessionComplianceForm(session)}</div>`}</div>`).join('') : `<p class="empty">No hay sesiones programadas ${periodName}.</p>`;
 }
 function renderRoutines() {
-  document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${routine.title}</h3><p>${routine.description}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''}</footer><div class="client-actions"><button class="secondary" data-edit-routine="${routine.id}">Editar</button><button class="secondary" data-duplicate-routine="${routine.id}">Reutilizar</button><button class="secondary" data-delete-routine="${routine.id}">Eliminar</button></div></article>`).join('');
+  document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${routine.title}</h3><p>${routine.description}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''}${routine.dueOn ? `<br><span class="routine-due${dateOnly(routine.dueOn) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">Fecha límite: ${dateOnly(routine.dueOn)}</span>` : ''}</footer><div class="client-actions"><button class="secondary" data-edit-routine="${routine.id}">Editar</button><button class="secondary" data-duplicate-routine="${routine.id}">Reutilizar</button><button class="secondary" data-delete-routine="${routine.id}">Eliminar</button></div></article>`).join('');
 }
 function renderBillingInsights() {
   const chart = document.getElementById('billing-line-chart');
@@ -735,6 +735,58 @@ function editSessionSchedule(session) {
 }
 const megabytes = bytes => `${(Number(bytes) / (1024 * 1024)).toFixed(1)} MB`;
 
+// Registro diario: la entrenadora atiende presencialmente a la mayoría y no
+// alcanza a crear una rutina por día. Aquí marca quién entrenó y eso cuenta
+// igual en el cumplimiento.
+async function dailyTrainingLog(date = new Date().toISOString().slice(0, 10)) {
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">ASISTENCIA</p><h2>Entrenamientos de hoy</h2>
+    <p style="color:#6f7b75;margin-top:-12px">Marca a quien entrenó. Cada marca cuenta en su cumplimiento y descuenta del paquete si tiene uno activo.</p>
+    <label>Día<input type="date" id="daily-date" value="${date}" max="${new Date().toISOString().slice(0, 10)}" /></label>
+    <div id="daily-list"><p class="empty">Cargando clientes…</p></div>`;
+  openModal(box, true);
+  document.getElementById('daily-date').onchange = event => dailyTrainingLog(event.target.value);
+  renderDailyLog(date);
+}
+
+async function renderDailyLog(date) {
+  const target = document.getElementById('daily-list');
+  if (!target) return;
+  try {
+    const rows = await api(`/api/trainings/daily?date=${encodeURIComponent(date)}`);
+    if (!target.isConnected) return;
+    const marcados = rows.filter(row => row.session_id && Number(row.completion_percent) > 0).length;
+    target.innerHTML = `<p class="section-note">${rows.length} clientes activos · ${marcados} con entrenamiento registrado ese día.</p>
+      <div class="daily-list">${rows.map(row => {
+        // Una sesión agendada de verdad no se puede desmarcar desde aquí: esta
+        // pantalla sólo administra lo que ella misma creó.
+        const agendada = row.session_id && !row.quick_logged;
+        const cumplida = Boolean(row.session_id) && Number(row.completion_percent) > 0;
+        return `<label class="daily-item${agendada ? ' locked' : ''}">
+          <input type="checkbox" data-daily-client="${row.client_id}" ${cumplida ? 'checked' : ''} ${agendada ? 'disabled' : ''} />
+          <span class="daily-name"><b>${escapeHtml(row.full_name)}</b><small>${agendada ? `Sesión agendada${row.routine_title ? `: ${escapeHtml(row.routine_title)}` : ''} · se marca desde la agenda` : row.billing_model === 'package' ? `${row.available_sessions} sesiones disponibles` : 'Mensualidad'}</small></span>
+        </label>`;
+      }).join('')}</div>
+      <button class="primary wide-button" id="daily-save">Guardar entrenamientos</button>`;
+
+    document.getElementById('daily-save').onclick = async event => {
+      const seleccion = [...target.querySelectorAll('[data-daily-client]')].filter(input => input.checked && !input.disabled).map(input => input.dataset.dailyClient);
+      // Las agendadas van igual en la lista: si se omitieran, el servidor las
+      // interpretaría como desmarcadas.
+      const agendadas = [...target.querySelectorAll('[data-daily-client]')].filter(input => input.disabled && input.checked).map(input => input.dataset.dailyClient);
+      try {
+        event.target.disabled = true; event.target.textContent = 'Guardando…';
+        const resultado = await api('/api/trainings/daily', { method: 'POST', body: { date, clientIds: [...seleccion, ...agendadas] } });
+        await loadData(); renderAll();
+        toast(`${resultado.registrados} registrado${resultado.registrados === 1 ? '' : 's'}${resultado.eliminados ? ` · ${resultado.eliminados} quitado${resultado.eliminados === 1 ? '' : 's'}` : ''}`);
+        renderDailyLog(date);
+      } catch (error) { toast(error.message, true); event.target.disabled = false; event.target.textContent = 'Guardar entrenamientos'; }
+    };
+  } catch (error) {
+    if (target.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
+  }
+}
+
 function exerciseCatalogManager() {
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">ENTRENAMIENTO</p><h2>Catálogo de ejercicios</h2>
@@ -897,6 +949,8 @@ function newRoutine(routine = null, duplicate = false) {
   // porque va para otra persona, y heredar al cliente original invitaría a
   // pisarle la rutina sin darse cuenta.
   if (editing && routine?.assignedClientIds?.[0]) clientSelect.value = routine.assignedClientIds[0];
+  // La copia tampoco hereda la fecha: se cumple en otro momento para otra persona.
+  if (editing && routine?.dueOn) document.getElementById('routine-due').value = dateOnly(routine.dueOn);
   const categorySelect = document.getElementById('exercise-category');
   const levelSelect = document.getElementById('exercise-level');
   const exerciseSelect = document.getElementById('exercise-choice');
@@ -967,7 +1021,7 @@ function newRoutine(routine = null, duplicate = false) {
     if (!selectedExercises.length) { toast('Agrega al menos un ejercicio a la rutina', true); return; }
     try {
       event.target.classList.add('loading-state');
-      await api(editing ? `/api/routines/${routine.id}` : '/api/routines', { method: editing ? 'PATCH' : 'POST', body: { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: assigned || undefined, exercises: selectedExercises } });
+      await api(editing ? `/api/routines/${routine.id}` : '/api/routines', { method: editing ? 'PATCH' : 'POST', body: { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: assigned || undefined, dueOn: form.get('dueOn') || null, exercises: selectedExercises } });
       await loadData(); renderAll(); modal.close(); navigate('routines'); toast('Rutina guardada');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
@@ -1303,6 +1357,7 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'new-session') newSession();
   if (actionButton?.dataset.action === 'new-routine') newRoutine();
   if (actionButton?.dataset.action === 'exercise-catalog') exerciseCatalogManager();
+  if (actionButton?.dataset.action === 'daily-log') dailyTrainingLog();
   if (actionButton?.dataset.action === 'new-plan') planEditor();
   if (actionButton?.dataset.action === 'export-compliance') exportCompliance();
   if (actionButton?.dataset.action === 'account-statement') financialReportDialog('account-statement');
@@ -1485,7 +1540,7 @@ function renderPortal() {
   activities.forEach(item => buckets.find(bucket => bucket.key === `${item.date.getFullYear()}-${item.date.getMonth()}`)?.values.push(item.percent));
   document.getElementById('portal-chart').innerHTML = buckets.map(bucket => { const percent = bucket.values.length ? Math.round(bucket.values.reduce((sum, value) => sum + value, 0) / bucket.values.length) : 0; return `<div class="chart-column"><span>${percent}%</span><i style="height:${Math.max(4, percent)}%"></i><small>${monthLabel(bucket.date)}</small></div>`; }).join('');
   document.getElementById('portal-inbody').innerHTML = portalData.assessments.length ? `<div class="portal-inbody-grid">${portalData.assessments.slice(-4).reverse().map(item => `<article><span>${String(item.tested_at).slice(0, 10)}</span><b>${Number(item.values.weightKg || 0).toFixed(1)} kg</b><small>${Number(item.values.percentBodyFat || 0).toFixed(1)}% grasa · ${Number(item.values.skeletalMuscleMassKg || 0).toFixed(1)} kg músculo</small></article>`).join('')}</div>` : '<p class="empty">Todavía no hay evaluaciones confirmadas.</p>';
-  document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(routine => { const todayCompletion = portalData.routineCompletions.find(item => item.routine_id === routine.id && item.completed_on === dateKey(today)); return `<article class="card portal-routine-card"><div class="card-head"><div><h3>${escapeHtml(routine.title)}</h3><p>${escapeHtml(routine.description || '')} · ${routine.sessions_per_week} veces por semana</p></div></div><div class="exercise-preview">${portalExerciseRows(routine.exercises || [])}</div><form data-portal-routine="${routine.id}" class="portal-completion-form"><label class="completion-check"><input name="completed" type="checkbox" ${todayCompletion && Number(todayCompletion.completion_percent) > 0 ? 'checked' : ''} /><span>Entrenamiento realizado hoy</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${Number(todayCompletion?.completion_percent || 100)}" /><span>% completado</span></label><button class="primary">Guardar cumplimiento</button></form></article>`; }).join('') : '<p class="empty">La entrenadora todavía no te ha asignado una rutina.</p>';
+  document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(routine => { const todayCompletion = portalData.routineCompletions.find(item => item.routine_id === routine.id && item.completed_on === dateKey(today)); return `<article class="card portal-routine-card"><div class="card-head"><div><h3>${escapeHtml(routine.title)}</h3><p>${escapeHtml(routine.description || '')} · ${routine.sessions_per_week} veces por semana</p>${routine.due_on ? `<p class="routine-due${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? 'Venció el' : 'Para cumplirla antes del'} ${dateOnly(routine.due_on)}</p>` : ''}</div></div><div class="exercise-preview">${portalExerciseRows(routine.exercises || [])}</div><form data-portal-routine="${routine.id}" class="portal-completion-form"><label class="completion-check"><input name="completed" type="checkbox" ${todayCompletion && Number(todayCompletion.completion_percent) > 0 ? 'checked' : ''} /><span>Entrenamiento realizado hoy</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${Number(todayCompletion?.completion_percent || 100)}" /><span>% completado</span></label><button class="primary">Guardar cumplimiento</button></form></article>`; }).join('') : '<p class="empty">La entrenadora todavía no te ha asignado una rutina.</p>';
   const ownSessions = new Map(portalData.sessions.map(item => [item.id, portalSession(item)]));
   document.getElementById('portal-calendar-list').innerHTML = portalData.busySlots.length ? portalData.busySlots.map(slot => { const date = new Date(slot.starts_at); const own = slot.is_mine ? ownSessions.get(slot.id) : null; return `<article class="portal-slot ${own ? 'mine' : 'busy'}"><time><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric', month: 'short' }).format(date)}</b><span>${new Intl.DateTimeFormat('es-PA', { hour: 'numeric', minute: '2-digit' }).format(date)}</span></time><div><b>${own ? escapeHtml(own.routine) : 'Ocupado'}</b><span>${own ? escapeHtml(own.mode) : 'Horario no disponible'}</span></div>${own ? `<form data-portal-session="${own.id}" class="portal-session-form"><label class="completion-check"><input name="completed" type="checkbox" ${own.status === 'completed' ? 'checked' : ''} /><span>Cumplí</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${own.status === 'completed' ? own.completionPercent || 100 : 0}" /><span>%</span></label><button class="secondary">Guardar</button></form>` : ''}</article>`; }).join('') : '<p class="empty">No hay horarios ocupados en los próximos 90 días.</p>';
   document.getElementById('portal-plan').innerHTML = `<span class="commercial-label ${client.billing_model === 'package' ? 'package-label' : ''}">${client.billing_model === 'package' ? 'Paquete' : 'Mensualidad'}</span><div><h3>${escapeHtml(client.plan_name || 'Plan personalizado')}</h3><p>${money.format(Number(client.standard_price))}${client.billing_model === 'monthly' ? ` · corte día ${client.billing_cutoff_day}` : ` · ${client.sessions_included || 0} sesiones`}</p></div>`;
