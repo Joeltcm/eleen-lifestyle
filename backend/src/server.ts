@@ -1318,6 +1318,47 @@ app.delete('/api/invoices/:id', { preHandler: requireStaff }, async (request, re
   return { deleted: true, voided: true, invoice };
 });
 
+// Borrado definitivo, para cobros que nunca debieron existir: pruebas,
+// duplicados por error. Anular deja constancia de una transacción real; un
+// cobro de prueba no lo es y no tiene por qué ensuciar la contabilidad para
+// siempre.
+//
+// Se permite sólo si nada de dinero llegó a moverse: cobro local (Zoho manda
+// sobre lo suyo), sin pagos registrados y sin notas de crédito. Con un pago
+// encima, borrarlo escondería dinero recibido, y eso sí es un agujero.
+app.delete('/api/invoices/:id/permanent', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+
+  const resultado = await sql.begin(async transaction => {
+    const [invoice] = await transaction`
+      SELECT i.* FROM invoices i JOIN clients c ON c.id = i.client_id
+      WHERE i.id = ${id} AND c.owner_id = ${auth.sub} FOR UPDATE OF i
+    `;
+    if (!invoice) return { error: 'Cobro no encontrado', code: 404 };
+    if (invoice.source_system === 'zoho_invoice') return { error: 'Los cobros de Zoho no se borran desde aquí: Zoho es su fuente', code: 409 };
+    const [pago] = await transaction`SELECT id FROM payment_allocations WHERE invoice_id = ${id} LIMIT 1`;
+    if (pago) return { error: 'Este cobro tiene pagos registrados. Quita el pago antes de borrarlo', code: 409 };
+    if (invoice.status === 'confirmed') return { error: 'Este cobro está confirmado como pagado. Edita el pago antes de borrarlo', code: 409 };
+
+    // Si el cobro creó un saldo de sesiones y nadie lo usó, se va con él: era
+    // parte del mismo error. Si ya se consumieron sesiones, el saldo se queda.
+    let saldoBorrado = false;
+    if (invoice.package_id) {
+      const [pack] = await transaction`SELECT id, used_sessions FROM session_packages WHERE id = ${invoice.package_id} FOR UPDATE`;
+      if (pack && Number(pack.used_sessions) === 0) {
+        await transaction`DELETE FROM session_packages WHERE id = ${pack.id}`;
+        saldoBorrado = true;
+      }
+    }
+    await transaction`DELETE FROM invoices WHERE id = ${id}`;
+    return { deleted: true, saldoBorrado, concept: invoice.concept as string, error: undefined as string | undefined, code: 0 };
+  });
+
+  if (resultado.error) return reply.code(resultado.code || 400).send({ error: resultado.error });
+  return { deleted: true, saldoBorrado: resultado.saldoBorrado, concept: resultado.concept };
+});
+
 const paymentSchema = z.object({ method: z.enum(['Efectivo', 'Yappy', 'Transferencia bancaria', 'Tarjeta', 'Otro']), reference: z.string().max(160).optional(), paidOn: z.string().date() });
 async function saveNativeInvoicePayment(ownerId: string, id: string, input: z.infer<typeof paymentSchema>) {
   return sql.begin(async transaction => {
