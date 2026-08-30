@@ -310,7 +310,10 @@ const clientSchema = z.object({
   fullName: z.string().min(2), email: z.string().email().optional().or(z.literal('')), phone: z.string().optional(),
   goal: z.string().optional(), notes: z.string().optional(), billingModel: z.enum(['monthly', 'package']).default('monthly'),
   standardPrice: z.coerce.number().min(0).default(0), packageSessions: z.coerce.number().int().positive().optional(),
-  planId: z.string().uuid().optional(), cutoffDay: z.coerce.number().int().min(1).max(31).default(1)
+  planId: z.string().uuid().optional(), cutoffDay: z.coerce.number().int().min(1).max(31).default(1),
+  // Vacío llega como '' desde el formulario y significa "sin meta pactada".
+  monthlySessionTarget: z.union([z.literal(''), z.null(), z.coerce.number().int().min(1).max(31)]).optional()
+    .transform(value => (value === '' || value === undefined ? null : value))
 });
 app.get('/api/clients', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
@@ -349,8 +352,8 @@ app.post('/api/clients', { preHandler: requireStaff }, async (request, reply) =>
 app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const input = clientSchema.pick({ fullName: true, email: true, phone: true, goal: true, notes: true }).parse(request.body);
-  const [client] = await sql`UPDATE clients SET full_name = ${input.fullName}, email = ${input.email || null}, phone = ${input.phone || null}, goal = ${input.goal || null}, notes = ${input.notes || null}, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
+  const input = clientSchema.pick({ fullName: true, email: true, phone: true, goal: true, notes: true, monthlySessionTarget: true }).parse(request.body);
+  const [client] = await sql`UPDATE clients SET full_name = ${input.fullName}, email = ${input.email || null}, phone = ${input.phone || null}, goal = ${input.goal || null}, notes = ${input.notes || null}, monthly_session_target = ${input.monthlySessionTarget ?? null}, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
   if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
   return client;
 });
@@ -1327,7 +1330,7 @@ app.delete('/api/inbody/:id', { preHandler: requireStaff }, async (request, repl
 });
 
 async function ownedClient(clientId: string, ownerId: string) {
-  const [client] = await sql`SELECT id, billing_model FROM clients WHERE id = ${clientId} AND owner_id = ${ownerId}`;
+  const [client] = await sql`SELECT id, billing_model, monthly_session_target FROM clients WHERE id = ${clientId} AND owner_id = ${ownerId}`;
   return client;
 }
 
@@ -1368,11 +1371,18 @@ app.get('/api/clients/:clientId/attendance', { preHandler: requireStaff }, async
   const packageRows = packages as unknown as Array<{ id: string; label: string; total_sessions: number; used_sessions: number; status: string; purchased_on: string; expires_on: string | null }>;
   const sessionsPerWeek = Number(cadence[0]?.sessions_per_week) || null;
 
-  // El paquete fija cuántas sesiones tocan al mes: el total repartido entre los
-  // meses que cubre. Sin fecha de vencimiento no hay ritmo pactado, así que se
-  // cae a la cadencia de la rutina activa. Si tampoco hay, no se inventa una
-  // meta: el mes queda sin referencia y la interfaz lo dice.
+  // Precedencia de la meta mensual:
+  //   1. La pactada en la ficha del cliente, si la hay. Manda sobre todo
+  //      porque es lo que la entrenadora acordó, y es lo único que cubre a los
+  //      clientes de mensualidad, que no tienen paquete ni siempre rutina.
+  //   2. El paquete: su total repartido entre los meses que cubre. Sin fecha
+  //      de vencimiento no hay ritmo pactado y no sirve.
+  //   3. La cadencia de la rutina activa.
+  // Si no hay ninguna, no se inventa una meta: el mes queda sin referencia y
+  // la interfaz lo dice.
+  const clientTarget = Number(client.monthly_session_target) || null;
   function expectedFor(monthKey: string) {
+    if (clientTarget) return { expected: clientTarget, basis: 'client' as const, packageLabel: null };
     const monthStart = new Date(`${monthKey}-01T00:00:00Z`);
     const monthEnd = new Date(Date.UTC(monthStart.getUTCFullYear(), monthStart.getUTCMonth() + 1, 0));
     const covering = packageRows.find(row => {
@@ -1420,7 +1430,7 @@ app.get('/api/clients/:clientId/attendance', { preHandler: requireStaff }, async
     };
   });
 
-  return { timeline, packages: packageRows, sessionsPerWeek, billingModel: client.billing_model };
+  return { timeline, packages: packageRows, sessionsPerWeek, billingModel: client.billing_model, monthlySessionTarget: clientTarget };
 });
 
 const conditionSchema = z.object({
