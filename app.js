@@ -1,4 +1,4 @@
-const APP_VERSION = '54';
+const APP_VERSION = '55';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -30,31 +30,6 @@ if (authToken && !localStorage.getItem(authKey)) {
   localStorage.removeItem(legacyAuthKey);
 }
 let currentUser = null;
-const seed = {
-  clients: [
-    { id: 'c1', name: 'Cliente de prueba', goal: 'Ganar masa muscular', billingModel: 'monthly', plan: 150, email: '', status: 'Activo', inbody: { date: '2026-07-12', weight: 71.1, smm: 31.2, fat: 15.6, pbf: 21.9, score: 74, history: [{ date: '2025-10-04', weight: 65.1, smm: 29.6, fat: 12.3, pbf: 18.9 }, { date: '2025-11-07', weight: 67.5, smm: 29.7, fat: 14.7, pbf: 21.8 }, { date: '2026-07-12', weight: 71.1, smm: 31.2, fat: 15.6, pbf: 21.9 }] } },
-    { id: 'c2', name: 'Sofía Morales', goal: 'Reducir grasa corporal', billingModel: 'monthly', plan: 130, email: 'sofia@ejemplo.com', status: 'Activo', inbody: { date: '2026-07-28', weight: 62.4, smm: 24.3, fat: 16.1, pbf: 25.8, score: 77, history: [{ date: '2026-06-01', weight: 64.2, smm: 23.9, fat: 18.4, pbf: 28.7 }, { date: '2026-07-28', weight: 62.4, smm: 24.3, fat: 16.1, pbf: 25.8 }] } },
-    { id: 'c3', name: 'Carlos Pérez', goal: 'Mejorar condición física', billingModel: 'package', plan: 100, packageSessions: 8, email: 'carlos@ejemplo.com', status: 'Activo', inbody: null }
-  ],
-  invoices: [
-    { id: 'i1', client: 'Sofía Morales', concept: 'Mensualidad', amount: 130, due: dateKey(today), method: 'Yappy', status: 'confirmed' },
-    { id: 'i2', client: 'Carlos Pérez', concept: 'Paquete de sesiones', amount: 100, due: dateKey(new Date(today.getFullYear(), today.getMonth(), today.getDate() + 2)), method: 'pending', status: 'pending' },
-    { id: 'i3', client: 'Cliente de prueba', concept: 'Mensualidad', amount: 150, due: dateKey(new Date(today.getFullYear(), today.getMonth(), today.getDate() - 3)), method: 'Transferencia bancaria', status: 'confirmed' }
-  ],
-  packages: [
-    { id: 'p1', client: 'Carlos Pérez', label: 'Paquete 8 sesiones', total: 8, used: 3, amount: 100, status: 'confirmed' }
-  ],
-  sessions: [
-    { id: 's1', client: 'Sofía Morales', date: dateKey(today), time: '08:00', routine: 'Fuerza funcional', mode: 'Presencial', status: 'scheduled', notes: '' },
-    { id: 's2', client: 'Cliente de prueba', date: dateKey(today), time: '10:30', routine: 'Hipertrofia · 4 días', mode: 'Presencial', status: 'scheduled', notes: '' },
-    { id: 's3', client: 'Carlos Pérez', date: dateKey(new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1)), time: '16:00', routine: 'Evaluación / seguimiento', mode: 'Presencial', status: 'scheduled', notes: '' }
-  ],
-  routines: [
-    { id: 'r1', title: 'Hipertrofia · 4 días', description: 'Rutina de fuerza y volumen progresivo.', clients: 1, sessions: 4, exercises: ['Sentadilla · 4 × 8', 'Hip thrust · 4 × 10', 'Peso muerto rumano · 3 × 10'] },
-    { id: 'r2', title: 'Fuerza funcional', description: 'Movilidad, estabilidad y acondicionamiento.', clients: 2, sessions: 3, exercises: ['Goblet squat · 3 × 12', 'Remo con banda · 3 × 15', 'Plancha · 3 × 40 s'] },
-    { id: 'r3', title: 'Recomposición corporal', description: 'Entrenamiento de fuerza con cardio estratégico.', clients: 1, sessions: 4, exercises: ['Prensa · 4 × 10', 'Press de pecho · 3 × 10', 'Intervalos · 8 × 30 s'] }
-  ]
-};
 let data = { clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, notifications: [], googleCalendar: { configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } } };
 let portalData = null;
 let compliancePeriod = 'week';
@@ -816,6 +791,7 @@ function renderCatalogList() {
       <span class="catalog-video ${exercise.hasVideo ? 'ready' : ''}">${exercise.hasVideo ? `▶ ${exercise.videoDurationSeconds ? `${Math.round(exercise.videoDurationSeconds)} s` : 'con video'}` : 'sin video'}</span>
       <div class="catalog-item-actions">
         <button class="secondary session-use" data-edit-exercise="${exercise.id}">Editar</button>
+        ${exercise.hasVideo ? `<button class="secondary session-use" data-preview-exercise="${exercise.id}">Ver video</button>` : ''}
         <button class="secondary session-use" data-video-exercise="${exercise.id}">${exercise.hasVideo ? 'Reemplazar video' : 'Subir video'}</button>
       </div></article>`).join('')}</div>` : '<p class="empty">No hay ejercicios en esta sección.</p>'}`;
 
@@ -825,6 +801,30 @@ function renderCatalogList() {
   target.querySelectorAll('[data-video-exercise]').forEach(button => {
     button.onclick = () => exerciseVideoUploader(exerciseCatalog.find(exercise => exercise.id === button.dataset.videoExercise));
   });
+  target.querySelectorAll('[data-preview-exercise]').forEach(button => {
+    button.onclick = () => previewExerciseVideo(exerciseCatalog.find(exercise => exercise.id === button.dataset.previewExercise));
+  });
+}
+
+// La entrenadora necesita ver lo que subió —comprobar el encuadre, si se
+// entiende el movimiento— sin tener que entrar como cliente.
+async function previewExerciseVideo(exercise) {
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">DEMOSTRACIÓN</p><h2>${escapeHtml(exercise.name)}</h2>
+    <p style="color:#6f7b75;margin-top:-12px">Así lo ve el cliente en su rutina.</p>
+    <div id="preview-video"><p class="empty">Cargando video…</p></div>
+    <button class="secondary wide-button" id="preview-replace">Reemplazar este video</button>`;
+  openModal(box);
+  document.getElementById('preview-replace').onclick = () => exerciseVideoUploader(exercise);
+  try {
+    const fuente = await api(`/api/exercises/${exercise.id}/video-url`);
+    const target = document.getElementById('preview-video');
+    if (!target || !modal.open) return;
+    target.innerHTML = `<div class="exercise-video"><video controls playsinline preload="metadata" src="${escapeHtml(fuente.videoUrl)}"></video></div>`;
+  } catch (error) {
+    const target = document.getElementById('preview-video');
+    if (target) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
+  }
 }
 
 async function reloadCatalog() {
@@ -1619,8 +1619,20 @@ const logout = () => {
   localStorage.removeItem(authKey); localStorage.removeItem(legacyAuthKey); authToken = null; currentUser = null; portalData = null;
   data = { clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, notifications: [], googleCalendar: { configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } } }; showAuth(false);
 };
-document.getElementById('account-button').addEventListener('click', logout);
-document.getElementById('portal-account-button').addEventListener('click', logout);
+// El avatar cerraba la sesión de un toque, sin aviso: un roce al buscar el
+// menú te sacaba de la aplicación. Ahora abre la cuenta y salir es explícito.
+function accountMenu() {
+  const nombre = currentUser?.fullName || currentUser?.full_name || '';
+  const rol = currentUser?.role === 'client' ? 'Cliente' : currentUser?.role === 'admin' ? 'Administradora' : 'Entrenadora';
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">TU CUENTA</p><h2>${escapeHtml(nombre || 'Sesión activa')}</h2>
+    <div class="account-card"><div><b>${escapeHtml(currentUser?.email || '')}</b><small>${rol}</small></div><span class="initials">${initials(nombre || currentUser?.email || '')}</span></div>
+    <button class="secondary wide-button" id="account-logout">Cerrar sesión</button>`;
+  openModal(box);
+  document.getElementById('account-logout').onclick = () => { modal.close(); logout(); };
+}
+document.getElementById('account-button').addEventListener('click', accountMenu);
+document.getElementById('portal-account-button').addEventListener('click', accountMenu);
 document.getElementById('google-calendar-connect').addEventListener('click', googleCalendarAction);
 document.getElementById('google-calendar-disconnect').addEventListener('click', disconnectGoogleCalendar);
 async function start() {
