@@ -11,7 +11,10 @@ const scopes = [
   'ZohoInvoice.contacts.READ',
   'ZohoInvoice.invoices.READ',
   'ZohoInvoice.customerpayments.READ',
-  'ZohoInvoice.creditnotes.READ'
+  'ZohoInvoice.creditnotes.READ',
+  // Los gastos exigen su propio permiso. Añadirlo obliga a reconectar Zoho:
+  // el token vigente se emitió para los permisos anteriores y no los cubre.
+  'ZohoInvoice.expenses.READ'
 ].join(',');
 const encryptionKey = createHash('sha256').update(config.JWT_SECRET).digest();
 const runningOwners = new Set<string>();
@@ -249,8 +252,19 @@ async function runSync(ownerId: string) {
     // /expense-category; sin ellos la aplicación sólo conocería los ingresos.
     // Si la cuenta no tiene el módulo habilitado, la llamada falla y se sigue
     // sin gastos en vez de abortar toda la importación.
-    const expenseCategories = await fetchAllPages(accessToken, connection, '/expense-category', ['expense_categories', 'expensecategories', 'categories']).catch(() => []);
-    const expenses = await fetchAllPages(accessToken, connection, '/expenses', ['expenses']).catch(() => []);
+    // Antes estos fallos se tragaban en silencio y el resultado era
+    // indistinguible de "no hay gastos". Ahora se registra el motivo.
+    let expenseError: string | null = null;
+    const traerGastos = async (ruta: string, claves: string[]) => {
+      try { return await fetchAllPages(accessToken, connection, ruta, claves); }
+      catch (error) {
+        expenseError = expenseError || `${ruta}: ${(error as Error).message}`;
+        console.warn('No se pudieron traer los gastos de Zoho', ruta, (error as Error).message);
+        return [] as ZohoRecord[];
+      }
+    };
+    const expenseCategories = await traerGastos('/expensecategories', ['expense_categories', 'expensecategories', 'categories']);
+    const expenses = await traerGastos('/expenses', ['expenses']);
     const categoryMap = new Map<string, string>();
     const clientMap = new Map<string, string>();
     const invoiceMap = new Map<string, string>();
@@ -392,7 +406,7 @@ async function runSync(ownerId: string) {
 
     const sourceSummary = {
       clients: contacts.length, invoices: invoices.length - skippedInvoices, payments: payments.length, recurring: recurring.length, credits: credits.length,
-      expenses: expenses.length, expenseCategories: expenseCategories.length,
+      expenses: expenses.length, expenseCategories: expenseCategories.length, expenseError,
       totalInvoiced: rounded(invoices.reduce((sum, invoice) => sum + numeric(invoice.total), 0)),
       totalPaid: rounded(payments.reduce((sum, payment) => sum + numeric(payment.amount), 0)),
       totalCredits: rounded(credits.reduce((sum, credit) => sum + numeric(credit.total), 0)), skippedInvoices

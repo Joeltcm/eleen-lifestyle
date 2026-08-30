@@ -1,4 +1,4 @@
-const APP_VERSION = '76';
+const APP_VERSION = '77';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1166,14 +1166,21 @@ function financeChartSvg(timeline) {
     <div class="chart-leyenda"><span><i style="background:#8fb89c"></i>Ingresos</span><span><i style="background:#dca78f"></i>Gastos</span></div>`;
 }
 
-function financeDashboard(months = 12) {
+function financeDashboard(rango = 'meses:12') {
+  const anio = new Date().getFullYear();
+  const opciones = [
+    ['meses:6', 'Últimos 6 meses'], ['meses:12', 'Últimos 12 meses'], ['meses:24', 'Últimos 24 meses'],
+    ['anio:0', `Este año (${anio})`], ['anioAnterior:0', `Año anterior (${anio - 1})`], ['todo:0', 'Todo el historial']
+  ];
+  const [modo, meses] = rango.split(':');
+  const consulta = modo === 'meses' ? `rango=meses&months=${meses}` : `rango=${modo}`;
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">FINANZAS</p><h2>Ingresos y gastos</h2>
-    <label>Período<select id="fin-meses">${[6, 12, 24, 36].map(n => `<option value="${n}"${n === months ? ' selected' : ''}>Últimos ${n} meses</option>`).join('')}</select></label>
+    <label>Período<select id="fin-meses">${opciones.map(([valor, texto]) => `<option value="${valor}"${valor === rango ? ' selected' : ''}>${texto}</option>`).join('')}</select></label>
     <div id="fin-cuerpo"><p class="empty">Calculando…</p></div>`;
   openModal(box, true);
-  document.getElementById('fin-meses').onchange = event => financeDashboard(Number(event.target.value));
-  api(`/api/finance/summary?months=${months}`).then(datos => {
+  document.getElementById('fin-meses').onchange = event => financeDashboard(event.target.value);
+  api(`/api/finance/summary?${consulta}`).then(datos => {
     const target = document.getElementById('fin-cuerpo');
     if (!target?.isConnected || !modal.open) return;
     const t = datos.totales;
@@ -2301,7 +2308,11 @@ async function start() {
   try {
     const status = await api('/api/auth/setup-status', { auth: false });
     if (!authToken) return showAuth(status.required);
-    const result = await api('/api/me'); await enterApp(result.user);
+    const result = await api('/api/me');
+    // La sesión se renueva sola al abrir la aplicación: sólo caduca tras 30
+    // días sin usarla.
+    if (result.token) { authToken = result.token; localStorage.setItem(authKey, authToken); }
+    await enterApp(result.user);
   } catch (error) { showAuth(false); document.getElementById('login-error').textContent = authToken ? 'La sesión venció. Inicia sesión nuevamente.' : 'No fue posible conectar con el servidor.'; }
 }
 start();

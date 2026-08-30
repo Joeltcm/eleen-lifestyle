@@ -49,6 +49,11 @@ async function requireAuth(request: FastifyRequest) {
   return request.user as AuthUser;
 }
 
+// La sesión duraba 12 horas, así que a la entrenadora la sacaba a media
+// jornada y al cliente entre una visita y otra. 30 días, y además se renueva
+// en cada arranque de la aplicación: mientras se use, no vence.
+const sessionLifetime = '30d';
+
 async function requireStaff(request: FastifyRequest) {
   const user = await requireAuth(request);
   if (!['admin', 'trainer'].includes(user.role)) {
@@ -257,7 +262,7 @@ app.post('/api/auth/setup', async (request, reply) => {
     VALUES (${input.email.toLowerCase()}, ${passwordHash}, ${input.fullName}, 'admin')
     RETURNING id, email, full_name, role
   `;
-  const token = app.jwt.sign({ sub: user.id, email: user.email, role: user.role }, { expiresIn: '12h' });
+  const token = app.jwt.sign({ sub: user.id, email: user.email, role: user.role }, { expiresIn: sessionLifetime });
   return reply.code(201).send({ user, token });
 });
 
@@ -266,7 +271,7 @@ app.post('/api/auth/login', async (request, reply) => {
   const input = loginSchema.parse(request.body);
   const [user] = await sql`SELECT id, email, full_name, role, password_hash, active FROM users WHERE email = ${input.email.toLowerCase()}`;
   if (!user || !user.active || !(await bcrypt.compare(input.password, user.password_hash))) return reply.code(401).send({ error: 'Correo o contraseña incorrectos' });
-  const token = app.jwt.sign({ sub: user.id, email: user.email, role: user.role }, { expiresIn: '12h' });
+  const token = app.jwt.sign({ sub: user.id, email: user.email, role: user.role }, { expiresIn: sessionLifetime });
   return { user: { id: user.id, email: user.email, fullName: user.full_name, role: user.role }, token };
 });
 
@@ -281,14 +286,17 @@ app.post('/api/auth/reset-password', async (request, reply) => {
     RETURNING id, email, full_name, role
   `;
   if (!user) return reply.code(404).send({ error: 'No existe una cuenta administradora activa' });
-  const token = app.jwt.sign({ sub: user.id, email: user.email, role: user.role }, { expiresIn: '12h' });
+  const token = app.jwt.sign({ sub: user.id, email: user.email, role: user.role }, { expiresIn: sessionLifetime });
   return { user: { id: user.id, email: user.email, fullName: user.full_name, role: user.role }, token };
 });
 
 app.get('/api/me', { preHandler: requireAuth }, async request => {
+  // Se devuelve un token nuevo en cada arranque: usar la aplicación renueva la
+  // sesión, y sólo caduca tras 30 días sin abrirla.
+  const renovado = app.jwt.sign({ sub: (request.user as AuthUser).sub, email: (request.user as AuthUser).email, role: (request.user as AuthUser).role }, { expiresIn: sessionLifetime });
   const auth = request.user as AuthUser;
   const [user] = await sql`SELECT id, email, full_name, role FROM users WHERE id = ${auth.sub}`;
-  return { user };
+  return { user, token: renovado };
 });
 
 const planSchema = z.object({
@@ -561,7 +569,7 @@ app.post('/api/auth/access-link/:token', async (request, reply) => {
   });
 
   if (!resultado) return reply.code(410).send({ error: 'Este enlace ya no es válido. Pídele uno nuevo a tu entrenadora.' });
-  const jwtToken = app.jwt.sign({ sub: resultado.id, email: resultado.email, role: resultado.role }, { expiresIn: '12h' });
+  const jwtToken = app.jwt.sign({ sub: resultado.id, email: resultado.email, role: resultado.role }, { expiresIn: sessionLifetime });
   return { user: { id: resultado.id, email: resultado.email, fullName: resultado.full_name, role: resultado.role }, token: jwtToken };
 });
 
@@ -1423,12 +1431,43 @@ app.patch('/api/invoices/:id/payment', { preHandler: requireStaff }, async (requ
 // también fueron dinero recibido.
 app.get('/api/finance/summary', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
-  const { months } = z.object({ months: z.coerce.number().int().min(2).max(36).default(12) }).parse(request.query);
+  const query = z.object({
+    months: z.coerce.number().int().min(2).max(36).default(12),
+    rango: z.enum(['meses', 'anio', 'anioAnterior', 'todo']).default('meses')
+  }).parse(request.query);
 
-  const desde = new Date();
-  desde.setUTCDate(1); desde.setUTCHours(0, 0, 0, 0);
-  desde.setUTCMonth(desde.getUTCMonth() - (months - 1));
+  const hoy = new Date();
+  const anioActual = hoy.getUTCFullYear();
+  let desde: Date;
+  let hasta: Date | null = null;
+  if (query.rango === 'anio') {
+    desde = new Date(Date.UTC(anioActual, 0, 1));
+    hasta = new Date(Date.UTC(anioActual, 11, 31));
+  } else if (query.rango === 'anioAnterior') {
+    desde = new Date(Date.UTC(anioActual - 1, 0, 1));
+    hasta = new Date(Date.UTC(anioActual - 1, 11, 31));
+  } else if (query.rango === 'todo') {
+    // El primer movimiento real, sea un pago o un gasto. Empezar en una fecha
+    // fija inventaría años vacíos por delante.
+    const [primero] = await sql`
+      SELECT least(
+        COALESCE((SELECT min(p.paid_on) FROM invoice_payments p JOIN clients c ON c.id = p.client_id WHERE c.owner_id = ${auth.sub}), current_date),
+        COALESCE((SELECT min(spent_on) FROM expenses WHERE owner_id = ${auth.sub}), current_date)
+      ) AS inicio
+    `;
+    desde = new Date(`${String(primero?.inicio || new Date().toISOString()).slice(0, 10)}T00:00:00Z`);
+    desde.setUTCDate(1);
+  } else {
+    desde = new Date();
+    desde.setUTCDate(1); desde.setUTCHours(0, 0, 0, 0);
+    desde.setUTCMonth(desde.getUTCMonth() - (query.months - 1));
+  }
   const inicio = desde.toISOString().slice(0, 10);
+  const fin = hasta ? hasta.toISOString().slice(0, 10) : null;
+  // Cuántos meses cubre el rango elegido, para armar la línea de tiempo.
+  const ultimo = hasta || hoy;
+  const months = Math.max(1, Math.min(600,
+    (ultimo.getUTCFullYear() - desde.getUTCFullYear()) * 12 + (ultimo.getUTCMonth() - desde.getUTCMonth()) + 1));
 
   const [ingresos, gastos, porCategoria] = await Promise.all([
     sql`
@@ -1436,12 +1475,14 @@ app.get('/api/finance/summary', { preHandler: requireStaff }, async request => {
         COALESCE(sum(p.amount), 0)::numeric AS total, count(*)::int AS cantidad
       FROM invoice_payments p JOIN clients c ON c.id = p.client_id
       WHERE c.owner_id = ${auth.sub} AND p.paid_on >= ${inicio}::date
+        AND (${fin}::date IS NULL OR p.paid_on <= ${fin}::date)
       GROUP BY 1
     `,
     sql`
       SELECT to_char(date_trunc('month', spent_on), 'YYYY-MM') AS month,
         COALESCE(sum(amount), 0)::numeric AS total, count(*)::int AS cantidad
       FROM expenses WHERE owner_id = ${auth.sub} AND spent_on >= ${inicio}::date
+        AND (${fin}::date IS NULL OR spent_on <= ${fin}::date)
       GROUP BY 1
     `,
     sql`
@@ -1449,6 +1490,7 @@ app.get('/api/finance/summary', { preHandler: requireStaff }, async request => {
         COALESCE(sum(e.amount), 0)::numeric AS total, count(*)::int AS cantidad
       FROM expenses e LEFT JOIN expense_categories c ON c.id = e.category_id
       WHERE e.owner_id = ${auth.sub} AND e.spent_on >= ${inicio}::date
+        AND (${fin}::date IS NULL OR e.spent_on <= ${fin}::date)
       GROUP BY 1 ORDER BY 2 DESC LIMIT 12
     `
   ]);
