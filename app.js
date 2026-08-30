@@ -1,4 +1,4 @@
-const APP_VERSION = '78';
+const APP_VERSION = '79';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1276,8 +1276,11 @@ function linkPackageEditor(cobro, origen) {
 // Gastos: la otra mitad de las finanzas. En lista y no en tabla, por el
 // teléfono.
 function expensesManager(desde = null, hasta = null) {
-  const primeroDelMes = new Date(today.getFullYear(), today.getMonth(), 1).toISOString().slice(0, 10);
-  const rango = { desde: desde || primeroDelMes, hasta: hasta || dateKey(today) };
+  // Desde enero y no desde el primero del mes: con el historial importado de
+  // Zoho, abrir en el mes en curso mostraba "no hay gastos" aunque hubiera
+  // cientos registrados. El año entero cabe de sobra en el tope de la consulta.
+  const primeroDelAnio = new Date(today.getFullYear(), 0, 1).toISOString().slice(0, 10);
+  const rango = { desde: desde || primeroDelAnio, hasta: hasta || dateKey(today) };
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">FINANZAS</p><h2>Gastos</h2>
     <div class="form-row"><label>Desde<input type="date" id="gasto-desde" value="${rango.desde}" /></label><label>Hasta<input type="date" id="gasto-hasta" value="${rango.hasta}" /></label></div>
