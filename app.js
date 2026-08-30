@@ -1,4 +1,4 @@
-const APP_VERSION = '88';
+const APP_VERSION = '89';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1586,7 +1586,7 @@ async function auditLog() {
       const detalle = resumenBitacora(fila.detail);
       return `<article class="gasto-item"><div>
         <b>${escapeHtml(que)}${detalle ? ` · ${escapeHtml(detalle)}` : ''}</b>
-        <small>${new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'America/Panama' }).format(cuando)} · ${escapeHtml(fila.user_email || 'desconocido')}</small>
+        <small>${new Intl.DateTimeFormat('es-PA', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'America/Panama' }).format(cuando)} · ${escapeHtml(fila.user_email || 'desconocido')}</small>
       </div></article>`;
     }).join('')}</div>` : '<p class="empty">Todavía no se ha borrado nada.</p>';
   } catch (error) {
