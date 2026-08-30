@@ -97,3 +97,5 @@ dialog.modal-wide{max-width:920px}
 .checkbox-line input[type=checkbox],.completion-check input[type=checkbox]{width:20px;height:20px;flex:0 0 20px;accent-color:#c98aa6}
 /* Saldos de sesiones en el expediente */
 .balance-list{display:grid;gap:8px}.balance-item{display:grid;grid-template-columns:1fr auto;gap:8px 12px;align-items:center;padding:13px;border-radius:11px;background:rgba(255,253,252,.94);box-shadow:0 4px 13px #6d4a5909;border-left:3px solid #a9c4b3}.balance-item.expired{border-left-color:#dca78f}.balance-item b{display:block;font-size:13px}.balance-item small{display:block;margin-top:3px;font-size:10px;color:var(--muted)}.balance-warning{color:#9c6558;font-weight:600}.balance-item button{grid-column:1/-1;min-height:44px}
+/* Gráfica de cumplimiento mes a mes */
+.compliance-chart{display:block;width:100%;height:auto;margin:14px 0;border-radius:11px;background:rgba(255,253,252,.94);box-shadow:0 4px 13px #6d4a5909;padding:6px}

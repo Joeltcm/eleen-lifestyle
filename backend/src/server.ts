@@ -11,7 +11,7 @@ import { createDownloadUrl, createUploadUrl, deleteObject, downloadObject, stora
 import { extractInBodyDocument, extractInBodyImage, inbodyAnalysisReady, inbodyAnalysisSetup, prepareInBodyImage, validateExtraction, validateInBodyValues } from './inbody-analysis.js';
 import { registerZohoRoutes } from './zoho-routes.js';
 import { cancelSessionInGoogle, registerGoogleCalendarRoutes, syncSessionToGoogle } from './google-calendar.js';
-import { accountStatementPdf, accountsReceivablePdf, invoicePdf } from './billing-reports.js';
+import { accountStatementPdf, accountsReceivablePdf, compliancePdf, invoicePdf } from './billing-reports.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
 const app = Fastify({ logger: true, trustProxy: true });
@@ -1208,8 +1208,12 @@ const reportStart = (period: z.infer<typeof reportPeriodSchema>) => {
   return start.toISOString();
 };
 
-async function complianceRows(ownerId: string, period: z.infer<typeof reportPeriodSchema>, clientId?: string) {
-  const start = reportStart(period);
+// El informe mensual necesita la misma definición de actividad pero sobre una
+// ventana propia, así que el inicio se puede imponer en vez de derivarlo del
+// período. Duplicar la consulta habría dejado dos definiciones de
+// "cumplimiento" que se irían separando con el tiempo.
+async function complianceRows(ownerId: string, period: z.infer<typeof reportPeriodSchema>, clientId?: string, startOverride?: string) {
+  const start = startOverride || reportStart(period);
   return sql`
     WITH activities AS (
       SELECT c.id AS client_id, c.full_name, s.starts_at AS occurred_at, 'Sesión'::text AS source,
@@ -1291,6 +1295,85 @@ app.get('/api/compliance/summary', { preHandler: requireStaff }, async request =
     compliancePercent: rows.length ? Math.round(rows.reduce((sum, row) => sum + Number(row.completion_percent), 0) / rows.length) : 0,
     clients: clientSummaries
   };
+});
+
+// Informe mensual de cumplimiento, para revisar la evolución de un cliente y
+// mandársela al cierre de cada mes.
+const monthlyReportSchema = z.object({
+  clientId: z.string().uuid().optional(),
+  months: z.coerce.number().int().min(2).max(24).default(6)
+});
+
+async function complianceMonthly(ownerId: string, clientId: string | undefined, months: number) {
+  const desde = new Date();
+  desde.setUTCDate(1); desde.setUTCHours(0, 0, 0, 0);
+  desde.setUTCMonth(desde.getUTCMonth() - (months - 1));
+  const filas = await complianceRows(ownerId, 'year', clientId, desde.toISOString());
+
+  const porMes = new Map<string, { month: string; activities: number; completed: number; late: number; missed: number; suma: number }>();
+  for (let i = 0; i < months; i += 1) {
+    const fecha = new Date(Date.UTC(desde.getUTCFullYear(), desde.getUTCMonth() + i, 1));
+    const clave = `${fecha.getUTCFullYear()}-${String(fecha.getUTCMonth() + 1).padStart(2, '0')}`;
+    porMes.set(clave, { month: clave, activities: 0, completed: 0, late: 0, missed: 0, suma: 0 });
+  }
+  for (const fila of filas) {
+    const fecha = new Date(fila.occurred_at as string);
+    const clave = `${fecha.getUTCFullYear()}-${String(fecha.getUTCMonth() + 1).padStart(2, '0')}`;
+    const mes = porMes.get(clave);
+    if (!mes) continue;
+    mes.activities += 1; mes.suma += Number(fila.completion_percent);
+    if (Number(fila.completion_percent) > 0) mes.completed += 1;
+    if (fila.late) mes.late += 1;
+    if (fila.status === 'missed') mes.missed += 1;
+  }
+  // Un mes sin actividad devuelve null, no 0%: no es lo mismo "no entrenó
+  // nada" que "no había nada que medir", y pintar un cero hundiría la gráfica
+  // por meses en los que el cliente ni siquiera estaba activo.
+  return [...porMes.values()].map(mes => ({
+    month: mes.month, activities: mes.activities, completed: mes.completed, late: mes.late, missed: mes.missed,
+    compliancePercent: mes.activities ? Math.round(mes.suma / mes.activities) : null
+  }));
+}
+
+app.get('/api/compliance/monthly', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const query = monthlyReportSchema.parse(request.query);
+  let client = null;
+  if (query.clientId) {
+    client = await ownedClient(query.clientId, auth.sub);
+    if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  }
+  const timeline = await complianceMonthly(auth.sub, query.clientId, query.months);
+  const conDatos = timeline.filter(mes => mes.compliancePercent !== null);
+  return {
+    timeline,
+    clientId: query.clientId || null,
+    promedio: conDatos.length ? Math.round(conDatos.reduce((suma, mes) => suma + (mes.compliancePercent || 0), 0) / conDatos.length) : null,
+    totalActividades: timeline.reduce((suma, mes) => suma + mes.activities, 0),
+    totalTardias: timeline.reduce((suma, mes) => suma + mes.late, 0),
+    totalIncumplidas: timeline.reduce((suma, mes) => suma + mes.missed, 0)
+  };
+});
+
+app.get('/api/compliance/report.pdf', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const query = monthlyReportSchema.parse(request.query);
+  let client = null;
+  if (query.clientId) {
+    const [row] = await sql`SELECT id, full_name, email FROM clients WHERE id = ${query.clientId} AND owner_id = ${auth.sub}`;
+    if (!row) return reply.code(404).send({ error: 'Cliente no encontrado' });
+    client = row;
+  }
+  const timeline = await complianceMonthly(auth.sub, query.clientId, query.months);
+  const conDatos = timeline.filter(mes => mes.compliancePercent !== null);
+  const resumen = {
+    promedio: conDatos.length ? Math.round(conDatos.reduce((suma, mes) => suma + (mes.compliancePercent || 0), 0) / conDatos.length) : null,
+    totalActividades: timeline.reduce((suma, mes) => suma + mes.activities, 0),
+    totalTardias: timeline.reduce((suma, mes) => suma + mes.late, 0),
+    totalIncumplidas: timeline.reduce((suma, mes) => suma + mes.missed, 0)
+  };
+  const nombre = client ? String(client.full_name).replace(/\s+/g, '-').toLowerCase() : 'todos';
+  return sendPdf(reply, await compliancePdf(client, resumen, timeline), `cumplimiento-${nombre}.pdf`);
 });
 
 app.get('/api/compliance/report.csv', { preHandler: requireStaff }, async (request, reply) => {

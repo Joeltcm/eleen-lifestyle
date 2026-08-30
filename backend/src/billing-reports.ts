@@ -189,3 +189,93 @@ export function accountsReceivablePdf(rows: PdfRecord[], asOf: string) {
     ], rows, 'Cuentas por cobrar');
   });
 }
+
+// Gráfica lineal de cumplimiento mes a mes. Se dibuja con primitivas de pdfkit
+// en vez de incrustar una imagen: pesa nada, se imprime nítida a cualquier
+// tamaño y no mete una dependencia sólo para esto.
+function complianceChart(document: PDFKit.PDFDocument, timeline: PdfRecord[]) {
+  const x = 42, ancho = 511, alto = 168;
+  const y = document.y;
+  const conDatos = timeline.filter(mes => mes.compliancePercent !== null);
+  if (conDatos.length < 2) {
+    document.font('Helvetica').fontSize(9).fillColor(colors.muted)
+      .text('Se necesitan al menos dos meses con actividad para comparar.', x, y + 12, { width: ancho });
+    document.y = y + 40;
+    return;
+  }
+
+  document.roundedRect(x, y, ancho, alto, 10).fill(colors.pale);
+
+  // Rejilla horizontal cada 25%
+  for (let p = 0; p <= 100; p += 25) {
+    const py = y + alto - 26 - ((alto - 46) * p) / 100;
+    document.moveTo(x + 34, py).lineTo(x + ancho - 14, py).lineWidth(0.5).stroke(colors.line);
+    document.font('Helvetica').fontSize(7).fillColor(colors.muted).text(`${p}%`, x + 8, py - 3, { width: 22, align: 'right' });
+  }
+
+  const paso = (ancho - 52) / Math.max(1, timeline.length - 1);
+  const punto = (indice: number, porcentaje: number) => ({
+    px: x + 34 + paso * indice,
+    py: y + alto - 26 - ((alto - 46) * porcentaje) / 100
+  });
+
+  // La línea salta los meses sin actividad en vez de bajarlos a cero.
+  let iniciado = false;
+  timeline.forEach((mes, indice) => {
+    if (mes.compliancePercent === null) { iniciado = false; return; }
+    const { px, py } = punto(indice, Number(mes.compliancePercent));
+    if (!iniciado) { document.moveTo(px, py); iniciado = true; } else { document.lineTo(px, py); }
+  });
+  document.lineWidth(2).stroke(colors.rose);
+
+  timeline.forEach((mes, indice) => {
+    const etiqueta = String(mes.month).slice(5) + '/' + String(mes.month).slice(2, 4);
+    const { px } = punto(indice, 0);
+    document.font('Helvetica').fontSize(7).fillColor(colors.muted)
+      .text(etiqueta, px - 16, y + alto - 18, { width: 32, align: 'center' });
+    if (mes.compliancePercent === null) return;
+    const { py } = punto(indice, Number(mes.compliancePercent));
+    document.circle(px, py, 3).fill(colors.rose);
+    document.font('Helvetica-Bold').fontSize(7).fillColor(colors.ink)
+      .text(`${mes.compliancePercent}%`, px - 16, py - 14, { width: 32, align: 'center' });
+  });
+
+  document.y = y + alto + 14;
+}
+
+export function compliancePdf(client: PdfRecord | null, resumen: PdfRecord, timeline: PdfRecord[]) {
+  return pdfBuffer(document => {
+    const desde = timeline[0]?.month || '';
+    const hasta = timeline[timeline.length - 1]?.month || '';
+    brandHeader(document, 'Informe de cumplimiento', `${desde} al ${hasta} · Entrenamientos y rutinas`);
+    infoPair(document, 'Cliente', clean(client ? client.full_name : 'Todos los clientes'), 42, document.y, 245);
+    infoPair(document, 'Emitido', date(new Date()), 310, document.y, 245);
+    document.y += 48;
+
+    summaryBoxes(document, [
+      { label: 'Cumplimiento promedio', value: resumen.promedio === null ? 'Sin datos' : `${resumen.promedio}%` },
+      { label: 'Actividades', value: String(resumen.totalActividades) },
+      { label: 'Fuera de fecha', value: String(resumen.totalTardias) },
+      { label: 'Sin hacer', value: String(resumen.totalIncumplidas) }
+    ]);
+
+    document.font('Helvetica-Bold').fontSize(11).fillColor(colors.ink).text('Evolución mes a mes', 42, document.y);
+    document.y += 6;
+    complianceChart(document, timeline);
+
+    table(document, [
+      { label: 'Mes', key: 'month', width: 96 },
+      { label: 'Actividades', key: 'activities', width: 90, align: 'right' },
+      { label: 'Cumplidas', key: 'completed', width: 90, align: 'right' },
+      { label: 'Fuera de fecha', key: 'late', width: 100, align: 'right' },
+      { label: 'Sin hacer', key: 'missed', width: 80, align: 'right' },
+      { label: 'Cumplimiento', key: 'compliancePercent', width: 95, align: 'right',
+        format: value => (value === null ? 'Sin actividad' : `${value}%`) }
+    ], timeline, 'Informe de cumplimiento');
+
+    document.moveDown(1);
+    document.font('Helvetica').fontSize(8).fillColor(colors.muted).text(
+      'Cumplir fuera de fecha cuenta como cumplido. Sólo lo que venció sin hacerse cuenta como incumplimiento.',
+      42, document.y, { width: 511 });
+  });
+}

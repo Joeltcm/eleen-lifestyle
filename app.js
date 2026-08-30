@@ -1,4 +1,4 @@
-const APP_VERSION = '61';
+const APP_VERSION = '62';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1213,6 +1213,70 @@ function reschedulePackage(saldo, client) {
   });
 }
 
+// Gráfica lineal en SVG con viewBox: escala sola al ancho disponible, así se
+// ve igual en el teléfono que en el escritorio, sin dos maquetaciones y sin
+// meter una librería de gráficas.
+function complianceChartSvg(timeline) {
+  const ancho = 520, alto = 190, izq = 34, der = 14, arriba = 18, abajo = 26;
+  if (timeline.filter(mes => mes.compliancePercent !== null).length < 2) {
+    return '<p class="empty">Se necesitan al menos dos meses con actividad para comparar.</p>';
+  }
+  const paso = (ancho - izq - der) / Math.max(1, timeline.length - 1);
+  const px = i => izq + paso * i;
+  const py = p => alto - abajo - ((alto - arriba - abajo) * p) / 100;
+
+  const rejilla = [0, 25, 50, 75, 100].map(p =>
+    `<line x1="${izq}" y1="${py(p)}" x2="${ancho - der}" y2="${py(p)}" stroke="#ece5e7" stroke-width="1"/><text x="${izq - 6}" y="${py(p) + 3}" text-anchor="end" font-size="8" fill="#7c7077">${p}%</text>`).join('');
+
+  // Un mes sin actividad corta la línea en vez de bajarla a cero: no es lo
+  // mismo no cumplir que no haber tenido nada que cumplir.
+  const tramos = []; let actual = [];
+  timeline.forEach((mes, i) => {
+    if (mes.compliancePercent === null) { if (actual.length > 1) tramos.push(actual); actual = []; return; }
+    actual.push(`${px(i)},${py(Number(mes.compliancePercent))}`);
+  });
+  if (actual.length > 1) tramos.push(actual);
+  const lineas = tramos.map(t => `<polyline points="${t.join(' ')}" fill="none" stroke="#c98aa6" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`).join('');
+
+  const puntos = timeline.map((mes, i) => {
+    const etiqueta = `<text x="${px(i)}" y="${alto - 8}" text-anchor="middle" font-size="8" fill="#7c7077">${mes.month.slice(5)}</text>`;
+    if (mes.compliancePercent === null) return etiqueta;
+    const y = py(Number(mes.compliancePercent));
+    return `${etiqueta}<circle cx="${px(i)}" cy="${y}" r="3.5" fill="#c98aa6"/><text x="${px(i)}" y="${y - 8}" text-anchor="middle" font-size="8" font-weight="700" fill="#3d3238">${mes.compliancePercent}%</text>`;
+  }).join('');
+
+  return `<svg viewBox="0 0 ${ancho} ${alto}" class="compliance-chart" role="img" aria-label="Cumplimiento mes a mes">${rejilla}${lineas}${puntos}</svg>`;
+}
+
+function complianceReport(client = null, months = 6) {
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">INFORME DE CUMPLIMIENTO</p><h2>${client ? escapeHtml(client.name) : 'Todos los clientes'}</h2>
+    <label>Meses a comparar<select id="report-months">${[3, 6, 12, 24].map(n => `<option value="${n}"${n === months ? ' selected' : ''}>Últimos ${n} meses</option>`).join('')}</select></label>
+    <div id="report-body"><p class="empty">Calculando…</p></div>`;
+  openModal(box, true);
+  document.getElementById('report-months').onchange = event => complianceReport(client, Number(event.target.value));
+  renderComplianceReport(client, months);
+}
+
+function renderComplianceReport(client, months) {
+  const target = document.getElementById('report-body');
+  const query = `months=${months}${client ? `&clientId=${encodeURIComponent(client.id)}` : ''}`;
+  api(`/api/compliance/monthly?${query}`).then(informe => {
+    if (!target?.isConnected || !modal.open) return;
+    const filas = informe.timeline.map(mes => `<tr><td>${attendanceMonthLabel(mes.month)}</td><td>${mes.activities || '—'}</td><td>${mes.completed || '—'}</td><td>${mes.late || '—'}</td><td>${mes.missed || '—'}</td><td>${mes.compliancePercent === null ? '<span class="delta neutral">sin actividad</span>' : `<span class="delta ${mes.compliancePercent >= 90 ? 'good' : mes.compliancePercent >= 70 ? 'neutral' : 'bad'}">${mes.compliancePercent}%</span>`}</td></tr>`).join('');
+    target.innerHTML = `<div class="metrics" style="grid-template-columns:repeat(2,1fr)">
+        <article><span>Promedio</span><strong>${informe.promedio === null ? '—' : `${informe.promedio}%`}</strong></article>
+        <article><span>Actividades</span><strong>${informe.totalActividades}</strong></article>
+        <article><span>Fuera de fecha</span><strong>${informe.totalTardias}</strong></article>
+        <article><span>Sin hacer</span><strong>${informe.totalIncumplidas}</strong></article></div>
+      ${complianceChartSvg(informe.timeline)}
+      <div class="table-wrap"><table><thead><tr><th>Mes</th><th>Act.</th><th>Cumpl.</th><th>Tarde</th><th>Sin hacer</th><th>%</th></tr></thead><tbody>${filas}</tbody></table></div>
+      <button class="primary wide-button" id="report-pdf">Ver PDF para enviar</button>
+      <p class="section-note">El PDF trae la gráfica y el detalle mes a mes con la marca de Eileen Lifestyle. Desde ahí lo descargas y lo compartes por WhatsApp o correo.</p>`;
+    document.getElementById('report-pdf').onclick = () => previewProtectedPdf(`/api/compliance/report.pdf?${query}`, `Cumplimiento · ${client ? client.name : 'Todos los clientes'}`, `cumplimiento-${client ? client.name.replace(/\s+/g, '-').toLowerCase() : 'todos'}.pdf`);
+  }).catch(error => { if (target?.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; });
+}
+
 function attendanceSection(target, clientId) {
   api(`/api/clients/${encodeURIComponent(clientId)}/attendance?months=6`).then(report => {
     if (!target.isConnected || !modal.open) return;
@@ -1362,8 +1426,8 @@ function clientDetail(id) {
     : `${client.planName || 'Mensualidad'} · ${money.format(client.plan)} al mes · corte día ${client.cutoffDay}`;
   const box = document.createElement('div');
   const reviewNotice = client.inbodyReviews.length ? `<button class="secondary wide-button" id="review-inbody">Revisar ${client.inbodyReviews.length} evaluación${client.inbodyReviews.length > 1 ? 'es' : ''} pendiente${client.inbodyReviews.length > 1 ? 's' : ''}</button>` : '';
-  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">CAMBIO DESDE LA MEDICIÓN ANTERIOR</p>${inbodyComparison(inbody)}<p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th>vs. anterior</th><th></th></tr></thead><tbody>${inbody.history.slice().reverse().map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td class="delta-cell">${reading.delta ? `${deltaChip('weight', reading.delta.weight)}${deltaChip('smm', reading.delta.smm)}${deltaChip('pbf', reading.delta.pbf)}` : '<span class="delta neutral">primera</span>'}</td><td><button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">SALDO DE SESIONES</p><div id="client-balances"><p class="empty">Cargando saldos…</p></div><p class="eyebrow" style="margin-top:20px">ASISTENCIA MENSUAL</p><div id="client-attendance"><p class="empty">Calculando cumplimiento…</p></div><p class="eyebrow" style="margin-top:20px">LESIONES Y PADECIMIENTOS</p><div id="client-conditions"><p class="empty">Cargando expediente clínico…</p></div><p class="eyebrow" style="margin-top:20px">FOTOS DE PROGRESO</p><div id="client-photos"><p class="empty">Cargando fotos…</p></div><p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="portal-link">${client.portalActive ? 'Enviar enlace de acceso' : 'Activar portal con enlace'}</button><button class="secondary" id="portal-access">${client.portalActive ? 'Poner contraseña a mano' : 'Activar con contraseña'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
-  openModal(box); document.getElementById('open-scan').onclick = () => inbodyImport(client); document.getElementById('edit-client-contact').onclick = () => editClient(client); document.getElementById('edit-client-plan').onclick = () => clientPlanEditor(client); document.getElementById('portal-access').onclick = () => portalAccessEditor(client); document.getElementById('portal-link').onclick = () => portalAccessLink(client); document.getElementById('delete-client').onclick = () => deleteResource(`/api/clients/${client.id}`, `¿Eliminar a ${client.name}? También se eliminarán sus documentos, sesiones y cobros asociados.`, 'Cliente eliminado');
+  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">CAMBIO DESDE LA MEDICIÓN ANTERIOR</p>${inbodyComparison(inbody)}<p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th>vs. anterior</th><th></th></tr></thead><tbody>${inbody.history.slice().reverse().map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td class="delta-cell">${reading.delta ? `${deltaChip('weight', reading.delta.weight)}${deltaChip('smm', reading.delta.smm)}${deltaChip('pbf', reading.delta.pbf)}` : '<span class="delta neutral">primera</span>'}</td><td><button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">SALDO DE SESIONES</p><div id="client-balances"><p class="empty">Cargando saldos…</p></div><p class="eyebrow" style="margin-top:20px">ASISTENCIA MENSUAL</p><div id="client-attendance"><p class="empty">Calculando cumplimiento…</p></div><p class="eyebrow" style="margin-top:20px">LESIONES Y PADECIMIENTOS</p><div id="client-conditions"><p class="empty">Cargando expediente clínico…</p></div><p class="eyebrow" style="margin-top:20px">FOTOS DE PROGRESO</p><div id="client-photos"><p class="empty">Cargando fotos…</p></div><p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="client-report">Informe de cumplimiento</button><button class="secondary" id="portal-link">${client.portalActive ? 'Enviar enlace de acceso' : 'Activar portal con enlace'}</button><button class="secondary" id="portal-access">${client.portalActive ? 'Poner contraseña a mano' : 'Activar con contraseña'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
+  openModal(box); document.getElementById('open-scan').onclick = () => inbodyImport(client); document.getElementById('edit-client-contact').onclick = () => editClient(client); document.getElementById('edit-client-plan').onclick = () => clientPlanEditor(client); document.getElementById('portal-access').onclick = () => portalAccessEditor(client); document.getElementById('portal-link').onclick = () => portalAccessLink(client); document.getElementById('client-report').onclick = () => complianceReport(client); document.getElementById('delete-client').onclick = () => deleteResource(`/api/clients/${client.id}`, `¿Eliminar a ${client.name}? También se eliminarán sus documentos, sesiones y cobros asociados.`, 'Cliente eliminado');
   if (client.inbodyReviews.length) document.getElementById('review-inbody').onclick = () => inbodyReview(client, client.inbodyReviews);
   balancesSection(document.getElementById('client-balances'), client);
   attendanceSection(document.getElementById('client-attendance'), client.id);
@@ -1479,6 +1543,7 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'new-routine') newRoutine();
   if (actionButton?.dataset.action === 'exercise-catalog') exerciseCatalogManager();
   if (actionButton?.dataset.action === 'daily-log') dailyTrainingLog();
+  if (actionButton?.dataset.action === 'compliance-report') complianceReport();
   if (actionButton?.dataset.action === 'new-plan') planEditor();
   if (actionButton?.dataset.action === 'export-compliance') exportCompliance();
   if (actionButton?.dataset.action === 'account-statement') financialReportDialog('account-statement');
