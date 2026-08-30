@@ -1431,6 +1431,7 @@ app.delete('/api/invoices/:id', { preHandler: requireStaff }, async (request, re
 app.delete('/api/invoices/:id/permanent', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const forzar = z.coerce.boolean().default(false).parse((request.query as { force?: string }).force ?? false);
 
   const resultado = await sql.begin(async transaction => {
     const [invoice] = await transaction`
@@ -1439,10 +1440,34 @@ app.delete('/api/invoices/:id/permanent', { preHandler: requireStaff }, async (r
     `;
     if (!invoice) return { error: 'Cobro no encontrado', code: 404 };
     if (invoice.source_system === 'zoho_invoice') return { error: 'Los cobros de Zoho no se borran desde aquí: Zoho es su fuente', code: 409 };
+    // Un cobro ya pagado sólo se borra si se pide a conciencia: se lleva por
+    // delante el pago, y con él el ingreso que figura en finanzas. Antes esto
+    // era un callejón sin salida —el mensaje mandaba a "editar el pago
+    // primero", pero editarlo no lo borra— y un cobro de prueba confirmado por
+    // error se quedaba para siempre.
     // payment_allocations tiene clave primaria compuesta y no columna id.
-    const [pago] = await transaction`SELECT payment_id FROM payment_allocations WHERE invoice_id = ${id} LIMIT 1`;
-    if (pago) return { error: 'Este cobro tiene pagos registrados. Quita el pago antes de borrarlo', code: 409 };
-    if (invoice.status === 'confirmed') return { error: 'Este cobro está confirmado como pagado. Edita el pago antes de borrarlo', code: 409 };
+    const pagos = await transaction`SELECT payment_id, amount FROM payment_allocations WHERE invoice_id = ${id}`;
+    if (pagos.length && !forzar) {
+      return { error: 'Este cobro tiene un pago registrado. Bórralo con la opción de borrado definitivo si de verdad quieres quitarlo', code: 409 };
+    }
+    if (invoice.status === 'confirmed' && !forzar) {
+      return { error: 'Este cobro está confirmado como pagado. Usa el borrado definitivo si de verdad quieres quitarlo', code: 409 };
+    }
+
+    let pagosBorrados = 0;
+    for (const asignacion of pagos) {
+      // Si ese pago cubre además otros cobros, no se toca: sería un movimiento
+      // de banco real y recortarlo aquí falsearía los otros cobros. Se dice y
+      // se para, en vez de arreglarlo por dentro a ojo.
+      const [otra] = await transaction`
+        SELECT invoice_id FROM payment_allocations
+        WHERE payment_id = ${asignacion.payment_id} AND invoice_id <> ${id} LIMIT 1
+      `;
+      if (otra) return { error: 'El pago de este cobro cubre también otros cobros. Sepáralos antes de borrarlo', code: 409 };
+      // Las asignaciones caen en cascada con el pago.
+      await transaction`DELETE FROM invoice_payments WHERE id = ${asignacion.payment_id}`;
+      pagosBorrados += 1;
+    }
 
     // Si el cobro creó un saldo de sesiones y nadie lo usó, se va con él: era
     // parte del mismo error. Si ya se consumieron sesiones, el saldo se queda.
@@ -1455,11 +1480,11 @@ app.delete('/api/invoices/:id/permanent', { preHandler: requireStaff }, async (r
       }
     }
     await transaction`DELETE FROM invoices WHERE id = ${id}`;
-    return { deleted: true, saldoBorrado, concept: invoice.concept as string, error: undefined as string | undefined, code: 0 };
+    return { deleted: true, saldoBorrado, pagosBorrados, concept: invoice.concept as string, error: undefined as string | undefined, code: 0 };
   });
 
   if (resultado.error) return reply.code(resultado.code || 400).send({ error: resultado.error });
-  return { deleted: true, saldoBorrado: resultado.saldoBorrado, concept: resultado.concept };
+  return { deleted: true, saldoBorrado: resultado.saldoBorrado, pagosBorrados: resultado.pagosBorrados, concept: resultado.concept };
 });
 
 const paymentSchema = z.object({ method: z.enum(['Efectivo', 'Yappy', 'Transferencia bancaria', 'Tarjeta', 'Otro']), reference: z.string().max(160).optional(), paidOn: z.string().date() });
