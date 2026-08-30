@@ -91,3 +91,7 @@ dialog.modal-wide{max-width:920px}
 /* Enlace de acceso de un solo uso */
 .access-link{margin:12px 0;padding:13px;border-radius:10px;background:#f7f1f3;border:1px dashed #d8a7bc}.access-link code{display:block;font:500 11px/1.5 'DM Mono',monospace;color:#6e5963;word-break:break-all;user-select:all}
 .sin-video{color:#a2969c;font-style:italic}
+/* Área táctil de las casillas: la etiqueta ya envolvía a la casilla, pero la
+   fila medía 24 px de alto y con el dedo se falla. 44 px es el mínimo cómodo. */
+.checkbox-line,.completion-check{display:flex;align-items:center;gap:10px;min-height:44px}
+.checkbox-line input[type=checkbox],.completion-check input[type=checkbox]{width:20px;height:20px;flex:0 0 20px;accent-color:#c98aa6}
