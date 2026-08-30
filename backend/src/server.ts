@@ -1488,19 +1488,23 @@ app.get('/api/finance/summary', { preHandler: requireStaff }, async request => {
       GROUP BY 1
     `,
     sql`
-      SELECT to_char(date_trunc('month', spent_on), 'YYYY-MM') AS month,
-        COALESCE(sum(amount), 0)::numeric AS total, count(*)::int AS cantidad
-      FROM expenses WHERE owner_id = ${auth.sub} AND spent_on >= ${inicio}::date
-        AND (${fin}::date IS NULL OR spent_on <= ${fin}::date)
+      SELECT to_char(date_trunc('month', e.spent_on), 'YYYY-MM') AS month,
+        COALESCE(sum(e.amount), 0)::numeric AS total, count(*)::int AS cantidad,
+        COALESCE(sum(e.amount) FILTER (WHERE c.ambito = 'negocio'), 0)::numeric AS negocio,
+        COALESCE(sum(e.amount) FILTER (WHERE c.ambito = 'personal'), 0)::numeric AS personal,
+        COALESCE(sum(e.amount) FILTER (WHERE c.ambito IS NULL), 0)::numeric AS sin_clasificar
+      FROM expenses e LEFT JOIN expense_categories c ON c.id = e.category_id
+      WHERE e.owner_id = ${auth.sub} AND e.spent_on >= ${inicio}::date
+        AND (${fin}::date IS NULL OR e.spent_on <= ${fin}::date)
       GROUP BY 1
     `,
     sql`
-      SELECT COALESCE(c.name, 'Sin categoría') AS categoria,
+      SELECT COALESCE(c.name, 'Sin categoría') AS categoria, c.ambito,
         COALESCE(sum(e.amount), 0)::numeric AS total, count(*)::int AS cantidad
       FROM expenses e LEFT JOIN expense_categories c ON c.id = e.category_id
       WHERE e.owner_id = ${auth.sub} AND e.spent_on >= ${inicio}::date
         AND (${fin}::date IS NULL OR e.spent_on <= ${fin}::date)
-      GROUP BY 1 ORDER BY 2 DESC LIMIT 12
+      GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 12
     `
   ]);
 
@@ -1511,16 +1515,27 @@ app.get('/api/finance/summary', { preHandler: requireStaff }, async request => {
     const month = `${fecha.getUTCFullYear()}-${String(fecha.getUTCMonth() + 1).padStart(2, '0')}`;
     const income = Number(mapaIngresos.get(month)?.total || 0);
     const expense = Number(mapaGastos.get(month)?.total || 0);
+    const fila = mapaGastos.get(month);
+    const negocio = Number(fila?.negocio || 0);
     return {
       month, income: Number(income.toFixed(2)), expense: Number(expense.toFixed(2)),
       net: Number((income - expense).toFixed(2)),
+      // El neto del negocio ignora el gasto personal: es el que dice si el
+      // entrenamiento se sostiene solo.
+      expenseNegocio: Number(negocio.toFixed(2)),
+      expensePersonal: Number(Number(fila?.personal || 0).toFixed(2)),
+      expenseSinClasificar: Number(Number(fila?.sin_clasificar || 0).toFixed(2)),
+      netNegocio: Number((income - negocio).toFixed(2)),
       payments: Number(mapaIngresos.get(month)?.cantidad || 0),
-      expenseCount: Number(mapaGastos.get(month)?.cantidad || 0)
+      expenseCount: Number(fila?.cantidad || 0)
     };
   });
 
   const totalIngresos = timeline.reduce((suma, mes) => suma + mes.income, 0);
   const totalGastos = timeline.reduce((suma, mes) => suma + mes.expense, 0);
+  const gastosNegocio = timeline.reduce((suma, mes) => suma + mes.expenseNegocio, 0);
+  const gastosPersonal = timeline.reduce((suma, mes) => suma + mes.expensePersonal, 0);
+  const gastosSinClasificar = timeline.reduce((suma, mes) => suma + mes.expenseSinClasificar, 0);
   const conActividad = timeline.filter(mes => mes.income > 0 || mes.expense > 0);
 
   return {
@@ -1532,6 +1547,13 @@ app.get('/api/finance/summary', { preHandler: requireStaff }, async request => {
       // Cuánto de cada dólar cobrado se queda. Sin ingresos no se calcula, en
       // vez de mostrar un 0% que parecería un negocio en ruina.
       margen: totalIngresos > 0 ? Math.round(((totalIngresos - totalGastos) / totalIngresos) * 100) : null,
+      gastosNegocio: Number(gastosNegocio.toFixed(2)),
+      gastosPersonal: Number(gastosPersonal.toFixed(2)),
+      gastosSinClasificar: Number(gastosSinClasificar.toFixed(2)),
+      netoNegocio: Number((totalIngresos - gastosNegocio).toFixed(2)),
+      // El margen del negocio sólo es creíble cuando no queda gasto por
+      // clasificar: con categorías sin ámbito estaría contando de menos.
+      margenNegocio: totalIngresos > 0 ? Math.round(((totalIngresos - gastosNegocio) / totalIngresos) * 100) : null,
       mesesConActividad: conActividad.length,
       promedioMensualNeto: conActividad.length ? Number(((totalIngresos - totalGastos) / conActividad.length).toFixed(2)) : 0
     }
@@ -1543,6 +1565,7 @@ app.get('/api/finance/summary', { preHandler: requireStaff }, async request => {
 // ingresos, así que no había con qué comparar.
 const expenseCategorySchema = z.object({
   name: z.string().trim().min(2).max(120),
+  ambito: z.enum(['negocio', 'personal']).nullable().optional(),
   description: z.string().trim().max(300).optional().nullable(),
   archived: z.boolean().optional()
 });
@@ -1561,8 +1584,8 @@ app.post('/api/expense-categories', { preHandler: requireStaff }, async (request
   const auth = request.user as AuthUser;
   const input = expenseCategorySchema.parse(request.body);
   const [categoria] = await sql`
-    INSERT INTO expense_categories (owner_id, name, description)
-    VALUES (${auth.sub}, ${input.name}, ${input.description || null})
+    INSERT INTO expense_categories (owner_id, name, ambito, description)
+    VALUES (${auth.sub}, ${input.name}, ${input.ambito ?? null}, ${input.description || null})
     ON CONFLICT (owner_id, name) DO NOTHING RETURNING *
   `;
   if (!categoria) return reply.code(409).send({ error: 'Ya existe una categoría con ese nombre' });
@@ -1576,6 +1599,7 @@ app.patch('/api/expense-categories/:id', { preHandler: requireStaff }, async (re
   const [categoria] = await sql`
     UPDATE expense_categories SET
       name = COALESCE(${input.name ?? null}, name),
+      ambito = CASE WHEN ${'ambito' in (input as Record<string, unknown>)} THEN ${input.ambito ?? null} ELSE ambito END,
       description = COALESCE(${input.description ?? null}, description),
       archived = COALESCE(${input.archived ?? null}, archived),
       updated_at = now()

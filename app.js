@@ -1,4 +1,4 @@
-const APP_VERSION = '79';
+const APP_VERSION = '80';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1188,14 +1188,26 @@ function financeDashboard(rango = 'meses:12') {
       <td>${attendanceMonthLabel(mes.month)}</td><td>${money.format(mes.income)}</td><td>${money.format(mes.expense)}</td>
       <td><span class="delta ${mes.net >= 0 ? 'good' : 'bad'}">${money.format(mes.net)}</span></td></tr>`).join('');
 
-    target.innerHTML = `<div class="metrics" style="grid-template-columns:repeat(2,1fr)">
+    // El negocio arriba y lo personal aparte. Mezclarlos daba un margen que no
+    // describía ni una cosa ni la otra: el supermercado restando de lo que
+    // cobra por entrenar.
+    target.innerHTML = `<p class="eyebrow">EL NEGOCIO</p>
+      <div class="metrics" style="grid-template-columns:repeat(2,1fr)">
         <article><span>Ingresos</span><strong>${money.format(t.ingresos)}</strong></article>
-        <article><span>Gastos</span><strong>${money.format(t.gastos)}</strong></article>
-        <article><span>Neto</span><strong class="${t.neto >= 0 ? 'neto-positivo' : 'neto-negativo'}">${money.format(t.neto)}</strong></article>
-        <article><span>Margen</span><strong>${t.margen === null ? '—' : `${t.margen}%`}</strong><small>${t.margen === null ? 'sin ingresos' : 'de cada dólar cobrado'}</small></article>
+        <article><span>Gastos del negocio</span><strong>${money.format(t.gastosNegocio)}</strong></article>
+        <article><span>Neto del negocio</span><strong class="${t.netoNegocio >= 0 ? 'neto-positivo' : 'neto-negativo'}">${money.format(t.netoNegocio)}</strong></article>
+        <article><span>Margen</span><strong>${t.margenNegocio === null ? '—' : `${t.margenNegocio}%`}</strong><small>${t.margenNegocio === null ? 'sin ingresos' : 'de cada dólar cobrado'}</small></article>
+      </div>
+      ${t.gastosSinClasificar > 0 ? `<p class="section-note aviso-ambito">${money.format(t.gastosSinClasificar)} en categorías sin marcar como negocio o personal, fuera de este margen. Clasifícalas en <b>Gastos → Categorías</b>.</p>` : ''}
+      <p class="eyebrow" style="margin-top:18px">PERSONAL Y TOTAL</p>
+      <div class="metrics" style="grid-template-columns:repeat(2,1fr)">
+        <article><span>Gastos personales</span><strong>${money.format(t.gastosPersonal)}</strong></article>
+        <article><span>Gasto total</span><strong>${money.format(t.gastos)}</strong></article>
+        <article><span>Neto total</span><strong class="${t.neto >= 0 ? 'neto-positivo' : 'neto-negativo'}">${money.format(t.neto)}</strong><small>ingresos menos todo el gasto</small></article>
+        <article><span>Promedio mensual</span><strong>${money.format(t.promedioMensualNeto)}</strong><small>${t.mesesConActividad} mes${t.mesesConActividad === 1 ? '' : 'es'} con movimiento</small></article>
       </div>
       ${financeChartSvg(datos.timeline)}
-      ${datos.categorias.length ? `<p class="eyebrow" style="margin-top:18px">GASTO POR CATEGORÍA</p><div class="gasto-resumen">${datos.categorias.map(c => `<span><b>${money.format(c.total)}</b>${escapeHtml(c.categoria)} · ${c.cantidad}</span>`).join('')}</div>` : ''}
+      ${datos.categorias.length ? `<p class="eyebrow" style="margin-top:18px">GASTO POR CATEGORÍA</p><div class="gasto-resumen">${datos.categorias.map(c => `<span class="ambito-${c.ambito || 'ninguno'}"><b>${money.format(c.total)}</b>${escapeHtml(c.categoria)} · ${c.cantidad}${c.ambito ? '' : ' · sin clasificar'}</span>`).join('')}</div>` : ''}
       <p class="eyebrow" style="margin-top:18px">MES A MES</p>
       ${filas ? `<div class="table-wrap"><table><thead><tr><th>Mes</th><th>Ingresos</th><th>Gastos</th><th>Neto</th></tr></thead><tbody>${filas}</tbody></table></div>` : '<p class="empty">Sin movimientos en el período.</p>'}
       <p class="section-note">Ingreso son pagos recibidos, no facturas emitidas: una factura es una promesa y un pago es dinero que entró.${t.gastos === 0 ? ' Todavía no hay gastos registrados, así que el neto es igual al ingreso.' : ''}</p>`;
@@ -1366,12 +1378,22 @@ async function expenseEditor(gasto, rango) {
 
 async function expenseCategories(rango) {
   const categorias = await api('/api/expense-categories').catch(() => []);
+  // Eileen lleva aquí también sus finanzas personales, así que cada categoría
+  // dice a cuál de las dos pertenece. Sin eso, el alquiler de su apartamento
+  // se restaría de lo que cobra por entrenar.
+  const sinAmbito = categorias.filter(c => !c.ambito).length;
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">FINANZAS</p><h2>Categorías de gasto</h2>
     <form id="categoria-form" class="catalog-toolbar"><input name="name" required minlength="2" maxlength="120" placeholder="Nombre de la categoría" /><button class="secondary">Agregar</button></form>
+    ${sinAmbito ? `<p class="section-note aviso-ambito">${sinAmbito} categoría${sinAmbito === 1 ? '' : 's'} sin marcar como negocio o personal. Hasta clasificarlas, su gasto no entra en el margen del negocio.</p>` : ''}
     ${categorias.length ? `<div class="gasto-lista">${categorias.map(c => `<article class="gasto-item">
       <div><b>${escapeHtml(c.name)}</b><small>${c.usos} gasto${c.usos === 1 ? '' : 's'} · ${money.format(c.total)}${c.source_system ? ' · de Zoho' : ''}</small></div>
-      <button class="secondary session-use" data-borrar-categoria="${c.id}">Eliminar</button>
+      <div class="categoria-acciones">
+        <select class="ambito-select" data-ambito="${c.id}" aria-label="Ámbito de ${escapeHtml(c.name)}">
+          ${[['', 'Sin clasificar'], ['negocio', 'Negocio'], ['personal', 'Personal']].map(([v, t]) => `<option value="${v}"${(c.ambito || '') === v ? ' selected' : ''}>${t}</option>`).join('')}
+        </select>
+        <button class="secondary session-use" data-borrar-categoria="${c.id}">Eliminar</button>
+      </div>
     </article>`).join('')}</div>` : '<p class="empty">Todavía no hay categorías.</p>'}
     <p class="section-note">Eliminar una categoría no borra sus gastos: quedan sin clasificar.</p>
     <button class="secondary wide-button" id="volver-gastos">Volver a gastos</button>`;
@@ -1381,6 +1403,14 @@ async function expenseCategories(rango) {
     event.preventDefault();
     try { await api('/api/expense-categories', { method: 'POST', body: { name: new FormData(event.target).get('name').trim() } }); toast('Categoría creada'); expenseCategories(rango); }
     catch (error) { toast(error.message, true); }
+  });
+  box.querySelectorAll('[data-ambito]').forEach(sel => {
+    sel.onchange = async () => {
+      try {
+        await api(`/api/expense-categories/${sel.dataset.ambito}`, { method: 'PATCH', body: { ambito: sel.value || null } });
+        toast('Ámbito actualizado'); expenseCategories(rango);
+      } catch (error) { toast(error.message, true); }
+    };
   });
   box.querySelectorAll('[data-borrar-categoria]').forEach(b => {
     b.onclick = async () => {
