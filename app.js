@@ -1,4 +1,4 @@
-const APP_VERSION = '66';
+const APP_VERSION = '68';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -141,7 +141,8 @@ async function loadData() {
     const history = readyAssessments.map((item, position, all) => {
       const previous = all[position - 1];
       const reading = {
-        id: item.id, date: String(item.tested_at).slice(0, 10), weight: Number(item.values.weightKg), smm: Number(item.values.skeletalMuscleMassKg),
+        id: item.id, documentId: item.document_id || null,
+        date: String(item.tested_at).slice(0, 10), weight: Number(item.values.weightKg), smm: Number(item.values.skeletalMuscleMassKg),
         fat: Number(item.values.bodyFatMassKg), pbf: Number(item.values.percentBodyFat), score: Number(item.values.inBodyScore)
       };
       if (!previous) return { ...reading, delta: null, previousDate: null };
@@ -910,7 +911,9 @@ async function previewExerciseVideo(exercise) {
     if (!target || !modal.open) return;
     // En bucle: son clips de pocos segundos y se revisan mirando el movimiento
     // repetido, no una sola vez.
-    target.innerHTML = `<div class="exercise-video"><video controls loop playsinline preload="metadata" src="${escapeHtml(fuente.videoUrl)}"></video></div>`;
+    // Silenciado por necesidad, no por gusto: sin muted el navegador no deja
+    // que un video arranque solo, y el clip no empezaría hasta pulsar play.
+    target.innerHTML = `<div class="exercise-video"><video controls loop muted autoplay playsinline preload="auto" src="${escapeHtml(fuente.videoUrl)}"></video></div>`;
   } catch (error) {
     const target = document.getElementById('preview-video');
     if (target) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
@@ -1187,6 +1190,30 @@ function inbodyComparison(inbody) {
 
 // Saldos en el expediente, en lista y no en tabla: la tabla de paquetes se
 // desplaza en horizontal en el teléfono y su última columna queda escondida.
+// Ver el archivo original de un expediente. Hasta ahora sólo se podía borrar:
+// los datos del InBody estaban a la vista pero el reporte del que salieron era
+// inalcanzable, así que no había forma de contrastarlos.
+async function viewDocument(item) {
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">ARCHIVO DEL EXPEDIENTE</p><h2>${escapeHtml(item.original_name)}</h2>
+    <div id="document-view"><p class="empty">Abriendo archivo…</p></div>`;
+  openModal(box, true);
+  try {
+    const fuente = await api(`/api/documents/${item.id}/download-url`);
+    const target = document.getElementById('document-view');
+    if (!target || !modal.open) return;
+    const esImagen = String(item.content_type || '').startsWith('image/');
+    target.innerHTML = `${esImagen
+      ? `<img class="document-image" src="${escapeHtml(fuente.downloadUrl)}" alt="${escapeHtml(item.original_name)}" />`
+      : `<object class="document-embed" data="${escapeHtml(fuente.downloadUrl)}" type="${escapeHtml(item.content_type || 'application/pdf')}"><p class="empty">Tu navegador no puede mostrarlo aquí. Ábrelo en una pestaña.</p></object>`}
+      <a class="secondary wide-button document-open" href="${escapeHtml(fuente.downloadUrl)}" target="_blank" rel="noopener">Abrir en una pestaña nueva</a>
+      <p class="section-note">El enlace es privado y caduca en ${Math.round(fuente.expiresInSeconds / 60)} minutos.</p>`;
+  } catch (error) {
+    const target = document.getElementById('document-view');
+    if (target) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
+  }
+}
+
 function balancesSection(target, client) {
   api(`/api/clients/${encodeURIComponent(client.id)}/balances`).then(saldos => {
     if (!target.isConnected || !modal.open) return;
@@ -1444,7 +1471,7 @@ function clientDetail(id) {
     : `${client.planName || 'Mensualidad'} · ${money.format(client.plan)} al mes · corte día ${client.cutoffDay}`;
   const box = document.createElement('div');
   const reviewNotice = client.inbodyReviews.length ? `<button class="secondary wide-button" id="review-inbody">Revisar ${client.inbodyReviews.length} evaluación${client.inbodyReviews.length > 1 ? 'es' : ''} pendiente${client.inbodyReviews.length > 1 ? 's' : ''}</button>` : '';
-  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">CAMBIO DESDE LA MEDICIÓN ANTERIOR</p>${inbodyComparison(inbody)}<p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th>vs. anterior</th><th></th></tr></thead><tbody>${inbody.history.slice().reverse().map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td class="delta-cell">${reading.delta ? `${deltaChip('weight', reading.delta.weight)}${deltaChip('smm', reading.delta.smm)}${deltaChip('pbf', reading.delta.pbf)}` : '<span class="delta neutral">primera</span>'}</td><td><button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">SALDO DE SESIONES</p><div id="client-balances"><p class="empty">Cargando saldos…</p></div><p class="eyebrow" style="margin-top:20px">ASISTENCIA MENSUAL</p><div id="client-attendance"><p class="empty">Calculando cumplimiento…</p></div><p class="eyebrow" style="margin-top:20px">LESIONES Y PADECIMIENTOS</p><div id="client-conditions"><p class="empty">Cargando expediente clínico…</p></div><p class="eyebrow" style="margin-top:20px">FOTOS DE PROGRESO</p><div id="client-photos"><p class="empty">Cargando fotos…</p></div><p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="client-report">Informe de cumplimiento</button><button class="secondary" id="portal-link">${client.portalActive ? 'Enviar enlace de acceso' : 'Activar portal con enlace'}</button><button class="secondary" id="portal-access">${client.portalActive ? 'Poner contraseña a mano' : 'Activar con contraseña'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
+  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${client.name}</h2><p style="color:#6f7b75;margin-top:-12px">${client.goal}<br>${commercialDescription}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">CAMBIO DESDE LA MEDICIÓN ANTERIOR</p>${inbodyComparison(inbody)}<p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th>vs. anterior</th><th></th></tr></thead><tbody>${inbody.history.slice().reverse().map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td class="delta-cell">${reading.delta ? `${deltaChip('weight', reading.delta.weight)}${deltaChip('smm', reading.delta.smm)}${deltaChip('pbf', reading.delta.pbf)}` : '<span class="delta neutral">primera</span>'}</td><td>${reading.documentId ? `<button class="secondary session-use" data-view-inbody="${reading.documentId}" data-inbody-client="${client.id}">Ver reporte</button>` : ''}<button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">SALDO DE SESIONES</p><div id="client-balances"><p class="empty">Cargando saldos…</p></div><p class="eyebrow" style="margin-top:20px">ASISTENCIA MENSUAL</p><div id="client-attendance"><p class="empty">Calculando cumplimiento…</p></div><p class="eyebrow" style="margin-top:20px">LESIONES Y PADECIMIENTOS</p><div id="client-conditions"><p class="empty">Cargando expediente clínico…</p></div><p class="eyebrow" style="margin-top:20px">FOTOS DE PROGRESO</p><div id="client-photos"><p class="empty">Cargando fotos…</p></div><p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="client-report">Informe de cumplimiento</button><button class="secondary" id="portal-link">${client.portalActive ? 'Enviar enlace de acceso' : 'Activar portal con enlace'}</button><button class="secondary" id="portal-access">${client.portalActive ? 'Poner contraseña a mano' : 'Activar con contraseña'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
   openModal(box); document.getElementById('open-scan').onclick = () => inbodyImport(client); document.getElementById('edit-client-contact').onclick = () => editClient(client); document.getElementById('edit-client-plan').onclick = () => clientPlanEditor(client); document.getElementById('portal-access').onclick = () => portalAccessEditor(client); document.getElementById('portal-link').onclick = () => portalAccessLink(client); document.getElementById('client-report').onclick = () => complianceReport(client); document.getElementById('delete-client').onclick = () => deleteResource(`/api/clients/${client.id}`, `¿Eliminar a ${client.name}? También se eliminarán sus documentos, sesiones y cobros asociados.`, 'Cliente eliminado');
   if (client.inbodyReviews.length) document.getElementById('review-inbody').onclick = () => inbodyReview(client, client.inbodyReviews);
   balancesSection(document.getElementById('client-balances'), client);
@@ -1454,7 +1481,18 @@ function clientDetail(id) {
   api(`/api/documents?clientId=${encodeURIComponent(client.id)}`).then(items => {
     const target = document.getElementById('client-documents');
     if (!target || !modal.open) return;
-    target.innerHTML = items.length ? `<div class="table-wrap"><table><thead><tr><th>Archivo</th><th>Tipo</th><th>Fecha</th><th></th></tr></thead><tbody>${items.map(item => `<tr><td>${escapeHtml(item.original_name)}</td><td>${item.kind === 'inbody' ? 'InBody' : escapeHtml(item.kind)}</td><td>${String(item.created_at).slice(0, 10)}</td><td><button class="secondary session-use" data-delete-document="${item.id}">Eliminar archivo</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">No hay archivos guardados en este expediente.</p>';
+    // En lista y no en tabla: la tabla se desplaza en horizontal en el teléfono
+    // y la última columna —donde viven las acciones— queda fuera de la vista.
+    const tipos = { inbody: 'InBody', contract: 'Contrato', receipt: 'Comprobante', progress_photo: 'Foto de progreso', other: 'Otro' };
+    target.innerHTML = items.length ? `<div class="document-list">${items.map(item => `<article class="document-item">
+      <div><b>${escapeHtml(item.original_name)}</b><small>${tipos[item.kind] || escapeHtml(item.kind)} · ${String(item.created_at).slice(0, 10)}${item.size_bytes ? ` · ${(Number(item.size_bytes) / 1024).toFixed(0)} KB` : ''}${item.upload_status !== 'ready' ? ' · incompleto' : ''}</small></div>
+      <div class="document-actions">
+        ${item.upload_status === 'ready' ? `<button class="secondary session-use" data-view-document="${item.id}">Ver archivo</button>` : ''}
+        <button class="secondary session-use" data-delete-document="${item.id}">Eliminar</button>
+      </div></article>`).join('')}</div>` : '<p class="empty">No hay archivos guardados en este expediente.</p>';
+    target.querySelectorAll('[data-view-document]').forEach(button => {
+      button.onclick = () => viewDocument(items.find(item => item.id === button.dataset.viewDocument));
+    });
   }).catch(error => {
     const target = document.getElementById('client-documents');
     if (target) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
@@ -1581,6 +1619,17 @@ document.addEventListener('click', event => {
   if (event.target.dataset.editPayment) confirmInvoice(event.target.dataset.editPayment, true);
   if (event.target.dataset.editInvoice) editInvoice(event.target.dataset.editInvoice);
   if (event.target.dataset.deleteInvoice) deleteResource(`/api/invoices/${event.target.dataset.deleteInvoice}`, '¿Anular este cobro? No se eliminará de los reportes históricos.', 'Cobro anulado');
+  if (event.target.dataset.viewInbody) {
+    // Sin await: este manejador no es async y usarlo aquí rompe el archivo
+    // entero al interpretarse, no sólo esta línea.
+    const documentId = event.target.dataset.viewInbody;
+    api(`/api/documents?clientId=${encodeURIComponent(event.target.dataset.inbodyClient)}`)
+      .then(documentos => {
+        const archivo = documentos.find(item => item.id === documentId);
+        if (archivo) viewDocument(archivo); else toast('El archivo original ya no está en el expediente', true);
+      })
+      .catch(error => toast(error.message, true));
+  }
   if (event.target.dataset.deleteInbody) deleteResource(`/api/inbody/${event.target.dataset.deleteInbody}`, '¿Eliminar esta medición InBody? El archivo original permanecerá en el expediente.', 'Medición InBody eliminada');
   if (event.target.dataset.deleteDocument) deleteResource(`/api/documents/${event.target.dataset.deleteDocument}`, '¿Eliminar este archivo? Si corresponde a un InBody, también se eliminarán sus métricas asociadas.', 'Archivo del expediente eliminado');
   if (event.target.dataset.cancelSession) deleteResource(`/api/sessions/${event.target.dataset.cancelSession}`, '¿Cancelar esta sesión? También se eliminará de Google Calendar si estaba sincronizada.', 'Sesión cancelada');
@@ -1728,7 +1777,7 @@ async function playExerciseVideo(exerciseId, button) {
     // entrena, y muted porque este reproductor arranca solo: los navegadores
     // bloquean el autoplay con sonido, y un gimnasio de fondo no aporta nada.
     // Con los controles a la vista, quien quiera oírlo puede quitar el silencio.
-    container.innerHTML = `<video controls loop muted playsinline preload="metadata" src="${escapeHtml(source.videoUrl)}"></video>`;
+    container.innerHTML = `<video controls loop muted autoplay playsinline preload="auto" src="${escapeHtml(source.videoUrl)}"></video>`;
     container.dataset.loaded = 'true'; container.hidden = false;
     button.textContent = 'Ocultar video';
     container.querySelector('video').play().catch(() => {});
