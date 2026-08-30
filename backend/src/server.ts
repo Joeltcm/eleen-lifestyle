@@ -1283,6 +1283,135 @@ app.patch('/api/invoices/:id/payment', { preHandler: requireStaff }, async (requ
   return result;
 });
 
+// ── Gastos ────────────────────────────────────────────────────────────────
+// La otra mitad de las finanzas. Hasta ahora la aplicación sólo sabía de
+// ingresos, así que no había con qué comparar.
+const expenseCategorySchema = z.object({
+  name: z.string().trim().min(2).max(120),
+  description: z.string().trim().max(300).optional().nullable(),
+  archived: z.boolean().optional()
+});
+
+app.get('/api/expense-categories', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  return sql`
+    SELECT c.*, count(e.id)::int AS usos, COALESCE(sum(e.amount), 0)::numeric AS total
+    FROM expense_categories c LEFT JOIN expenses e ON e.category_id = c.id
+    WHERE c.owner_id = ${auth.sub}
+    GROUP BY c.id ORDER BY c.archived, c.name
+  `;
+});
+
+app.post('/api/expense-categories', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const input = expenseCategorySchema.parse(request.body);
+  const [categoria] = await sql`
+    INSERT INTO expense_categories (owner_id, name, description)
+    VALUES (${auth.sub}, ${input.name}, ${input.description || null})
+    ON CONFLICT (owner_id, name) DO NOTHING RETURNING *
+  `;
+  if (!categoria) return reply.code(409).send({ error: 'Ya existe una categoría con ese nombre' });
+  return reply.code(201).send(categoria);
+});
+
+app.patch('/api/expense-categories/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = expenseCategorySchema.partial().parse(request.body);
+  const [categoria] = await sql`
+    UPDATE expense_categories SET
+      name = COALESCE(${input.name ?? null}, name),
+      description = COALESCE(${input.description ?? null}, description),
+      archived = COALESCE(${input.archived ?? null}, archived),
+      updated_at = now()
+    WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *
+  `;
+  if (!categoria) return reply.code(404).send({ error: 'Categoría no encontrada' });
+  return categoria;
+});
+
+app.delete('/api/expense-categories/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  // Los gastos no se borran con la categoría: quedan sin clasificar. Perder el
+  // gasto por reordenar categorías sería perder dinero del registro.
+  const [categoria] = await sql`DELETE FROM expense_categories WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING id, name`;
+  if (!categoria) return reply.code(404).send({ error: 'Categoría no encontrada' });
+  return { deleted: true, categoria };
+});
+
+const expenseSchema = z.object({
+  description: z.string().trim().min(2).max(300),
+  amount: z.coerce.number().min(0),
+  spentOn: z.string().date(),
+  categoryId: z.union([z.literal(''), z.null(), z.string().uuid()]).optional().transform(v => (v === '' || v === undefined ? null : v)),
+  clientId: z.union([z.literal(''), z.null(), z.string().uuid()]).optional().transform(v => (v === '' || v === undefined ? null : v)),
+  paymentMethod: z.string().trim().max(60).optional().nullable(),
+  reference: z.string().trim().max(160).optional().nullable(),
+  notes: z.string().trim().max(500).optional().nullable()
+});
+
+app.get('/api/expenses', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const query = z.object({
+    from: z.string().date().optional(), to: z.string().date().optional(),
+    categoryId: z.string().uuid().optional(), limit: z.coerce.number().int().min(1).max(500).default(200)
+  }).parse(request.query);
+  return sql`
+    SELECT e.*, c.name AS category_name, cl.full_name AS client_name
+    FROM expenses e
+    LEFT JOIN expense_categories c ON c.id = e.category_id
+    LEFT JOIN clients cl ON cl.id = e.client_id
+    WHERE e.owner_id = ${auth.sub}
+      AND (${query.from || null}::date IS NULL OR e.spent_on >= ${query.from || null}::date)
+      AND (${query.to || null}::date IS NULL OR e.spent_on <= ${query.to || null}::date)
+      AND (${query.categoryId || null}::uuid IS NULL OR e.category_id = ${query.categoryId || null}::uuid)
+    ORDER BY e.spent_on DESC, e.created_at DESC
+    LIMIT ${query.limit}
+  `;
+});
+
+app.post('/api/expenses', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const input = expenseSchema.parse(request.body);
+  const [gasto] = await sql`
+    INSERT INTO expenses (owner_id, category_id, client_id, description, amount, spent_on, payment_method, reference, notes)
+    VALUES (${auth.sub}, ${input.categoryId}, ${input.clientId}, ${input.description}, ${input.amount}, ${input.spentOn}::date,
+            ${input.paymentMethod || null}, ${input.reference || null}, ${input.notes || null})
+    RETURNING *
+  `;
+  return reply.code(201).send(gasto);
+});
+
+app.patch('/api/expenses/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = expenseSchema.partial().parse(request.body);
+  const [gasto] = await sql`
+    UPDATE expenses SET
+      description = COALESCE(${input.description ?? null}, description),
+      amount = COALESCE(${input.amount ?? null}, amount),
+      spent_on = COALESCE(${input.spentOn ?? null}::date, spent_on),
+      category_id = ${input.categoryId === undefined ? sql`category_id` : input.categoryId},
+      client_id = ${input.clientId === undefined ? sql`client_id` : input.clientId},
+      payment_method = COALESCE(${input.paymentMethod ?? null}, payment_method),
+      reference = COALESCE(${input.reference ?? null}, reference),
+      notes = COALESCE(${input.notes ?? null}, notes),
+      updated_at = now()
+    WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *
+  `;
+  if (!gasto) return reply.code(404).send({ error: 'Gasto no encontrado' });
+  return gasto;
+});
+
+app.delete('/api/expenses/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [gasto] = await sql`DELETE FROM expenses WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING id, description`;
+  if (!gasto) return reply.code(404).send({ error: 'Gasto no encontrado' });
+  return { deleted: true, gasto };
+});
+
 const reportPeriodSchema = z.enum(['week', 'month', '3months', '6months', 'year']);
 const reportStart = (period: z.infer<typeof reportPeriodSchema>) => {
   const start = new Date(); start.setHours(0, 0, 0, 0);

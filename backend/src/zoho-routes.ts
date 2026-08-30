@@ -245,6 +245,13 @@ async function runSync(ownerId: string) {
     const payments = await fetchAllPages(accessToken, connection, '/customerpayments', ['customerpayments', 'customer_payments']);
     const recurring = await fetchAllPages(accessToken, connection, '/recurringinvoices', ['recurring_invoices', 'recurringinvoices']);
     const credits = await fetchAllPages(accessToken, connection, '/creditnotes', ['creditnotes', 'credit_notes']);
+    // Los gastos y sus categorías. Zoho Invoice sí los expone, en /expenses y
+    // /expense-category; sin ellos la aplicación sólo conocería los ingresos.
+    // Si la cuenta no tiene el módulo habilitado, la llamada falla y se sigue
+    // sin gastos en vez de abortar toda la importación.
+    const expenseCategories = await fetchAllPages(accessToken, connection, '/expense-category', ['expense_categories', 'expensecategories', 'categories']).catch(() => []);
+    const expenses = await fetchAllPages(accessToken, connection, '/expenses', ['expenses']).catch(() => []);
+    const categoryMap = new Map<string, string>();
     const clientMap = new Map<string, string>();
     const invoiceMap = new Map<string, string>();
     let skippedInvoices = 0;
@@ -348,10 +355,44 @@ async function runSync(ownerId: string) {
             status = EXCLUDED.status, reference = EXCLUDED.reference, source_payload = EXCLUDED.source_payload, updated_at = now()
         `;
       }
+
+      // Categorías primero: los gastos las referencian.
+      for (const categoria of expenseCategories) {
+        const zohoId = externalId(categoria.expense_category_id || categoria.category_id);
+        const nombre = String(categoria.expense_category_name || categoria.category_name || categoria.name || '').trim();
+        if (!zohoId || !nombre) continue;
+        const [guardada] = await transaction`
+          INSERT INTO expense_categories (owner_id, name, description, source_system, external_id)
+          VALUES (${ownerId}, ${nombre}, ${categoria.description || null}, ${sourceSystem}, ${zohoId})
+          ON CONFLICT (owner_id, name) DO UPDATE SET
+            source_system = EXCLUDED.source_system, external_id = EXCLUDED.external_id, updated_at = now()
+          RETURNING id
+        `;
+        if (guardada) categoryMap.set(zohoId, guardada.id as string);
+      }
+
+      for (const gasto of expenses) {
+        const zohoId = externalId(gasto.expense_id);
+        if (!zohoId) continue;
+        const categoriaZoho = externalId(gasto.expense_category_id || gasto.category_id);
+        // El nombre de la cuenta es el mejor rótulo cuando el gasto no trae
+        // descripción: en Zoho muchos gastos se registran sólo con la cuenta.
+        const descripcion = String(gasto.description || gasto.account_name || gasto.expense_category_name || 'Gasto').trim().slice(0, 300);
+        await transaction`
+          INSERT INTO expenses (owner_id, category_id, description, amount, currency, spent_on, reference, source_system, external_id)
+          VALUES (${ownerId}, ${categoriaZoho ? categoryMap.get(categoriaZoho) || null : null}, ${descripcion},
+            ${numeric(gasto.total ?? gasto.amount)}, ${String(gasto.currency_code || 'USD').slice(0, 3)},
+            ${sourceDate(gasto.date)}, ${gasto.reference_number || null}, ${sourceSystem}, ${zohoId})
+          ON CONFLICT (owner_id, source_system, external_id) WHERE external_id IS NOT NULL DO UPDATE SET
+            category_id = EXCLUDED.category_id, description = EXCLUDED.description, amount = EXCLUDED.amount,
+            currency = EXCLUDED.currency, spent_on = EXCLUDED.spent_on, reference = EXCLUDED.reference, updated_at = now()
+        `;
+      }
     });
 
     const sourceSummary = {
       clients: contacts.length, invoices: invoices.length - skippedInvoices, payments: payments.length, recurring: recurring.length, credits: credits.length,
+      expenses: expenses.length, expenseCategories: expenseCategories.length,
       totalInvoiced: rounded(invoices.reduce((sum, invoice) => sum + numeric(invoice.total), 0)),
       totalPaid: rounded(payments.reduce((sum, payment) => sum + numeric(payment.amount), 0)),
       totalCredits: rounded(credits.reduce((sum, credit) => sum + numeric(credit.total), 0)), skippedInvoices

@@ -1,4 +1,4 @@
-const APP_VERSION = '70';
+const APP_VERSION = '71';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1134,6 +1134,123 @@ async function completeSession(id) {
 // Cobrar en dos toques: abrir el selector y elegir el método. La fecha es hoy,
 // que es el caso normal. Para un pago de otro día está "Otra fecha", que abre
 // el formulario completo.
+const metodosPago = ['Efectivo', 'Yappy', 'Transferencia bancaria', 'Tarjeta', 'Otro'];
+
+// Gastos: la otra mitad de las finanzas. En lista y no en tabla, por el
+// teléfono.
+function expensesManager(desde = null, hasta = null) {
+  const primeroDelMes = new Date(today.getFullYear(), today.getMonth(), 1).toISOString().slice(0, 10);
+  const rango = { desde: desde || primeroDelMes, hasta: hasta || dateKey(today) };
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">FINANZAS</p><h2>Gastos</h2>
+    <div class="form-row"><label>Desde<input type="date" id="gasto-desde" value="${rango.desde}" /></label><label>Hasta<input type="date" id="gasto-hasta" value="${rango.hasta}" /></label></div>
+    <div class="catalog-toolbar"><button class="secondary" id="gasto-nuevo">+ Registrar gasto</button><button class="secondary" id="gasto-categorias">Categorías</button></div>
+    <div id="gasto-lista"><p class="empty">Cargando gastos…</p></div>`;
+  openModal(box, true);
+  const recargar = () => expensesManager(document.getElementById('gasto-desde').value, document.getElementById('gasto-hasta').value);
+  document.getElementById('gasto-desde').onchange = recargar;
+  document.getElementById('gasto-hasta').onchange = recargar;
+  document.getElementById('gasto-nuevo').onclick = () => expenseEditor(null, rango);
+  document.getElementById('gasto-categorias').onclick = () => expenseCategories(rango);
+  renderExpenses(rango);
+}
+
+function renderExpenses(rango) {
+  const target = document.getElementById('gasto-lista');
+  api(`/api/expenses?from=${rango.desde}&to=${rango.hasta}`).then(gastos => {
+    if (!target?.isConnected || !modal.open) return;
+    const total = gastos.reduce((suma, gasto) => suma + Number(gasto.amount), 0);
+    const porCategoria = new Map();
+    gastos.forEach(gasto => {
+      const clave = gasto.category_name || 'Sin categoría';
+      porCategoria.set(clave, (porCategoria.get(clave) || 0) + Number(gasto.amount));
+    });
+    const resumen = [...porCategoria.entries()].sort((a, b) => b[1] - a[1]);
+
+    target.innerHTML = `<p class="section-note">${gastos.length} gasto${gastos.length === 1 ? '' : 's'} · ${money.format(total)} en el período.</p>
+      ${resumen.length ? `<div class="gasto-resumen">${resumen.map(([nombre, monto]) => `<span><b>${money.format(monto)}</b>${escapeHtml(nombre)}</span>`).join('')}</div>` : ''}
+      ${gastos.length ? `<div class="gasto-lista">${gastos.map(gasto => `<article class="gasto-item">
+        <div><b>${escapeHtml(gasto.description)}</b><small>${gasto.spent_on ? dateOnly(gasto.spent_on) : ''} · ${escapeHtml(gasto.category_name || 'Sin categoría')}${gasto.client_name ? ` · ${escapeHtml(gasto.client_name)}` : ''}${gasto.source_system ? ' · importado de Zoho' : ''}</small></div>
+        <span class="gasto-monto">${money.format(gasto.amount)}</span>
+        <div class="gasto-acciones"><button class="secondary session-use" data-editar-gasto="${gasto.id}">Editar</button><button class="secondary session-use" data-borrar-gasto="${gasto.id}">Eliminar</button></div>
+      </article>`).join('')}</div>` : '<p class="empty">No hay gastos en este período.</p>'}`;
+
+    target.querySelectorAll('[data-editar-gasto]').forEach(b => {
+      b.onclick = () => expenseEditor(gastos.find(g => g.id === b.dataset.editarGasto), rango);
+    });
+    target.querySelectorAll('[data-borrar-gasto]').forEach(b => {
+      b.onclick = async () => {
+        if (!confirm('¿Eliminar este gasto del registro?')) return;
+        try { await api(`/api/expenses/${b.dataset.borrarGasto}`, { method: 'DELETE' }); toast('Gasto eliminado'); renderExpenses(rango); }
+        catch (error) { toast(error.message, true); }
+      };
+    });
+  }).catch(error => { if (target?.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; });
+}
+
+async function expenseEditor(gasto, rango) {
+  const categorias = await api('/api/expense-categories').catch(() => []);
+  const box = document.createElement('div');
+  const v = campo => escapeHtml(gasto?.[campo] ?? '');
+  box.innerHTML = `<form id="gasto-form"><p class="eyebrow">FINANZAS</p><h2>${gasto ? 'Editar gasto' : 'Registrar gasto'}</h2>
+    <label>Descripción<input name="description" required maxlength="300" value="${v('description')}" placeholder="Alquiler del local" /></label>
+    <div class="form-row">
+      <label>Monto (USD)<input name="amount" type="number" min="0" step="0.01" required value="${gasto?.amount ?? ''}" /></label>
+      <label>Fecha<input name="spentOn" type="date" required value="${gasto ? dateOnly(gasto.spent_on) : dateKey(today)}" /></label>
+    </div>
+    <label>Categoría<select name="categoryId"><option value="">Sin categoría</option>${categorias.filter(c => !c.archived).map(c => `<option value="${c.id}"${gasto?.category_id === c.id ? ' selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}</select></label>
+    <div class="form-row">
+      <label>Método de pago<select name="paymentMethod"><option value="">Sin especificar</option>${metodosPago.map(m => `<option${gasto?.payment_method === m ? ' selected' : ''}>${m}</option>`).join('')}</select></label>
+      <label>Referencia<input name="reference" maxlength="160" value="${v('reference')}" placeholder="Opcional" /></label>
+    </div>
+    <label>Notas<textarea name="notes" rows="2" maxlength="500">${v('notes')}</textarea></label>
+    <button class="primary wide-button">${gasto ? 'Guardar cambios' : 'Registrar gasto'}</button></form>`;
+  openModal(box);
+  document.getElementById('gasto-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const valores = new FormData(event.target);
+    const cuerpo = {
+      description: valores.get('description').trim(), amount: Number(valores.get('amount')),
+      spentOn: valores.get('spentOn'), categoryId: valores.get('categoryId') || null,
+      paymentMethod: valores.get('paymentMethod') || null, reference: valores.get('reference').trim() || null,
+      notes: valores.get('notes').trim() || null
+    };
+    try {
+      event.target.classList.add('loading-state');
+      if (gasto) await api(`/api/expenses/${gasto.id}`, { method: 'PATCH', body: cuerpo });
+      else await api('/api/expenses', { method: 'POST', body: cuerpo });
+      modal.close(); toast(gasto ? 'Gasto actualizado' : 'Gasto registrado'); expensesManager(rango.desde, rango.hasta);
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+
+async function expenseCategories(rango) {
+  const categorias = await api('/api/expense-categories').catch(() => []);
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">FINANZAS</p><h2>Categorías de gasto</h2>
+    <form id="categoria-form" class="catalog-toolbar"><input name="name" required minlength="2" maxlength="120" placeholder="Nombre de la categoría" /><button class="secondary">Agregar</button></form>
+    ${categorias.length ? `<div class="gasto-lista">${categorias.map(c => `<article class="gasto-item">
+      <div><b>${escapeHtml(c.name)}</b><small>${c.usos} gasto${c.usos === 1 ? '' : 's'} · ${money.format(c.total)}${c.source_system ? ' · de Zoho' : ''}</small></div>
+      <button class="secondary session-use" data-borrar-categoria="${c.id}">Eliminar</button>
+    </article>`).join('')}</div>` : '<p class="empty">Todavía no hay categorías.</p>'}
+    <p class="section-note">Eliminar una categoría no borra sus gastos: quedan sin clasificar.</p>
+    <button class="secondary wide-button" id="volver-gastos">Volver a gastos</button>`;
+  openModal(box, true);
+  document.getElementById('volver-gastos').onclick = () => expensesManager(rango.desde, rango.hasta);
+  document.getElementById('categoria-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    try { await api('/api/expense-categories', { method: 'POST', body: { name: new FormData(event.target).get('name').trim() } }); toast('Categoría creada'); expenseCategories(rango); }
+    catch (error) { toast(error.message, true); }
+  });
+  box.querySelectorAll('[data-borrar-categoria]').forEach(b => {
+    b.onclick = async () => {
+      if (!confirm('¿Eliminar esta categoría? Sus gastos quedarán sin clasificar.')) return;
+      try { await api(`/api/expense-categories/${b.dataset.borrarCategoria}`, { method: 'DELETE' }); toast('Categoría eliminada'); expenseCategories(rango); }
+      catch (error) { toast(error.message, true); }
+    };
+  });
+}
+
 function pendingCollections() {
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">COBROS PENDIENTES</p><h2>Registrar cobros</h2>
@@ -1658,6 +1775,7 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'exercise-catalog') exerciseCatalogManager();
   if (actionButton?.dataset.action === 'daily-log') dailyTrainingLog();
   if (actionButton?.dataset.action === 'pending-collections') pendingCollections();
+  if (actionButton?.dataset.action === 'expenses') expensesManager();
   if (actionButton?.dataset.action === 'compliance-report') complianceReport();
   if (actionButton?.dataset.action === 'new-plan') planEditor();
   if (actionButton?.dataset.action === 'export-compliance') exportCompliance();
