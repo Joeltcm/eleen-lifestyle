@@ -1,4 +1,4 @@
-const APP_VERSION = '65';
+const APP_VERSION = '66';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -908,7 +908,9 @@ async function previewExerciseVideo(exercise) {
     const fuente = await api(`/api/exercises/${exercise.id}/video-url`);
     const target = document.getElementById('preview-video');
     if (!target || !modal.open) return;
-    target.innerHTML = `<div class="exercise-video"><video controls playsinline preload="metadata" src="${escapeHtml(fuente.videoUrl)}"></video></div>`;
+    // En bucle: son clips de pocos segundos y se revisan mirando el movimiento
+    // repetido, no una sola vez.
+    target.innerHTML = `<div class="exercise-video"><video controls loop playsinline preload="metadata" src="${escapeHtml(fuente.videoUrl)}"></video></div>`;
   } catch (error) {
     const target = document.getElementById('preview-video');
     if (target) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
@@ -1722,7 +1724,11 @@ async function playExerciseVideo(exerciseId, button) {
   button.disabled = true; button.textContent = 'Cargando…';
   try {
     const source = await api(`/api/exercises/${exerciseId}/video-url`);
-    container.innerHTML = `<video controls playsinline preload="metadata" src="${escapeHtml(source.videoUrl)}"></video>`;
+    // loop porque el cliente necesita ver el movimiento varias veces mientras
+    // entrena, y muted porque este reproductor arranca solo: los navegadores
+    // bloquean el autoplay con sonido, y un gimnasio de fondo no aporta nada.
+    // Con los controles a la vista, quien quiera oírlo puede quitar el silencio.
+    container.innerHTML = `<video controls loop muted playsinline preload="metadata" src="${escapeHtml(source.videoUrl)}"></video>`;
     container.dataset.loaded = 'true'; container.hidden = false;
     button.textContent = 'Ocultar video';
     container.querySelector('video').play().catch(() => {});
