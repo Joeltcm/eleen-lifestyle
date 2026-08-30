@@ -1,4 +1,4 @@
-const APP_VERSION = '87';
+const APP_VERSION = '88';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1545,6 +1545,56 @@ function packageEditor(pack) {
   });
 }
 
+// Bitácora: qué se ha borrado, quién y cuándo. Una bitácora que nadie puede
+// leer no sirve de nada, así que se mira desde la propia aplicación y no
+// entrando a la base.
+const ENTIDADES = {
+  '/api/clients/:id': 'Cliente', '/api/plans/:id': 'Plan', '/api/packages/:id': 'Saldo de sesiones',
+  '/api/routines/:id': 'Rutina', '/api/exercises/:id': 'Ejercicio', '/api/exercises/:id/video': 'Video de ejercicio',
+  '/api/sessions/:id': 'Sesión', '/api/invoices/:id': 'Cobro (anulado)', '/api/invoices/:id/permanent': 'Cobro (definitivo)',
+  '/api/expense-categories/:id': 'Categoría de gasto', '/api/expenses/:id': 'Gasto',
+  '/api/documents/:id': 'Documento', '/api/inbody/:id': 'Medición InBody',
+  '/api/conditions/:id': 'Condición o lesión', '/api/progress-photos/:id': 'Foto de progreso'
+};
+const resumenBitacora = detalle => {
+  if (!detalle || typeof detalle !== 'object') return '';
+  for (const clave of ['concept', 'name', 'label', 'title', 'description', 'full_name']) {
+    if (typeof detalle[clave] === 'string') return detalle[clave];
+  }
+  for (const anidado of ['plan', 'categoria', 'client', 'invoice', 'assessment', 'routine']) {
+    const valor = detalle[anidado];
+    if (valor && typeof valor === 'object') {
+      const dentro = resumenBitacora(valor);
+      if (dentro) return dentro;
+    }
+  }
+  return '';
+};
+async function auditLog() {
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">REGISTRO</p><h2>Qué se ha borrado</h2>
+    <p style="color:#6f7b75;margin-top:-12px">La aplicación borra de verdad. Aquí queda constancia de quién quitó qué y cuándo.</p>
+    <div id="bitacora-lista"><p class="empty">Cargando…</p></div>`;
+  openModal(box, true);
+  try {
+    const filas = await api('/api/audit-log?limit=100');
+    const destino = document.getElementById('bitacora-lista');
+    if (!destino?.isConnected) return;
+    destino.innerHTML = filas.length ? `<div class="gasto-lista">${filas.map(fila => {
+      const cuando = new Date(fila.created_at);
+      const que = ENTIDADES[fila.route] || fila.route;
+      const detalle = resumenBitacora(fila.detail);
+      return `<article class="gasto-item"><div>
+        <b>${escapeHtml(que)}${detalle ? ` · ${escapeHtml(detalle)}` : ''}</b>
+        <small>${new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'America/Panama' }).format(cuando)} · ${escapeHtml(fila.user_email || 'desconocido')}</small>
+      </div></article>`;
+    }).join('')}</div>` : '<p class="empty">Todavía no se ha borrado nada.</p>';
+  } catch (error) {
+    const destino = document.getElementById('bitacora-lista');
+    if (destino) destino.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
+  }
+}
+
 function pendingCollections() {
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">COBROS PENDIENTES</p><h2>Registrar cobros</h2>
@@ -2075,6 +2125,7 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'expenses') expensesManager();
   if (actionButton?.dataset.action === 'link-packages') linkPackages();
   if (actionButton?.dataset.action === 'finance') financeDashboard();
+  if (actionButton?.dataset.action === 'audit-log') auditLog();
   if (actionButton?.dataset.action === 'compliance-report') complianceReport();
   if (actionButton?.dataset.action === 'new-plan') planEditor();
   if (actionButton?.dataset.action === 'export-compliance') exportCompliance();

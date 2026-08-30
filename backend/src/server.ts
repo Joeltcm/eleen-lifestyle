@@ -251,6 +251,55 @@ app.get('/api/auth/setup-status', async () => {
 });
 
 const setupSchema = z.object({ email: z.string().email(), password: z.string().min(10), fullName: z.string().min(2) });
+// ── Bitácora de borrados ──────────────────────────────────────────────────
+// Un hook y no quince llamadas repartidas por los endpoints: así quedan
+// cubiertas también las rutas de borrado que se añadan mañana, que es
+// justamente lo que se olvidaría instrumentar a mano.
+//
+// Va en onSend porque aquí ya se conoce la respuesta: varios endpoints
+// devuelven lo que borraron ("plan", "categoria", "concept"), y eso convierte
+// un identificador suelto en algo legible dentro de un año.
+app.addHook('onSend', async (request, reply, payload) => {
+  try {
+    const url = request.url || '';
+    const esBorrado = request.method === 'DELETE' || (request.method === 'POST' && url.includes('/permanent'));
+    if (!esBorrado || reply.statusCode >= 400) return payload;
+    const auth = request.user as AuthUser | undefined;
+    if (!auth?.sub) return payload;
+
+    // Se guarda el texto tal cual y se convierte en la propia consulta: pasar
+    // un objeto suelto al driver obliga a pelearse con sus tipos sin ganar
+    // nada, porque el cuerpo ya venía siendo JSON.
+    let detalle: string | null = null;
+    if (typeof payload === 'string' && payload.length <= 4000) {
+      try { JSON.parse(payload); detalle = payload; } catch { detalle = null; }
+    }
+    const parametros = (request.params || {}) as Record<string, string>;
+    await sql`
+      INSERT INTO audit_log (user_id, user_email, action, route, target_id, detail, ip)
+      VALUES (${auth.sub}, ${auth.email || null}, ${request.method},
+        ${request.routeOptions?.url || url}, ${parametros.id || null},
+        -- El ::text antes del ::jsonb no sobra: sin él, postgres.js deduce que
+        -- el parámetro ya es jsonb y vuelve a codificarlo, y en la columna
+        -- acaba una cadena JSON escapada en vez de un objeto.
+        ${detalle}::text::jsonb, ${request.ip || null})
+    `;
+  } catch (error) {
+    // La bitácora nunca puede tumbar la operación que registra: si falla, se
+    // deja constancia en el log del servidor y la respuesta sigue su camino.
+    app.log.warn({ err: error, url: request.url }, 'No se pudo escribir en la bitácora');
+  }
+  return payload;
+});
+
+app.get('/api/audit-log', { preHandler: requireStaff }, async request => {
+  const consulta = z.object({ limit: z.coerce.number().int().min(1).max(200).default(60) }).parse(request.query);
+  return sql`
+    SELECT id, user_email, action, route, target_id, detail, created_at
+    FROM audit_log ORDER BY created_at DESC LIMIT ${consulta.limit}
+  `;
+});
+
 // ── Freno a la fuerza bruta ───────────────────────────────────────────────
 // Se cuenta por correo y por IP. Por correo, para que nadie martillee una
 // cuenta concreta; por IP, para que no se libre probando muchos correos
