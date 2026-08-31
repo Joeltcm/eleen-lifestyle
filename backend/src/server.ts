@@ -1130,6 +1130,123 @@ app.post('/api/sessions', { preHandler: requireStaff }, async (request, reply) =
   catch (error) { app.log.warn({ err: error, sessionId: session.id }, 'Session created but Google Calendar sync failed'); }
   return reply.code(201).send(session);
 });
+// ── Horarios que se repiten sin fecha de fin ──────────────────────────────
+// Un cliente que entrena lunes y miércoles a las 5:30 no tiene fecha de fin:
+// entrena hasta que deja de entrenar. Se guarda la regla y se mantienen creadas
+// las sesiones de las próximas semanas, en vez de intentar guardar infinitas.
+const HORIZONTE_DIAS = 56;
+
+async function extenderRecurrencias(ownerId?: string) {
+  const reglas = await sql`
+    SELECT r.id, r.client_id, r.routine_id, r.weekdays, r.time_of_day, r.duration_minutes,
+           r.mode, r.notes, r.starts_on, r.ends_on, c.owner_id
+    FROM session_recurrences r
+    JOIN clients c ON c.id = r.client_id
+    WHERE r.active AND c.status = 'active'
+      AND (r.ends_on IS NULL OR r.ends_on >= current_date)
+      AND (${ownerId ?? null}::uuid IS NULL OR c.owner_id = ${ownerId ?? null}::uuid)
+  `;
+  let creadas = 0;
+  for (const regla of reglas) {
+    // Una sola consulta por regla: genera los días del horizonte, se queda con
+    // los de la semana elegidos y salta los que ya tienen sesión viva. El
+    // AT TIME ZONE convierte "las 5:30 en Panamá" al instante correcto.
+    const filas = await sql`
+      INSERT INTO sessions (client_id, routine_id, starts_at, duration_minutes, mode, notes, recurrence_id)
+      SELECT ${regla.client_id}, ${regla.routine_id}, candidato.momento,
+             ${regla.duration_minutes}, ${regla.mode}, ${regla.notes}, ${regla.id}
+      FROM (
+        SELECT ((dia::date + ${regla.time_of_day}::time) AT TIME ZONE 'America/Panama') AS momento
+        FROM generate_series(
+          GREATEST(current_date, ${regla.starts_on}::date),
+          -- Los ::int hacen falta: sin ellos el número llega sin tipo y
+          -- Postgres no sabe si "date + $1" suma días o un intervalo, así que
+          -- se planta con "operator is not unique".
+          LEAST(current_date + ${HORIZONTE_DIAS}::int, COALESCE(${regla.ends_on}::date, current_date + ${HORIZONTE_DIAS}::int)),
+          interval '1 day'
+        ) AS dia
+        WHERE extract(dow FROM dia)::int = ANY(${regla.weekdays as number[]})
+      ) AS candidato
+      WHERE NOT EXISTS (
+        SELECT 1 FROM sessions s
+        WHERE s.client_id = ${regla.client_id} AND s.starts_at = candidato.momento AND s.status <> 'cancelled'
+      )
+      RETURNING id
+    `;
+    creadas += filas.length;
+    for (const sesion of filas) {
+      try { await syncSessionToGoogle(String(regla.owner_id), sesion.id as string); }
+      catch { /* el calendario se reintenta solo; la sesión ya es válida aquí */ }
+    }
+  }
+  return creadas;
+}
+
+const recurrenceSchema = z.object({
+  clientId: z.string().uuid(),
+  routineId: z.string().uuid().optional(),
+  weekdays: z.array(z.coerce.number().int().min(0).max(6)).min(1).max(7),
+  timeOfDay: z.string().regex(/^\d{2}:\d{2}$/, 'Hora inválida'),
+  durationMinutes: z.coerce.number().int().min(15).max(480).default(60),
+  mode: z.string().default('Presencial'),
+  notes: z.string().optional(),
+  endsOn: z.union([z.literal(''), z.null(), z.string().date()]).optional()
+    .transform(valor => (valor === '' || valor === undefined ? null : valor))
+});
+
+app.post('/api/session-recurrences', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const input = recurrenceSchema.parse(request.body);
+  const [cliente] = await sql`SELECT id FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub}`;
+  if (!cliente) return reply.code(404).send({ error: 'Cliente no encontrado' });
+
+  const [regla] = await sql`
+    INSERT INTO session_recurrences (client_id, routine_id, weekdays, time_of_day, duration_minutes, mode, notes, ends_on)
+    VALUES (${input.clientId}, ${input.routineId || null}, ${[...new Set(input.weekdays)].sort()},
+      ${input.timeOfDay}::time, ${input.durationMinutes}, ${input.mode}, ${input.notes || null}, ${input.endsOn}::date)
+    RETURNING *
+  `;
+  const creadas = await extenderRecurrencias(auth.sub);
+  return reply.code(201).send({ recurrence: regla, creadas });
+});
+
+app.get('/api/session-recurrences', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  return sql`
+    SELECT r.*, c.full_name, rt.title AS routine_title,
+      (SELECT count(*)::int FROM sessions s WHERE s.recurrence_id = r.id AND s.starts_at >= now() AND s.status = 'scheduled') AS proximas
+    FROM session_recurrences r
+    JOIN clients c ON c.id = r.client_id
+    LEFT JOIN routines rt ON rt.id = r.routine_id
+    WHERE c.owner_id = ${auth.sub} AND r.active
+    ORDER BY c.full_name
+  `;
+});
+
+// Detener el horario: la entrenadora confirma que el cliente no sigue. Se
+// retiran las sesiones futuras que aún nadie tocó, y se dejan intactas las
+// pasadas y las que ya tienen asistencia registrada: son historial.
+app.delete('/api/session-recurrences/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const motivo = z.object({ reason: z.string().trim().max(300).optional() })
+    .parse(request.query as Record<string, unknown>).reason ?? null;
+
+  const [regla] = await sql`
+    UPDATE session_recurrences r SET active = false, stopped_at = now(), stopped_reason = ${motivo}, updated_at = now()
+    FROM clients c WHERE r.id = ${id} AND c.id = r.client_id AND c.owner_id = ${auth.sub} AND r.active
+    RETURNING r.*
+  `;
+  if (!regla) return reply.code(404).send({ error: 'Horario no encontrado o ya detenido' });
+
+  const retiradas = await sql`
+    DELETE FROM sessions
+    WHERE recurrence_id = ${id} AND starts_at > now() AND status = 'scheduled'
+    RETURNING id
+  `;
+  return { stopped: true, recurrence: regla, sesionesRetiradas: retiradas.length };
+});
+
 // Agendar varias fechas de una vez, para el caso normal: "Julio entrena lunes,
 // miércoles y viernes a las 8". Antes había que repetir el modal una vez por
 // sesión, doce veces para un mes.
@@ -2973,6 +3090,13 @@ const billingInterval = setInterval(() => generateRecurringInvoices().catch(erro
 // barren una vez al día para que la tabla no crezca sin fin.
 const purgaIntentos = setInterval(() => purgarIntentos().catch(error => app.log.error(error)), 24 * 60 * 60_000);
 purgaIntentos.unref();
+// Mantiene creadas las sesiones de los horarios fijos. Corre cada seis horas:
+// el horizonte es de ocho semanas, así que no hay ninguna prisa, y si el
+// servicio estuvo caído un rato se pone al día en el siguiente ciclo.
+const primeraExtension = setTimeout(() => extenderRecurrencias().catch(error => app.log.error(error)), 20_000);
+const extensionRecurrencias = setInterval(() => extenderRecurrencias().catch(error => app.log.error(error)), 6 * 60 * 60_000);
+primeraExtension.unref();
+extensionRecurrencias.unref();
 firstReminderRun.unref();
 reminderInterval.unref();
 firstBillingRun.unref();

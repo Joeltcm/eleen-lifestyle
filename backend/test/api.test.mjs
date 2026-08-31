@@ -261,6 +261,60 @@ describe('cobros', () => {
   });
 });
 
+describe('horarios fijos indefinidos', () => {
+  let clientId;
+  let reglaId;
+  before(async () => {
+    const c = await api.post('/api/clients', { fullName: 'Fijo Prueba', billingModel: 'monthly', standardPrice: 200, cutoffDay: 1, planId: undefined });
+    clientId = c.datos.id;
+  });
+
+  test('guarda la regla y llena el horizonte de una vez', async () => {
+    const { estado, datos } = await api.post('/api/session-recurrences', {
+      clientId, weekdays: [1, 3], timeOfDay: '05:30', durationMinutes: 60, mode: 'Presencial'
+    });
+    assert.equal(estado, 201);
+    assert.equal(datos.recurrence.ends_on, null, 'indefinido es el caso normal');
+    reglaId = datos.recurrence.id;
+    // Ocho semanas con dos días por semana: unas dieciséis sesiones.
+    assert.ok(datos.creadas >= 14 && datos.creadas <= 18, `esperaba ~16 sesiones, hubo ${datos.creadas}`);
+  });
+
+  test('las agenda en los días correctos y a la hora de Panamá', async () => {
+    const sesiones = (await api.get('/api/sessions')).datos.filter(s => s.client_id === clientId);
+    assert.ok(sesiones.length > 0);
+    for (const sesion of sesiones.slice(0, 6)) {
+      const cuando = new Date(sesion.starts_at);
+      // Panamá es UTC-5 todo el año: las 05:30 locales son las 10:30 UTC.
+      assert.equal(cuando.getUTCHours(), 10, 'la hora local debe conservarse');
+      assert.equal(cuando.getUTCMinutes(), 30);
+      const diaPanama = new Date(cuando.getTime() - 5 * 3600_000).getUTCDay();
+      assert.ok([1, 3].includes(diaPanama), `día inesperado: ${diaPanama}`);
+    }
+  });
+
+  test('volver a extender no duplica nada', async () => {
+    const antes = (await api.get('/api/sessions')).datos.filter(s => s.client_id === clientId).length;
+    await api.post('/api/session-recurrences', { clientId, weekdays: [1, 3], timeOfDay: '05:30' });
+    const despues = (await api.get('/api/sessions')).datos.filter(s => s.client_id === clientId).length;
+    assert.equal(despues, antes, 'una segunda regla igual no debe duplicar las sesiones');
+  });
+
+  test('detenerlo retira las futuras y conserva el historial', async () => {
+    const { estado, datos } = await api.delete(`/api/session-recurrences/${reglaId}`);
+    assert.equal(estado, 200);
+    assert.ok(datos.sesionesRetiradas > 0, 'debe limpiar la agenda por delante');
+
+    const activas = await api.get('/api/session-recurrences');
+    assert.ok(!activas.datos.find(r => r.id === reglaId), 'ya no figura entre los activos');
+  });
+
+  test('no se detiene dos veces', async () => {
+    const { estado } = await api.delete(`/api/session-recurrences/${reglaId}`);
+    assert.equal(estado, 404);
+  });
+});
+
 describe('quitar sesiones canceladas de la agenda', () => {
   let clienteId;
   let sesionId;

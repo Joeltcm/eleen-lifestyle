@@ -1,4 +1,4 @@
-const APP_VERSION = '91';
+const APP_VERSION = '92';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -801,6 +801,46 @@ function newInvoice() {
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
+// Horarios fijos: verlos y detenerlos. Un horario indefinido sin un sitio
+// visible donde pararlo sería una trampa —seguiría llenando la agenda de
+// alguien que ya no entrena—, así que esto no es opcional.
+const DIAS_CORTOS = ['D', 'L', 'M', 'X', 'J', 'V', 'S'];
+async function recurrenceManager() {
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">AGENDA</p><h2>Horarios fijos</h2>
+    <p style="color:#6f7b75;margin-top:-12px">Se repiten solos hasta que los detengas. Detener uno retira sus sesiones futuras y deja intactas las pasadas.</p>
+    <div id="recurrencias-lista"><p class="empty">Cargando…</p></div>`;
+  openModal(box, true);
+  const pintar = async () => {
+    const destino = document.getElementById('recurrencias-lista');
+    try {
+      const reglas = await api('/api/session-recurrences');
+      if (!destino?.isConnected) return;
+      destino.innerHTML = reglas.length ? `<div class="gasto-lista">${reglas.map(regla => {
+        const dias = (regla.weekdays || []).map(d => DIAS_CORTOS[d]).join(' · ');
+        const hora = String(regla.time_of_day).slice(0, 5);
+        return `<article class="gasto-item">
+          <div><b>${escapeHtml(regla.full_name)}</b><small>${dias} · ${hora} · ${regla.duration_minutes} min${regla.routine_title ? ` · ${escapeHtml(regla.routine_title)}` : ''}<br>${regla.proximas} sesion${regla.proximas === 1 ? '' : 'es'} ya agendada${regla.proximas === 1 ? '' : 's'}${regla.ends_on ? ` · hasta ${dateOnly(regla.ends_on)}` : ' · sin fecha de fin'}</small></div>
+          <button class="secondary session-use" data-detener-horario="${regla.id}" data-nombre="${escapeHtml(regla.full_name)}">Detener</button>
+        </article>`;
+      }).join('')}</div>` : '<p class="empty">No hay horarios fijos activos.</p>';
+      destino.querySelectorAll('[data-detener-horario]').forEach(boton => {
+        boton.onclick = async () => {
+          if (!confirm(`¿Detener el horario fijo de ${boton.dataset.nombre}?\n\nSe retiran sus sesiones futuras que todavía nadie marcó. Las pasadas y las que ya tienen asistencia se quedan.`)) return;
+          try {
+            const r = await api(`/api/session-recurrences/${boton.dataset.detenerHorario}`, { method: 'DELETE' });
+            await loadData(); renderAll(); await pintar();
+            toast(`Horario detenido · ${r.sesionesRetiradas} sesiones futuras retiradas`);
+          } catch (error) { toast(error.message, true); }
+        };
+      });
+    } catch (error) {
+      if (destino) destino.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
+    }
+  };
+  await pintar();
+}
+
 function newSession() {
   const content = formFromTemplate('new-session-template'); openModal(content);
   const clientSelect = document.getElementById('session-client'); data.clients.filter(client => client.status === 'Activo').forEach(client => clientSelect.add(new Option(client.name, client.id)));
@@ -830,9 +870,14 @@ function newSession() {
     return salida;
   };
 
+  const perpetua = document.getElementById('session-forever');
+  const perpetuaLabel = document.getElementById('session-forever-label');
   const refrescar = () => {
     const marcados = dias();
-    hastaLabel.hidden = !marcados.length;
+    perpetuaLabel.hidden = !marcados.length;
+    // Sin fecha de fin no se agenda un montón de sesiones: se guarda el horario
+    // y la aplicación mantiene creadas las de las próximas semanas.
+    hastaLabel.hidden = !marcados.length || perpetua.checked;
     if (marcados.length && !hastaInput.value && fechaInput.value) {
       // Cuatro semanas por defecto: un mes de entrenamientos es lo que se
       // agenda de una sentada, y siempre se puede acortar.
@@ -840,10 +885,18 @@ function newSession() {
       sugerida.setDate(sugerida.getDate() + 27);
       hastaInput.value = dateKey(sugerida);
     }
+    if (marcados.length && perpetua.checked) {
+      const nombres = ['domingos', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábados'];
+      const cuales = marcados.sort().map(d => nombres[d]).join(', ');
+      pista.textContent = `Se repetirá los ${cuales} indefinidamente. Se detiene desde Agenda → Horarios fijos.`;
+      boton.textContent = 'Guardar horario fijo';
+      return;
+    }
     const total = marcados.length ? fechasRepetidas().length : 1;
     pista.textContent = marcados.length ? `Se agendarán ${total} sesion${total === 1 ? '' : 'es'}.` : '';
     boton.textContent = total > 1 ? `Agendar ${total} sesiones` : 'Agendar sesión';
   };
+  perpetua.addEventListener('change', refrescar);
   document.querySelectorAll('#session-weekdays input').forEach(c => c.addEventListener('change', refrescar));
   fechaInput.addEventListener('change', refrescar);
   hastaInput.addEventListener('change', refrescar);
@@ -854,6 +907,17 @@ function newSession() {
     try {
       event.target.classList.add('loading-state');
       const routineId = form.get('routine');
+      if (dias().length && perpetua.checked) {
+        const resultado = await api('/api/session-recurrences', { method: 'POST', body: {
+          clientId: form.get('client'),
+          routineId: routineId === 'Evaluación / seguimiento' ? undefined : routineId,
+          weekdays: dias(), timeOfDay: form.get('time'),
+          durationMinutes: Number(form.get('durationMinutes')), mode: form.get('mode'), notes: form.get('notes') || undefined
+        } });
+        await loadData(); renderAll(); modal.close(); navigate('calendar');
+        toast(`Horario fijo guardado · ${resultado.creadas} sesiones agendadas por ahora`);
+        return;
+      }
       const repetidas = fechasRepetidas();
       if (repetidas.length) {
         const resultado = await api('/api/sessions/batch', { method: 'POST', body: {
@@ -2151,6 +2215,7 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'new-routine') newRoutine();
   if (actionButton?.dataset.action === 'exercise-catalog') exerciseCatalogManager();
   if (actionButton?.dataset.action === 'daily-log') dailyTrainingLog();
+  if (actionButton?.dataset.action === 'recurrences') recurrenceManager();
   if (actionButton?.dataset.action === 'pending-collections') pendingCollections();
   if (actionButton?.dataset.action === 'expenses') expensesManager();
   if (actionButton?.dataset.action === 'link-packages') linkPackages();
