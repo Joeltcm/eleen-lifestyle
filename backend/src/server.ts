@@ -905,7 +905,10 @@ app.delete('/api/packages/:id', { preHandler: requireStaff }, async (request, re
 const routineExerciseSchema = z.object({
   catalogId: z.string().max(80).optional(), name: z.string().min(1).max(120), english: z.string().max(120).optional(),
   category: z.string().max(80).optional(), level: z.string().max(40).optional(), machine: z.string().max(180).optional(),
-  freeWeight: z.string().max(180).optional(), sets: z.coerce.number().int().min(1).max(20).optional(), reps: z.string().max(40).optional(), notes: z.string().max(300).optional()
+  freeWeight: z.string().max(180).optional(), sets: z.coerce.number().int().min(1).max(20).optional(), reps: z.string().max(40).optional(),
+  // Texto libre y no un número: aquí se escribe "20 lb", "12 kg" o "barra sola",
+  // y forzar una unidad sería adivinar cómo trabaja cada quien.
+  weight: z.string().max(40).optional(), notes: z.string().max(300).optional()
 });
 const routineSchema = z.object({ title: z.string().min(2), description: z.string().optional(), sessionsPerWeek: z.coerce.number().int().min(1).max(7), exercises: z.array(routineExerciseSchema).max(80).default([]), clientId: z.string().uuid().optional(), dueOn: z.union([z.literal(''), z.null(), z.string().date()]).optional().transform(value => (value === '' || value === undefined ? null : value)) });
 app.get('/api/routines', { preHandler: requireStaff }, async request => {
@@ -924,6 +927,41 @@ const routineSuggestionSchema = z.object({
   description: z.string().trim().min(10).max(600),
   clientId: z.string().uuid().optional(),
   repeatMuscleGroups: z.boolean().default(false)
+});
+
+// Los pesos que este cliente ya manejó, por ejercicio. Salen de sus rutinas
+// anteriores: es el único registro que hay, y sirve para no empezar de cero
+// cada vez ni tener que buscarlo en un cuaderno.
+//
+// Se sugiere, no se rellena: el peso de hoy lo decide quien está delante de la
+// persona, y arrastrar el de hace dos meses como si siguiera vigente sería
+// meterle un número que nadie revisó.
+app.get('/api/clients/:clientId/exercise-weights', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const clientId = z.string().uuid().parse((request.params as { clientId: string }).clientId);
+  const [cliente] = await sql`SELECT id FROM clients WHERE id = ${clientId} AND owner_id = ${auth.sub}`;
+  if (!cliente) return reply.code(404).send({ error: 'Cliente no encontrado' });
+
+  const previas = await sql`
+    SELECT r.exercises, COALESCE(ra.starts_on, r.created_at::date) AS cuando
+    FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id
+    WHERE ra.client_id = ${clientId}
+    ORDER BY COALESCE(ra.starts_on, r.created_at::date) DESC
+    LIMIT 12
+  `;
+  // Se recorre de más reciente a más antigua y se queda con el primero que
+  // aparezca de cada ejercicio: el último peso conocido.
+  const ultimos: Record<string, { weight: string; on: string }> = {};
+  for (const fila of previas) {
+    const lista = Array.isArray(fila.exercises) ? fila.exercises as Array<{ name?: string; weight?: string }> : [];
+    for (const ejercicio of lista) {
+      const nombre = String(ejercicio?.name ?? '').trim();
+      const peso = String(ejercicio?.weight ?? '').trim();
+      if (!nombre || !peso || ultimos[nombre]) continue;
+      ultimos[nombre] = { weight: peso, on: String(fila.cuando).slice(0, 10) };
+    }
+  }
+  return ultimos;
 });
 
 app.post('/api/routines/suggest', { preHandler: requireStaff }, async (request, reply) => {
@@ -1035,6 +1073,7 @@ const exerciseSchema = z.object({
   machine: z.string().trim().max(180).optional().nullable(),
   freeWeight: z.string().trim().max(180).optional().nullable(),
   cues: z.string().trim().max(600).optional().nullable(),
+  usesWeight: z.boolean().optional(),
   archived: z.boolean().optional()
 });
 
@@ -1048,7 +1087,7 @@ function slugFrom(name: string) {
 
 const exerciseColumns = sql`
   id, slug, name, english, section, pattern, level, machine, free_weight, cues,
-  archived, sort_order, video_content_type, video_size_bytes, video_duration_seconds,
+  uses_weight, archived, sort_order, video_content_type, video_size_bytes, video_duration_seconds,
   video_uploaded_at, (video_object_key IS NOT NULL) AS has_video
 `;
 
@@ -1073,9 +1112,10 @@ app.post('/api/exercises', { preHandler: requireStaff }, async (request, reply) 
   const auth = request.user as AuthUser;
   const input = exerciseSchema.parse(request.body);
   const [exercise] = await sql`
-    INSERT INTO exercises (owner_id, slug, name, english, section, pattern, level, machine, free_weight, cues)
+    INSERT INTO exercises (owner_id, slug, name, english, section, pattern, level, machine, free_weight, cues, uses_weight)
     VALUES (${auth.sub}, ${slugFrom(input.name)}, ${input.name}, ${input.english || null}, ${input.section},
-            ${input.pattern || null}, ${input.level}, ${input.machine || null}, ${input.freeWeight || null}, ${input.cues || null})
+            ${input.pattern || null}, ${input.level}, ${input.machine || null}, ${input.freeWeight || null}, ${input.cues || null},
+            ${input.usesWeight ?? false})
     ON CONFLICT (owner_id, slug) DO NOTHING
     RETURNING ${exerciseColumns}
   `;
@@ -1097,6 +1137,7 @@ app.patch('/api/exercises/:id', { preHandler: requireStaff }, async (request, re
       machine = COALESCE(${input.machine ?? null}, machine),
       free_weight = COALESCE(${input.freeWeight ?? null}, free_weight),
       cues = COALESCE(${input.cues ?? null}, cues),
+      uses_weight = COALESCE(${input.usesWeight ?? null}, uses_weight),
       archived = COALESCE(${input.archived ?? null}, archived),
       updated_at = now()
     WHERE id = ${id} AND owner_id = ${auth.sub}

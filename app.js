@@ -1,4 +1,4 @@
-const APP_VERSION = '95';
+const APP_VERSION = '96';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -97,7 +97,28 @@ async function api(path, options = {}) {
   return payload;
 }
 const setsLabel = sets => `${sets} serie${Number(sets) === 1 ? '' : 's'}`;
-const exerciseLabel = exercise => typeof exercise === 'string' ? exercise : [exercise.name, exercise.sets && setsLabel(exercise.sets), exercise.reps].filter(Boolean).join(' · ');
+// Equivalencia entre los dos sistemas. En Panamá se usan los dos: las
+// mancuernas del gimnasio suelen venir en libras y los discos en kilos, así que
+// quien anota "20 lb" y quien anota "9 kg" están hablando de lo mismo y
+// conviene verlo sin hacer la cuenta a mano.
+const LIBRAS_POR_KILO = 2.20462;
+function equivalenciaPeso(texto) {
+  const limpio = String(texto || '').trim();
+  if (!limpio) return '';
+  // Se acepta coma o punto decimal, y la unidad pegada o separada.
+  const encontrado = limpio.match(/(\d+(?:[.,]\d+)?)\s*(kg|kilos?|k|lb|lbs|libras?)\b/i);
+  if (!encontrado) return '';
+  const cantidad = Number(encontrado[1].replace(',', '.'));
+  if (!Number.isFinite(cantidad) || cantidad <= 0) return '';
+  const unidad = encontrado[2].toLowerCase();
+  const enKilos = /^k/.test(unidad);
+  const convertido = enKilos ? cantidad * LIBRAS_POR_KILO : cantidad / LIBRAS_POR_KILO;
+  // Un decimal basta: nadie ajusta la carga a la centésima de kilo.
+  const redondeado = Math.round(convertido * 10) / 10;
+  return `≈ ${redondeado} ${enKilos ? 'lb' : 'kg'}`;
+}
+
+const exerciseLabel = exercise => typeof exercise === 'string' ? exercise : [exercise.name, exercise.sets && setsLabel(exercise.sets), exercise.reps, exercise.weight].filter(Boolean).join(' · ');
 const sessionFromApi = item => {
   const starts = panamaDateTimeParts(item.starts_at);
   return {
@@ -128,7 +149,7 @@ async function loadData() {
     id: exercise.id, slug: exercise.slug, name: exercise.name, english: exercise.english || '',
     section: exercise.section, pattern: exercise.pattern || '', level: exercise.level,
     machine: exercise.machine || 'No aplica', freeWeight: exercise.free_weight || 'No aplica',
-    cues: exercise.cues || '', hasVideo: Boolean(exercise.has_video),
+    cues: exercise.cues || '', usesWeight: Boolean(exercise.uses_weight), hasVideo: Boolean(exercise.has_video),
     videoDurationSeconds: exercise.video_duration_seconds ? Number(exercise.video_duration_seconds) : null
   })) : fallbackCatalog;
   const assessments = await Promise.all(clients.map(client => api(`/api/clients/${client.id}/inbody`)));
@@ -1160,7 +1181,7 @@ async function reloadCatalog() {
     id: exercise.id, slug: exercise.slug, name: exercise.name, english: exercise.english || '',
     section: exercise.section, pattern: exercise.pattern || '', level: exercise.level,
     machine: exercise.machine || 'No aplica', freeWeight: exercise.free_weight || 'No aplica',
-    cues: exercise.cues || '', hasVideo: Boolean(exercise.has_video),
+    cues: exercise.cues || '', usesWeight: Boolean(exercise.uses_weight), hasVideo: Boolean(exercise.has_video),
     videoDurationSeconds: exercise.video_duration_seconds ? Number(exercise.video_duration_seconds) : null
   }));
 }
@@ -1182,6 +1203,8 @@ function exerciseEditor(exercise) {
     <label>Con máquina<input name="machine" maxlength="180" value="${value('machine')}" /></label>
     <label>Sin máquina<input name="freeWeight" maxlength="180" value="${value('freeWeight')}" /></label>
     <label>Claves de ejecución<textarea name="cues" rows="2" maxlength="600" placeholder="Lo que el cliente debe cuidar al ejecutarlo">${value('cues')}</textarea></label>
+    <label class="checkbox-line"><input type="checkbox" name="usesWeight"${exercise?.usesWeight ? ' checked' : ''} /> Lleva peso</label>
+    <p class="section-note">Si lo marcas, al armar una rutina aparecerá el campo para anotar la carga. Se clasificó solo a partir de la máquina y el implemento; corrígelo si falló.</p>
     <button class="primary wide-button">${exercise ? 'Guardar cambios' : 'Crear ejercicio'}</button>
     ${exercise ? '<button type="button" class="secondary wide-button" id="delete-exercise">Eliminar del catálogo</button>' : ''}</form>`;
   openModal(box);
@@ -1199,7 +1222,8 @@ function exerciseEditor(exercise) {
       name: values.get('name').trim(), english: values.get('english').trim() || null,
       section: values.get('section'), pattern: values.get('pattern').trim() || null,
       level: values.get('level'), machine: values.get('machine').trim() || null,
-      freeWeight: values.get('freeWeight').trim() || null, cues: values.get('cues').trim() || null
+      freeWeight: values.get('freeWeight').trim() || null, cues: values.get('cues').trim() || null,
+      usesWeight: Boolean(values.get('usesWeight'))
     };
     try {
       event.target.classList.add('loading-state');
@@ -1389,12 +1413,60 @@ function newRoutine(routine = null, duplicate = false) {
       const dose = document.createElement('div'); dose.className = 'selected-exercise-dose';
       const setsLabel = document.createElement('label'); setsLabel.className = 'selected-exercise-field'; const setsTitle = document.createElement('span'); setsTitle.textContent = 'Series'; const sets = document.createElement('input'); sets.type = 'number'; sets.min = '1'; sets.max = '20'; sets.value = exercise.sets; sets.dataset.exerciseSets = String(index); setsLabel.append(setsTitle, sets);
       const repsLabel = document.createElement('label'); repsLabel.className = 'selected-exercise-field'; const repsTitle = document.createElement('span'); repsTitle.textContent = 'Repeticiones / tiempo'; const reps = document.createElement('input'); reps.value = exercise.reps; reps.dataset.exerciseReps = String(index); repsLabel.append(repsTitle, reps); dose.append(setsLabel, repsLabel);
+      // El peso sólo se pide donde tiene sentido: una plancha o la caminadora
+      // no llevan kilos, y pedirlos en todos llenaría la rutina de huecos.
+      const enCatalogo = exerciseCatalog.find(item => item.id === exercise.catalogId || item.name === exercise.name);
+      if (enCatalogo?.usesWeight) {
+        const pesoLabel = document.createElement('label'); pesoLabel.className = 'selected-exercise-field';
+        const pesoTitulo = document.createElement('span'); pesoTitulo.textContent = 'Peso';
+        const peso = document.createElement('input');
+        peso.value = exercise.weight || '';
+        peso.dataset.exerciseWeight = String(index);
+        // Nace en blanco a propósito. Lo que el cliente levantó la última vez
+        // se ofrece como pista, no se rellena: el peso de hoy lo decide quien
+        // lo tiene delante, y arrastrar el de hace dos meses sería colar un
+        // número que nadie revisó.
+        const anterior = pesosPrevios[exercise.name];
+        peso.placeholder = anterior ? `Antes: ${anterior.weight}` : 'Ej. 20 lb';
+        if (anterior) peso.title = `La última vez usó ${anterior.weight} (${anterior.on})`;
+        pesoLabel.append(pesoTitulo, peso);
+        const equivalencia = document.createElement('small');
+        equivalencia.className = 'peso-equivalencia';
+        const pintarEquivalencia = () => { equivalencia.textContent = equivalenciaPeso(peso.value); };
+        pintarEquivalencia();
+        peso.addEventListener('input', pintarEquivalencia);
+        pesoLabel.append(equivalencia);
+        if (anterior) {
+          const pista = document.createElement('small');
+          pista.className = 'peso-anterior';
+          pista.textContent = `Última vez: ${anterior.weight} · ${anterior.on}`;
+          pista.tabIndex = 0; pista.role = 'button';
+          pista.onclick = () => {
+            peso.value = anterior.weight;
+            selectedExercises[index].weight = anterior.weight;
+            peso.dispatchEvent(new Event('input'));
+          };
+          pesoLabel.append(pista);
+        }
+        dose.append(pesoLabel);
+      }
       const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'exercise-remove'; remove.dataset.removeExercise = String(index); remove.setAttribute('aria-label', `Quitar ${exercise.name}`); remove.textContent = '×';
       row.append(order, copy, dose, remove); selectedList.append(row);
     });
   };
   // Se copia explícitamente lo que la rutina necesita guardar. catalogId es lo
   // que después permite al portal encontrar el video del ejercicio.
+  // Pesos que este cliente ya manejó. Se piden al elegir cliente, porque
+  // dependen de él y no de la rutina.
+  let pesosPrevios = {};
+  const cargarPesosPrevios = async () => {
+    const id = clientSelect.value;
+    pesosPrevios = id ? await api(`/api/clients/${id}/exercise-weights`).catch(() => ({})) : {};
+    renderSelected();
+  };
+  clientSelect.addEventListener('change', () => void cargarPesosPrevios());
+  if (clientSelect.value) void cargarPesosPrevios();
+
   const prescription = exercise => ({
     catalogId: exercise.id, name: exercise.name, english: exercise.english,
     category: exerciseSectionLabels[exercise.section] || exercise.section,
@@ -1413,6 +1485,9 @@ function newRoutine(routine = null, duplicate = false) {
   selectedList.addEventListener('input', event => {
     if (event.target.matches('[data-exercise-sets]')) selectedExercises[Number(event.target.dataset.exerciseSets)].sets = Math.max(1, Math.min(20, Number(event.target.value) || 1));
     if (event.target.matches('[data-exercise-reps]')) selectedExercises[Number(event.target.dataset.exerciseReps)].reps = event.target.value.trim() || '1';
+    // El peso puede quedarse vacío: no todos los días se anota, y forzar un
+    // valor inventaría una carga que nadie usó.
+    if (event.target.matches('[data-exercise-weight]')) selectedExercises[Number(event.target.dataset.exerciseWeight)].weight = event.target.value.trim();
   });
   renderChoices(); renderSelected();
   document.getElementById('routine-form').addEventListener('submit', async event => {

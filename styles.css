@@ -174,3 +174,8 @@ dialog.modal-wide{max-width:920px}
 
 /* Cuentas por cobrar: lo vencido salta a la vista sin leer fechas. */
 .por-cobrar-vencida{color:#9c6558;font-weight:600}
+
+/* Peso del ejercicio: la pista del historial se toca para copiarla. */
+.peso-anterior{display:block;margin-top:4px;font-size:10px;color:#9b607a;cursor:pointer;text-decoration:underline dotted}
+.peso-anterior:hover{color:#7d4a60}
+.peso-equivalencia{display:block;margin-top:3px;font-size:10px;color:var(--muted)}
