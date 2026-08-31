@@ -18,7 +18,11 @@ const ejecutar = promisify(execFile);
 // corra igual en el Mac (usuario del sistema, sin contraseña) y en CI
 // (usuario postgres con contraseña).
 const USUARIO = process.env.PGUSER || process.env.USER || 'postgres';
-const HOST = process.env.PGHOST || 'localhost';
+// 'localhost' resuelve primero a ::1, y el Postgres de servicio de GitHub
+// Actions sólo publica el puerto en IPv4: la conexión se rechaza sin decir por
+// qué. Se fuerza 127.0.0.1, que funciona igual en local.
+const HOST_PEDIDO = process.env.PGHOST || 'localhost';
+const HOST = HOST_PEDIDO === 'localhost' ? '127.0.0.1' : HOST_PEDIDO;
 const PUERTO = process.env.PGPORT || '5432';
 const CLAVE = process.env.PGPASSWORD ? `:${encodeURIComponent(process.env.PGPASSWORD)}` : '';
 
@@ -28,7 +32,11 @@ export const SETUP_TOKEN = 'token-de-configuracion-para-pruebas';
 export async function levantar() {
   const nombreBase = `eileen_test_${randomUUID().slice(0, 8)}`;
   const url = `postgres://${USUARIO}${CLAVE}@${HOST}:${PUERTO}/${nombreBase}`;
-  await ejecutar('createdb', [nombreBase]);
+  try {
+    await ejecutar('createdb', [nombreBase], { env: { ...process.env, PGHOST: HOST } });
+  } catch (error) {
+    throw new Error(`No se pudo crear la base de pruebas en ${HOST}:${PUERTO}. ¿Está Postgres levantado?\n${error.stderr || error.message}`);
+  }
 
   const entorno = {
     ...process.env,
@@ -42,7 +50,12 @@ export async function levantar() {
   };
 
   // Las migraciones se aplican con el mismo comando que usa el despliegue.
-  await ejecutar('npm', ['run', 'migrate'], { env: entorno, cwd: new URL('..', import.meta.url).pathname });
+  try {
+    await ejecutar('npm', ['run', 'migrate'], { env: entorno, cwd: new URL('..', import.meta.url).pathname });
+  } catch (error) {
+    await ejecutar('dropdb', ['--if-exists', nombreBase]).catch(() => {});
+    throw new Error(`Fallaron las migraciones sobre una base vacía:\n${error.stdout || ''}${error.stderr || error.message}`);
+  }
 
   const puerto = 4000 + Math.floor(Math.random() * 1000);
   const proceso = spawn('node', ['dist/server.js'], {
