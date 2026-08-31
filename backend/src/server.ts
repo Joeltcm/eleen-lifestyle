@@ -1788,75 +1788,9 @@ app.get('/api/invoices', { preHandler: requireStaff }, async request => {
     WHERE c.owner_id = ${auth.sub} ORDER BY i.created_at DESC
   `;
 });
-// Vincular un cobro ya hecho —típicamente importado de Zoho— con su saldo de
-// sesiones. El saldo sólo nacía cuando el cobro se creaba aquí, así que los
-// clientes que pagaron en Zoho quedaron sin sesiones disponibles en la app.
-// Esto cierra ese hueco sin volver a cobrarles.
-const linkPackageSchema = z.object({
-  totalSessions: z.coerce.number().int().min(1).max(500),
-  // Cuántas de esas sesiones ya se dieron. Para un período pasado lo normal es
-  // que estén consumidas; darlas por no usadas las contaría como incumplidas y
-  // hundiría el cumplimiento del cliente por algo que sí ocurrió.
-  usedSessions: z.coerce.number().int().min(0).max(500).default(0),
-  kind: z.enum(['package', 'monthly']).default('monthly'),
-  expiresOn: z.union([z.literal(''), z.null(), z.string().date()]).optional().transform(v => (v === '' || v === undefined ? null : v))
-});
 
-app.post('/api/invoices/:id/link-package', { preHandler: requireStaff }, async (request, reply) => {
-  const auth = request.user as AuthUser;
-  const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const input = linkPackageSchema.parse(request.body);
-  if (input.usedSessions > input.totalSessions) return reply.code(400).send({ error: 'Las sesiones usadas no pueden superar el total' });
-
-  const resultado = await sql.begin(async transaction => {
-    const [invoice] = await transaction`
-      SELECT i.*, c.billing_cutoff_day FROM invoices i JOIN clients c ON c.id = i.client_id
-      WHERE i.id = ${id} AND c.owner_id = ${auth.sub} FOR UPDATE OF i
-    `;
-    if (!invoice) return { pack: null, clientId: '', amount: 0, error: 'Cobro no encontrado', code: 404 };
-    if (invoice.package_id) return { pack: null, clientId: '', amount: 0, error: 'Este cobro ya tiene un saldo de sesiones vinculado', code: 409 };
-
-    const comprado = String(invoice.issued_on || invoice.due_on || new Date().toISOString().slice(0, 10)).slice(0, 10);
-    // Sin fecha dada, la mensualidad vence un mes después de emitida: es el
-    // período que ese cobro cubrió.
-    const vence = input.expiresOn || (input.kind === 'monthly'
-      ? new Date(new Date(`${comprado}T12:00:00Z`).setUTCMonth(new Date(`${comprado}T12:00:00Z`).getUTCMonth() + 1)).toISOString().slice(0, 10)
-      : null);
-    const agotado = input.usedSessions >= input.totalSessions;
-
-    const [pack] = await transaction`
-      INSERT INTO session_packages (client_id, label, total_sessions, used_sessions, amount, status, purchased_on, expires_on, kind)
-      VALUES (${invoice.client_id}, ${String(invoice.concept || 'Cobro').slice(0, 120)}, ${input.totalSessions}, ${input.usedSessions},
-        ${invoice.amount}, ${agotado ? 'exhausted' : 'active'}, ${comprado}::date, ${vence}, ${input.kind})
-      RETURNING *
-    `;
-    await transaction`UPDATE invoices SET package_id = ${pack.id} WHERE id = ${id}`;
-    return { pack, clientId: invoice.client_id as string, amount: Number(invoice.amount), error: undefined as string | undefined, code: 0 };
-  });
-
-  if (resultado.error) return reply.code(resultado.code || 400).send({ error: resultado.error });
-  // Un cobro mensual vinculado también asienta el precio y la membresía: es lo
-  // que permite que ese cliente entre al cobro automático al cerrar Zoho.
-  if (input.kind === 'monthly' && resultado.amount > 0) await asentarMensualidad(resultado.clientId, auth.sub, resultado.amount);
-  return reply.code(201).send(resultado.pack);
-});
 
 // Cobros sin saldo de sesiones vinculado, para cerrar la migración.
-app.get('/api/invoices/unlinked', { preHandler: requireStaff }, async request => {
-  const auth = request.user as AuthUser;
-  const query = z.object({ source: z.enum(['zoho_invoice', 'eileen', 'all']).default('all') }).parse(request.query);
-  return sql`
-    SELECT i.id, i.concept, i.amount, i.due_on, i.issued_on, i.status, i.source_system, i.invoice_number,
-      c.id AS client_id, c.full_name, c.standard_price, c.billing_model
-    FROM invoices i JOIN clients c ON c.id = i.client_id
-    WHERE c.owner_id = ${auth.sub}
-      AND i.package_id IS NULL
-      AND i.status <> 'void'
-      AND (${query.source === 'all'} OR COALESCE(i.source_system, 'eileen') = ${query.source})
-    ORDER BY i.due_on DESC, c.full_name
-    LIMIT 400
-  `;
-});
 
 app.get('/api/billing/analytics', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
@@ -1965,85 +1899,9 @@ app.post('/api/invoices', { preHandler: requireStaff }, async (request, reply) =
   return reply.code(201).send(invoice);
 });
 const invoiceEditSchema = z.object({ concept: z.string().min(2).max(180), amount: z.coerce.number().min(0), dueOn: z.string().date() });
-// Qué mes cubre cada cobro.
-//
-// Las mensualidades se pagan por adelantado: lo cobrado en agosto cubre
-// septiembre. Pero las facturas importadas de Zoho no traen esa información
-// —Zoho no la exporta— así que para saber si un mes ya está cobrado la
-// generación automática mira la fecha de emisión. Con pago adelantado eso
-// falla: da agosto por cubierto, septiembre por pendiente, y emite un segundo
-// cobro de septiembre. El cliente paga dos veces.
-//
-// Con el período asignado, la generación lo respeta y deja de adivinar.
-// Se marcan los cobros elegidos, no un mes entero: en un mismo mes conviven
-// mensualidades y pagos de clases sueltas, y decir que las tres facturas
-// pequeñas de alguien cubren el mes siguiente daría ese mes por cobrado tres
-// veces y bloquearía su mensualidad real.
-const cobertura = z.object({
-  invoiceIds: z.array(z.string().uuid()).min(1).max(200),
-  coversMonth: z.string().regex(/^\d{4}-\d{2}$/, 'Mes inválido')
-});
 
-async function cobrosDelMes(ownerId: string, mes: string) {
-  return sql`
-    SELECT i.id, i.concept, i.amount, i.issued_on, i.due_on, i.billing_period, c.full_name
-    FROM invoices i JOIN clients c ON c.id = i.client_id
-    WHERE c.owner_id = ${ownerId}
-      AND i.status <> 'void'
-      AND i.package_id IS NULL
-      AND c.billing_model = 'monthly'
-      AND to_char(COALESCE(i.issued_on, i.due_on), 'YYYY-MM') = ${mes}
-    ORDER BY c.full_name
-  `;
-}
-
-app.get('/api/billing/coverage', { preHandler: requireStaff }, async request => {
-  const auth = request.user as AuthUser;
-  const { month } = z.object({ month: z.string().regex(/^\d{4}-\d{2}$/) }).parse(request.query);
-  const filas = await cobrosDelMes(auth.sub, month);
-  return {
-    month,
-    total: filas.length,
-    yaAsignados: filas.filter(f => f.billing_period).length,
-    cobros: filas
-  };
-});
-
-app.post('/api/billing/coverage', { preHandler: requireStaff }, async (request, reply) => {
-  const auth = request.user as AuthUser;
-  const input = cobertura.parse(request.body);
-  const periodo = `${input.coversMonth}-01`;
-
-  // Sólo los que no tengan período: si alguno ya se corrigió a mano, se
-  // respeta. Reasignar en bloque pisaría una decisión deliberada.
-  const actualizados = await sql`
-    UPDATE invoices i SET billing_period = ${periodo}::date
-    FROM clients c
-    WHERE c.id = i.client_id AND c.owner_id = ${auth.sub}
-      AND i.status <> 'void'
-      AND i.id = ANY(${input.invoiceIds}::uuid[])
-    RETURNING i.id, c.full_name
-  `;
-  if (!actualizados.length) return reply.code(404).send({ error: 'No se encontró ninguno de esos cobros' });
-  return { asignados: actualizados.length, cubre: input.coversMonth, clientes: actualizados.map(f => f.full_name) };
-});
 
 // Corregir uno suelto, cuando el reparto en bloque no acierta.
-app.patch('/api/invoices/:id/period', { preHandler: requireStaff }, async (request, reply) => {
-  const auth = request.user as AuthUser;
-  const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const { billingPeriod } = z.object({
-    billingPeriod: z.union([z.literal(''), z.null(), z.string().regex(/^\d{4}-\d{2}$/)]).optional()
-      .transform(v => (v === '' || v === undefined ? null : v))
-  }).parse(request.body);
-  const [invoice] = await sql`
-    UPDATE invoices i SET billing_period = ${billingPeriod ? `${billingPeriod}-01` : null}::date
-    FROM clients c WHERE i.id = ${id} AND c.id = i.client_id AND c.owner_id = ${auth.sub}
-    RETURNING i.id, i.billing_period
-  `;
-  if (!invoice) return reply.code(404).send({ error: 'Cobro no encontrado' });
-  return invoice;
-});
 
 app.patch('/api/invoices/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = invoiceEditSchema.parse(request.body);

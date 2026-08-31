@@ -1,4 +1,4 @@
-const APP_VERSION = '116';
+const APP_VERSION = '117';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1746,70 +1746,7 @@ function financeDashboard(rango = 'meses:12') {
 // Vincular cobros ya hechos con su saldo de sesiones. Los que se pagaron en
 // Zoho entraron como facturas sueltas: el cliente pagó pero la app no le
 // reconoce sesiones disponibles.
-function linkPackages(origen = 'zoho_invoice') {
-  const box = document.createElement('div');
-  box.innerHTML = `<p class="eyebrow">CIERRE DE MIGRACIÓN</p><h2>Vincular cobros con sus sesiones</h2>
-    <p style="color:#6f7b75;margin-top:-12px">Cobros sin saldo de sesiones. Al vincularlos, el cliente recupera sus sesiones en la app sin volver a pagarlos.</p>
-    <label>Origen<select id="link-origen">
-      <option value="zoho_invoice"${origen === 'zoho_invoice' ? ' selected' : ''}>Cobros de Zoho</option>
-      <option value="eileen"${origen === 'eileen' ? ' selected' : ''}>Cobros de Eileen</option>
-      <option value="all"${origen === 'all' ? ' selected' : ''}>Todos</option>
-    </select></label>
-    <div id="link-lista"><p class="empty">Buscando cobros…</p></div>`;
-  openModal(box, true);
-  document.getElementById('link-origen').onchange = event => linkPackages(event.target.value);
-  renderLinkPackages(origen);
-}
 
-function renderLinkPackages(origen) {
-  const target = document.getElementById('link-lista');
-  api(`/api/invoices/unlinked?source=${origen}`).then(cobros => {
-    if (!target?.isConnected || !modal.open) return;
-    target.innerHTML = cobros.length ? `<p class="section-note">${cobros.length} cobro${cobros.length === 1 ? '' : 's'} sin saldo vinculado. Vincula sólo los que corresponden a paquetes o mensualidades con sesiones.</p>
-      <div class="gasto-lista">${cobros.slice(0, 200).map(cobro => `<article class="gasto-item">
-        <div><b>${escapeHtml(cobro.full_name)}</b><small>${escapeHtml(cobro.concept)} · ${cobro.due_on ? dateOnly(cobro.due_on) : ''}${cobro.invoice_number ? ` · ${escapeHtml(cobro.invoice_number)}` : ''}</small></div>
-        <span class="gasto-monto">${money.format(cobro.amount)}</span>
-        <div class="gasto-acciones"><button class="secondary session-use" data-vincular="${cobro.id}">Vincular sesiones</button></div>
-      </article>`).join('')}</div>
-      ${cobros.length > 200 ? '<p class="section-note">Se muestran los 200 más recientes.</p>' : ''}` : '<p class="empty">No hay cobros sin vincular en este origen.</p>';
-    target.querySelectorAll('[data-vincular]').forEach(b => {
-      b.onclick = () => linkPackageEditor(cobros.find(c => c.id === b.dataset.vincular), origen);
-    });
-  }).catch(error => { if (target?.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; });
-}
-
-function linkPackageEditor(cobro, origen) {
-  const vencido = cobro.due_on && dateOnly(cobro.due_on) < dateKey(today);
-  const box = document.createElement('div');
-  box.innerHTML = `<form id="link-form"><p class="eyebrow">VINCULAR SESIONES</p><h2>${escapeHtml(cobro.full_name)}</h2>
-    <p class="form-summary">${escapeHtml(cobro.concept)} · ${money.format(cobro.amount)}${cobro.due_on ? ` · ${dateOnly(cobro.due_on)}` : ''}</p>
-    <div class="form-row">
-      <label>Sesiones del cobro<input name="totalSessions" type="number" min="1" max="500" required value="8" /></label>
-      <label>Ya usadas<input name="usedSessions" type="number" min="0" max="500" required value="8" /></label>
-    </div>
-    <label>Tipo<select name="kind"><option value="monthly">Mensualidad</option><option value="package">Paquete</option></select></label>
-    <label>Vence el<input name="expiresOn" type="date" id="package-expires" /><small id="package-expires-hint">Se propone según la vigencia del plan. Vacío: el saldo no caduca.</small></label>
-    ${vencido ? `<p class="section-note"><b>Este cobro es de un período pasado.</b> Deja "ya usadas" igual al total si esas sesiones se dieron. Si pones menos, las restantes contarán como incumplidas y bajarán el cumplimiento de ${escapeHtml(cobro.full_name)}.</p>` : '<p class="section-note">Si el período sigue vigente, pon en "ya usadas" las que realmente se dieron.</p>'}
-    <button class="primary wide-button">Vincular</button></form>`;
-  openModal(box);
-  const form = document.getElementById('link-form');
-  // Al cambiar el total, las usadas lo siguen mientras no se toquen a mano:
-  // el caso normal en un cobro viejo es que se dieron todas.
-  let usadasTocadas = false;
-  form.elements.usedSessions.oninput = () => { usadasTocadas = true; };
-  form.elements.totalSessions.oninput = event => { if (!usadasTocadas) form.elements.usedSessions.value = event.target.value; };
-  form.addEventListener('submit', async event => {
-    event.preventDefault();
-    const v = new FormData(event.target);
-    try {
-      event.target.classList.add('loading-state');
-      await api(`/api/invoices/${cobro.id}/link-package`, { method: 'POST', body: {
-        totalSessions: Number(v.get('totalSessions')), usedSessions: Number(v.get('usedSessions')),
-        kind: v.get('kind'), expiresOn: v.get('expiresOn') || null } });
-      await loadData(); renderAll(); modal.close(); toast('Sesiones vinculadas'); linkPackages(origen);
-    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
-  });
-}
 
 // Gastos: la otra mitad de las finanzas. En lista y no en tabla, por el
 // teléfono.
@@ -2036,73 +1973,6 @@ async function auditLog() {
 // lo cobrado en agosto cubre septiembre; sin decirlo, la generación automática
 // mira la fecha de emisión, da septiembre por pendiente y emite un segundo
 // cobro. Aquí se le dice.
-async function coverageManager(mesOrigen = null) {
-  const hoy = new Date();
-  const anterior = new Date(hoy.getFullYear(), hoy.getMonth() - 1, 1);
-  const origen = mesOrigen || `${anterior.getFullYear()}-${String(anterior.getMonth() + 1).padStart(2, '0')}`;
-  const [anio, mes] = origen.split('-').map(Number);
-  const siguiente = new Date(anio, mes, 1);
-  const cubre = `${siguiente.getFullYear()}-${String(siguiente.getMonth() + 1).padStart(2, '0')}`;
-  const comoMes = clave => {
-    const [a, m] = clave.split('-').map(Number);
-    return new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric' }).format(new Date(a, m - 1, 1));
-  };
-
-  const box = document.createElement('div');
-  box.innerHTML = `<p class="eyebrow">COBROS Y PERÍODOS</p><h2>Qué mes cubre cada cobro</h2>
-    <p style="color:#6f7b75;margin-top:-12px">Las mensualidades se pagan por adelantado. Sin esto, la aplicación cree que el mes siguiente está sin cobrar y emite un cobro de más.</p>
-    <label>Cobros de<select id="cobertura-mes">${Array.from({ length: 6 }, (_, n) => {
-      const f = new Date(hoy.getFullYear(), hoy.getMonth() - n, 1);
-      const clave = `${f.getFullYear()}-${String(f.getMonth() + 1).padStart(2, '0')}`;
-      return `<option value="${clave}"${clave === origen ? ' selected' : ''}>${comoMes(clave)}</option>`;
-    }).join('')}</select></label>
-    <p class="section-note aviso-ambito">Se marcarán como cobertura de <b>${comoMes(cubre)}</b>.</p>
-    <div id="cobertura-lista"><p class="empty">Cargando…</p></div>`;
-  openModal(box, true);
-
-  document.getElementById('cobertura-mes').onchange = evento => coverageManager(evento.target.value);
-
-  try {
-    const datos = await api(`/api/billing/coverage?month=${origen}`);
-    const destino = document.getElementById('cobertura-lista');
-    if (!destino?.isConnected) return;
-    const pendientes = datos.cobros.filter(c => !c.billing_period);
-    destino.innerHTML = `
-      <p class="section-note">${datos.total} cobro${datos.total === 1 ? '' : 's'} en ${comoMes(origen)} · ${datos.yaAsignados} ya tienen período. Desmarca los que no sean mensualidad.</p>
-      ${datos.cobros.length ? `<div class="gasto-lista">${datos.cobros.map(c => `<article class="gasto-item">
-        <div><label class="checkbox-line"><input type="checkbox" data-cobro="${c.id}" ${c.billing_period ? 'disabled' : 'checked'} /> <b>${escapeHtml(c.full_name)}</b></label>
-        <small>${escapeHtml(c.concept)} · ${dateOnly(c.issued_on || c.due_on)}${c.billing_period ? ` · ya cubre ${comoMes(String(c.billing_period).slice(0, 7))}` : ''}</small></div>
-        <span class="gasto-monto">${money.format(c.amount)}</span>
-      </article>`).join('')}</div>` : '<p class="empty">No hay cobros en ese mes.</p>'}
-      ${pendientes.length ? `<button class="primary wide-button" id="cobertura-aplicar"></button>` : ''}`;
-
-    const boton = document.getElementById('cobertura-aplicar');
-    const marcados = () => [...destino.querySelectorAll('[data-cobro]:checked:not(:disabled)')].map(c => c.dataset.cobro);
-    const refrescarBoton = () => {
-      if (!boton) return;
-      const n = marcados().length;
-      boton.disabled = !n;
-      boton.textContent = n ? `Marcar ${n} como cobertura de ${comoMes(cubre)}` : 'Selecciona al menos uno';
-    };
-    destino.querySelectorAll('[data-cobro]').forEach(c => c.addEventListener('change', refrescarBoton));
-    refrescarBoton();
-
-    if (boton) boton.onclick = async () => {
-      const elegidos = marcados();
-      if (!elegidos.length) return;
-      if (!confirmarGuardado(`${elegidos.length} cobro${elegidos.length === 1 ? '' : 's'} de ${comoMes(origen)} pasarán a cubrir ${comoMes(cubre)}`)) return;
-      try {
-        const r = await api('/api/billing/coverage', { method: 'POST', body: { invoiceIds: elegidos, coversMonth: cubre } });
-        await loadData(); renderAll();
-        toast(`${r.asignados} cobros marcados`);
-        coverageManager(origen);
-      } catch (error) { toast(error.message, true); }
-    };
-  } catch (error) {
-    const destino = document.getElementById('cobertura-lista');
-    if (destino) destino.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
-  }
-}
 
 function pendingCollections() {
   const box = document.createElement('div');
@@ -2635,10 +2505,8 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'recurrences') recurrenceManager();
   if (actionButton?.dataset.action === 'pending-collections') pendingCollections();
   if (actionButton?.dataset.action === 'expenses') expensesManager();
-  if (actionButton?.dataset.action === 'link-packages') linkPackages();
   if (actionButton?.dataset.action === 'finance') financeDashboard();
   if (actionButton?.dataset.action === 'audit-log') auditLog();
-  if (actionButton?.dataset.action === 'coverage') coverageManager();
   if (actionButton?.dataset.action === 'compliance-report') complianceReport();
   if (actionButton?.dataset.action === 'new-plan') planEditor();
   if (actionButton?.dataset.action === 'export-compliance') exportCompliance();

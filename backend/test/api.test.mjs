@@ -481,56 +481,6 @@ describe('corregir una sesión ya guardada', () => {
   });
 });
 
-describe('pago por adelantado: qué mes cubre cada cobro', () => {
-  let clientId;
-  const mesPasado = () => { const d = new Date(); d.setMonth(d.getMonth() - 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
-  const esteMes = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
-
-  before(async () => {
-    const plan = await api.post('/api/plans', { name: 'Mensual adelantado', billingModel: 'monthly', price: 150, sessionsIncluded: 8 });
-    const c = await api.post('/api/clients', { fullName: 'Paga adelantado', planId: plan.datos.id, cutoffDay: 1 });
-    clientId = c.datos.id;
-    // Un cobro emitido el mes pasado, como los importados de Zoho.
-    const d = new Date(); d.setMonth(d.getMonth() - 1); d.setDate(20);
-    const emitido = d.toISOString().slice(0, 10);
-    await api.post('/api/invoices', { clientId, concept: 'Mensualidad', amount: 150, dueOn: emitido });
-  });
-
-  test('la vista previa los encuentra sin período', async () => {
-    const { estado, datos } = await api.get(`/api/billing/coverage?month=${mesPasado()}`);
-    assert.equal(estado, 200);
-    assert.ok(datos.total >= 1, 'debe listar el cobro del mes pasado');
-    assert.equal(datos.yaAsignados, 0);
-  });
-
-  test('se marcan sólo los elegidos', async () => {
-    const previa = await api.get(`/api/billing/coverage?month=${mesPasado()}`);
-    const sinPeriodo = previa.datos.cobros.filter(c => !c.billing_period);
-    assert.ok(sinPeriodo.length >= 1);
-
-    const { estado, datos } = await api.post('/api/billing/coverage', {
-      invoiceIds: [sinPeriodo[0].id], coversMonth: esteMes()
-    });
-    assert.equal(estado, 200);
-    assert.equal(datos.asignados, 1, 'en un mismo mes conviven mensualidades y clases sueltas: se eligen una a una');
-  });
-
-  test('con el período puesto, no se emite un segundo cobro del mes', async () => {
-    await api.post('/api/billing/recurring/generate', {});
-    const suyas = (await api.get('/api/invoices')).datos
-      .filter(i => i.client_id === clientId && String(i.billing_period || '').startsWith(esteMes()));
-    assert.equal(suyas.length, 1,
-      'el pago adelantado ya cubría este mes: generar otro sería cobrarle dos veces');
-  });
-
-  test('un cobro de otra entrenadora no se toca', async () => {
-    const { estado } = await api.post('/api/billing/coverage', {
-      invoiceIds: ['00000000-0000-4000-8000-000000000000'], coversMonth: esteMes()
-    });
-    assert.equal(estado, 404, 'sólo se marcan cobros propios');
-  });
-});
-
 describe('un pagador que cubre a varias personas', () => {
   let pagador, esposa, yerno, plan;
   before(async () => {
