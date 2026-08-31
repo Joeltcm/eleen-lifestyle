@@ -1,4 +1,4 @@
-const APP_VERSION = '102';
+const APP_VERSION = '103';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2765,7 +2765,10 @@ function renderPortalCalendar(ownSessions) {
       // Un tramo está ocupado si se solapa con algún hueco, aunque la sesión
       // no empiece justo en él.
       const encima = ocupados.find(o => o.dia === clave && o.desde < minuto + PORTAL_PASO_MINUTOS && o.hasta > minuto);
-      if (!encima) return `<span class="portal-tramo libre" title="Disponible"></span>`;
+      // Una hora que ya pasó no está disponible. Pintarla igual que el resto
+      // invitaría a pedir un horario imposible.
+      const yaPaso = new Date(`${clave}T00:00:00`).getTime() + minuto * 60_000 < Date.now();
+      if (!encima) return `<span class="portal-tramo ${yaPaso ? 'pasado' : 'libre'}" title="${yaPaso ? 'Ya pasó' : 'Disponible'}"></span>`;
       const empieza = encima.desde >= minuto && encima.desde < minuto + PORTAL_PASO_MINUTOS;
       return `<button type="button" class="portal-tramo ${encima.mia ? 'mia' : 'ocupada'}" data-portal-dia="${clave}"
         title="${encima.mia ? 'Tu sesión' : 'Ocupado'} · ${comoHora(encima.desde)}">${empieza ? (encima.mia ? '●' : '') : ''}</button>`;
@@ -2788,13 +2791,20 @@ function renderPortalCalendar(ownSessions) {
       <span class="portal-hora"></span>${cabecera}
       ${filas}
     </div>
-    <p class="portal-leyenda"><span class="marca-mia">●</span> Tu sesión &nbsp; <span class="marca-ocupada">▪</span> Ocupado &nbsp; <span class="marca-libre">▫</span> Disponible</p>
+    <p class="portal-leyenda"><span class="marca-mia">●</span> Tu sesión &nbsp; <span class="marca-ocupada">▪</span> Ocupado &nbsp; <span class="marca-libre">▫</span> Disponible &nbsp; <span class="marca-pasada">▫</span> Ya pasó</p>
     <h4 class="portal-dia-titulo">${new Intl.DateTimeFormat('es-PA', { weekday: 'long', day: 'numeric', month: 'long' }).format(fechaElegida)}</h4>
     ${delDia.length ? delDia.map(o => portalSlotCard(o.slot, ownSessions)).join('') : '<p class="empty">Sin horarios ocupados este día.</p>'}`;
 
+  // Fuera de la ventana que envía el servidor todo saldría vacío, y una semana
+  // entera en blanco se lee como "todo libre" cuando en realidad es "no lo sé".
+  const limiteAtras = new Date(today); limiteAtras.setDate(limiteAtras.getDate() - 60);
+  const limiteAdelante = new Date(today); limiteAdelante.setDate(limiteAdelante.getDate() + 90);
   contenedor.querySelectorAll('[data-portal-semana]').forEach(boton => {
+    const salto = Number(boton.dataset.portalSemana);
+    const destino = new Date(portalWeekStart); destino.setDate(destino.getDate() + 7 * salto);
+    if (destino < startOfWeek(limiteAtras) || destino > startOfWeek(limiteAdelante)) { boton.disabled = true; return; }
     boton.onclick = () => {
-      portalWeekStart.setDate(portalWeekStart.getDate() + 7 * Number(boton.dataset.portalSemana));
+      portalWeekStart = destino;
       renderPortalCalendar(ownSessions);
     };
   });

@@ -221,3 +221,6 @@ select.filter{padding:11px 13px;font:600 13px 'DM Sans';cursor:pointer}
 .portal-leyenda .marca-ocupada{color:#b8adb2}
 .portal-leyenda .marca-libre{color:#8fa08b}
 .portal-dia-titulo{margin:14px 0 10px;font:600 16px Fraunces;text-transform:capitalize}
+.portal-tramo.pasado{background:#efeeec;opacity:.5}
+.portal-leyenda .marca-pasada{color:#c9c6c2}
+.portal-mes-nav:disabled{opacity:.35;cursor:default}
