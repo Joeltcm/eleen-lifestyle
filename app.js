@@ -1,4 +1,4 @@
-const APP_VERSION = '89';
+const APP_VERSION = '90';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -155,7 +155,7 @@ async function loadData() {
     });
     const latest = history.at(-1);
     const inbodyReviews = assessments[index].assessments.filter(item => item.extraction_status === 'review');
-    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), status: client.status === 'active' ? 'Activo' : 'Inactivo', inbodyReviews, inbody: latest ? { ...latest, history } : null };
+    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), status: client.status === 'active' ? 'Activo' : 'Inactivo', statusRaw: client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
   });
   data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, concept: item.concept, amount: Number(item.amount), balance: item.source_system ? Number(item.balance) : item.status === 'pending' ? Number(item.amount) : 0, due: dateOnly(item.due_on), issued: dateOnly(item.issued_on || item.due_on), paidOn: item.confirmed_at ? String(item.confirmed_at).slice(0, 10) : '', method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '' }));
   data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), expiresOn: item.expires_on || '', status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired' }));
@@ -469,10 +469,29 @@ const selectedReportDates = () => {
     ? { from: dateKey(new Date(year, month - 1, 1, 12)), to: dateKey(new Date(year, month, 0, 12)) }
     : { from: `${year}-01-01`, to: `${year}-12-31` };
 };
+// Lo pendiente de cobro, a la vista. El diálogo sólo ofrecía generar un PDF:
+// para saber quién debe había que exportar un reporte y abrirlo.
+function listaPorCobrar() {
+  const pendientes = data.invoices
+    .filter(factura => factura.status === 'pending')
+    .sort((a, b) => String(a.due).localeCompare(String(b.due)));
+  if (!pendientes.length) return '<p class="empty">No hay facturas pendientes de cobro.</p>';
+  const hoy = dateKey(today);
+  const total = pendientes.reduce((suma, factura) => suma + Number(factura.balance || factura.amount), 0);
+  return `<p class="section-note">${pendientes.length} factura${pendientes.length === 1 ? '' : 's'} sin cobrar · ${money.format(total)}</p>
+    <div class="gasto-lista">${pendientes.map(factura => {
+      const vencida = String(factura.due) < hoy;
+      return `<article class="gasto-item">
+        <div><b>${escapeHtml(factura.client)}</b><small>${escapeHtml(factura.concept)} · vence ${factura.due}${vencida ? ' · <span class="por-cobrar-vencida">vencida</span>' : ''}</small></div>
+        <span class="gasto-monto">${money.format(factura.balance || factura.amount)}</span>
+      </article>`;
+    }).join('')}</div>`;
+}
+
 function financialReportDialog(kind) {
   const isStatement = kind === 'account-statement'; const dates = selectedReportDates(); const box = document.createElement('div');
   if (isStatement && !data.clients.length) { toast('Agrega un cliente antes de crear un estado de cuenta', true); return; }
-  box.innerHTML = `<form id="financial-report-form"><p class="eyebrow">REPORTES FINANCIEROS</p><h2>${isStatement ? 'Estado de cuenta' : 'Cuentas por cobrar'}</h2><p class="report-form-copy">${isStatement ? 'Selecciona el cliente y período que deseas compartir.' : 'Obtén el detalle de saldos vigentes y su antigüedad a una fecha de corte.'}</p>${isStatement ? `<label>Cliente<select name="clientId" required>${data.clients.map(client => `<option value="${client.id}">${escapeHtml(client.name)}</option>`).join('')}</select></label><div class="form-row"><label>Desde<input name="from" type="date" value="${dates.from}" required /></label><label>Hasta<input name="to" type="date" value="${dates.to}" required /></label></div>` : `<label>Fecha de corte<input name="asOf" type="date" value="${dateKey(today)}" required /></label>`}<div class="report-format-actions"><button class="primary" type="submit" data-format="pdf">Previsualizar PDF</button><button class="secondary" type="submit" data-format="csv">Exportar CSV</button></div></form>`;
+  box.innerHTML = `<form id="financial-report-form"><p class="eyebrow">REPORTES FINANCIEROS</p><h2>${isStatement ? 'Estado de cuenta' : 'Cuentas por cobrar'}</h2><p class="report-form-copy">${isStatement ? 'Selecciona el cliente y período que deseas compartir.' : 'Obtén el detalle de saldos vigentes y su antigüedad a una fecha de corte.'}</p>${isStatement ? `<label>Cliente<select name="clientId" required>${data.clients.map(client => `<option value="${client.id}">${escapeHtml(client.name)}</option>`).join('')}</select></label><div class="form-row"><label>Desde<input name="from" type="date" value="${dates.from}" required /></label><label>Hasta<input name="to" type="date" value="${dates.to}" required /></label></div>` : `${listaPorCobrar()}<label>Fecha de corte<input name="asOf" type="date" value="${dateKey(today)}" required /></label>`}<div class="report-format-actions"><button class="primary" type="submit" data-format="pdf">Previsualizar PDF</button><button class="secondary" type="submit" data-format="csv">Exportar CSV</button></div></form>`;
   openModal(box);
   document.getElementById('financial-report-form').addEventListener('submit', async event => {
     event.preventDefault(); const format = event.submitter?.dataset.format || 'pdf'; const values = new FormData(event.currentTarget); const query = new URLSearchParams();
@@ -502,7 +521,7 @@ function newClient() {
 }
 function editClient(client) {
   const box = document.createElement('div');
-  box.innerHTML = `<form id="edit-client-form"><p class="eyebrow">CONTACTO Y EXPEDIENTE</p><h2>Editar cliente</h2><label>Nombre completo<input name="fullName" required value="${escapeHtml(client.name)}" /></label><label>Correo electrónico<input name="email" type="email" value="${escapeHtml(client.email)}" /></label><label>Teléfono<input name="phone" value="${escapeHtml(client.phone)}" /></label><label>Meta principal<input name="goal" value="${escapeHtml(client.goal)}" /></label><label>Sesiones esperadas al mes<input name="monthlySessionTarget" type="number" min="1" max="31" value="${client.monthlySessionTarget ?? ''}" placeholder="Sin meta pactada" /></label><label>Quién paga<select name="billingResponsibleClientId" id="client-payer"><option value="">Paga por sí mismo</option></select><small>Para parejas: el saldo de sesiones y los cobros van a nombre de quien paga. El progreso y la asistencia siguen siendo de cada uno.</small></label><p class="section-note">Meta contra la cual se mide el cumplimiento mensual. Déjala vacía para derivarla del paquete o de la rutina activa.</p><label>Notas privadas<textarea name="notes" rows="3">${escapeHtml(client.notes)}</textarea></label><button class="primary wide-button">Guardar cambios</button></form>`;
+  box.innerHTML = `<form id="edit-client-form"><p class="eyebrow">CONTACTO Y EXPEDIENTE</p><h2>Editar cliente</h2><label>Nombre completo<input name="fullName" required value="${escapeHtml(client.name)}" /></label><label>Correo electrónico<input name="email" type="email" value="${escapeHtml(client.email)}" /></label><label>Teléfono<input name="phone" value="${escapeHtml(client.phone)}" /></label><label>Meta principal<input name="goal" value="${escapeHtml(client.goal)}" /></label><label>Sesiones esperadas al mes<input name="monthlySessionTarget" type="number" min="1" max="31" value="${client.monthlySessionTarget ?? ''}" placeholder="Sin meta pactada" /></label><label>Quién paga<select name="billingResponsibleClientId" id="client-payer"><option value="">Paga por sí mismo</option></select><small>Para parejas: el saldo de sesiones y los cobros van a nombre de quien paga. El progreso y la asistencia siguen siendo de cada uno.</small></label><p class="section-note">Meta contra la cual se mide el cumplimiento mensual. Déjala vacía para derivarla del paquete o de la rutina activa.</p><label>Notas privadas<textarea name="notes" rows="3">${escapeHtml(client.notes)}</textarea></label><label>Estado<select name="status">${[['active', 'Activo'], ['paused', 'En pausa'], ['inactive', 'Inactivo']].map(([valor, texto]) => `<option value="${valor}"${client.statusRaw === valor ? ' selected' : ''}>${texto}</option>`).join('')}</select><small>Un cliente inactivo conserva su expediente, su historial y sus cobros, pero desaparece de la agenda y de los listados del día a día.</small></label><button class="primary wide-button">Guardar cambios</button></form>`;
   openModal(box);
   // Sólo pueden ser pagadores quienes no dependen de otro: encadenar dejaría el
   // saldo en un tercero imposible de rastrear.
@@ -562,6 +581,17 @@ function planEditor(plan = null) {
     const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'secondary wide-button'; remove.textContent = 'Desactivar plan';
     remove.addEventListener('click', () => deleteResource(`/api/plans/${plan.id}`, `¿Desactivar “${plan.name}”? Ya no estará disponible para nuevos clientes.`, 'Plan desactivado'));
     form.append(remove);
+    // Desactivar lo esconde de los clientes nuevos pero lo deja en la lista
+    // para siempre. Un plan creado por error no tiene por qué quedarse ahí.
+    const borrar = document.createElement('button'); borrar.type = 'button'; borrar.className = 'secondary wide-button'; borrar.textContent = 'Borrar definitivamente';
+    borrar.addEventListener('click', async () => {
+      if (!confirm(`¿Borrar “${plan.name}” para siempre?\n\nSólo se puede si ningún cliente lo tiene asignado. Esto no deja rastro.`)) return;
+      try {
+        await api(`/api/plans/${plan.id}/permanent`, { method: 'DELETE' });
+        await loadData(); renderAll(); modal.close(); toast('Plan borrado');
+      } catch (error) { toast(error.message, true); }
+    });
+    form.append(borrar);
   }
 }
 function clientPlanEditor(client) {

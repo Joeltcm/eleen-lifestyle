@@ -171,3 +171,6 @@ dialog.modal-wide{max-width:920px}
 .dias-semana span{display:grid;place-items:center;width:100%;min-height:44px;border-radius:10px;border:1px solid var(--line);background:var(--card);font:600 13px 'DM Sans';cursor:pointer;user-select:none}
 .dias-semana input:checked+span{background:var(--lime);border-color:transparent;color:#49343e}
 .dias-semana input:focus-visible+span{outline:2px solid #d8a7bc;outline-offset:2px}
+
+/* Cuentas por cobrar: lo vencido salta a la vista sin leer fechas. */
+.por-cobrar-vencida{color:#9c6558;font-weight:600}

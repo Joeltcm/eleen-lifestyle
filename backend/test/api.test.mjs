@@ -261,6 +261,53 @@ describe('cobros', () => {
   });
 });
 
+describe('desactivar clientes', () => {
+  let clienteId;
+  before(async () => {
+    const c = await api.post('/api/clients', { fullName: 'Se va de viaje', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+    clienteId = c.datos.id;
+  });
+
+  test('se puede desactivar y volver a activar', async () => {
+    const baja = await api.patch(`/api/clients/${clienteId}`, { fullName: 'Se va de viaje', status: 'inactive' });
+    assert.equal(baja.estado, 200);
+    assert.equal(baja.datos.status, 'inactive');
+
+    const alta = await api.patch(`/api/clients/${clienteId}`, { fullName: 'Se va de viaje', status: 'active' });
+    assert.equal(alta.datos.status, 'active');
+  });
+
+  test('desactivar no borra el expediente', async () => {
+    await api.patch(`/api/clients/${clienteId}`, { fullName: 'Se va de viaje', status: 'inactive' });
+    const lista = await api.get('/api/clients');
+    assert.ok(lista.datos.find(c => c.id === clienteId), 'el cliente sigue existiendo, sólo inactivo');
+  });
+
+  test('editar sin tocar el estado lo respeta', async () => {
+    const { datos } = await api.patch(`/api/clients/${clienteId}`, { fullName: 'Nombre nuevo' });
+    assert.equal(datos.status, 'inactive', 'no debe reactivarse por editar el nombre');
+  });
+});
+
+describe('borrado definitivo de planes', () => {
+  test('un plan sin usar se borra del todo', async () => {
+    const plan = await api.post('/api/plans', { name: 'Plan efímero', billingModel: 'single', price: 20 });
+    const borrado = await api.delete(`/api/plans/${plan.datos.id}/permanent`);
+    assert.equal(borrado.estado, 200);
+    const quedan = await api.get('/api/plans');
+    assert.ok(!quedan.datos.find(p => p.id === plan.datos.id), 'no debe quedar rastro');
+  });
+
+  test('un plan asignado a alguien no se borra', async () => {
+    const plan = await api.post('/api/plans', { name: 'Plan en uso', billingModel: 'monthly', price: 150, sessionsIncluded: 8 });
+    await api.post('/api/clients', { fullName: 'Con plan', planId: plan.datos.id, cutoffDay: 1 });
+
+    const { estado, datos } = await api.delete(`/api/plans/${plan.datos.id}/permanent`);
+    assert.equal(estado, 409, 'borrarlo dejaría al cliente sin plan y sin saber cuál tenía');
+    assert.match(datos.error, /asignado a 1 cliente/);
+  });
+});
+
 describe('bitácora', () => {
   test('deja constancia de lo borrado, con quién y qué era', async () => {
     const cat = await api.post('/api/expense-categories', { name: 'Categoría efímera' });

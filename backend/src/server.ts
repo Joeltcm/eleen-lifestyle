@@ -466,6 +466,29 @@ app.patch('/api/plans/:id', { preHandler: requireStaff }, async (request, reply)
   return plan;
 });
 
+// Borrar un plan de verdad, sólo si nadie lo usa. Desactivarlo lo esconde de
+// los clientes nuevos pero lo deja en la lista para siempre, y un plan creado
+// por error —o de prueba— no tiene por qué quedarse ahí.
+//
+// Si algún cliente lo tiene asignado no se borra: la clave foránea es ON DELETE
+// SET NULL, así que borrarlo dejaría a esas personas sin plan y sin manera de
+// saber cuál tenían.
+app.delete('/api/plans/:id/permanent', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [enUso] = await sql`
+    SELECT count(*)::int AS total FROM clients WHERE plan_id = ${id} AND owner_id = ${auth.sub}
+  `;
+  if (Number(enUso?.total)) {
+    return reply.code(409).send({
+      error: `Este plan está asignado a ${enUso.total} cliente${Number(enUso.total) === 1 ? '' : 's'}. Cámbiales el plan antes de borrarlo, o desactívalo.`
+    });
+  }
+  const [plan] = await sql`DELETE FROM service_plans WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING id, name`;
+  if (!plan) return reply.code(404).send({ error: 'Plan no encontrado' });
+  return { deleted: true, plan };
+});
+
 app.delete('/api/plans/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
@@ -484,7 +507,10 @@ const clientSchema = z.object({
     .transform(value => (value === '' || value === undefined ? null : value)),
   // Quién paga por este cliente. Vacío = paga él mismo.
   billingResponsibleClientId: z.union([z.literal(''), z.null(), z.string().uuid()]).optional()
-    .transform(value => (value === '' || value === undefined ? null : value))
+    .transform(value => (value === '' || value === undefined ? null : value)),
+  // Desactivar en vez de borrar: quien deja de entrenar conserva su expediente,
+  // su historial de InBody y sus cobros, pero sale de las listas del día a día.
+  status: z.enum(['active', 'paused', 'inactive']).optional()
 });
 app.get('/api/clients', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
@@ -529,7 +555,7 @@ app.post('/api/clients', { preHandler: requireStaff }, async (request, reply) =>
 app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const input = clientSchema.pick({ fullName: true, email: true, phone: true, goal: true, notes: true, monthlySessionTarget: true, billingResponsibleClientId: true }).parse(request.body);
+  const input = clientSchema.pick({ fullName: true, email: true, phone: true, goal: true, notes: true, monthlySessionTarget: true, billingResponsibleClientId: true, status: true }).parse(request.body);
   // El pagador debe ser otro cliente de la misma entrenadora, y no puede
   // apuntarse a sí mismo ni encadenar: quien paga por alguien no puede a su vez
   // tener pagador, o el saldo quedaría en un tercero imposible de rastrear.
@@ -541,7 +567,7 @@ app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, repl
     const [dependientes] = await sql`SELECT id FROM clients WHERE billing_responsible_client_id = ${id} LIMIT 1`;
     if (dependientes) return reply.code(409).send({ error: 'Este cliente ya paga por alguien más, no puede depender de otro' });
   }
-  const [client] = await sql`UPDATE clients SET full_name = ${input.fullName}, email = ${input.email || null}, phone = ${input.phone || null}, goal = ${input.goal || null}, notes = ${input.notes || null}, monthly_session_target = ${input.monthlySessionTarget ?? null}, billing_responsible_client_id = ${input.billingResponsibleClientId ?? null}, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
+  const [client] = await sql`UPDATE clients SET full_name = ${input.fullName}, email = ${input.email || null}, phone = ${input.phone || null}, goal = ${input.goal || null}, notes = ${input.notes || null}, monthly_session_target = ${input.monthlySessionTarget ?? null}, billing_responsible_client_id = ${input.billingResponsibleClientId ?? null}, status = COALESCE(${input.status ?? null}, status), updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
   if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
   return client;
 });
