@@ -1,4 +1,4 @@
-const APP_VERSION = '106';
+const APP_VERSION = '107';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -372,7 +372,7 @@ function renderCalendar() {
   const periodName = calendarMode === 'day' ? 'del día' : calendarMode === 'week' ? 'de la semana' : 'del mes';
   document.getElementById('session-control-title').textContent = `Sesiones ${periodName}`;
   document.getElementById('session-control-copy').textContent = visibleSessions.length ? `${visibleSessions.length} sesión${visibleSessions.length !== 1 ? 'es' : ''} en el período visible` : 'No hay sesiones en el período visible';
-  document.getElementById('session-list').innerHTML = visibleSessions.length ? visibleSessions.map(session => `<div class="session-row"><div class="session-date"><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric' }).format(new Date(`${session.date}T12:00:00`))}</b><span>${session.time} · ${session.durationMinutes} min</span></div><div class="session-person"><b>${escapeHtml(session.client)}</b><span>${session.routine} · ${session.mode}</span>${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}</div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span>${session.status === 'cancelled' ? `<div class="session-management"><button type="button" class="secondary" data-purge-session="${session.id}">Quitar de la agenda</button></div>` : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button><button type="button" class="secondary" data-cancel-session="${session.id}">Cancelar</button>${sessionComplianceForm(session)}</div>`}</div>`).join('') : `<p class="empty">No hay sesiones programadas ${periodName}.</p>`;
+  document.getElementById('session-list').innerHTML = visibleSessions.length ? visibleSessions.map(session => `<div class="session-row"><div class="session-date"><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric' }).format(new Date(`${session.date}T12:00:00`))}</b><span>${session.time} · ${session.durationMinutes} min</span></div><div class="session-person"><b>${escapeHtml(session.client)}</b><span>${session.routine} · ${session.mode}</span>${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}</div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span>${session.status === 'cancelled' ? `<div class="session-management"><button type="button" class="secondary" data-purge-session="${session.id}">Quitar de la agenda</button></div>` : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button><button type="button" class="secondary" data-cancel-session="${session.id}">Cancelar</button><button type="button" class="secondary" data-purge-session="${session.id}">Eliminar</button>${sessionComplianceForm(session)}</div>`}</div>`).join('') : `<p class="empty">No hay sesiones programadas ${periodName}.</p>`;
 }
 const routineVideoCount = routine => (routine.exercises || []).filter(exercise => {
   const entry = exerciseCatalog.find(item => item.id === exercise.catalogId || item.slug === exercise.catalogId);
@@ -879,8 +879,7 @@ function cancelSessionDialog(sesion) {
     <p class="section-note">No afecta el cumplimiento: contará la sesión nueva.</p>
     <button class="secondary wide-button" id="cancelar-perdida">No se reprograma</button>
     <p class="section-note">Cuenta como sesión incumplida y baja su porcentaje.</p>
-    <button class="secondary wide-button" id="cancelar-error">Se creó por error · borrar</button>
-    <p class="section-note">Desaparece de la agenda y de Google. No cuenta como incumplida: una clase que nunca debió existir no es una clase que alguien perdió.</p>`;
+    <p class="section-note">Si la agendaste por error, ciérra esto y usa <b>Eliminar</b>: desaparece sin contar como incumplida.</p>`;
   openModal(box, true);
   const cancelar = async reprogramada => {
     try {
@@ -891,14 +890,7 @@ function cancelSessionDialog(sesion) {
   };
   document.getElementById('cancelar-reprogramada').onclick = () => cancelar(true);
   document.getElementById('cancelar-perdida').onclick = () => cancelar(false);
-  document.getElementById('cancelar-error').onclick = async () => {
-    if (!confirm(`¿Borrar la sesión de ${sesion.client} del ${sesion.date}?\n\nNo deja rastro y no afecta su cumplimiento.`)) return;
-    try {
-      await api(`/api/sessions/${sesion.id}/permanent`, { method: 'DELETE' });
-      await loadData(); renderAll(); modal.close();
-      toast('Sesión borrada');
-    } catch (error) { toast(error.message, true); }
-  };
+
 }
 
 async function recurrenceManager() {
@@ -2478,7 +2470,11 @@ document.addEventListener('click', event => {
   if (event.target.dataset.editInvoice) editInvoice(event.target.dataset.editInvoice);
   if (event.target.dataset.purgeSession) {
     const sesion = data.sessions.find(item => item.id === event.target.dataset.purgeSession);
-    if (confirm(`¿Quitar de la agenda la sesión cancelada de ${sesion?.client} del ${sesion?.date}?\n\nDesaparece del historial y del contador de canceladas. No deja rastro.`)) {
+    const cancelada = sesion?.status === 'cancelled';
+    const aviso = cancelada
+      ? `¿Quitar de la agenda la sesión cancelada de ${sesion?.client} del ${sesion?.date}?\n\nDesaparece del historial y del contador de canceladas. No deja rastro.`
+      : `¿Eliminar la sesión de ${sesion?.client} del ${sesion?.date} a las ${sesion?.time}?\n\nDesaparece de la agenda y de Google Calendar. No cuenta como incumplida: úsalo cuando se agendó por error.`;
+    if (confirm(aviso)) {
       api(`/api/sessions/${event.target.dataset.purgeSession}/permanent`, { method: 'DELETE' })
         .then(async () => { await loadData(); renderAll(); toast('Sesión quitada de la agenda'); })
         .catch(error => toast(error.message, true));
