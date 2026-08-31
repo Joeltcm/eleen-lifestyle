@@ -1,4 +1,4 @@
-const APP_VERSION = '115';
+const APP_VERSION = '116';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -960,7 +960,7 @@ function newInvoice() {
   document.getElementById('invoice-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target); const method = form.get('method');
     const cliente = data.clients.find(c => c.id === form.get('client'));
-    if (!confirmarGuardado(`Cobro de ${money.format(Number(form.get('amount')) || 0)} a ${cliente?.name || 'cliente'}\n${form.get('concept')} · vence ${form.get('dueOn') || 'hoy'}`)) return;
+    if (!confirmarGuardado(`Cobro de ${money.format(Number(form.get('amount')) || 0)} a ${cliente?.name || 'cliente'}\n${form.get('concept')} · vence ${form.get('due') || 'hoy'}`)) return;
     try {
       event.target.classList.add('loading-state');
       let invoice;
@@ -969,7 +969,8 @@ function newInvoice() {
       // Con sesiones se crea un saldo que se descuenta y vence; sin ellas, la
       // mensualidad sigue siendo un cobro simple como hasta ahora.
       if (concepto === 'Paquete de sesiones' || (concepto === 'Mensualidad' && sesiones > 0)) {
-        const pack = await api('/api/packages', { method: 'POST', body: { clientId: form.get('client'), totalSessions: sesiones, amount: Number(form.get('amount')), kind: concepto === 'Mensualidad' ? 'monthly' : 'package' } });
+        const pack = await api('/api/packages', { method: 'POST', body: { clientId: form.get('client'), totalSessions: sesiones, amount: Number(form.get('amount')), kind: concepto === 'Mensualidad' ? 'monthly' : 'package',
+          dueOn: form.get('due') || undefined, expiresOn: form.get('expiresOn') || undefined } });
         invoice = { id: pack.invoice_id };
       } else {
         invoice = await api('/api/invoices', { method: 'POST', body: { clientId: form.get('client'), concept: concepto, amount: Number(form.get('amount')), dueOn: form.get('due') } });

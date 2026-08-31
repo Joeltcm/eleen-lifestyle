@@ -171,7 +171,12 @@ async function generateRecurringInvoices(ownerId?: string) {
     ), candidates AS (
       SELECT s.*
       FROM schedule s
-      WHERE s.due_on <= current_date + (${config.BILLING_GENERATION_DAYS_AHEAD})::integer
+      -- Ni antes de tiempo ni hacia atrás. Un cobro de un mes que ya terminó
+      -- no es un cobro: es un registro de algo que pasó, y emitirlo hoy le
+      -- llegaría al cliente como una deuda nueva de agosto el 31 de agosto.
+      -- Los pagos viejos se quedan como historial y no dirigen lo que viene.
+      WHERE s.due_on >= current_date
+        AND s.due_on <= current_date + (${config.BILLING_GENERATION_DAYS_AHEAD})::integer
         AND EXISTS (
           SELECT 1 FROM memberships m
           WHERE m.client_id = s.billed_for_client_id AND m.status = 'active' AND m.starts_on <= s.due_on
@@ -788,6 +793,11 @@ function proximoCorte(diaDeCorte: number) {
 }
 
 const packageSchema = z.object({
+  // Sin esto la factura se fechaba siempre hoy, así que un cobro creado en
+  // agosto para cubrir septiembre quedaba registrado como de agosto y la
+  // generación automática emitía el de septiembre igualmente.
+  dueOn: z.union([z.literal(''), z.null(), z.string().date()]).optional()
+    .transform(v => (v === '' || v === undefined ? null : v)),
   clientId: z.string().uuid(), totalSessions: z.coerce.number().int().positive(), amount: z.coerce.number().positive(),
   expiresOn: z.string().date().optional(),
   kind: z.enum(['package', 'monthly']).default('package')
@@ -815,7 +825,11 @@ app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) =
 
   const pack = await sql.begin(async transaction => {
     const [created] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind) VALUES (${input.clientId}, ${etiqueta}, ${input.totalSessions}, ${input.amount}, ${vence}, ${input.kind}) RETURNING *`;
-    const [invoice] = await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${input.clientId}, ${created.id}, ${concepto}, ${input.amount}, current_date) RETURNING id`;
+    const [invoice] = await transaction`
+      INSERT INTO invoices (client_id, package_id, concept, amount, due_on, issued_on)
+      VALUES (${input.clientId}, ${created.id}, ${concepto}, ${input.amount},
+        COALESCE(${input.dueOn}::date, current_date), current_date)
+      RETURNING id`;
     return { ...created, invoice_id: invoice.id };
   });
   // Una mensualidad con sesiones también asienta precio y membresía: es un
@@ -1571,26 +1585,16 @@ async function recordSessionCompliance(id: string, ownerId: string, markedBy: st
       return updated;
     }
     if (completed && !current.package_debited) {
-      // El saldo vive en quien paga. En una pareja son dos expedientes con dos
-      // asistencias, pero un solo bolsillo: el paquete es del responsable.
-      const [duenoDelSaldo] = await transaction`SELECT COALESCE(billing_responsible_client_id, id) AS id FROM clients WHERE id = ${current.client_id}`;
-      const grupo = duenoDelSaldo.id as string;
-
-      // Y un solo descuento por encuentro: si los dos entrenaron juntos hoy,
-      // el segundo se registra como cumplido pero ya no vuelve a cobrar.
-      const [yaCobradoHoy] = await transaction`
-        SELECT id FROM sessions
-        WHERE debited_group_id = ${grupo} AND starts_at::date = ${current.starts_at}::date
-          AND package_debited = true AND id <> ${id} LIMIT 1
-      `;
-      if (yaCobradoHoy) {
-        const [updated] = await transaction`
-          UPDATE sessions SET status = 'completed', completion_percent = ${completionPercent}, debited_group_id = ${grupo},
-            completed_by_user_id = ${markedBy}, completion_recorded_at = now(), updated_at = now()
-          WHERE id = ${id} RETURNING *
-        `;
-        return updated;
-      }
+      // El saldo es de cada quien, aunque pague otro. Antes se descontaba del
+      // bolsillo del pagador y, si dos personas suyas entrenaban el mismo día,
+      // sólo se descontaba una vez: se asumía una bolsa compartida.
+      //
+      // Con un paquete configurado por persona eso falseaba la métrica del
+      // segundo, que entrenaba y no veía bajar su saldo. Entrenar juntos no
+      // hace que consuman una sola clase: cada uno gasta una de las suyas.
+      //
+      // Lo que sigue siendo del pagador es el dinero, no las clases.
+      const grupo = current.client_id as string;
 
       const [pack] = await transaction`SELECT * FROM session_packages WHERE client_id = ${grupo} AND status = 'active' AND used_sessions < total_sessions ORDER BY purchased_on LIMIT 1 FOR UPDATE`;
       if (!pack) {

@@ -196,6 +196,37 @@ describe('gastos y ámbito', () => {
   });
 });
 
+describe('descuento de clases individual', () => {
+  let pagador, dependiente;
+  before(async () => {
+    const a = await api.post('/api/clients', { fullName: 'Paga por los dos', billingModel: 'monthly', standardPrice: 200, cutoffDay: 1 });
+    const b = await api.post('/api/clients', { fullName: 'Entrena tambien', billingModel: 'monthly', standardPrice: 200, cutoffDay: 1 });
+    pagador = a.datos.id; dependiente = b.datos.id;
+    await api.patch(`/api/clients/${dependiente}`, { fullName: 'Entrena tambien', billingResponsibleClientId: pagador });
+    // Cada uno con su propio saldo, como los configura Eileen.
+    for (const id of [pagador, dependiente]) {
+      const p = await api.post('/api/packages', { clientId: id, totalSessions: 8, amount: 200, kind: 'monthly' });
+      await api.post(`/api/invoices/${p.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-01' });
+    }
+  });
+
+  test('entrenar juntos descuenta una clase a cada uno', async () => {
+    const cuando = '2026-11-16T13:00:00.000Z';
+    const s1 = await api.post('/api/sessions/batch', { clientId: pagador, startsAt: [cuando], durationMinutes: 60, mode: 'Presencial' });
+    const s2 = await api.post('/api/sessions/batch', { clientId: dependiente, startsAt: [cuando], durationMinutes: 60, mode: 'Presencial' });
+
+    await api.patch(`/api/sessions/${s1.datos.sesiones[0].id}/compliance`, { completed: true, completionPercent: 100 });
+    await api.patch(`/api/sessions/${s2.datos.sesiones[0].id}/compliance`, { completed: true, completionPercent: 100 });
+
+    const saldos = (await api.get('/api/packages')).datos;
+    const delPagador = saldos.find(p => p.client_id === pagador);
+    const delOtro = saldos.find(p => p.client_id === dependiente);
+    assert.equal(Number(delPagador.used_sessions), 1, 'el pagador gasta una de las suyas');
+    assert.equal(Number(delOtro.used_sessions), 1,
+      'y el otro también: entrenar juntos no hace que consuman una sola clase');
+  });
+});
+
 describe('vencimiento de los paquetes', () => {
   let clientId;
   before(async () => {
