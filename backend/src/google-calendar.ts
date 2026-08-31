@@ -147,6 +147,11 @@ export function buildGoogleCalendarEvent(session: GoogleRecord) {
   return {
     summary: `Entrenamiento · ${session.full_name}`,
     description: details,
+    // Todo lo que crea la aplicación va en rosa, para distinguirlo de un
+    // vistazo de los eventos propios de Eileen. La paleta de Google es fija:
+    // once colores con nombre, y el 4 —Flamenco— es el rosa de la lista.
+    // Las canceladas se pasan a rojo aparte, así que destacan sobre este.
+    colorId: '4',
     start: { dateTime: start.toISOString(), timeZone: 'America/Panama' },
     end: { dateTime: end.toISOString(), timeZone: 'America/Panama' },
     extendedProperties: { private: { eileenSessionId: String(session.id), source: 'eileen-lifestyle' } }
@@ -338,7 +343,7 @@ export async function cancelSessionInGoogle(ownerId: string, sessionId: string) 
   const calendarId = encodeURIComponent(connection.organization_id || 'primary');
   const cuerpo = JSON.stringify({
     summary: `CANCELADA · Entrenamiento · ${session.full_name}`,
-    // 11 es el rojo de Google Calendar (Tomate).
+    // Rojo (Tomate) para lo cancelado: destaca sobre el rosa del resto.
     colorId: '11',
     transparency: 'transparent'
   });
