@@ -1,4 +1,4 @@
-const APP_VERSION = '109';
+const APP_VERSION = '110';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -93,6 +93,16 @@ async function ensurePushSubscription() {
 //
 // Sólo mientras dura la petición: guardar dos gastos iguales a propósito, uno
 // después de otro, sigue funcionando.
+// Confirmar antes de guardar, sólo donde el error cuesta caro: dinero y
+// expedientes. El aviso resume lo que va a quedar registrado, porque un
+// "¿Seguro?" sin contenido no evita ningún error: se acepta sin leerlo.
+//
+// PENDIENTE: extenderlo al resto de formularios. Joel lo pidió para todo y de
+// momento está sólo en cobros y expedientes.
+function confirmarGuardado(resumen) {
+  return window.confirm(`${resumen}\n\n¿Lo guardo así?`);
+}
+
 const peticionesEnVuelo = new Map();
 
 async function api(path, options = {}) {
@@ -604,6 +614,7 @@ function newClient() {
   const planSelect = document.getElementById('client-plan'); availablePlans.forEach(plan => planSelect.add(new Option(`${plan.name} · ${money.format(plan.price)}${plan.billingModel === 'package' ? ` · ${plan.sessionsIncluded} sesiones` : plan.billingModel === 'single' ? ' por sesión' : '/mes'}`, plan.id)));
   document.getElementById('client-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target); const selectedPlan = data.plans.find(plan => plan.id === form.get('planId'));
+    if (!confirmarGuardado(`Nuevo expediente: ${form.get('name')}\nPlan ${selectedPlan?.name || 'sin plan'} · corte día ${form.get('cutoffDay')}`)) return;
     try {
       event.target.classList.add('loading-state');
       await api('/api/clients', { method: 'POST', body: { fullName: form.get('name'), goal: form.get('goal'), planId: form.get('planId'), cutoffDay: Number(form.get('cutoffDay')), billingModel: selectedPlan?.billingModel || 'monthly', standardPrice: selectedPlan?.price || 0, packageSessions: selectedPlan?.sessionsIncluded || undefined, email: form.get('email') } });
@@ -905,6 +916,8 @@ function newInvoice() {
   dueInput.value = dateKey(today); selection.addEventListener('change', fillClientPlan); fillClientPlan();
   document.getElementById('invoice-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target); const method = form.get('method');
+    const cliente = data.clients.find(c => c.id === form.get('client'));
+    if (!confirmarGuardado(`Cobro de ${money.format(Number(form.get('amount')) || 0)} a ${cliente?.name || 'cliente'}\n${form.get('concept')} · vence ${form.get('dueOn') || 'hoy'}`)) return;
     try {
       event.target.classList.add('loading-state');
       let invoice;
@@ -2031,6 +2044,7 @@ function confirmInvoice(id, editing = false) {
   if (editing) { content.querySelector('h2').textContent = 'Editar pago recibido'; content.querySelector('button').textContent = 'Guardar pago'; }
   document.getElementById('payment-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target);
+    if (!confirmarGuardado(`${editing ? 'Cambiar el pago' : 'Marcar como pagado'}\n${form.get('method')} · ${form.get('paidOn')}`)) return;
     try {
       event.target.classList.add('loading-state');
       await api(`/api/invoices/${id}${editing ? '/payment' : '/confirm'}`, { method: editing ? 'PATCH' : 'POST', body: { method: form.get('method'), reference: form.get('reference') || undefined, paidOn: form.get('paidOn') } });
@@ -2045,6 +2059,7 @@ function editInvoice(id) {
   openModal(box);
   document.getElementById('edit-invoice-form').addEventListener('submit', async event => {
     event.preventDefault(); const values = new FormData(event.target);
+    if (!confirmarGuardado(`Cambiar el cobro a ${money.format(Number(values.get('amount')) || 0)}\n${values.get('concept')}`)) return;
     try { event.target.classList.add('loading-state'); await api(`/api/invoices/${id}`, { method: 'PATCH', body: { concept: values.get('concept'), amount: Number(values.get('amount')), dueOn: values.get('dueOn') } }); await loadData(); renderAll(); modal.close(); toast('Cobro actualizado'); }
     catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
