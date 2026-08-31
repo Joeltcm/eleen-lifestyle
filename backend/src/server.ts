@@ -102,7 +102,8 @@ async function recurringBillingStatus(ownerId: string) {
       SELECT s.*,
         EXISTS (
           SELECT 1 FROM invoices i
-          WHERE i.client_id = s.client_id AND i.status <> 'void'
+          -- El cobro puede estar a nombre de quien paga por esta persona.
+          WHERE COALESCE(i.billed_for_client_id, i.client_id) = s.client_id AND i.status <> 'void'
             AND date_trunc('month', COALESCE(i.billing_period, i.issued_on, i.due_on))::date = s.billing_period
             AND (
               i.auto_generated = true OR i.source_system = 'zoho_invoice'
@@ -141,7 +142,12 @@ async function generateRecurringInvoices(ownerId?: string) {
         interval '1 month'
       )::date AS billing_period
     ), schedule AS (
-      SELECT c.id AS client_id, c.owner_id, c.standard_price AS amount,
+      -- El cobro va a nombre de quien paga; se recuerda de quién es la
+      -- mensualidad para desglosarla y para poder dar de baja a uno solo.
+      SELECT COALESCE(c.billing_responsible_client_id, c.id) AS client_id,
+        c.id AS billed_for_client_id, c.full_name AS billed_for_name,
+        (c.billing_responsible_client_id IS NOT NULL) AS la_paga_otro,
+        c.owner_id, c.standard_price AS amount,
         COALESCE(p.name, 'Mensualidad') AS plan_name, periods.billing_period,
         make_date(
           extract(year FROM periods.billing_period)::integer,
@@ -152,9 +158,6 @@ async function generateRecurringInvoices(ownerId?: string) {
       LEFT JOIN service_plans p ON p.id = c.plan_id
       CROSS JOIN periods
       WHERE c.status = 'active' AND c.billing_model = 'monthly' AND c.standard_price > 0
-        -- Quien tiene a otro como responsable de pago no genera cobro propio:
-        -- de una pareja sale una sola factura, a nombre de quien paga.
-        AND c.billing_responsible_client_id IS NULL
         AND (${selectedOwner}::uuid IS NULL OR c.owner_id = ${selectedOwner}::uuid)
         AND NOT EXISTS (
           SELECT 1 FROM integration_connections ic
@@ -167,12 +170,12 @@ async function generateRecurringInvoices(ownerId?: string) {
       WHERE s.due_on <= current_date + (${config.BILLING_GENERATION_DAYS_AHEAD})::integer
         AND EXISTS (
           SELECT 1 FROM memberships m
-          WHERE m.client_id = s.client_id AND m.status = 'active' AND m.starts_on <= s.due_on
+          WHERE m.client_id = s.billed_for_client_id AND m.status = 'active' AND m.starts_on <= s.due_on
             AND (m.ends_on IS NULL OR m.ends_on >= s.billing_period)
         )
         AND NOT EXISTS (
           SELECT 1 FROM invoices i
-          WHERE i.client_id = s.client_id AND i.status <> 'void'
+          WHERE COALESCE(i.billed_for_client_id, i.client_id) = s.billed_for_client_id AND i.status <> 'void'
             AND date_trunc('month', COALESCE(i.billing_period, i.issued_on, i.due_on))::date = s.billing_period
             AND (
               i.auto_generated = true OR i.source_system = 'zoho_invoice'
@@ -182,14 +185,18 @@ async function generateRecurringInvoices(ownerId?: string) {
         )
     )
     INSERT INTO invoices (
-      client_id, concept, amount, due_on, issued_on, subtotal,
+      client_id, billed_for_client_id, concept, amount, due_on, issued_on, subtotal,
       billing_period, auto_generated
     )
-    SELECT client_id, plan_name || ' · ' || to_char(billing_period, 'MM/YYYY'), amount, due_on,
-      current_date, amount, billing_period, true
+    -- Cuando la paga otro, el concepto lleva el nombre de quien entrena: en el
+    -- estado de cuenta del pagador, tres cobros iguales serían indistinguibles.
+    SELECT client_id, billed_for_client_id,
+      plan_name || ' · ' || CASE WHEN la_paga_otro THEN billed_for_name || ' · ' ELSE '' END
+        || to_char(billing_period, 'MM/YYYY'),
+      amount, due_on, current_date, amount, billing_period, true
     FROM candidates
-    ON CONFLICT (client_id, billing_period) WHERE auto_generated = true DO NOTHING
-    RETURNING id, client_id, billing_period, due_on, amount
+    ON CONFLICT (client_id, billing_period, billed_for_client_id) WHERE auto_generated = true DO NOTHING
+    RETURNING id, client_id, billed_for_client_id, billing_period, due_on, amount
   `;
   // Renovar el saldo de sesiones junto con el cobro. Sin esto, la mensualidad
   // con tope de sesiones se cobraba cada mes pero el saldo vencía y no volvía:
@@ -197,22 +204,26 @@ async function generateRecurringInvoices(ownerId?: string) {
   // del último saldo mensual del propio cliente, así que sigue sus cambios sin
   // configurar nada aparte.
   for (const invoice of invoices) {
+    // El saldo es de quien entrena, no de quien paga: si la mensualidad de la
+    // esposa la cubre el marido, las sesiones son de ella. Sin esta distinción
+    // el saldo se le abonaría al pagador y ella se quedaría sin sesiones.
+    const entrena = (invoice.billed_for_client_id || invoice.client_id) as string;
     const [anterior] = await sql`
       SELECT total_sessions FROM session_packages
-      WHERE client_id = ${invoice.client_id} AND kind = 'monthly'
+      WHERE client_id = ${entrena} AND kind = 'monthly'
       ORDER BY purchased_on DESC, created_at DESC LIMIT 1
     `;
     if (!anterior?.total_sessions) continue;
     const [vigente] = await sql`
       SELECT id FROM session_packages
-      WHERE client_id = ${invoice.client_id} AND kind = 'monthly'
+      WHERE client_id = ${entrena} AND kind = 'monthly'
         AND expires_on IS NOT NULL AND expires_on >= ${invoice.due_on}::date
       LIMIT 1
     `;
     if (vigente) continue;
     await sql`
       INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on)
-      VALUES (${invoice.client_id},
+      VALUES (${entrena},
         ${'Mensualidad ' + new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric', timeZone: 'America/Panama' }).format(new Date(`${invoice.billing_period}T12:00:00-05:00`))},
         ${anterior.total_sessions}, ${invoice.amount}, ${invoice.due_on}::date, 'monthly', current_date)
     `;

@@ -424,6 +424,60 @@ describe('corregir una sesión ya guardada', () => {
   });
 });
 
+describe('un pagador que cubre a varias personas', () => {
+  let pagador, esposa, yerno, plan;
+  before(async () => {
+    const p = await api.post('/api/plans', { name: 'Mensualidad familiar', billingModel: 'monthly', price: 120, sessionsIncluded: 8 });
+    plan = p.datos.id;
+    const a = await api.post('/api/clients', { fullName: 'El que paga', planId: plan, cutoffDay: 1 });
+    const b = await api.post('/api/clients', { fullName: 'La esposa', planId: plan, cutoffDay: 1 });
+    const c = await api.post('/api/clients', { fullName: 'El yerno', planId: plan, cutoffDay: 1 });
+    pagador = a.datos.id; esposa = b.datos.id; yerno = c.datos.id;
+    await api.patch(`/api/clients/${esposa}`, { fullName: 'La esposa', billingResponsibleClientId: pagador });
+    await api.patch(`/api/clients/${yerno}`, { fullName: 'El yerno', billingResponsibleClientId: pagador });
+  });
+
+  test('un pagador puede cubrir a más de una persona', async () => {
+    const lista = await api.get('/api/clients');
+    const dependientes = lista.datos.filter(c => c.billing_responsible_client_id === pagador);
+    assert.equal(dependientes.length, 2, 'esposa y yerno deben depender del mismo pagador');
+  });
+
+  test('se genera un cobro por persona, todos a nombre de quien paga', async () => {
+    const { estado } = await api.post('/api/billing/recurring/generate', {});
+    assert.equal(estado, 200);
+
+    const facturas = (await api.get('/api/invoices')).datos
+      .filter(i => i.client_id === pagador && i.auto_generated);
+    assert.equal(facturas.length, 3, 'uno suyo y uno por cada persona que cubre');
+
+    const cubiertos = facturas.map(f => f.billed_for_client_id).sort();
+    assert.deepEqual(cubiertos.sort(), [pagador, esposa, yerno].sort(),
+      'cada cobro debe recordar de quién es la mensualidad');
+  });
+
+  test('el concepto dice de quién es cada mensualidad', async () => {
+    const facturas = (await api.get('/api/invoices')).datos
+      .filter(i => i.client_id === pagador && i.auto_generated);
+    const dela = facturas.find(f => f.billed_for_client_id === esposa);
+    assert.match(dela.concept, /La esposa/, 'sin el nombre, tres cobros iguales serían indistinguibles');
+    const suyo = facturas.find(f => f.billed_for_client_id === pagador);
+    assert.ok(!/·.*·/.test(suyo.concept.replace(/ · \d{2}\/\d{4}/, '')), 'el suyo no lleva nombre repetido');
+  });
+
+  test('no duplica al volver a generar', async () => {
+    await api.post('/api/billing/recurring/generate', {});
+    const facturas = (await api.get('/api/invoices')).datos
+      .filter(i => i.client_id === pagador && i.auto_generated);
+    assert.equal(facturas.length, 3, 'el índice único va por persona, no sólo por cliente y mes');
+  });
+
+  test('a los dependientes no se les factura por su cuenta', async () => {
+    const suyas = (await api.get('/api/invoices')).datos.filter(i => i.client_id === esposa);
+    assert.equal(suyas.length, 0, 'quien no paga no recibe cobros');
+  });
+});
+
 describe('no se agenda a quien ya no entrena', () => {
   let clientId;
   before(async () => {
