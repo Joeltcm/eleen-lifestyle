@@ -218,6 +218,23 @@ describe('el saldo sale del plan sin tener que teclearlo', () => {
       'declarar las sesiones en el plan no serviría de nada si hubiera que teclearlas otra vez');
   });
 
+  test('un cobro que ya existía también estrena su saldo', async () => {
+    // El caso que se colaba: el cobro se emitió ayer, o llegó importado de
+    // Zoho. Nunca vuelve a salir del INSERT de generación, así que su cliente
+    // se quedaba sin saldo para siempre y nadie lo decía.
+    const dia = new Date(Date.now() + 3 * 24 * 3600_000);
+    const vence = dia.toISOString().slice(0, 10);
+    const plan = await api.post('/api/plans', { name: 'Mensual ya cobrada', billingModel: 'monthly', price: 150, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Cobro previo', planId: plan.datos.id, cutoffDay: dia.getDate() });
+    await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad de antes', amount: 150, dueOn: vence });
+
+    await api.post('/api/billing/recurring/generate', {});
+
+    const saldos = (await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id);
+    assert.equal(saldos.length, 1, 'el cobro vigente debe traer saldo aunque no naciera en esta generación');
+    assert.equal(Number(saldos[0].total_sessions), 8);
+  });
+
   test('un cobro con vencimiento futuro cubre ese mes', async () => {
     const finDeMes = new Date();
     finDeMes.setMonth(finDeMes.getMonth() + 1, 15);

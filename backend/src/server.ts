@@ -218,42 +218,54 @@ async function generateRecurringInvoices(ownerId?: string) {
   `;
   // Renovar el saldo de sesiones junto con el cobro. Sin esto, la mensualidad
   // con tope de sesiones se cobraba cada mes pero el saldo vencía y no volvía:
-  // el cliente quedaba pagando sin sesiones disponibles. La cantidad se hereda
-  // del último saldo mensual del propio cliente, así que sigue sus cambios sin
-  // configurar nada aparte.
-  for (const invoice of invoices) {
-    // El saldo es de quien entrena, no de quien paga: si la mensualidad de la
-    // esposa la cubre el marido, las sesiones son de ella. Sin esta distinción
-    // el saldo se le abonaría al pagador y ella se quedaría sin sesiones.
-    const entrena = (invoice.billed_for_client_id || invoice.client_id) as string;
-    // Las sesiones salen del último saldo del cliente y, si aún no tiene
-    // ninguno, del plan que se le asignó. Antes sólo miraba el saldo previo,
-    // así que quien nunca tuvo uno no lo tenía nunca: había que crearle el
-    // primero a mano, y las sesiones declaradas en el plan no servían para
-    // nada hasta entonces.
-    const [anterior] = await sql`
-      SELECT COALESCE(
-        (SELECT sp.total_sessions FROM session_packages sp
-          WHERE sp.client_id = ${entrena} AND sp.kind = 'monthly'
-          ORDER BY sp.purchased_on DESC, sp.created_at DESC LIMIT 1),
-        (SELECT p.sessions_included FROM clients c
-          JOIN service_plans p ON p.id = c.plan_id
-          WHERE c.id = ${entrena})
-      ) AS total_sessions
-    `;
-    if (!anterior?.total_sessions) continue;
-    const [vigente] = await sql`
-      SELECT id FROM session_packages
-      WHERE client_id = ${entrena} AND kind = 'monthly'
-        AND expires_on IS NOT NULL AND expires_on >= ${invoice.due_on}::date
-      LIMIT 1
-    `;
-    if (vigente) continue;
+  // el cliente quedaba pagando sin sesiones disponibles.
+  //
+  // Se mira el cobro vigente de cada quien, no sólo los que acaban de nacer en
+  // este mismo INSERT. Un cobro emitido ayer —o traído de Zoho— ya no vuelve a
+  // pasar por aquí, y su cliente se quedaba sin saldo para siempre sin que
+  // nada lo dijera. El saldo es de quien entrena, no de quien paga: si la
+  // mensualidad de la esposa la cubre el marido, las sesiones son de ella.
+  const pendientes = await sql`
+    SELECT DISTINCT ON (entrena) * FROM (
+      SELECT COALESCE(i.billed_for_client_id, i.client_id) AS entrena,
+        i.due_on, i.amount,
+        COALESCE(i.billing_period, date_trunc('month', i.due_on)::date) AS billing_period,
+        -- Las sesiones salen del último saldo del cliente y, si aún no tiene
+        -- ninguno, del plan que se le asignó. Antes sólo miraba el saldo
+        -- previo, así que quien nunca tuvo uno no lo tenía nunca: había que
+        -- crearle el primero a mano, y las sesiones declaradas en el plan no
+        -- servían para nada hasta entonces.
+        COALESCE(
+          (SELECT sp.total_sessions FROM session_packages sp
+            WHERE sp.client_id = COALESCE(i.billed_for_client_id, i.client_id) AND sp.kind = 'monthly'
+            ORDER BY sp.purchased_on DESC, sp.created_at DESC LIMIT 1),
+          pl.sessions_included
+        ) AS total_sessions
+      FROM invoices i
+      JOIN clients c ON c.id = COALESCE(i.billed_for_client_id, i.client_id)
+      LEFT JOIN service_plans pl ON pl.id = c.plan_id
+      WHERE c.status = 'active' AND c.billing_model = 'monthly' AND i.status <> 'void'
+        AND i.package_id IS NULL
+        -- Sólo el ciclo que viene. Un cobro de un mes cerrado es historial: no
+        -- debe repartir sesiones hoy ni corregir nada hacia atrás.
+        AND i.due_on >= current_date
+        AND i.due_on <= current_date + (${config.BILLING_GENERATION_DAYS_AHEAD})::integer
+        AND (${selectedOwner}::uuid IS NULL OR c.owner_id = ${selectedOwner}::uuid)
+        AND NOT EXISTS (
+          SELECT 1 FROM session_packages sp
+          WHERE sp.client_id = COALESCE(i.billed_for_client_id, i.client_id) AND sp.kind = 'monthly'
+            AND sp.expires_on IS NOT NULL AND sp.expires_on >= i.due_on
+        )
+    ) q
+    WHERE q.total_sessions > 0
+    ORDER BY entrena, due_on
+  `;
+  for (const cobro of pendientes) {
     await sql`
       INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on)
-      VALUES (${entrena},
-        ${'Mensualidad ' + new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric', timeZone: 'America/Panama' }).format(mediodiaEnPanama(invoice.billing_period))},
-        ${anterior.total_sessions}, ${invoice.amount}, ${invoice.due_on}::date, 'monthly', current_date)
+      VALUES (${cobro.entrena},
+        ${'Mensualidad ' + new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric', timeZone: 'America/Panama' }).format(mediodiaEnPanama(cobro.billing_period))},
+        ${cobro.total_sessions}, ${cobro.amount}, ${cobro.due_on}::date, 'monthly', current_date)
     `;
   }
   return { generated: invoices.length, invoices };
