@@ -13,11 +13,23 @@ lleva por delante los respaldos.
 `0 7 * * *` — todos los días a las 07:00 UTC, que en Panamá son las 02:00.
 Se elige esa hora porque no hay nadie entrenando ni cobrando de madrugada.
 
-**El cron se configura en el panel de Railway**, en Settings → Cron Schedule
-del servicio `backup`. El `cronSchedule` de este railway.json **no se aplica**:
-Railway sólo lee la configuración como código desde la raíz del repositorio, y
-esa raíz ya la ocupa el railway.json del API. Mientras el campo esté vacío el
-servicio corre sólo cuando se le pide a mano.
+El `cronSchedule` de este railway.json **no se aplica**: Railway sólo lee la
+configuración como código desde la raíz del repositorio, y esa raíz ya la ocupa
+el railway.json del API. El horario está puesto directamente en el servicio, y
+se consulta o se cambia por la API de Railway sin salir de la terminal:
+
+```
+# ver el horario de todos los servicios
+railway api 'query { environment(id: "<ENV_ID>") { serviceInstances { edges { node { serviceName cronSchedule } } } } }'
+
+# cambiarlo
+railway api 'mutation F($s: String!, $e: String, $i: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $s, environmentId: $e, input: $i) }' \
+  --var s=<SERVICE_ID> --var e=<ENV_ID> --variables '{"input":{"cronSchedule":"0 7 * * *"}}'
+```
+
+`railway api` usa la sesión de la propia CLI, así que no hace falta un token
+aparte. La política de reinicio debe ser `NEVER` y no debe haber healthcheck:
+es un trabajo que corre, termina y se apaga, no un servicio que se queda vivo.
 
 ## Dónde quedan
 
