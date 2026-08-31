@@ -31,7 +31,11 @@ app.addContentTypeParser([...documentContentTypes], { parseAs: 'buffer', bodyLim
 await app.register(cors, {
   origin: config.CORS_ORIGIN.split(',').map(origin => origin.trim()),
   methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  credentials: true
+  credentials: true,
+  // Sin esto el navegador manda un OPTIONS de comprobación antes de CADA
+  // llamada, porque todas llevan cabecera de autorización: el doble de viajes
+  // para el mismo dato. Dos horas es el máximo que respeta Chrome.
+  maxAge: 7200
 });
 await app.register(jwt, { secret: config.JWT_SECRET });
 await registerZohoRoutes(app);
@@ -1754,7 +1758,19 @@ function sendPdf(reply: any, buffer: Buffer, fileName: string) {
 
 app.get('/api/invoices', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
-  return sql`SELECT i.*, c.full_name FROM invoices i JOIN clients c ON c.id = i.client_id WHERE c.owner_id = ${auth.sub} ORDER BY i.created_at DESC`;
+  // Sin source_payload ni line_items: son el JSON crudo que devolvió Zoho por
+  // cada factura y el desglose de líneas. Nadie los lee en la lista y hacían
+  // que 1.400 facturas pesaran 3,6 MB, que se descargan enteros cada vez que
+  // se refresca cualquier cosa.
+  return sql`
+    SELECT i.id, i.client_id, i.package_id, i.concept, i.amount, i.currency, i.due_on, i.status,
+      i.payment_method, i.payment_reference, i.confirmed_at, i.created_at, i.source_system,
+      i.external_id, i.invoice_number, i.issued_on, i.subtotal, i.tax_total, i.balance,
+      i.external_status, i.notes, i.external_updated_at, i.billing_period, i.auto_generated,
+      i.billed_for_client_id, c.full_name
+    FROM invoices i JOIN clients c ON c.id = i.client_id
+    WHERE c.owner_id = ${auth.sub} ORDER BY i.created_at DESC
+  `;
 });
 // Vincular un cobro ya hecho —típicamente importado de Zoho— con su saldo de
 // sesiones. El saldo sólo nacía cuando el cobro se creaba aquí, así que los

@@ -1,4 +1,4 @@
-const APP_VERSION = '108';
+const APP_VERSION = '109';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -184,14 +184,16 @@ async function refreshGoogleCalendarState() {
   data.googleCalendar = await api('/api/integrations/google-calendar/status').catch(() => ({ configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } }));
 }
 async function loadData() {
-  const [clients, invoices, packages, sessions, routines, plans, compliance, notifications, googleCalendar] = await Promise.all([
+  const [clients, invoices, packages, sessions, routines, plans, compliance, notifications, googleCalendar, catalog] = await Promise.all([
     api('/api/clients'), api('/api/invoices'), api('/api/packages'), api('/api/sessions'), api('/api/routines'),
     api('/api/plans'),
     api(`/api/compliance/summary?period=${compliancePeriod}`).catch(() => ({ compliancePercent: 0, activities: 0, clients: [] })),
     api('/api/notifications').catch(() => []),
-    api('/api/integrations/google-calendar/status').catch(() => ({ configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } }))
+    api('/api/integrations/google-calendar/status').catch(() => ({ configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } })),
+    // El catálogo iba en un segundo viaje, después de esperar a los otros
+    // nueve: un viaje de ida y vuelta entero por nada.
+    api('/api/exercises').catch(() => null)
   ]);
-  const catalog = await api('/api/exercises').catch(() => null);
   exerciseCatalog = catalog ? catalog.map(exercise => ({
     id: exercise.id, slug: exercise.slug, name: exercise.name, english: exercise.english || '',
     section: exercise.section, pattern: exercise.pattern || '', level: exercise.level,
