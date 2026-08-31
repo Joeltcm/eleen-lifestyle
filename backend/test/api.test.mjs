@@ -261,6 +261,31 @@ describe('cobros', () => {
   });
 });
 
+describe('quitar sesiones canceladas de la agenda', () => {
+  let clienteId;
+  let sesionId;
+  before(async () => {
+    const c = await api.post('/api/clients', { fullName: 'Agenda Prueba', billingModel: 'single', standardPrice: 30, cutoffDay: 1 });
+    clienteId = c.datos.id;
+    const lote = await api.post('/api/sessions/batch', { clientId: clienteId, startsAt: ['2026-10-05T13:00:00.000Z'], durationMinutes: 60, mode: 'Presencial' });
+    sesionId = lote.datos.sesiones[0].id;
+  });
+
+  test('una sesión en pie no se borra: primero se cancela', async () => {
+    const { estado } = await api.delete(`/api/sessions/${sesionId}/permanent`);
+    assert.equal(estado, 409, 'no se pierde por accidente una sesión que estaba agendada');
+  });
+
+  test('una vez cancelada, se puede quitar del todo', async () => {
+    await api.delete(`/api/sessions/${sesionId}`);
+    const borrada = await api.delete(`/api/sessions/${sesionId}/permanent`);
+    assert.equal(borrada.estado, 200);
+
+    const sesiones = await api.get('/api/sessions');
+    assert.ok(!sesiones.datos.find(s => s.id === sesionId), 'no debe quedar en la agenda');
+  });
+});
+
 describe('desactivar clientes', () => {
   let clienteId;
   before(async () => {

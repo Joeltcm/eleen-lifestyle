@@ -1206,6 +1206,30 @@ app.patch('/api/sessions/:id', { preHandler: requireStaff }, async (request, rep
   return updated;
 });
 
+// Quitar de la agenda una sesión cancelada. Cancelar no borra: la sesión se
+// queda en el listado marcada como "Cancelada" y sigue sumando en el contador
+// de canceladas del expediente. Para una que se agendó por error —o de prueba—
+// eso es ruido permanente en el historial de un cliente.
+//
+// Sólo se permite sobre canceladas: una sesión viva se cancela primero, y así
+// nunca se pierde por accidente una que estaba en pie. Las completadas tampoco
+// se tocan, porque descontaron una sesión del saldo y borrarlas descuadraría
+// el cumplimiento.
+app.delete('/api/sessions/:id/permanent', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [sesion] = await sql`
+    SELECT s.id, s.status FROM sessions s JOIN clients c ON c.id = s.client_id
+    WHERE s.id = ${id} AND c.owner_id = ${auth.sub}
+  `;
+  if (!sesion) return reply.code(404).send({ error: 'Sesión no encontrada' });
+  if (sesion.status !== 'cancelled') {
+    return reply.code(409).send({ error: 'Sólo se borran las sesiones canceladas. Cancélala primero.' });
+  }
+  const [borrada] = await sql`DELETE FROM sessions WHERE id = ${id} RETURNING id, starts_at`;
+  return { deleted: true, session: borrada };
+});
+
 app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
