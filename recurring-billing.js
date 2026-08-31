@@ -48,7 +48,10 @@
       if (generate) {
         const result = await api('/api/billing/recurring/generate', { method: 'POST' });
         await loadData(); renderAll();
-        toast(result.generated ? `${result.generated} cobro${result.generated === 1 ? '' : 's'} generado${result.generated === 1 ? '' : 's'}` : 'No había cobros nuevos por generar');
+        const partes = [];
+        if (result.generated) partes.push(`${result.generated} cobro${result.generated === 1 ? '' : 's'} generado${result.generated === 1 ? '' : 's'}`);
+        if (result.balances) partes.push(`${result.balances} saldo${result.balances === 1 ? '' : 's'} de sesiones abierto${result.balances === 1 ? '' : 's'}`);
+        toast(partes.length ? partes.join(' · ') : 'No había cobros nuevos por generar');
       }
       await load(false);
     } catch (error) { toast(error.message, true); await load(false); }

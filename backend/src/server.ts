@@ -268,7 +268,7 @@ async function generateRecurringInvoices(ownerId?: string) {
         ${cobro.total_sessions}, ${cobro.amount}, ${cobro.due_on}::date, 'monthly', current_date)
     `;
   }
-  return { generated: invoices.length, invoices };
+  return { generated: invoices.length, balances: pendientes.length, invoices };
 }
 
 app.get('/api/billing/recurring/status', { preHandler: requireStaff }, async request => {
@@ -283,7 +283,7 @@ app.post('/api/billing/recurring/generate', { preHandler: requireStaff }, async 
     return { ...status, generated: 0, message: 'La facturación automática se activará después del corte final de Zoho.' };
   }
   const result = await generateRecurringInvoices(auth.sub);
-  return { ...(await recurringBillingStatus(auth.sub)), generated: result.generated };
+  return { ...(await recurringBillingStatus(auth.sub)), generated: result.generated, balances: result.balances };
 });
 
 app.get('/health', async () => {
