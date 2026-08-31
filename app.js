@@ -1,4 +1,4 @@
-const APP_VERSION = '96';
+const APP_VERSION = '97';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1284,7 +1284,7 @@ function exerciseVideoUploader(exercise) {
 // duplicate = true reutiliza una rutina existente como punto de partida para
 // otro cliente: copia los ejercicios pero nace sin asignar y se guarda como
 // rutina nueva, sin tocar la original.
-function newRoutine(routine = null, duplicate = false) {
+function newRoutine(routine = null, duplicate = false, propuesta = null) {
   const editing = Boolean(routine) && !duplicate;
   const content = formFromTemplate('new-routine-template'); openModal(content, true);
   if (routine) {
@@ -1357,23 +1357,16 @@ function newRoutine(routine = null, duplicate = false) {
           repeatMuscleGroups: Boolean(valores.get('repeat'))
         } });
         modal.close();
-        newRoutine();
-        // El formulario se vuelve a abrir, así que hay que esperar a que exista.
-        setTimeout(() => {
-          const form = document.getElementById('routine-form');
-          if (!form) return;
-          form.elements.title.value = propuesta.title;
-          form.elements.description.value = propuesta.description || propuesta.title;
-          form.elements.sessions.value = propuesta.sessionsPerWeek;
-          if (valores.get('clientId')) document.getElementById('routine-client').value = valores.get('clientId');
-          window.dispatchEvent(new CustomEvent('rutina-propuesta', { detail: propuesta }));
-        }, 60);
+        // Se pasa como argumento y no por un evento en window: cada apertura
+        // del formulario registraba un escucha que sólo se retiraba al
+        // dispararse, así que los de las veces anteriores seguían vivos y la
+        // nota de la propuesta salía repetida una vez por cada uno.
+        newRoutine(null, false, { ...propuesta, clientId: valores.get('clientId') || '' });
       } catch (error) { toast(error.message, true); boton.disabled = false; boton.textContent = 'Proponer'; }
     });
   };
-  // Recibe la propuesta cuando el formulario ya está montado.
-  const aplicarPropuesta = evento => {
-    const propuesta = evento.detail;
+  // Se aplica al final del montaje, cuando renderSelected y la lista ya existen.
+  const aplicarPropuesta = () => {
     selectedExercises.splice(0, selectedExercises.length);
     for (const sugerido of propuesta.exercises) {
       const enCatalogo = exerciseCatalog.find(item => item.name.toLowerCase() === sugerido.name.toLowerCase());
@@ -1397,7 +1390,6 @@ function newRoutine(routine = null, duplicate = false) {
     }
     toast('Propuesta lista · revísala antes de guardar');
   };
-  window.addEventListener('rutina-propuesta', aplicarPropuesta, { once: true });
 
   const renderSelected = () => {
     selectedList.replaceChildren();
@@ -1490,6 +1482,16 @@ function newRoutine(routine = null, duplicate = false) {
     if (event.target.matches('[data-exercise-weight]')) selectedExercises[Number(event.target.dataset.exerciseWeight)].weight = event.target.value.trim();
   });
   renderChoices(); renderSelected();
+  // Si se viene de la propuesta con IA, se vuelca aquí: ya existe el formulario
+  // y la lista de ejercicios.
+  if (propuesta) {
+    const form = document.getElementById('routine-form');
+    form.elements.title.value = propuesta.title;
+    form.elements.description.value = propuesta.description || propuesta.title;
+    form.elements.sessions.value = propuesta.sessionsPerWeek;
+    if (propuesta.clientId) { clientSelect.value = propuesta.clientId; void cargarPesosPrevios(); }
+    aplicarPropuesta();
+  }
   document.getElementById('routine-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target); const assigned = form.get('client');
     if (!selectedExercises.length) { toast('Agrega al menos un ejercicio a la rutina', true); return; }
