@@ -1,4 +1,4 @@
-const APP_VERSION = '105';
+const APP_VERSION = '106';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2714,9 +2714,15 @@ function portalActivities() {
 // vistazo qué está ocupado y qué queda libre, que es lo que un cliente
 // necesita para pedir un cambio de hora.
 //
-// Los tramos son de media hora porque las sesiones empiezan a y media y a
-// menos cuarto —las 5:30, las 5:45—; con tramos de una hora no encajarían.
-const PORTAL_PASO_MINUTOS = 30;
+// La rejilla va al minuto: las sesiones empiezan a y media, a menos cuarto o
+// donde haga falta, y encajarlas a marcas fijas las pintaba fuera de su hora.
+// La rejilla se mide en unidades de 5 minutos y las bandas visibles son de 30.
+// Con filas de media hora, una sesión de 5:45 se encajaba a la fuerza en la
+// marca de 5:30 y, al redondear también el final, se estiraba hasta las 7:00:
+// sesenta minutos ocupando noventa y comiéndose dos tramos que estaban libres.
+// Con la unidad en 5, cualquier hora que se agende cae en una línea exacta.
+const PORTAL_UNIDAD_MINUTOS = 5;
+const PORTAL_BANDA_MINUTOS = 30;
 
 let portalWeekStart = startOfWeek(today);
 let portalSelectedDay = dateKey(today);
@@ -2755,15 +2761,16 @@ function renderPortalCalendar(ownSessions) {
 
   // El rango de horas sale de lo que hay: mostrar de 0 a 24 llenaría la
   // pantalla de filas vacías a las tres de la mañana. Si la semana está libre
-  // se usa una franja razonable de mañana y tarde.
+  // se usa una franja razonable de mañana y tarde. Los bordes se alinean a la
+  // banda de media hora para que las etiquetas queden en su sitio.
   const conAlgo = ocupados.length;
   const primero = conAlgo ? Math.min(...ocupados.map(o => o.desde)) : 6 * 60;
   const ultimo = conAlgo ? Math.max(...ocupados.map(o => o.hasta)) : 19 * 60;
-  const desde = Math.max(0, Math.floor((primero - 60) / PORTAL_PASO_MINUTOS) * PORTAL_PASO_MINUTOS);
-  const hasta = Math.min(24 * 60, Math.ceil((ultimo + 60) / PORTAL_PASO_MINUTOS) * PORTAL_PASO_MINUTOS);
+  const desde = Math.max(0, Math.floor((primero - 30) / PORTAL_BANDA_MINUTOS) * PORTAL_BANDA_MINUTOS);
+  const hasta = Math.min(24 * 60, Math.ceil((ultimo + 30) / PORTAL_BANDA_MINUTOS) * PORTAL_BANDA_MINUTOS);
+  const unidades = Math.max(1, (hasta - desde) / PORTAL_UNIDAD_MINUTOS);
+  const unidadesPorBanda = PORTAL_BANDA_MINUTOS / PORTAL_UNIDAD_MINUTOS;
 
-  const tramos = [];
-  for (let minuto = desde; minuto < hasta; minuto += PORTAL_PASO_MINUTOS) tramos.push(minuto);
   const comoHora = minutos => {
     const h = Math.floor(minutos / 60); const m = minutos % 60;
     const sufijo = h < 12 ? 'a' : 'p';
@@ -2780,30 +2787,32 @@ function renderPortalCalendar(ownSessions) {
     </button>`;
   }).join('');
 
-  // El fondo: una celda por tramo y día, con su estado.
-  const fondo = tramos.map((minuto, fila) => {
+  // El fondo va en bandas de media hora: son las que llevan etiqueta y las que
+  // dan la retícula. Sólo los bloques necesitan precisión al minuto.
+  const bandas = [];
+  for (let minuto = desde; minuto < hasta; minuto += PORTAL_BANDA_MINUTOS) bandas.push(minuto);
+  const fondo = bandas.map((minuto, banda) => {
+    const filaInicio = banda * unidadesPorBanda + 2;
     const celdas = clavesSemana.map((clave, columna) => {
-      const yaPaso = new Date(`${clave}T00:00:00`).getTime() + minuto * 60_000 < Date.now();
-      return `<span class="portal-tramo ${yaPaso ? 'pasado' : 'libre'}" style="grid-row:${fila + 2};grid-column:${columna + 2}" title="${yaPaso ? 'Ya pasó' : 'Disponible'}"></span>`;
+      const yaPaso = new Date(`${clave}T00:00:00`).getTime() + (minuto + PORTAL_BANDA_MINUTOS) * 60_000 < Date.now();
+      return `<span class="portal-tramo ${yaPaso ? 'pasado' : 'libre'}" style="grid-row:${filaInicio} / span ${unidadesPorBanda};grid-column:${columna + 2}" title="${yaPaso ? 'Ya pasó' : 'Disponible'}"></span>`;
     }).join('');
-    const etiqueta = minuto % 60 === 0
-      ? `<span class="portal-hora" style="grid-row:${fila + 2};grid-column:1">${comoHora(minuto)}</span>`
-      : `<span class="portal-hora" style="grid-row:${fila + 2};grid-column:1"></span>`;
+    const etiqueta = `<span class="portal-hora" style="grid-row:${filaInicio} / span ${unidadesPorBanda};grid-column:1">${minuto % 60 === 0 ? comoHora(minuto) : ''}</span>`;
     return etiqueta + celdas;
   }).join('');
 
-  // Y encima, cada sesión como UN bloque que abarca sus tramos. Antes se
-  // pintaba celda a celda, así que una sesión de una hora se veía como dos o
-  // tres bloques separados y parecía que había el triple de actividades.
+  // Y encima, cada sesión en su minuto exacto.
   const bloques = ocupados.map(o => {
     const columna = clavesSemana.indexOf(o.dia);
     if (columna < 0) return '';
-    const filaInicio = Math.floor((Math.max(o.desde, desde) - desde) / PORTAL_PASO_MINUTOS);
-    const filaFin = Math.ceil((Math.min(o.hasta, hasta) - desde) / PORTAL_PASO_MINUTOS);
-    const cuantas = Math.max(1, filaFin - filaInicio);
+    const inicio = Math.max(o.desde, desde);
+    const fin = Math.min(o.hasta, hasta);
+    if (fin <= inicio) return '';
+    const filaInicio = Math.round((inicio - desde) / PORTAL_UNIDAD_MINUTOS) + 2;
+    const cuantas = Math.max(1, Math.round((fin - inicio) / PORTAL_UNIDAD_MINUTOS));
     return `<button type="button" class="portal-bloque ${o.mia ? 'mia' : 'ocupada'}"
-      style="grid-row:${filaInicio + 2} / span ${cuantas};grid-column:${columna + 2}"
-      data-portal-dia="${o.dia}" title="${o.mia ? 'Tu sesión' : 'Ocupado'} · ${comoHora(o.desde)}">${o.mia ? '●' : ''}</button>`;
+      style="grid-row:${filaInicio} / span ${cuantas};grid-column:${columna + 2}"
+      data-portal-dia="${o.dia}" title="${o.mia ? 'Tu sesión' : 'Ocupado'} · ${comoHora(o.desde)} a ${comoHora(o.hasta)}">${o.mia ? '●' : ''}</button>`;
   }).join('');
 
   const rango = `${new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short' }).format(dias[0])} – ${new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short' }).format(dias[6])}`;
@@ -2816,7 +2825,7 @@ function renderPortalCalendar(ownSessions) {
       <b>${rango}</b>
       <button type="button" class="portal-mes-nav" data-portal-semana="1" aria-label="Semana siguiente">›</button>
     </div>
-    <div class="portal-semana-rejilla" style="grid-template-rows:auto repeat(${tramos.length}, 17px)">
+    <div class="portal-semana-rejilla" style="grid-template-rows:auto repeat(${unidades}, 3px)">
       ${cabecera}
       ${fondo}
       ${bloques}
