@@ -136,6 +136,15 @@ async function recurringBillingStatus(ownerId: string) {
   };
 }
 
+// Las columnas date vuelven de postgres.js como Date, no como texto. Pegarles
+// 'T12:00:00-05:00' producía "Invalid Date" y tumbaba toda la generación con un
+// 500 sin pista: el error salía al formatear el nombre del saldo, no al leerlo.
+// Mediodía porque a medianoche el cambio de huso mueve el día un mes atrás.
+function mediodiaEnPanama(fecha: Date | string): Date {
+  const dia = fecha instanceof Date ? fecha.toISOString().slice(0, 10) : String(fecha).slice(0, 10);
+  return new Date(`${dia}T12:00:00-05:00`);
+}
+
 async function generateRecurringInvoices(ownerId?: string) {
   const selectedOwner = ownerId || null;
   const invoices = await sql`
@@ -217,10 +226,20 @@ async function generateRecurringInvoices(ownerId?: string) {
     // esposa la cubre el marido, las sesiones son de ella. Sin esta distinción
     // el saldo se le abonaría al pagador y ella se quedaría sin sesiones.
     const entrena = (invoice.billed_for_client_id || invoice.client_id) as string;
+    // Las sesiones salen del último saldo del cliente y, si aún no tiene
+    // ninguno, del plan que se le asignó. Antes sólo miraba el saldo previo,
+    // así que quien nunca tuvo uno no lo tenía nunca: había que crearle el
+    // primero a mano, y las sesiones declaradas en el plan no servían para
+    // nada hasta entonces.
     const [anterior] = await sql`
-      SELECT total_sessions FROM session_packages
-      WHERE client_id = ${entrena} AND kind = 'monthly'
-      ORDER BY purchased_on DESC, created_at DESC LIMIT 1
+      SELECT COALESCE(
+        (SELECT sp.total_sessions FROM session_packages sp
+          WHERE sp.client_id = ${entrena} AND sp.kind = 'monthly'
+          ORDER BY sp.purchased_on DESC, sp.created_at DESC LIMIT 1),
+        (SELECT p.sessions_included FROM clients c
+          JOIN service_plans p ON p.id = c.plan_id
+          WHERE c.id = ${entrena})
+      ) AS total_sessions
     `;
     if (!anterior?.total_sessions) continue;
     const [vigente] = await sql`
@@ -233,7 +252,7 @@ async function generateRecurringInvoices(ownerId?: string) {
     await sql`
       INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on)
       VALUES (${entrena},
-        ${'Mensualidad ' + new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric', timeZone: 'America/Panama' }).format(new Date(`${invoice.billing_period}T12:00:00-05:00`))},
+        ${'Mensualidad ' + new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric', timeZone: 'America/Panama' }).format(mediodiaEnPanama(invoice.billing_period))},
         ${anterior.total_sessions}, ${invoice.amount}, ${invoice.due_on}::date, 'monthly', current_date)
     `;
   }
@@ -826,9 +845,15 @@ app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) =
   const pack = await sql.begin(async transaction => {
     const [created] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind) VALUES (${input.clientId}, ${etiqueta}, ${input.totalSessions}, ${input.amount}, ${vence}, ${input.kind}) RETURNING *`;
     const [invoice] = await transaction`
-      INSERT INTO invoices (client_id, package_id, concept, amount, due_on, issued_on)
+      INSERT INTO invoices (client_id, package_id, concept, amount, due_on, issued_on, billing_period)
       VALUES (${input.clientId}, ${created.id}, ${concepto}, ${input.amount},
-        COALESCE(${input.dueOn}::date, current_date), current_date)
+        COALESCE(${input.dueOn}::date, current_date), current_date,
+        -- Una mensualidad cubre el mes en que vence. Sin esto, un cobro creado
+        -- hoy con vencimiento en septiembre se leía como de agosto —manda la
+        -- fecha de emisión— y la generación emitía el de septiembre igualmente.
+        CASE WHEN ${esCobroMensual}
+          THEN date_trunc('month', COALESCE(${input.dueOn}::date, current_date))::date
+          ELSE NULL END)
       RETURNING id`;
     return { ...created, invoice_id: invoice.id };
   });

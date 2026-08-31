@@ -196,6 +196,39 @@ describe('gastos y ámbito', () => {
   });
 });
 
+describe('el saldo sale del plan sin tener que teclearlo', () => {
+  let clientId;
+  before(async () => {
+    const plan = await api.post('/api/plans', { name: 'Mensual con saldo', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
+    // El corte se pone a tres días vista para que la generación lo alcance.
+    const dia = new Date(Date.now() + 3 * 24 * 3600_000).getDate();
+    const c = await api.post('/api/clients', { fullName: 'Hereda del plan', planId: plan.datos.id, cutoffDay: dia });
+    clientId = c.datos.id;
+  });
+
+  test('la primera renovación crea el saldo con las sesiones del plan', async () => {
+    const antes = (await api.get('/api/packages')).datos.filter(p => p.client_id === clientId);
+    assert.equal(antes.length, 0, 'arranca sin saldo');
+
+    await api.post('/api/billing/recurring/generate', {});
+
+    const despues = (await api.get('/api/packages')).datos.filter(p => p.client_id === clientId);
+    assert.equal(despues.length, 1, 'la mensualidad debe traer su saldo');
+    assert.equal(Number(despues[0].total_sessions), 12,
+      'declarar las sesiones en el plan no serviría de nada si hubiera que teclearlas otra vez');
+  });
+
+  test('un cobro con vencimiento futuro cubre ese mes', async () => {
+    const finDeMes = new Date();
+    finDeMes.setMonth(finDeMes.getMonth() + 1, 15);
+    const vence = finDeMes.toISOString().slice(0, 10);
+    const p = await api.post('/api/packages', { clientId, totalSessions: 12, amount: 175, kind: 'monthly', dueOn: vence });
+    const factura = (await api.get('/api/invoices')).datos.find(i => i.id === p.datos.invoice_id);
+    assert.equal(String(factura.billing_period).slice(0, 7), vence.slice(0, 7),
+      'cubre el mes en que vence, no el mes en que se creó');
+  });
+});
+
 describe('descuento de clases individual', () => {
   let pagador, dependiente;
   before(async () => {
