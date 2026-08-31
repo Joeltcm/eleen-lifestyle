@@ -1,4 +1,4 @@
-const APP_VERSION = '113';
+const APP_VERSION = '114';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2031,6 +2031,65 @@ async function auditLog() {
   }
 }
 
+// Qué mes cubre cada cobro. Las mensualidades se pagan por adelantado, así que
+// lo cobrado en agosto cubre septiembre; sin decirlo, la generación automática
+// mira la fecha de emisión, da septiembre por pendiente y emite un segundo
+// cobro. Aquí se le dice.
+async function coverageManager(mesOrigen = null) {
+  const hoy = new Date();
+  const anterior = new Date(hoy.getFullYear(), hoy.getMonth() - 1, 1);
+  const origen = mesOrigen || `${anterior.getFullYear()}-${String(anterior.getMonth() + 1).padStart(2, '0')}`;
+  const [anio, mes] = origen.split('-').map(Number);
+  const siguiente = new Date(anio, mes, 1);
+  const cubre = `${siguiente.getFullYear()}-${String(siguiente.getMonth() + 1).padStart(2, '0')}`;
+  const comoMes = clave => {
+    const [a, m] = clave.split('-').map(Number);
+    return new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric' }).format(new Date(a, m - 1, 1));
+  };
+
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">COBROS Y PERÍODOS</p><h2>Qué mes cubre cada cobro</h2>
+    <p style="color:#6f7b75;margin-top:-12px">Las mensualidades se pagan por adelantado. Sin esto, la aplicación cree que el mes siguiente está sin cobrar y emite un cobro de más.</p>
+    <label>Cobros de<select id="cobertura-mes">${Array.from({ length: 6 }, (_, n) => {
+      const f = new Date(hoy.getFullYear(), hoy.getMonth() - n, 1);
+      const clave = `${f.getFullYear()}-${String(f.getMonth() + 1).padStart(2, '0')}`;
+      return `<option value="${clave}"${clave === origen ? ' selected' : ''}>${comoMes(clave)}</option>`;
+    }).join('')}</select></label>
+    <p class="section-note aviso-ambito">Se marcarán como cobertura de <b>${comoMes(cubre)}</b>.</p>
+    <div id="cobertura-lista"><p class="empty">Cargando…</p></div>`;
+  openModal(box, true);
+
+  document.getElementById('cobertura-mes').onchange = evento => coverageManager(evento.target.value);
+
+  try {
+    const datos = await api(`/api/billing/coverage?month=${origen}`);
+    const destino = document.getElementById('cobertura-lista');
+    if (!destino?.isConnected) return;
+    const pendientes = datos.cobros.filter(c => !c.billing_period);
+    destino.innerHTML = `
+      <p class="section-note">${datos.total} cobro${datos.total === 1 ? '' : 's'} de mensualidad en ${comoMes(origen)} · ${datos.yaAsignados} ya tienen período.</p>
+      ${datos.cobros.length ? `<div class="gasto-lista">${datos.cobros.map(c => `<article class="gasto-item">
+        <div><b>${escapeHtml(c.full_name)}</b><small>${escapeHtml(c.concept)} · ${dateOnly(c.issued_on || c.due_on)}${c.billing_period ? ` · cubre ${comoMes(String(c.billing_period).slice(0, 7))}` : ' · sin período'}</small></div>
+        <span class="gasto-monto">${money.format(c.amount)}</span>
+      </article>`).join('')}</div>` : '<p class="empty">No hay cobros de mensualidad en ese mes.</p>'}
+      ${pendientes.length ? `<button class="primary wide-button" id="cobertura-aplicar">Marcar ${pendientes.length} como cobertura de ${comoMes(cubre)}</button>` : ''}`;
+
+    const boton = document.getElementById('cobertura-aplicar');
+    if (boton) boton.onclick = async () => {
+      if (!confirmarGuardado(`${pendientes.length} cobros de ${comoMes(origen)} pasarán a cubrir ${comoMes(cubre)}`)) return;
+      try {
+        const r = await api('/api/billing/coverage', { method: 'POST', body: { sourceMonth: origen, coversMonth: cubre } });
+        await loadData(); renderAll();
+        toast(`${r.asignados} cobros marcados`);
+        coverageManager(origen);
+      } catch (error) { toast(error.message, true); }
+    };
+  } catch (error) {
+    const destino = document.getElementById('cobertura-lista');
+    if (destino) destino.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
+  }
+}
+
 function pendingCollections() {
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">COBROS PENDIENTES</p><h2>Registrar cobros</h2>
@@ -2565,6 +2624,7 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'link-packages') linkPackages();
   if (actionButton?.dataset.action === 'finance') financeDashboard();
   if (actionButton?.dataset.action === 'audit-log') auditLog();
+  if (actionButton?.dataset.action === 'coverage') coverageManager();
   if (actionButton?.dataset.action === 'compliance-report') complianceReport();
   if (actionButton?.dataset.action === 'new-plan') planEditor();
   if (actionButton?.dataset.action === 'export-compliance') exportCompliance();

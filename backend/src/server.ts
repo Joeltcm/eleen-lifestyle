@@ -1961,6 +1961,85 @@ app.post('/api/invoices', { preHandler: requireStaff }, async (request, reply) =
   return reply.code(201).send(invoice);
 });
 const invoiceEditSchema = z.object({ concept: z.string().min(2).max(180), amount: z.coerce.number().min(0), dueOn: z.string().date() });
+// Qué mes cubre cada cobro.
+//
+// Las mensualidades se pagan por adelantado: lo cobrado en agosto cubre
+// septiembre. Pero las facturas importadas de Zoho no traen esa información
+// —Zoho no la exporta— así que para saber si un mes ya está cobrado la
+// generación automática mira la fecha de emisión. Con pago adelantado eso
+// falla: da agosto por cubierto, septiembre por pendiente, y emite un segundo
+// cobro de septiembre. El cliente paga dos veces.
+//
+// Con el período asignado, la generación lo respeta y deja de adivinar.
+const cobertura = z.object({
+  sourceMonth: z.string().regex(/^\d{4}-\d{2}$/, 'Mes inválido'),
+  coversMonth: z.string().regex(/^\d{4}-\d{2}$/, 'Mes inválido')
+});
+
+async function cobrosDelMes(ownerId: string, mes: string) {
+  return sql`
+    SELECT i.id, i.concept, i.amount, i.issued_on, i.due_on, i.billing_period, c.full_name
+    FROM invoices i JOIN clients c ON c.id = i.client_id
+    WHERE c.owner_id = ${ownerId}
+      AND i.status <> 'void'
+      AND i.package_id IS NULL
+      AND c.billing_model = 'monthly'
+      AND to_char(COALESCE(i.issued_on, i.due_on), 'YYYY-MM') = ${mes}
+    ORDER BY c.full_name
+  `;
+}
+
+app.get('/api/billing/coverage', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const { month } = z.object({ month: z.string().regex(/^\d{4}-\d{2}$/) }).parse(request.query);
+  const filas = await cobrosDelMes(auth.sub, month);
+  return {
+    month,
+    total: filas.length,
+    yaAsignados: filas.filter(f => f.billing_period).length,
+    cobros: filas
+  };
+});
+
+app.post('/api/billing/coverage', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const input = cobertura.parse(request.body);
+  const periodo = `${input.coversMonth}-01`;
+
+  // Sólo los que no tengan período: si alguno ya se corrigió a mano, se
+  // respeta. Reasignar en bloque pisaría una decisión deliberada.
+  const actualizados = await sql`
+    UPDATE invoices i SET billing_period = ${periodo}::date
+    FROM clients c
+    WHERE c.id = i.client_id AND c.owner_id = ${auth.sub}
+      AND i.status <> 'void'
+      AND i.package_id IS NULL
+      AND c.billing_model = 'monthly'
+      AND i.billing_period IS NULL
+      AND to_char(COALESCE(i.issued_on, i.due_on), 'YYYY-MM') = ${input.sourceMonth}
+    RETURNING i.id, c.full_name
+  `;
+  if (!actualizados.length) return reply.code(409).send({ error: 'No hay cobros de ese mes sin período asignado' });
+  return { asignados: actualizados.length, cubre: input.coversMonth, clientes: actualizados.map(f => f.full_name) };
+});
+
+// Corregir uno suelto, cuando el reparto en bloque no acierta.
+app.patch('/api/invoices/:id/period', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const { billingPeriod } = z.object({
+    billingPeriod: z.union([z.literal(''), z.null(), z.string().regex(/^\d{4}-\d{2}$/)]).optional()
+      .transform(v => (v === '' || v === undefined ? null : v))
+  }).parse(request.body);
+  const [invoice] = await sql`
+    UPDATE invoices i SET billing_period = ${billingPeriod ? `${billingPeriod}-01` : null}::date
+    FROM clients c WHERE i.id = ${id} AND c.id = i.client_id AND c.owner_id = ${auth.sub}
+    RETURNING i.id, i.billing_period
+  `;
+  if (!invoice) return reply.code(404).send({ error: 'Cobro no encontrado' });
+  return invoice;
+});
+
 app.patch('/api/invoices/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = invoiceEditSchema.parse(request.body);
   const [invoice] = await sql`UPDATE invoices i SET concept = ${input.concept}, amount = ${input.amount}, due_on = ${input.dueOn} FROM clients c WHERE i.id = ${id} AND c.id = i.client_id AND c.owner_id = ${auth.sub} AND i.status = 'pending' AND i.source_system IS DISTINCT FROM 'zoho_invoice' RETURNING i.*`;
