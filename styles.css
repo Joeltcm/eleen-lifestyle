@@ -185,7 +185,16 @@ dialog.modal-wide{max-width:920px}
 .grupo-clientes{grid-column:1/-1;display:flex;align-items:center;gap:9px;margin:6px 0 0;font:500 10px 'DM Mono';letter-spacing:1.3px;text-transform:uppercase;color:var(--muted)}
 .grupo-clientes:not(:first-child){margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}
 .grupo-clientes span{padding:2px 8px;border-radius:99px;background:#eddde5;color:#7d4a60;font-size:10px}
-select.filter{padding:11px 13px;max-width:none;font:600 13px 'DM Sans';cursor:pointer}
+/* El desplegable de estados no lleva max-width:none: esa regla ganaba por
+   especificidad a la del móvil y se comía el ancho del buscador, que quedaba
+   reducido a una rendija. En pantalla estrecha cada uno ocupa su propia fila:
+   "Todos los estados" no cabe en los 125 px que tenía el botón anterior. */
+select.filter{padding:11px 13px;font:600 13px 'DM Sans';cursor:pointer}
+@media(max-width:600px){
+  .toolbar{flex-wrap:wrap}
+  .toolbar input{flex:1 1 100%}
+  select.filter{flex:1 1 100%;max-width:none}
+}
 
 /* Estado del cliente. Quien ya no entrena se ve en rojo, y quien está en pausa
    en ámbar: son tres situaciones distintas y la etiqueta debía notarlo. */
