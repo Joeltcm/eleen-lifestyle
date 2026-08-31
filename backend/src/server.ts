@@ -267,10 +267,21 @@ async function generateRecurringInvoices(ownerId?: string) {
   `;
   for (const cobro of pendientes) {
     await sql`
-      INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on)
+      INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
       VALUES (${cobro.entrena},
         ${'Mensualidad ' + new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric', timeZone: 'America/Panama' }).format(mediodiaEnPanama(cobro.billing_period))},
-        ${cobro.total_sessions}, ${cobro.amount}, ${cobro.due_on}::date, 'monthly', current_date)
+        ${cobro.total_sessions}, ${cobro.amount}, ${cobro.due_on}::date, 'monthly', current_date,
+        -- Nace activo, y es la diferencia entre servir y no servir. Un saldo
+        -- 'pending' no suma en las sesiones disponibles ni se descuenta al
+        -- marcar la clase: el cliente entrenaba y su saldo no se movía. Se
+        -- activaba al confirmar el cobro asociado, pero éste no lo tiene —y
+        -- los cobros que vienen de Zoho no pasan por esa confirmación—, así
+        -- que se habría quedado dormido para siempre.
+        --
+        -- La mensualidad se paga por adelantado y el cobro ya está emitido:
+        -- las clases del ciclo son suyas. Si no lo fueran, el cumplimiento
+        -- mediría mal a quien sí entrenó, que es peor que cobrar tarde.
+        'active')
     `;
   }
   return { generated: invoices.length, balances: pendientes.length, invoices };

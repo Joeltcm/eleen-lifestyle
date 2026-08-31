@@ -280,6 +280,38 @@ describe('descuento de clases individual', () => {
   });
 });
 
+describe('la pareja que paga uno y entrenan los dos', () => {
+  // El caso real: Eduardo paga $350 —$175 por cabeza— y cada uno tiene su
+  // plan de 12 sesiones. Si hoy entrena sólo Beatris, sólo a ella le baja.
+  let eduardo, beatris;
+  before(async () => {
+    const plan = await api.post('/api/plans', { name: 'Mensualidad en pareja (por persona)', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
+    const corte = new Date(Date.now() + 4 * 24 * 3600_000).getDate();
+    const a = await api.post('/api/clients', { fullName: 'Eduardo', planId: plan.datos.id, cutoffDay: corte });
+    const b = await api.post('/api/clients', { fullName: 'Beatris', planId: plan.datos.id, cutoffDay: corte });
+    eduardo = a.datos.id; beatris = b.datos.id;
+    await api.patch(`/api/clients/${beatris}`, { fullName: 'Beatris', billingResponsibleClientId: eduardo });
+    await api.post('/api/billing/recurring/generate', {});
+  });
+
+  test('cada uno estrena sus 12 sesiones, no 12 entre los dos', async () => {
+    const clientes = (await api.get('/api/clients')).datos;
+    assert.equal(Number(clientes.find(c => c.id === eduardo).available_sessions), 12);
+    assert.equal(Number(clientes.find(c => c.id === beatris).available_sessions), 12,
+      'quien no paga también entrena: su saldo es suyo');
+  });
+
+  test('si entrena sólo ella, sólo a ella le baja', async () => {
+    const cuando = new Date(Date.now() - 3600_000).toISOString();
+    const s = await api.post('/api/sessions/batch', { clientId: beatris, startsAt: [cuando], durationMinutes: 60, mode: 'Presencial' });
+    await api.patch(`/api/sessions/${s.datos.sesiones[0].id}/compliance`, { completed: true, completionPercent: 100 });
+
+    const clientes = (await api.get('/api/clients')).datos;
+    assert.equal(Number(clientes.find(c => c.id === beatris).available_sessions), 11, 'ella gastó una');
+    assert.equal(Number(clientes.find(c => c.id === eduardo).available_sessions), 12, 'él no entrenó');
+  });
+});
+
 describe('vencimiento de los paquetes', () => {
   let clientId;
   before(async () => {
