@@ -1971,8 +1971,12 @@ const invoiceEditSchema = z.object({ concept: z.string().min(2).max(180), amount
 // cobro de septiembre. El cliente paga dos veces.
 //
 // Con el período asignado, la generación lo respeta y deja de adivinar.
+// Se marcan los cobros elegidos, no un mes entero: en un mismo mes conviven
+// mensualidades y pagos de clases sueltas, y decir que las tres facturas
+// pequeñas de alguien cubren el mes siguiente daría ese mes por cobrado tres
+// veces y bloquearía su mensualidad real.
 const cobertura = z.object({
-  sourceMonth: z.string().regex(/^\d{4}-\d{2}$/, 'Mes inválido'),
+  invoiceIds: z.array(z.string().uuid()).min(1).max(200),
   coversMonth: z.string().regex(/^\d{4}-\d{2}$/, 'Mes inválido')
 });
 
@@ -2013,13 +2017,10 @@ app.post('/api/billing/coverage', { preHandler: requireStaff }, async (request, 
     FROM clients c
     WHERE c.id = i.client_id AND c.owner_id = ${auth.sub}
       AND i.status <> 'void'
-      AND i.package_id IS NULL
-      AND c.billing_model = 'monthly'
-      AND i.billing_period IS NULL
-      AND to_char(COALESCE(i.issued_on, i.due_on), 'YYYY-MM') = ${input.sourceMonth}
+      AND i.id = ANY(${input.invoiceIds}::uuid[])
     RETURNING i.id, c.full_name
   `;
-  if (!actualizados.length) return reply.code(409).send({ error: 'No hay cobros de ese mes sin período asignado' });
+  if (!actualizados.length) return reply.code(404).send({ error: 'No se encontró ninguno de esos cobros' });
   return { asignados: actualizados.length, cubre: input.coversMonth, clientes: actualizados.map(f => f.full_name) };
 });
 

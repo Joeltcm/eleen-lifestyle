@@ -472,13 +472,16 @@ describe('pago por adelantado: qué mes cubre cada cobro', () => {
     assert.equal(datos.yaAsignados, 0);
   });
 
-  test('asignarlos les pone el mes que cubren', async () => {
-    const { estado, datos } = await api.post('/api/billing/coverage', { sourceMonth: mesPasado(), coversMonth: esteMes() });
-    assert.equal(estado, 200);
-    assert.ok(datos.asignados >= 1);
+  test('se marcan sólo los elegidos', async () => {
+    const previa = await api.get(`/api/billing/coverage?month=${mesPasado()}`);
+    const sinPeriodo = previa.datos.cobros.filter(c => !c.billing_period);
+    assert.ok(sinPeriodo.length >= 1);
 
-    const despues = await api.get(`/api/billing/coverage?month=${mesPasado()}`);
-    assert.equal(despues.datos.yaAsignados, despues.datos.total, 'ninguno debe quedar sin período');
+    const { estado, datos } = await api.post('/api/billing/coverage', {
+      invoiceIds: [sinPeriodo[0].id], coversMonth: esteMes()
+    });
+    assert.equal(estado, 200);
+    assert.equal(datos.asignados, 1, 'en un mismo mes conviven mensualidades y clases sueltas: se eligen una a una');
   });
 
   test('con el período puesto, no se emite un segundo cobro del mes', async () => {
@@ -489,9 +492,11 @@ describe('pago por adelantado: qué mes cubre cada cobro', () => {
       'el pago adelantado ya cubría este mes: generar otro sería cobrarle dos veces');
   });
 
-  test('no se pisan los períodos ya corregidos a mano', async () => {
-    const { estado } = await api.post('/api/billing/coverage', { sourceMonth: mesPasado(), coversMonth: esteMes() });
-    assert.equal(estado, 409, 'si no queda ninguno sin asignar, no hay nada que hacer');
+  test('un cobro de otra entrenadora no se toca', async () => {
+    const { estado } = await api.post('/api/billing/coverage', {
+      invoiceIds: ['00000000-0000-4000-8000-000000000000'], coversMonth: esteMes()
+    });
+    assert.equal(estado, 404, 'sólo se marcan cobros propios');
   });
 });
 

@@ -1,4 +1,4 @@
-const APP_VERSION = '114';
+const APP_VERSION = '115';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2067,18 +2067,31 @@ async function coverageManager(mesOrigen = null) {
     if (!destino?.isConnected) return;
     const pendientes = datos.cobros.filter(c => !c.billing_period);
     destino.innerHTML = `
-      <p class="section-note">${datos.total} cobro${datos.total === 1 ? '' : 's'} de mensualidad en ${comoMes(origen)} · ${datos.yaAsignados} ya tienen período.</p>
+      <p class="section-note">${datos.total} cobro${datos.total === 1 ? '' : 's'} en ${comoMes(origen)} · ${datos.yaAsignados} ya tienen período. Desmarca los que no sean mensualidad.</p>
       ${datos.cobros.length ? `<div class="gasto-lista">${datos.cobros.map(c => `<article class="gasto-item">
-        <div><b>${escapeHtml(c.full_name)}</b><small>${escapeHtml(c.concept)} · ${dateOnly(c.issued_on || c.due_on)}${c.billing_period ? ` · cubre ${comoMes(String(c.billing_period).slice(0, 7))}` : ' · sin período'}</small></div>
+        <div><label class="checkbox-line"><input type="checkbox" data-cobro="${c.id}" ${c.billing_period ? 'disabled' : 'checked'} /> <b>${escapeHtml(c.full_name)}</b></label>
+        <small>${escapeHtml(c.concept)} · ${dateOnly(c.issued_on || c.due_on)}${c.billing_period ? ` · ya cubre ${comoMes(String(c.billing_period).slice(0, 7))}` : ''}</small></div>
         <span class="gasto-monto">${money.format(c.amount)}</span>
-      </article>`).join('')}</div>` : '<p class="empty">No hay cobros de mensualidad en ese mes.</p>'}
-      ${pendientes.length ? `<button class="primary wide-button" id="cobertura-aplicar">Marcar ${pendientes.length} como cobertura de ${comoMes(cubre)}</button>` : ''}`;
+      </article>`).join('')}</div>` : '<p class="empty">No hay cobros en ese mes.</p>'}
+      ${pendientes.length ? `<button class="primary wide-button" id="cobertura-aplicar"></button>` : ''}`;
 
     const boton = document.getElementById('cobertura-aplicar');
+    const marcados = () => [...destino.querySelectorAll('[data-cobro]:checked:not(:disabled)')].map(c => c.dataset.cobro);
+    const refrescarBoton = () => {
+      if (!boton) return;
+      const n = marcados().length;
+      boton.disabled = !n;
+      boton.textContent = n ? `Marcar ${n} como cobertura de ${comoMes(cubre)}` : 'Selecciona al menos uno';
+    };
+    destino.querySelectorAll('[data-cobro]').forEach(c => c.addEventListener('change', refrescarBoton));
+    refrescarBoton();
+
     if (boton) boton.onclick = async () => {
-      if (!confirmarGuardado(`${pendientes.length} cobros de ${comoMes(origen)} pasarán a cubrir ${comoMes(cubre)}`)) return;
+      const elegidos = marcados();
+      if (!elegidos.length) return;
+      if (!confirmarGuardado(`${elegidos.length} cobro${elegidos.length === 1 ? '' : 's'} de ${comoMes(origen)} pasarán a cubrir ${comoMes(cubre)}`)) return;
       try {
-        const r = await api('/api/billing/coverage', { method: 'POST', body: { sourceMonth: origen, coversMonth: cubre } });
+        const r = await api('/api/billing/coverage', { method: 'POST', body: { invoiceIds: elegidos, coversMonth: cubre } });
         await loadData(); renderAll();
         toast(`${r.asignados} cobros marcados`);
         coverageManager(origen);
