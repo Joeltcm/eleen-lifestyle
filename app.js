@@ -1,4 +1,4 @@
-const APP_VERSION = '100';
+const APP_VERSION = '101';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2683,6 +2683,87 @@ function portalActivities() {
   const routineActivities = portalData.routineCompletions.map(item => ({ date: new Date(`${item.completed_on}T12:00:00`), percent: Number(item.completion_percent || 0) }));
   return [...sessionActivities, ...routineActivities];
 }
+// Calendario del portal. Antes era una lista corrida de fechas: para saber si
+// el miércoles había hueco había que recorrerla entera, y las sesiones propias
+// se perdían entre los "Ocupado" de los demás.
+//
+// El mes se ve de un vistazo y el detalle del día se abre debajo, que es donde
+// el cliente marca si cumplió. Se conserva la ficha de siempre para no tocar
+// ese formulario.
+let portalCalendarCursor = new Date(today.getFullYear(), today.getMonth(), 1, 12);
+let portalSelectedDay = dateKey(today);
+
+function portalSlotCard(slot, ownSessions) {
+  const date = new Date(slot.starts_at);
+  const own = slot.is_mine ? ownSessions.get(slot.id) : null;
+  return `<article class="portal-slot ${own ? 'mine' : 'busy'}"><time><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric', month: 'short' }).format(date)}</b><span>${new Intl.DateTimeFormat('es-PA', { hour: 'numeric', minute: '2-digit' }).format(date)}</span></time><div><b>${own ? escapeHtml(own.routine) : 'Ocupado'}</b><span>${own ? escapeHtml(own.mode) : 'Horario no disponible'}</span></div>${own ? `<form data-portal-session="${own.id}" class="portal-session-form"><label class="completion-check"><input name="completed" type="checkbox" ${own.status === 'completed' ? 'checked' : ''} /><span>Cumplí</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${own.status === 'completed' ? own.completionPercent || 100 : 0}" /><span>%</span></label><button class="secondary">Guardar</button></form>` : ''}</article>`;
+}
+
+function renderPortalCalendar(ownSessions) {
+  const contenedor = document.getElementById('portal-calendar-list');
+  if (!contenedor) return;
+
+  // Los huecos se agrupan por día local de Panamá, no por el día UTC: una
+  // sesión de madrugada caería en la casilla equivocada.
+  const porDia = new Map();
+  for (const slot of portalData.busySlots) {
+    const clave = dateKey(new Date(slot.starts_at));
+    if (!porDia.has(clave)) porDia.set(clave, []);
+    porDia.get(clave).push(slot);
+  }
+
+  const anio = portalCalendarCursor.getFullYear();
+  const mes = portalCalendarCursor.getMonth();
+  const primero = new Date(anio, mes, 1, 12);
+  const diasDelMes = new Date(anio, mes + 1, 0).getDate();
+  // La semana empieza en lunes, como el resto de la aplicación.
+  const desplazamiento = (primero.getDay() + 6) % 7;
+
+  const celdas = [];
+  for (let n = 0; n < desplazamiento; n += 1) celdas.push('<span class="portal-dia vacio"></span>');
+  for (let dia = 1; dia <= diasDelMes; dia += 1) {
+    const fecha = new Date(anio, mes, dia, 12);
+    const clave = dateKey(fecha);
+    const huecos = porDia.get(clave) || [];
+    const mios = huecos.filter(h => h.is_mine).length;
+    const clases = ['portal-dia'];
+    if (clave === dateKey(today)) clases.push('hoy');
+    if (clave === portalSelectedDay) clases.push('elegido');
+    if (mios) clases.push('con-mia');
+    else if (huecos.length) clases.push('con-ocupado');
+    celdas.push(`<button type="button" class="${clases.join(' ')}" data-portal-dia="${clave}" ${huecos.length ? '' : 'data-vacio="1"'}>
+      <span class="portal-dia-numero">${dia}</span>
+      ${huecos.length ? `<span class="portal-dia-marca">${mios ? '●' : '·'}</span>` : ''}
+    </button>`);
+  }
+
+  const nombreMes = new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric' }).format(primero);
+  const delDia = (porDia.get(portalSelectedDay) || []).slice().sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)));
+  const fechaElegida = new Date(`${portalSelectedDay}T12:00:00`);
+
+  contenedor.innerHTML = `
+    <div class="portal-mes">
+      <button type="button" class="portal-mes-nav" data-portal-mes="-1" aria-label="Mes anterior">‹</button>
+      <b>${nombreMes.charAt(0).toUpperCase()}${nombreMes.slice(1)}</b>
+      <button type="button" class="portal-mes-nav" data-portal-mes="1" aria-label="Mes siguiente">›</button>
+    </div>
+    <div class="portal-semana">${['L', 'M', 'X', 'J', 'V', 'S', 'D'].map(d => `<span>${d}</span>`).join('')}</div>
+    <div class="portal-rejilla">${celdas.join('')}</div>
+    <p class="portal-leyenda"><span class="marca-mia">●</span> Tu sesión &nbsp; <span class="marca-ocupada">·</span> Ocupado</p>
+    <h4 class="portal-dia-titulo">${new Intl.DateTimeFormat('es-PA', { weekday: 'long', day: 'numeric', month: 'long' }).format(fechaElegida)}</h4>
+    ${delDia.length ? delDia.map(slot => portalSlotCard(slot, ownSessions)).join('') : '<p class="empty">Sin sesiones ni horarios ocupados este día.</p>'}`;
+
+  contenedor.querySelectorAll('[data-portal-mes]').forEach(boton => {
+    boton.onclick = () => {
+      portalCalendarCursor = new Date(anio, mes + Number(boton.dataset.portalMes), 1, 12);
+      renderPortalCalendar(ownSessions);
+    };
+  });
+  contenedor.querySelectorAll('[data-portal-dia]').forEach(boton => {
+    boton.onclick = () => { portalSelectedDay = boton.dataset.portalDia; renderPortalCalendar(ownSessions); };
+  });
+}
+
 function renderPortal() {
   const client = portalData.client; const activities = portalActivities(); const overall = activities.length ? Math.round(activities.reduce((sum, item) => sum + item.percent, 0) / activities.length) : 0;
   document.getElementById('portal-welcome').textContent = `Hola, ${client.full_name.split(' ')[0]}`; document.getElementById('portal-compliance').textContent = `${overall}%`;
@@ -2695,7 +2776,7 @@ function renderPortal() {
   document.getElementById('portal-inbody').innerHTML = portalData.assessments.length ? `<div class="portal-inbody-grid">${portalData.assessments.slice(-4).reverse().map(item => `<article><span>${String(item.tested_at).slice(0, 10)}</span><b>${Number(item.values.weightKg || 0).toFixed(1)} kg</b><small>${Number(item.values.percentBodyFat || 0).toFixed(1)}% grasa · ${Number(item.values.skeletalMuscleMassKg || 0).toFixed(1)} kg músculo</small></article>`).join('')}</div>` : '<p class="empty">Todavía no hay evaluaciones confirmadas.</p>';
   document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(routine => { const todayCompletion = portalData.routineCompletions.find(item => item.routine_id === routine.id && item.completed_on === dateKey(today)); return `<article class="card portal-routine-card"><div class="card-head"><div><h3>${escapeHtml(routine.title)}</h3><p>${escapeHtml(routine.description || '')} · ${routine.sessions_per_week} veces por semana</p>${routine.due_on ? `<p class="routine-due${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? 'Venció el' : 'Para cumplirla antes del'} ${dateOnly(routine.due_on)}</p>` : ''}</div></div><div class="exercise-preview">${portalExerciseRows(routine.exercises || [])}</div><form data-portal-routine="${routine.id}" class="portal-completion-form"><label class="completion-check"><input name="completed" type="checkbox" ${todayCompletion && Number(todayCompletion.completion_percent) > 0 ? 'checked' : ''} /><span>Entrenamiento realizado hoy</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${Number(todayCompletion?.completion_percent || 100)}" /><span>% completado</span></label><button class="primary">Guardar cumplimiento</button></form></article>`; }).join('') : '<p class="empty">La entrenadora todavía no te ha asignado una rutina.</p>';
   const ownSessions = new Map(portalData.sessions.map(item => [item.id, portalSession(item)]));
-  document.getElementById('portal-calendar-list').innerHTML = portalData.busySlots.length ? portalData.busySlots.map(slot => { const date = new Date(slot.starts_at); const own = slot.is_mine ? ownSessions.get(slot.id) : null; return `<article class="portal-slot ${own ? 'mine' : 'busy'}"><time><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric', month: 'short' }).format(date)}</b><span>${new Intl.DateTimeFormat('es-PA', { hour: 'numeric', minute: '2-digit' }).format(date)}</span></time><div><b>${own ? escapeHtml(own.routine) : 'Ocupado'}</b><span>${own ? escapeHtml(own.mode) : 'Horario no disponible'}</span></div>${own ? `<form data-portal-session="${own.id}" class="portal-session-form"><label class="completion-check"><input name="completed" type="checkbox" ${own.status === 'completed' ? 'checked' : ''} /><span>Cumplí</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${own.status === 'completed' ? own.completionPercent || 100 : 0}" /><span>%</span></label><button class="secondary">Guardar</button></form>` : ''}</article>`; }).join('') : '<p class="empty">No hay horarios ocupados en los próximos 90 días.</p>';
+  renderPortalCalendar(ownSessions);
   document.getElementById('portal-plan').innerHTML = `<span class="commercial-label ${client.billing_model === 'package' ? 'package-label' : ''}">${client.billing_model === 'package' ? 'Paquete' : 'Mensualidad'}</span><div><h3>${escapeHtml(client.plan_name || 'Plan personalizado')}</h3><p>${money.format(Number(client.standard_price))}${client.billing_model === 'monthly' ? ` · corte día ${client.billing_cutoff_day}` : ` · ${client.sessions_included || 0} sesiones`}</p></div>`;
   document.getElementById('portal-invoices').innerHTML = portalData.invoices.length ? portalData.invoices.map(invoice => `<tr><td><b>${escapeHtml(invoice.concept)}</b>${invoice.invoice_number ? `<br><small>${escapeHtml(invoice.invoice_number)}</small>` : ''}</td><td>${invoice.issued_on || invoice.due_on}</td><td>${money.format(Number(invoice.amount))}</td><td><span class="payment-status ${invoice.status}">${invoice.status === 'confirmed' ? 'Pagada' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'}</span></td><td><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoice_number || invoice.id.slice(0, 8))}">Ver PDF</button></td></tr>`).join('') : '<tr><td colspan="5" class="empty">No hay facturas registradas.</td></tr>';
   const portalCount = document.getElementById('portal-notification-count'); portalCount.textContent = portalData.notifications.length; portalCount.hidden = !portalData.notifications.length;
