@@ -1,4 +1,4 @@
-const APP_VERSION = '97';
+const APP_VERSION = '98';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -270,9 +270,22 @@ function renderDashboard() {
   document.getElementById('compliance-list').innerHTML = data.compliance.clients.length ? data.compliance.clients.map(client => `<div class="compliance-row"><span class="initials">${escapeHtml(initials(client.name))}</span><div><b>${escapeHtml(client.name)}</b><small>${client.completed} de ${client.activities} actividades con avance${client.late ? ` · ${client.late} fuera de fecha` : ''}${client.missed ? ` · ${client.missed} sin hacer` : ''}</small><span class="compliance-track"><i style="width:${client.compliancePercent}%"></i></span></div><strong>${client.compliancePercent}%</strong></div>`).join('') : '<p class="empty">Aún no hay entrenamientos vencidos en este período.</p>';
   const notificationCount = document.getElementById('notification-count'); notificationCount.textContent = data.notifications.length; notificationCount.hidden = !data.notifications.length;
 }
+// Los inactivos aparte y al final. Mezclados alfabéticamente obligaban a leer
+// la etiqueta de cada tarjeta para saber a quién se entrena hoy, y quien deja
+// de entrenar no debería competir por la atención con quien sigue viniendo.
+const ESTADOS_CLIENTE = [
+  { clave: 'active', titulo: 'Activos' },
+  { clave: 'paused', titulo: 'En pausa' },
+  { clave: 'inactive', titulo: 'Inactivos' }
+];
 function renderClients(filter = '') {
-  const clients = data.clients.filter(client => client.name.toLowerCase().includes(filter.toLowerCase()));
-  document.getElementById('client-grid').innerHTML = clients.map(client => {
+  const buscado = filter.toLowerCase();
+  const estadoElegido = document.getElementById('client-status-filter')?.value || '';
+  const clients = data.clients.filter(client =>
+    client.name.toLowerCase().includes(buscado)
+    && (!estadoElegido || client.statusRaw === estadoElegido));
+
+  const tarjeta = client => {
     const pack = clientPackage(client.name);
     const commercial = client.billingModel === 'package'
       ? `<span class="commercial-label package-label">Paquete</span><b>${pack?.status === 'pending' ? 'Pago pendiente' : `${pack ? remainingSessions(pack) : client.sessionsIncluded || 0} sesiones disponibles`}</b><small>${escapeHtml(client.planName || 'Plan por sesiones')} · ${money.format(client.plan)}</small>`
@@ -280,7 +293,16 @@ function renderClients(filter = '') {
       ? `<span class="commercial-label single-label">Sesión suelta</span><b>${escapeHtml(client.planName || 'Sesiones individuales')} · ${money.format(client.plan)}</b><small>Por sesión, sin corte mensual</small>`
       : `<span class="commercial-label">Mensualidad</span><b>${escapeHtml(client.planName || 'Mensualidad')} · ${money.format(client.plan)}</b><small>Corte día ${client.cutoffDay}</small>`;
     return `<article class="client-card"><header><span class="initials">${escapeHtml(initials(client.name))}</span><div><h3>${escapeHtml(client.name)}</h3><small>${escapeHtml(client.goal)}</small></div><span class="status">${client.status}</span></header><p>${client.inbody ? `Último InBody: ${client.inbody.date}` : 'Aún no se ha cargado un InBody.'}${client.portalActive ? ' · Portal activo' : ''}</p><div class="commercial-summary">${commercial}</div><div class="mini-data">${client.inbody ? `<div><b>${client.inbody.weight} kg</b><span>Peso</span></div><div><b>${client.inbody.smm} kg</b><span>Músculo</span></div><div><b>${client.inbody.pbf}%</b><span>Grasa</span></div>` : `<div><b>—</b><span>Evaluación pendiente</span></div>`}</div><div class="client-actions"><button class="secondary" data-client="${client.id}">Ver expediente</button><button class="secondary" data-edit-client="${client.id}">Editar</button><button class="secondary" data-inbody="${client.id}">+ InBody</button></div></article>`;
-  }).join('') || '<p class="empty">No se encontraron clientes.</p>';
+  };
+
+  const grupos = ESTADOS_CLIENTE
+    .map(estado => ({ ...estado, gente: clients.filter(c => c.statusRaw === estado.clave) }))
+    .filter(grupo => grupo.gente.length);
+  // Con un solo grupo el encabezado sobra: no separa nada de nada.
+  const conEncabezados = grupos.length > 1;
+  document.getElementById('client-grid').innerHTML = grupos.length
+    ? grupos.map(grupo => `${conEncabezados ? `<h3 class="grupo-clientes">${grupo.titulo} <span>${grupo.gente.length}</span></h3>` : ''}${grupo.gente.map(tarjeta).join('')}`).join('')
+    : '<p class="empty">No se encontraron clientes.</p>';
 }
 function renderGoogleCalendar() {
   const integration = data.googleCalendar || {};
@@ -2497,6 +2519,7 @@ document.addEventListener('change', event => {
 });
 document.querySelector('.modal-close').addEventListener('click', () => modal.close());
 document.getElementById('client-search').addEventListener('input', event => renderClients(event.target.value));
+document.getElementById('client-status-filter').addEventListener('change', () => renderClients(document.getElementById('client-search').value));
 document.getElementById('compliance-period').addEventListener('change', async event => {
   compliancePeriod = event.target.value;
   try { data.compliance = await api(`/api/compliance/summary?period=${compliancePeriod}`); renderDashboard(); }

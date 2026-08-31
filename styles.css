@@ -179,3 +179,10 @@ dialog.modal-wide{max-width:920px}
 .peso-anterior{display:block;margin-top:4px;font-size:10px;color:#9b607a;cursor:pointer;text-decoration:underline dotted}
 .peso-anterior:hover{color:#7d4a60}
 .peso-equivalencia{display:block;margin-top:3px;font-size:10px;color:var(--muted)}
+
+/* Clientes agrupados por estado. El encabezado ocupa la fila entera: dentro de
+   una rejilla de tarjetas, si no, se colocaría como una tarjeta más. */
+.grupo-clientes{grid-column:1/-1;display:flex;align-items:center;gap:9px;margin:6px 0 0;font:500 10px 'DM Mono';letter-spacing:1.3px;text-transform:uppercase;color:var(--muted)}
+.grupo-clientes:not(:first-child){margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}
+.grupo-clientes span{padding:2px 8px;border-radius:99px;background:#eddde5;color:#7d4a60;font-size:10px}
+select.filter{padding:11px 13px;max-width:none;font:600 13px 'DM Sans';cursor:pointer}
