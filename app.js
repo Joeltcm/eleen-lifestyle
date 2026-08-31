@@ -1,4 +1,4 @@
-const APP_VERSION = '101';
+const APP_VERSION = '102';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2690,8 +2690,23 @@ function portalActivities() {
 // El mes se ve de un vistazo y el detalle del día se abre debajo, que es donde
 // el cliente marca si cumplió. Se conserva la ficha de siempre para no tocar
 // ese formulario.
-let portalCalendarCursor = new Date(today.getFullYear(), today.getMonth(), 1, 12);
+// Agenda semanal del portal. La semana entera con sus horas: se ve de un
+// vistazo qué está ocupado y qué queda libre, que es lo que un cliente
+// necesita para pedir un cambio de hora.
+//
+// Los tramos son de media hora porque las sesiones empiezan a y media y a
+// menos cuarto —las 5:30, las 5:45—; con tramos de una hora no encajarían.
+const PORTAL_PASO_MINUTOS = 30;
+
+let portalWeekStart = startOfWeek(today);
 let portalSelectedDay = dateKey(today);
+
+function startOfWeek(fecha) {
+  const inicio = new Date(fecha.getFullYear(), fecha.getMonth(), fecha.getDate(), 12);
+  // Semana de lunes a domingo.
+  inicio.setDate(inicio.getDate() - ((inicio.getDay() + 6) % 7));
+  return inicio;
+}
 
 function portalSlotCard(slot, ownSessions) {
   const date = new Date(slot.starts_at);
@@ -2703,59 +2718,83 @@ function renderPortalCalendar(ownSessions) {
   const contenedor = document.getElementById('portal-calendar-list');
   if (!contenedor) return;
 
-  // Los huecos se agrupan por día local de Panamá, no por el día UTC: una
-  // sesión de madrugada caería en la casilla equivocada.
-  const porDia = new Map();
-  for (const slot of portalData.busySlots) {
-    const clave = dateKey(new Date(slot.starts_at));
-    if (!porDia.has(clave)) porDia.set(clave, []);
-    porDia.get(clave).push(slot);
-  }
+  const dias = Array.from({ length: 7 }, (_, n) => {
+    const fecha = new Date(portalWeekStart);
+    fecha.setDate(fecha.getDate() + n);
+    return fecha;
+  });
+  const clavesSemana = dias.map(dateKey);
 
-  const anio = portalCalendarCursor.getFullYear();
-  const mes = portalCalendarCursor.getMonth();
-  const primero = new Date(anio, mes, 1, 12);
-  const diasDelMes = new Date(anio, mes + 1, 0).getDate();
-  // La semana empieza en lunes, como el resto de la aplicación.
-  const desplazamiento = (primero.getDay() + 6) % 7;
+  // Cada hueco ocupado, con su minuto de inicio y fin dentro del día.
+  const ocupados = portalData.busySlots.map(slot => {
+    const inicio = new Date(slot.starts_at);
+    const minutos = inicio.getHours() * 60 + inicio.getMinutes();
+    const duracion = Number(slot.duration_minutes) || 60;
+    return { slot, dia: dateKey(inicio), desde: minutos, hasta: minutos + duracion, mia: Boolean(slot.is_mine) };
+  }).filter(item => clavesSemana.includes(item.dia));
 
-  const celdas = [];
-  for (let n = 0; n < desplazamiento; n += 1) celdas.push('<span class="portal-dia vacio"></span>');
-  for (let dia = 1; dia <= diasDelMes; dia += 1) {
-    const fecha = new Date(anio, mes, dia, 12);
+  // El rango de horas sale de lo que hay: mostrar de 0 a 24 llenaría la
+  // pantalla de filas vacías a las tres de la mañana. Si la semana está libre
+  // se usa una franja razonable de mañana y tarde.
+  const conAlgo = ocupados.length;
+  const primero = conAlgo ? Math.min(...ocupados.map(o => o.desde)) : 6 * 60;
+  const ultimo = conAlgo ? Math.max(...ocupados.map(o => o.hasta)) : 19 * 60;
+  const desde = Math.max(0, Math.floor((primero - 60) / PORTAL_PASO_MINUTOS) * PORTAL_PASO_MINUTOS);
+  const hasta = Math.min(24 * 60, Math.ceil((ultimo + 60) / PORTAL_PASO_MINUTOS) * PORTAL_PASO_MINUTOS);
+
+  const tramos = [];
+  for (let minuto = desde; minuto < hasta; minuto += PORTAL_PASO_MINUTOS) tramos.push(minuto);
+  const comoHora = minutos => {
+    const h = Math.floor(minutos / 60); const m = minutos % 60;
+    const sufijo = h < 12 ? 'a' : 'p';
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    return `${h12}:${String(m).padStart(2, '0')}${sufijo}`;
+  };
+
+  const hoyClave = dateKey(today);
+  const cabecera = dias.map(fecha => {
     const clave = dateKey(fecha);
-    const huecos = porDia.get(clave) || [];
-    const mios = huecos.filter(h => h.is_mine).length;
-    const clases = ['portal-dia'];
-    if (clave === dateKey(today)) clases.push('hoy');
-    if (clave === portalSelectedDay) clases.push('elegido');
-    if (mios) clases.push('con-mia');
-    else if (huecos.length) clases.push('con-ocupado');
-    celdas.push(`<button type="button" class="${clases.join(' ')}" data-portal-dia="${clave}" ${huecos.length ? '' : 'data-vacio="1"'}>
-      <span class="portal-dia-numero">${dia}</span>
-      ${huecos.length ? `<span class="portal-dia-marca">${mios ? '●' : '·'}</span>` : ''}
-    </button>`);
-  }
+    return `<button type="button" class="portal-col-dia ${clave === hoyClave ? 'hoy' : ''}" data-portal-dia="${clave}">
+      <b>${['L', 'M', 'X', 'J', 'V', 'S', 'D'][(fecha.getDay() + 6) % 7]}</b>
+      <i>${fecha.getDate()}</i>
+    </button>`;
+  }).join('');
 
-  const nombreMes = new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric' }).format(primero);
-  const delDia = (porDia.get(portalSelectedDay) || []).slice().sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)));
+  const filas = tramos.map(minuto => {
+    const celdas = clavesSemana.map(clave => {
+      // Un tramo está ocupado si se solapa con algún hueco, aunque la sesión
+      // no empiece justo en él.
+      const encima = ocupados.find(o => o.dia === clave && o.desde < minuto + PORTAL_PASO_MINUTOS && o.hasta > minuto);
+      if (!encima) return `<span class="portal-tramo libre" title="Disponible"></span>`;
+      const empieza = encima.desde >= minuto && encima.desde < minuto + PORTAL_PASO_MINUTOS;
+      return `<button type="button" class="portal-tramo ${encima.mia ? 'mia' : 'ocupada'}" data-portal-dia="${clave}"
+        title="${encima.mia ? 'Tu sesión' : 'Ocupado'} · ${comoHora(encima.desde)}">${empieza ? (encima.mia ? '●' : '') : ''}</button>`;
+    }).join('');
+    // Sólo se rotula la hora en punto: cada media hora sería ilegible.
+    return `<span class="portal-hora">${minuto % 60 === 0 ? comoHora(minuto) : ''}</span>${celdas}`;
+  }).join('');
+
+  const rango = `${new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short' }).format(dias[0])} – ${new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short' }).format(dias[6])}`;
+  const delDia = ocupados.filter(o => o.dia === portalSelectedDay).sort((a, b) => a.desde - b.desde);
   const fechaElegida = new Date(`${portalSelectedDay}T12:00:00`);
 
   contenedor.innerHTML = `
     <div class="portal-mes">
-      <button type="button" class="portal-mes-nav" data-portal-mes="-1" aria-label="Mes anterior">‹</button>
-      <b>${nombreMes.charAt(0).toUpperCase()}${nombreMes.slice(1)}</b>
-      <button type="button" class="portal-mes-nav" data-portal-mes="1" aria-label="Mes siguiente">›</button>
+      <button type="button" class="portal-mes-nav" data-portal-semana="-1" aria-label="Semana anterior">‹</button>
+      <b>${rango}</b>
+      <button type="button" class="portal-mes-nav" data-portal-semana="1" aria-label="Semana siguiente">›</button>
     </div>
-    <div class="portal-semana">${['L', 'M', 'X', 'J', 'V', 'S', 'D'].map(d => `<span>${d}</span>`).join('')}</div>
-    <div class="portal-rejilla">${celdas.join('')}</div>
-    <p class="portal-leyenda"><span class="marca-mia">●</span> Tu sesión &nbsp; <span class="marca-ocupada">·</span> Ocupado</p>
+    <div class="portal-semana-rejilla">
+      <span class="portal-hora"></span>${cabecera}
+      ${filas}
+    </div>
+    <p class="portal-leyenda"><span class="marca-mia">●</span> Tu sesión &nbsp; <span class="marca-ocupada">▪</span> Ocupado &nbsp; <span class="marca-libre">▫</span> Disponible</p>
     <h4 class="portal-dia-titulo">${new Intl.DateTimeFormat('es-PA', { weekday: 'long', day: 'numeric', month: 'long' }).format(fechaElegida)}</h4>
-    ${delDia.length ? delDia.map(slot => portalSlotCard(slot, ownSessions)).join('') : '<p class="empty">Sin sesiones ni horarios ocupados este día.</p>'}`;
+    ${delDia.length ? delDia.map(o => portalSlotCard(o.slot, ownSessions)).join('') : '<p class="empty">Sin horarios ocupados este día.</p>'}`;
 
-  contenedor.querySelectorAll('[data-portal-mes]').forEach(boton => {
+  contenedor.querySelectorAll('[data-portal-semana]').forEach(boton => {
     boton.onclick = () => {
-      portalCalendarCursor = new Date(anio, mes + Number(boton.dataset.portalMes), 1, 12);
+      portalWeekStart.setDate(portalWeekStart.getDate() + 7 * Number(boton.dataset.portalSemana));
       renderPortalCalendar(ownSessions);
     };
   });

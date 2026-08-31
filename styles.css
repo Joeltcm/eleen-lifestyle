@@ -201,23 +201,23 @@ select.filter{padding:11px 13px;font:600 13px 'DM Sans';cursor:pointer}
 .status.estado-inactive{background:#f7e2dc;color:#9c4f3a}
 .status.estado-paused{background:#f7eddc;color:#8a6a2f}
 
-/* Calendario del portal del cliente. El mes de un vistazo; el detalle debajo. */
+/* Agenda semanal del portal. Ocho columnas: la hora y los siete días. En el
+   teléfono cada columna baja a ~40 px, que sigue siendo tocable. */
 .portal-mes{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
-.portal-mes b{font:600 17px Fraunces;letter-spacing:-.4px}
+.portal-mes b{font:600 15px Fraunces;letter-spacing:-.3px}
 .portal-mes-nav{width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:var(--card);font-size:20px;line-height:1;color:var(--ink);cursor:pointer}
-.portal-semana{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px;margin-bottom:5px}
-.portal-semana span{text-align:center;font:500 10px 'DM Mono';color:var(--muted)}
-.portal-rejilla{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px}
-.portal-dia{min-height:46px;display:grid;place-content:center;gap:1px;border:0;border-radius:10px;background:rgba(255,253,252,.7);color:var(--ink);font:500 14px 'DM Sans';cursor:pointer;padding:4px 0}
-.portal-dia.vacio{background:none;cursor:default}
-.portal-dia[data-vacio]{color:#b6a9ae}
-.portal-dia.hoy{box-shadow:inset 0 0 0 1px #d8a7bc}
-.portal-dia.elegido{background:var(--ink);color:#fff}
-.portal-dia-marca{font-size:11px;line-height:1}
-.portal-dia.con-mia .portal-dia-marca{color:#a25e7c}
-.portal-dia.con-ocupado .portal-dia-marca{color:#9aa39d}
-.portal-dia.elegido .portal-dia-marca{color:#f3c4d5}
+.portal-semana-rejilla{display:grid;grid-template-columns:38px repeat(7,minmax(0,1fr));gap:2px;align-items:stretch}
+.portal-hora{font:500 9px 'DM Mono';color:var(--muted);display:flex;align-items:center;justify-content:flex-end;padding-right:4px}
+.portal-col-dia{border:0;background:none;cursor:pointer;color:var(--ink);display:grid;place-items:center;padding:4px 0 6px;line-height:1.15}
+.portal-col-dia b{font:500 10px 'DM Mono';color:var(--muted)}
+.portal-col-dia i{font-style:normal;font:600 13px 'DM Sans'}
+.portal-col-dia.hoy i{background:var(--ink);color:#fff;border-radius:50%;width:22px;height:22px;display:grid;place-items:center}
+.portal-tramo{min-height:17px;border:0;border-radius:4px;padding:0;display:grid;place-items:center;font-size:9px;line-height:1}
+.portal-tramo.libre{background:#f2f4f0}
+.portal-tramo.ocupada{background:#ded7da;color:#6d6167;cursor:pointer}
+.portal-tramo.mia{background:#e9bfd0;color:#7d3f5b;cursor:pointer}
 .portal-leyenda{margin:12px 0 4px;font-size:11px;color:var(--muted)}
-.portal-leyenda .marca-mia{color:#a25e7c}
-.portal-leyenda .marca-ocupada{color:#9aa39d}
+.portal-leyenda .marca-mia{color:#c07f9b}
+.portal-leyenda .marca-ocupada{color:#b8adb2}
+.portal-leyenda .marca-libre{color:#8fa08b}
 .portal-dia-titulo{margin:14px 0 10px;font:600 16px Fraunces;text-transform:capitalize}
