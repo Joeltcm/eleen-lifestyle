@@ -1,4 +1,4 @@
-const APP_VERSION = '111';
+const APP_VERSION = '112';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -624,12 +624,21 @@ function newClient() {
 }
 function editClient(client) {
   const box = document.createElement('div');
-  box.innerHTML = `<form id="edit-client-form"><p class="eyebrow">CONTACTO Y EXPEDIENTE</p><h2>Editar cliente</h2><label>Nombre completo<input name="fullName" required value="${escapeHtml(client.name)}" /></label><label>Correo electrónico<input name="email" type="email" value="${escapeHtml(client.email)}" /></label><label>Teléfono<input name="phone" value="${escapeHtml(client.phone)}" /></label><label>Meta principal<input name="goal" value="${escapeHtml(client.goal)}" /></label><label>Sesiones esperadas al mes<input name="monthlySessionTarget" type="number" min="1" max="31" value="${client.monthlySessionTarget ?? ''}" placeholder="Sin meta pactada" /></label><label>Quién paga<select name="billingResponsibleClientId" id="client-payer"><option value="">Paga por sí mismo</option></select><small>Para parejas: el saldo de sesiones y los cobros van a nombre de quien paga. El progreso y la asistencia siguen siendo de cada uno.</small></label><p class="section-note">Meta contra la cual se mide el cumplimiento mensual. Déjala vacía para derivarla del paquete o de la rutina activa.</p><label>Notas privadas<textarea name="notes" rows="3">${escapeHtml(client.notes)}</textarea></label><label>Día de corte<input name="cutoffDay" type="number" min="1" max="31" required value="${client.cutoffDay}" /><small>El día del mes en que se le cobra la mensualidad.</small></label><label>Estado<select name="status">${[['active', 'Activo'], ['paused', 'En pausa'], ['inactive', 'Inactivo']].map(([valor, texto]) => `<option value="${valor}"${client.statusRaw === valor ? ' selected' : ''}>${texto}</option>`).join('')}</select><small>Un cliente inactivo conserva su expediente, su historial y sus cobros, pero desaparece de la agenda y de los listados del día a día.</small></label><button class="primary wide-button">Guardar cambios</button>
+  box.innerHTML = `<form id="edit-client-form"><p class="eyebrow">CONTACTO Y EXPEDIENTE</p><h2>Editar cliente</h2><label>Nombre completo<input name="fullName" required value="${escapeHtml(client.name)}" /></label><label>Correo electrónico<input name="email" type="email" value="${escapeHtml(client.email)}" /></label><label>Teléfono<input name="phone" value="${escapeHtml(client.phone)}" /></label><label>Meta principal<input name="goal" value="${escapeHtml(client.goal)}" /></label><label>Sesiones esperadas al mes<input name="monthlySessionTarget" type="number" min="1" max="31" value="${client.monthlySessionTarget ?? ''}" placeholder="Sin meta pactada" /></label><label>Quién paga<select name="billingResponsibleClientId" id="client-payer"><option value="">Paga por sí mismo</option></select><small>Para parejas: el saldo de sesiones y los cobros van a nombre de quien paga. El progreso y la asistencia siguen siendo de cada uno.</small></label><p class="section-note">Meta contra la cual se mide el cumplimiento mensual. Déjala vacía para derivarla del paquete o de la rutina activa.</p><label>Notas privadas<textarea name="notes" rows="3">${escapeHtml(client.notes)}</textarea></label><label>Plan comercial<select name="planId" id="edit-client-plan"></select><small>Cambiarlo actualiza su precio, su membresía y su meta de sesiones.</small></label><label>Día de corte<input name="cutoffDay" type="number" min="1" max="31" required value="${client.cutoffDay}" /><small>El día del mes en que se le cobra la mensualidad.</small></label><label>Estado<select name="status">${[['active', 'Activo'], ['paused', 'En pausa'], ['inactive', 'Inactivo']].map(([valor, texto]) => `<option value="${valor}"${client.statusRaw === valor ? ' selected' : ''}>${texto}</option>`).join('')}</select><small>Un cliente inactivo conserva su expediente, su historial y sus cobros, pero desaparece de la agenda y de los listados del día a día.</small></label><button class="primary wide-button">Guardar cambios</button>
     <button type="button" class="secondary wide-button" id="borrar-expediente">Eliminar expediente</button>
     <p class="section-note">Para expedientes duplicados o creados por error. Se lleva su historial, mediciones, documentos y cobros. Si simplemente dejó de entrenar, ponlo Inactivo.</p></form>`;
   openModal(box);
   // Sólo pueden ser pagadores quienes no dependen de otro: encadenar dejaría el
   // saldo en un tercero imposible de rastrear.
+  const planSel = document.getElementById('edit-client-plan');
+  planSel.add(new Option('Sin plan asignado', ''));
+  data.plans
+    .filter(p => p.active || p.id === client.planId)
+    .forEach(p => planSel.add(new Option(
+      `${p.name} · ${money.format(p.price)}${p.billingModel === 'package' ? ` · ${p.sessionsIncluded} sesiones` : p.billingModel === 'single' ? ' por sesión' : '/mes'}${p.active ? '' : ' · inactivo'}`,
+      p.id)));
+  planSel.value = client.planId || '';
+
   document.getElementById('borrar-expediente').onclick = async () => {
     // Doble confirmación y escribiendo el nombre: borra InBody, documentos,
     // fotos y cobros de una persona, y no hay papelera donde recuperarlo.
@@ -647,7 +656,24 @@ function editClient(client) {
   if (client.paysForMeId) pagadores.value = client.paysForMeId;
   document.getElementById('edit-client-form').addEventListener('submit', async event => {
     event.preventDefault(); const values = new FormData(event.target);
-    try { event.target.classList.add('loading-state'); await api(`/api/clients/${client.id}`, { method: 'PATCH', body: Object.fromEntries(values) }); await loadData(); renderAll(); modal.close(); toast('Cliente actualizado'); }
+    const planElegido = values.get('planId') || '';
+    const cambiaDePlan = planElegido && planElegido !== (client.planId || '');
+    const datos = Object.fromEntries(values);
+    // El plan no va en el PATCH general: tiene su propio endpoint porque
+    // cambiarlo arrastra precio, membresía, saldo de sesiones y meta de
+    // cumplimiento. Aquí sólo se decide si hay que llamarlo.
+    delete datos.planId;
+    try {
+      event.target.classList.add('loading-state');
+      await api(`/api/clients/${client.id}`, { method: 'PATCH', body: datos });
+      if (cambiaDePlan) {
+        await api(`/api/clients/${client.id}/plan`, { method: 'PATCH', body: {
+          planId: planElegido, cutoffDay: Number(values.get('cutoffDay')) || client.cutoffDay
+        } });
+      }
+      await loadData(); renderAll(); modal.close();
+      toast(cambiaDePlan ? 'Cliente actualizado y plan cambiado' : 'Cliente actualizado');
+    }
     catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }

@@ -565,6 +565,47 @@ describe('borrado definitivo de planes', () => {
   });
 });
 
+describe('cambiar el plan de un cliente ya creado', () => {
+  let clientId, planBarato, planCaro;
+  before(async () => {
+    const a = await api.post('/api/plans', { name: 'Plan de entrada', billingModel: 'monthly', price: 80, sessionsIncluded: 4 });
+    const b = await api.post('/api/plans', { name: 'Plan completo', billingModel: 'monthly', price: 200, sessionsIncluded: 12 });
+    planBarato = a.datos.id; planCaro = b.datos.id;
+    const c = await api.post('/api/clients', { fullName: 'Sube de plan', planId: planBarato, cutoffDay: 1 });
+    clientId = c.datos.id;
+  });
+
+  test('arrastra el precio y la meta de cumplimiento', async () => {
+    const antes = (await api.get('/api/clients')).datos.find(c => c.id === clientId);
+    assert.equal(Number(antes.standard_price), 80);
+    assert.equal(Number(antes.monthly_session_target), 4);
+
+    const { estado } = await api.patch(`/api/clients/${clientId}/plan`, { planId: planCaro, cutoffDay: 1 });
+    assert.equal(estado, 200);
+
+    const despues = (await api.get('/api/clients')).datos.find(c => c.id === clientId);
+    assert.equal(Number(despues.standard_price), 200, 'el precio sigue al plan');
+    assert.equal(Number(despues.monthly_session_target), 12, 'y la meta contra la que se mide su cumplimiento');
+    assert.equal(despues.plan_id, planCaro);
+  });
+
+  test('un cliente sin plan puede recibir uno', async () => {
+    const suelto = await api.post('/api/clients', { fullName: 'Nacio sin plan', billingModel: 'monthly', standardPrice: 0, cutoffDay: 1 });
+    assert.equal(Number(suelto.datos.standard_price), 0, 'sin plan se queda en cero, que es lo que Joel veía');
+
+    await api.patch(`/api/clients/${suelto.datos.id}/plan`, { planId: planCaro, cutoffDay: 5 });
+    const ahora = (await api.get('/api/clients')).datos.find(c => c.id === suelto.datos.id);
+    assert.equal(Number(ahora.standard_price), 200, 'deja de estar en cero');
+    assert.equal(Number(ahora.billing_cutoff_day), 5);
+  });
+
+  test('un plan inactivo no se puede asignar', async () => {
+    await api.delete(`/api/plans/${planBarato}`);
+    const { estado } = await api.patch(`/api/clients/${clientId}/plan`, { planId: planBarato, cutoffDay: 1 });
+    assert.equal(estado, 404, 'desactivar un plan es para dejar de usarlo');
+  });
+});
+
 describe('cambiar el día de corte', () => {
   let clientId;
   before(async () => {
