@@ -207,6 +207,26 @@ async function pullGoogleChanges(ownerId: string, token: string, connection: Cal
   let updatedFromGoogle = 0;
   let conflictsResolved = 0;
 
+  // Eventos nuestros que ya no corresponden a ninguna sesión: quedaron
+  // huérfanos porque la sesión se borró en la aplicación sin avisar al
+  // calendario. Se retiran aquí para que la sincronización se cure sola, en
+  // vez de dejar entrenamientos fantasma en la agenda de la entrenadora.
+  const vivas = await sql`
+    SELECT s.id FROM sessions s JOIN clients c ON c.id = s.client_id WHERE c.owner_id = ${ownerId}
+  `;
+  const idsVivas = new Set(vivas.map(fila => String(fila.id)));
+  let huerfanosRetirados = 0;
+  const calendarId = encodeURIComponent(connection.organization_id || 'primary');
+  for (const event of events) {
+    if (event.status === 'cancelled') continue;
+    const marcada = event.extendedProperties?.private?.eileenSessionId;
+    if (!marcada || idsVivas.has(String(marcada))) continue;
+    try {
+      await googleRequest(token, `/calendars/${calendarId}/events/${encodeURIComponent(String(event.id))}?sendUpdates=none`, { method: 'DELETE' });
+      huerfanosRetirados += 1;
+    } catch { /* si ya no está, mejor */ }
+  }
+
   for (const event of events) {
     const sessionId = event.extendedProperties?.private?.eileenSessionId;
     const session = sessionId ? byId.get(String(sessionId)) : undefined;
@@ -260,7 +280,7 @@ async function pullGoogleChanges(ownerId: string, token: string, connection: Cal
     if (scheduleChanged) updatedFromGoogle += 1;
     if (localDirty) conflictsResolved += 1;
   }
-  return { updatedFromGoogle, checkedFromGoogle: events.length, conflictsResolved };
+  return { updatedFromGoogle, checkedFromGoogle: events.length, conflictsResolved, huerfanosRetirados };
 }
 
 async function connectionFor(ownerId: string) {
