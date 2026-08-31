@@ -299,7 +299,44 @@ export async function syncSessionToGoogle(ownerId: string, sessionId: string) {
   }
 }
 
+// Cancelar no borra el evento: lo deja en rojo y marcado como CANCELADA.
+// Antes desaparecía del calendario, y desaparecer no es lo mismo que cancelar:
+// si Eileen mira su agenda del martes y el hueco está vacío, no sabe si nunca
+// hubo clase o si se canceló. Queda en 'transparent' para que no siga
+// bloqueando su disponibilidad.
+//
+// syncFutureSessions ignora las canceladas, así que el rojo no se revierte solo.
 export async function cancelSessionInGoogle(ownerId: string, sessionId: string) {
+  if (!configured()) return null;
+  const connection = await connectionFor(ownerId);
+  if (!connection) return null;
+  const [session] = await sql`
+    SELECT s.google_event_id, c.full_name FROM sessions s JOIN clients c ON c.id = s.client_id
+    WHERE s.id = ${sessionId} AND c.owner_id = ${ownerId}
+  `;
+  if (!session?.google_event_id) return null;
+  const calendarId = encodeURIComponent(connection.organization_id || 'primary');
+  const cuerpo = JSON.stringify({
+    summary: `CANCELADA · Entrenamiento · ${session.full_name}`,
+    // 11 es el rojo de Google Calendar (Tomate).
+    colorId: '11',
+    transparency: 'transparent'
+  });
+  try {
+    await googleRequest(await accessToken(connection), `/calendars/${calendarId}/events/${encodeURIComponent(session.google_event_id)}?sendUpdates=none`, { method: 'PATCH', body: cuerpo });
+    await sql`UPDATE sessions SET google_synced_at = now(), google_sync_error = NULL WHERE id = ${sessionId}`;
+  } catch (error) {
+    // Si ya no está en Google no hay nada que marcar.
+    if (error instanceof GoogleCalendarError && [404, 410].includes(error.status)) return null;
+    throw error;
+  }
+  return { cancelled: true };
+}
+
+// Quitar el evento del calendario de verdad. Para cuando la sesión se borra en
+// la aplicación y no debe quedar rastro: si no se llama, el evento se queda
+// huérfano en Google para siempre, apuntando a una sesión que ya no existe.
+export async function removeSessionFromGoogle(ownerId: string, sessionId: string) {
   if (!configured()) return null;
   const connection = await connectionFor(ownerId);
   if (!connection) return null;
@@ -311,12 +348,11 @@ export async function cancelSessionInGoogle(ownerId: string, sessionId: string) 
   const calendarId = encodeURIComponent(connection.organization_id || 'primary');
   try {
     await googleRequest(await accessToken(connection), `/calendars/${calendarId}/events/${encodeURIComponent(session.google_event_id)}?sendUpdates=none`, { method: 'DELETE' });
-    await sql`UPDATE sessions SET google_event_id = NULL, google_event_link = NULL, google_synced_at = now(), google_sync_error = NULL WHERE id = ${sessionId}`;
   } catch (error) {
-    if (error instanceof GoogleCalendarError && error.status === 404) return null;
+    if (error instanceof GoogleCalendarError && [404, 410].includes(error.status)) return null;
     throw error;
   }
-  return { cancelled: true };
+  return { removed: true };
 }
 
 async function syncFutureSessions(ownerId: string): Promise<GoogleSyncResult> {

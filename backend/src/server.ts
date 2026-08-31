@@ -10,7 +10,7 @@ import { sql } from './db.js';
 import { createDownloadUrl, createUploadUrl, deleteObject, downloadObject, storageReady, uploadObject, verifyUpload } from './storage.js';
 import { extractInBodyDocument, extractInBodyImage, inbodyAnalysisReady, inbodyAnalysisSetup, prepareInBodyImage, validateExtraction, validateInBodyValues } from './inbody-analysis.js';
 import { registerZohoRoutes } from './zoho-routes.js';
-import { cancelSessionInGoogle, registerGoogleCalendarRoutes, syncSessionToGoogle } from './google-calendar.js';
+import { cancelSessionInGoogle, registerGoogleCalendarRoutes, removeSessionFromGoogle, syncSessionToGoogle } from './google-calendar.js';
 import { accountStatementPdf, accountsReceivablePdf, compliancePdf, invoicePdf } from './billing-reports.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
@@ -982,7 +982,12 @@ const exerciseColumns = sql`
 
 app.get('/api/exercises', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
-  const query = z.object({ section: z.enum(exerciseSections).optional(), includeArchived: z.coerce.boolean().default(false) }).parse(request.query);
+  // z.coerce.boolean() leería la cadena "false" como true. Hoy el frontend no
+  // manda este parámetro, pero la trampa quedaba armada para quien lo usara.
+  const query = z.object({
+    section: z.enum(exerciseSections).optional(),
+    includeArchived: z.enum(['true', 'false']).default('false').transform(valor => valor === 'true')
+  }).parse(request.query);
   return sql`
     SELECT ${exerciseColumns} FROM exercises
     WHERE owner_id = ${auth.sub}
@@ -1239,6 +1244,17 @@ app.delete('/api/session-recurrences/:id', { preHandler: requireStaff }, async (
   `;
   if (!regla) return reply.code(404).send({ error: 'Horario no encontrado o ya detenido' });
 
+  // Se listan antes de borrar para poder retirarlas también de Google. Sin
+  // esto, detener un horario dejaba decenas de eventos huérfanos en el
+  // calendario de la entrenadora.
+  const porRetirar = await sql`
+    SELECT id FROM sessions
+    WHERE recurrence_id = ${id} AND starts_at > now() AND status = 'scheduled'
+  `;
+  for (const sesion of porRetirar) {
+    try { await removeSessionFromGoogle(auth.sub, sesion.id as string); }
+    catch (error) { app.log.warn({ err: error, sessionId: sesion.id }, 'Sesión retirada pero el evento sigue en Google Calendar'); }
+  }
   const retiradas = await sql`
     DELETE FROM sessions
     WHERE recurrence_id = ${id} AND starts_at > now() AND status = 'scheduled'
@@ -1343,6 +1359,11 @@ app.delete('/api/sessions/:id/permanent', { preHandler: requireStaff }, async (r
   if (sesion.status !== 'cancelled') {
     return reply.code(409).send({ error: 'Sólo se borran las sesiones canceladas. Cancélala primero.' });
   }
+  // Primero Google, luego la fila: si se borra antes, se pierde el
+  // google_event_id y el evento se queda huérfano en el calendario para
+  // siempre, apuntando a una sesión que ya no existe.
+  try { await removeSessionFromGoogle(auth.sub, id); }
+  catch (error) { app.log.warn({ err: error, sessionId: id }, 'Sesión borrada pero el evento sigue en Google Calendar'); }
   const [borrada] = await sql`DELETE FROM sessions WHERE id = ${id} RETURNING id, starts_at`;
   return { deleted: true, session: borrada };
 });
@@ -1350,7 +1371,12 @@ app.delete('/api/sessions/:id/permanent', { preHandler: requireStaff }, async (r
 app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const [session] = await sql`UPDATE sessions s SET status = 'cancelled', updated_at = now() FROM clients c WHERE s.id = ${id} AND c.id = s.client_id AND c.owner_id = ${auth.sub} AND s.status <> 'cancelled' RETURNING s.*`;
+  // Reprogramada o no: es la diferencia entre mover una clase y perderla, y
+  // sólo la segunda debe afectar al cumplimiento del cliente.
+  // No se usa z.coerce.boolean(): convierte la cadena "false" en true, porque
+  // cualquier texto no vacío es verdadero. Se compara con "true" a mano.
+  const reprogramada = (request.query as { rescheduled?: string }).rescheduled === 'true';
+  const [session] = await sql`UPDATE sessions s SET status = 'cancelled', cancellation_kind = ${reprogramada ? 'rescheduled' : 'not_rescheduled'}, updated_at = now() FROM clients c WHERE s.id = ${id} AND c.id = s.client_id AND c.owner_id = ${auth.sub} AND s.status <> 'cancelled' RETURNING s.*`;
   if (!session) return reply.code(404).send({ error: 'Sesión no encontrada o ya cancelada' });
   try { await cancelSessionInGoogle(auth.sub, id); }
   catch (error) { app.log.warn({ err: error, sessionId: id }, 'Session cancelled but Google Calendar deletion failed'); }
@@ -1772,7 +1798,8 @@ app.delete('/api/invoices/:id', { preHandler: requireStaff }, async (request, re
 app.delete('/api/invoices/:id/permanent', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const forzar = z.coerce.boolean().default(false).parse((request.query as { force?: string }).force ?? false);
+  // Misma trampa que arriba: "false" como cadena sería true con coerce.
+  const forzar = (request.query as { force?: string }).force === 'true';
 
   const resultado = await sql.begin(async transaction => {
     const [invoice] = await transaction`
@@ -2156,9 +2183,15 @@ async function complianceRows(ownerId: string, period: z.infer<typeof reportPeri
     WITH activities AS (
       SELECT c.id AS client_id, c.full_name, s.starts_at AS occurred_at, 'Sesión'::text AS source,
         COALESCE(r.title, CASE WHEN s.quick_logged THEN 'Entrenamiento presencial' ELSE 'Evaluación / seguimiento' END) AS activity,
-        s.status, s.completion_percent, false AS late
+        CASE WHEN s.status = 'cancelled' THEN 'missed' ELSE s.status END AS status,
+        CASE WHEN s.status = 'cancelled' THEN 0::smallint ELSE s.completion_percent END AS completion_percent,
+        false AS late
       FROM sessions s JOIN clients c ON c.id = s.client_id LEFT JOIN routines r ON r.id = s.routine_id
-      WHERE c.owner_id = ${ownerId} AND s.starts_at >= ${start} AND s.starts_at <= now() AND s.status <> 'cancelled'
+      -- Las canceladas entran sólo si nadie las reprogramó: cuentan como
+      -- incumplidas con 0%. Si se movieron a otro día, la que cuenta es la
+      -- nueva sesión y penalizar ambas sería cobrar dos veces lo mismo.
+      WHERE c.owner_id = ${ownerId} AND s.starts_at >= ${start} AND s.starts_at <= now()
+        AND (s.status <> 'cancelled' OR s.cancellation_kind = 'not_rescheduled')
       UNION ALL
       SELECT c.id AS client_id, c.full_name, rc.completed_on::timestamptz AS occurred_at, 'Rutina'::text AS source,
         r.title AS activity, 'completed'::text AS status, rc.completion_percent,

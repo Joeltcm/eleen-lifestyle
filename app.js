@@ -1,4 +1,4 @@
-const APP_VERSION = '92';
+const APP_VERSION = '93';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -805,6 +805,32 @@ function newInvoice() {
 // visible donde pararlo sería una trampa —seguiría llenando la agenda de
 // alguien que ya no entrena—, así que esto no es opcional.
 const DIAS_CORTOS = ['D', 'L', 'M', 'X', 'J', 'V', 'S'];
+// Cancelar preguntando si se reprograma. No es un detalle de formulario: una
+// clase movida a otro día no debe penalizar al cliente, y una que simplemente
+// no se dio, sí. Antes ninguna de las dos contaba, así que cancelar salía
+// gratis y quien cancelaba media agenda seguía apareciendo al 100%.
+function cancelSessionDialog(sesion) {
+  if (!sesion) return;
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">AGENDA</p><h2>Cancelar sesión</h2>
+    <p class="form-summary"><b>${escapeHtml(sesion.client)}</b><br>${sesion.date} · ${sesion.time}</p>
+    <p style="color:#6f7b75">En Google Calendar quedará en rojo como CANCELADA, no desaparecerá.</p>
+    <button class="secondary wide-button" id="cancelar-reprogramada">Se reprogramará a otro día</button>
+    <p class="section-note">No afecta el cumplimiento: contará la sesión nueva.</p>
+    <button class="secondary wide-button" id="cancelar-perdida">No se reprograma</button>
+    <p class="section-note">Cuenta como sesión incumplida y baja su porcentaje.</p>`;
+  openModal(box, true);
+  const cancelar = async reprogramada => {
+    try {
+      await api(`/api/sessions/${sesion.id}?rescheduled=${reprogramada}`, { method: 'DELETE' });
+      await loadData(); renderAll(); modal.close();
+      toast(reprogramada ? 'Sesión cancelada para reprogramar' : 'Sesión cancelada · cuenta como incumplida');
+    } catch (error) { toast(error.message, true); }
+  };
+  document.getElementById('cancelar-reprogramada').onclick = () => cancelar(true);
+  document.getElementById('cancelar-perdida').onclick = () => cancelar(false);
+}
+
 async function recurrenceManager() {
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">AGENDA</p><h2>Horarios fijos</h2>
@@ -2293,7 +2319,7 @@ document.addEventListener('click', event => {
   }
   if (event.target.dataset.deleteInbody) deleteResource(`/api/inbody/${event.target.dataset.deleteInbody}`, '¿Eliminar esta medición InBody? El archivo original permanecerá en el expediente.', 'Medición InBody eliminada');
   if (event.target.dataset.deleteDocument) deleteResource(`/api/documents/${event.target.dataset.deleteDocument}`, '¿Eliminar este archivo? Si corresponde a un InBody, también se eliminarán sus métricas asociadas.', 'Archivo del expediente eliminado');
-  if (event.target.dataset.cancelSession) deleteResource(`/api/sessions/${event.target.dataset.cancelSession}`, '¿Cancelar esta sesión? También se eliminará de Google Calendar si estaba sincronizada.', 'Sesión cancelada');
+  if (event.target.dataset.cancelSession) cancelSessionDialog(data.sessions.find(item => item.id === event.target.dataset.cancelSession));
 });
 document.addEventListener('submit', async event => {
   const form = event.target.closest('[data-session-compliance]'); if (!form) return;

@@ -261,6 +261,49 @@ describe('cobros', () => {
   });
 });
 
+describe('cancelar afecta o no el cumplimiento', () => {
+  let clientId;
+  before(async () => {
+    const c = await api.post('/api/clients', { fullName: 'Cancela Prueba', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+    clientId = c.datos.id;
+  });
+
+  const agendarAyer = async () => {
+    const ayer = new Date(Date.now() - 24 * 3600_000).toISOString();
+    const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [ayer], durationMinutes: 60, mode: 'Presencial' });
+    return lote.datos.sesiones[0].id;
+  };
+
+  test('cancelar sin reprogramar cuenta como incumplida', async () => {
+    const id = await agendarAyer();
+    const antes = await api.get('/api/compliance/summary?period=month');
+    const previo = antes.datos.clients.find(c => c.clientId === clientId);
+
+    await api.delete(`/api/sessions/${id}?rescheduled=false`);
+
+    const despues = await api.get('/api/compliance/summary?period=month');
+    const ahora = despues.datos.clients.find(c => c.clientId === clientId);
+    assert.ok(ahora, 'el cliente debe seguir apareciendo en el cumplimiento');
+    assert.equal(ahora.activities, (previo?.activities ?? 0), 'la sesión sigue contando, ahora como incumplida');
+    assert.ok(ahora.missed >= 1, 'debe figurar como incumplida');
+    assert.equal(ahora.compliancePercent, 0, 'una sesión perdida no puntúa');
+  });
+
+  test('cancelar para reprogramar no penaliza', async () => {
+    const id = await agendarAyer();
+    const antes = await api.get('/api/compliance/summary?period=month');
+    const previo = antes.datos.clients.find(c => c.clientId === clientId);
+
+    await api.delete(`/api/sessions/${id}?rescheduled=true`);
+
+    const despues = await api.get('/api/compliance/summary?period=month');
+    const ahora = despues.datos.clients.find(c => c.clientId === clientId);
+    assert.equal(ahora.activities, previo.activities - 1,
+      'la reprogramada sale del cálculo: contará la sesión nueva');
+    assert.equal(ahora.missed, previo.missed, 'no suma incumplimientos');
+  });
+});
+
 describe('horarios fijos indefinidos', () => {
   let clientId;
   let reglaId;
