@@ -565,6 +565,23 @@ describe('borrado definitivo de planes', () => {
   });
 });
 
+describe('borrar un expediente duplicado', () => {
+  test('se lleva al cliente y deja de aparecer', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Duplicado por error', billingModel: 'single', standardPrice: 30, cutoffDay: 1 });
+    const id = c.datos.id;
+    const borrado = await api.delete(`/api/clients/${id}`);
+    assert.equal(borrado.estado, 200);
+    const lista = await api.get('/api/clients');
+    assert.ok(!lista.datos.find(x => x.id === id), 'no debe quedar en la lista');
+  });
+
+  test('queda registrado en la bitácora', async () => {
+    const filas = await api.get('/api/audit-log?limit=30');
+    const entrada = filas.datos.find(f => f.route === '/api/clients/:id');
+    assert.ok(entrada, 'borrar un expediente es de lo más grave que se puede hacer: debe quedar constancia');
+  });
+});
+
 describe('bitácora', () => {
   test('deja constancia de lo borrado, con quién y qué era', async () => {
     const cat = await api.post('/api/expense-categories', { name: 'Categoría efímera' });

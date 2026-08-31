@@ -1,4 +1,4 @@
-const APP_VERSION = '107';
+const APP_VERSION = '108';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -83,19 +83,66 @@ async function ensurePushSubscription() {
   await api('/api/push/subscriptions', { method: 'POST', body: { endpoint: serialized.endpoint, keys: serialized.keys } });
   return registration;
 }
+// Peticiones que cambian datos y están en vuelo, por si llega otra idéntica.
+//
+// Tocar dos veces un botón creaba dos cosas. Se puede tapar deshabilitando cada
+// botón, pero eso hay que acordarse de hacerlo en cada sitio y basta olvidarlo
+// una vez. Aquí se ataja en el único punto por el que pasan todas: si ya hay
+// una petición idéntica esperando respuesta, se devuelve esa misma en vez de
+// mandar otra. El segundo toque recibe el resultado del primero.
+//
+// Sólo mientras dura la petición: guardar dos gastos iguales a propósito, uno
+// después de otro, sigue funcionando.
+const peticionesEnVuelo = new Map();
+
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   const isPassThroughBody = options.body instanceof FormData || (typeof Blob !== 'undefined' && options.body instanceof Blob);
   if (authToken && options.auth !== false) headers.Authorization = `Bearer ${authToken}`;
   if (options.body !== undefined && !isPassThroughBody) headers['Content-Type'] = 'application/json';
-  const response = await fetch(`${API_BASE}${path}`, { method: options.method || 'GET', headers, body: options.body === undefined || isPassThroughBody ? options.body : JSON.stringify(options.body) });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    if (response.status === 401 && options.auth !== false) { localStorage.removeItem(authKey); authToken = null; }
-    throw new Error(payload.error || 'No fue posible completar la solicitud');
+
+  const metodo = options.method || 'GET';
+  // Las subidas de archivo quedan fuera: su cuerpo no se puede comparar y cada
+  // una es distinta de todas formas.
+  const clave = metodo !== 'GET' && !isPassThroughBody
+    ? `${metodo} ${path} ${JSON.stringify(options.body ?? null)}`
+    : null;
+  if (clave && peticionesEnVuelo.has(clave)) return peticionesEnVuelo.get(clave);
+
+  const enCurso = (async () => {
+    const response = await fetch(`${API_BASE}${path}`, { method: metodo, headers, body: options.body === undefined || isPassThroughBody ? options.body : JSON.stringify(options.body) });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status === 401 && options.auth !== false) { localStorage.removeItem(authKey); authToken = null; }
+      throw new Error(payload.error || 'No fue posible completar la solicitud');
+    }
+    return payload;
+  })();
+
+  if (clave) {
+    peticionesEnVuelo.set(clave, enCurso);
+    enCurso.catch(() => {}).finally(() => peticionesEnVuelo.delete(clave));
   }
-  return payload;
+  return enCurso;
 }
+
+// Cualquier formulario queda bloqueado mientras se guarda, sin depender de que
+// cada manejador se acuerde de hacerlo. El botón dice qué está pasando, que es
+// lo que evita el segundo toque en primer lugar.
+document.addEventListener('submit', event => {
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement) || form.classList.contains('loading-state')) return;
+  const boton = form.querySelector('button:not([type="button"])');
+  const textoOriginal = boton?.textContent;
+  form.classList.add('loading-state');
+  if (boton) boton.textContent = 'Guardando…';
+  // Se libera pase lo que pase: si la petición falla, el formulario debe poder
+  // reintentarse.
+  setTimeout(() => {
+    form.classList.remove('loading-state');
+    if (boton && textoOriginal) boton.textContent = textoOriginal;
+  }, 4000);
+}, true);
 const setsLabel = sets => `${sets} serie${Number(sets) === 1 ? '' : 's'}`;
 // Equivalencia entre los dos sistemas. En Panamá se usan los dos: las
 // mancuernas del gimnasio suelen venir en libras y los discos en kilos, así que
@@ -564,10 +611,23 @@ function newClient() {
 }
 function editClient(client) {
   const box = document.createElement('div');
-  box.innerHTML = `<form id="edit-client-form"><p class="eyebrow">CONTACTO Y EXPEDIENTE</p><h2>Editar cliente</h2><label>Nombre completo<input name="fullName" required value="${escapeHtml(client.name)}" /></label><label>Correo electrónico<input name="email" type="email" value="${escapeHtml(client.email)}" /></label><label>Teléfono<input name="phone" value="${escapeHtml(client.phone)}" /></label><label>Meta principal<input name="goal" value="${escapeHtml(client.goal)}" /></label><label>Sesiones esperadas al mes<input name="monthlySessionTarget" type="number" min="1" max="31" value="${client.monthlySessionTarget ?? ''}" placeholder="Sin meta pactada" /></label><label>Quién paga<select name="billingResponsibleClientId" id="client-payer"><option value="">Paga por sí mismo</option></select><small>Para parejas: el saldo de sesiones y los cobros van a nombre de quien paga. El progreso y la asistencia siguen siendo de cada uno.</small></label><p class="section-note">Meta contra la cual se mide el cumplimiento mensual. Déjala vacía para derivarla del paquete o de la rutina activa.</p><label>Notas privadas<textarea name="notes" rows="3">${escapeHtml(client.notes)}</textarea></label><label>Estado<select name="status">${[['active', 'Activo'], ['paused', 'En pausa'], ['inactive', 'Inactivo']].map(([valor, texto]) => `<option value="${valor}"${client.statusRaw === valor ? ' selected' : ''}>${texto}</option>`).join('')}</select><small>Un cliente inactivo conserva su expediente, su historial y sus cobros, pero desaparece de la agenda y de los listados del día a día.</small></label><button class="primary wide-button">Guardar cambios</button></form>`;
+  box.innerHTML = `<form id="edit-client-form"><p class="eyebrow">CONTACTO Y EXPEDIENTE</p><h2>Editar cliente</h2><label>Nombre completo<input name="fullName" required value="${escapeHtml(client.name)}" /></label><label>Correo electrónico<input name="email" type="email" value="${escapeHtml(client.email)}" /></label><label>Teléfono<input name="phone" value="${escapeHtml(client.phone)}" /></label><label>Meta principal<input name="goal" value="${escapeHtml(client.goal)}" /></label><label>Sesiones esperadas al mes<input name="monthlySessionTarget" type="number" min="1" max="31" value="${client.monthlySessionTarget ?? ''}" placeholder="Sin meta pactada" /></label><label>Quién paga<select name="billingResponsibleClientId" id="client-payer"><option value="">Paga por sí mismo</option></select><small>Para parejas: el saldo de sesiones y los cobros van a nombre de quien paga. El progreso y la asistencia siguen siendo de cada uno.</small></label><p class="section-note">Meta contra la cual se mide el cumplimiento mensual. Déjala vacía para derivarla del paquete o de la rutina activa.</p><label>Notas privadas<textarea name="notes" rows="3">${escapeHtml(client.notes)}</textarea></label><label>Estado<select name="status">${[['active', 'Activo'], ['paused', 'En pausa'], ['inactive', 'Inactivo']].map(([valor, texto]) => `<option value="${valor}"${client.statusRaw === valor ? ' selected' : ''}>${texto}</option>`).join('')}</select><small>Un cliente inactivo conserva su expediente, su historial y sus cobros, pero desaparece de la agenda y de los listados del día a día.</small></label><button class="primary wide-button">Guardar cambios</button>
+    <button type="button" class="secondary wide-button" id="borrar-expediente">Eliminar expediente</button>
+    <p class="section-note">Para expedientes duplicados o creados por error. Se lleva su historial, mediciones, documentos y cobros. Si simplemente dejó de entrenar, ponlo Inactivo.</p></form>`;
   openModal(box);
   // Sólo pueden ser pagadores quienes no dependen de otro: encadenar dejaría el
   // saldo en un tercero imposible de rastrear.
+  document.getElementById('borrar-expediente').onclick = async () => {
+    // Doble confirmación y escribiendo el nombre: borra InBody, documentos,
+    // fotos y cobros de una persona, y no hay papelera donde recuperarlo.
+    const escrito = prompt(`Se eliminará el expediente de ${client.name} con todo su historial: mediciones de InBody, documentos, fotos, sesiones y cobros. No se puede deshacer.\n\nEscribe el nombre completo para confirmar:`);
+    if (escrito === null) return;
+    if (escrito.trim().toLowerCase() !== client.name.trim().toLowerCase()) return toast('El nombre no coincide. No se borró nada.', true);
+    try {
+      await api(`/api/clients/${client.id}`, { method: 'DELETE' });
+      await loadData(); renderAll(); modal.close(); toast('Expediente eliminado');
+    } catch (error) { toast(error.message, true); }
+  };
   const pagadores = document.getElementById('client-payer');
   data.clients.filter(item => item.id !== client.id && !item.paysForMeId)
     .forEach(item => pagadores.add(new Option(item.name, item.id)));
