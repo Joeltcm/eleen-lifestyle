@@ -1,4 +1,4 @@
-const APP_VERSION = '104';
+const APP_VERSION = '105';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1039,7 +1039,13 @@ function editSessionSchedule(session) {
   content.innerHTML = `<form id="edit-session-form"><p class="eyebrow">HORARIO DE ENTRENAMIENTO</p><h2>Editar sesión</h2><p class="form-summary">${escapeHtml(session.routine)}</p><label>Cliente<select name="clientId" id="edit-session-client"></select><small>Si la agendaste a la persona equivocada, cámbiala aquí.</small></label><div class="form-row"><label>Fecha<input name="date" type="date" value="${session.date}" required /></label><label>Hora<input name="time" type="time" value="${session.time}" required /></label></div><div class="form-row"><label>Duración<select name="durationMinutes">${[30, 45, 60, 75, 90, 120].map(minutes => `<option value="${minutes}" ${minutes === session.durationMinutes ? 'selected' : ''}>${minutes} minutos</option>`).join('')}</select></label><label>Modalidad<select name="mode">${['Presencial', 'Virtual', 'Exterior'].map(mode => `<option ${mode === session.mode ? 'selected' : ''}>${mode}</option>`).join('')}</select></label></div><label>Notas<textarea name="notes" rows="3" placeholder="Opcional">${escapeHtml(session.notes)}</textarea></label><p class="calendar-edit-help">El cambio se enviará a Google Calendar. Si después arrastras el evento en Google, el nuevo horario regresará automáticamente a Eileen.</p><button class="primary wide-button">Guardar horario</button></form>`;
   openModal(content);
   const clienteSel = document.getElementById('edit-session-client');
-  data.clients.forEach(c => clienteSel.add(new Option(`${c.name}${c.status === 'Activo' ? '' : ` · ${c.status}`}`, c.id)));
+  // Sólo activos: agendar a quien ya no entrena ensucia su expediente, porque
+  // las sesiones cuentan para su cumplimiento aunque esté dado de baja. El
+  // actual se incluye siempre, o no se podría editar la hora de una sesión de
+  // alguien que se dio de baja después de agendarla.
+  data.clients
+    .filter(c => c.statusRaw === 'active' || c.id === session.clientId)
+    .forEach(c => clienteSel.add(new Option(`${c.name}${c.status === 'Activo' ? '' : ` · ${c.status}`}`, c.id)));
   clienteSel.value = session.clientId;
   document.getElementById('edit-session-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target);
@@ -2768,27 +2774,36 @@ function renderPortalCalendar(ownSessions) {
   const hoyClave = dateKey(today);
   const cabecera = dias.map(fecha => {
     const clave = dateKey(fecha);
-    return `<button type="button" class="portal-col-dia ${clave === hoyClave ? 'hoy' : ''}" data-portal-dia="${clave}">
+    return `<button type="button" class="portal-col-dia ${clave === hoyClave ? 'hoy' : ''}" style="grid-row:1;grid-column:${clavesSemana.indexOf(clave) + 2}" data-portal-dia="${clave}">
       <b>${['L', 'M', 'X', 'J', 'V', 'S', 'D'][(fecha.getDay() + 6) % 7]}</b>
       <i>${fecha.getDate()}</i>
     </button>`;
   }).join('');
 
-  const filas = tramos.map(minuto => {
-    const celdas = clavesSemana.map(clave => {
-      // Un tramo está ocupado si se solapa con algún hueco, aunque la sesión
-      // no empiece justo en él.
-      const encima = ocupados.find(o => o.dia === clave && o.desde < minuto + PORTAL_PASO_MINUTOS && o.hasta > minuto);
-      // Una hora que ya pasó no está disponible. Pintarla igual que el resto
-      // invitaría a pedir un horario imposible.
+  // El fondo: una celda por tramo y día, con su estado.
+  const fondo = tramos.map((minuto, fila) => {
+    const celdas = clavesSemana.map((clave, columna) => {
       const yaPaso = new Date(`${clave}T00:00:00`).getTime() + minuto * 60_000 < Date.now();
-      if (!encima) return `<span class="portal-tramo ${yaPaso ? 'pasado' : 'libre'}" title="${yaPaso ? 'Ya pasó' : 'Disponible'}"></span>`;
-      const empieza = encima.desde >= minuto && encima.desde < minuto + PORTAL_PASO_MINUTOS;
-      return `<button type="button" class="portal-tramo ${encima.mia ? 'mia' : 'ocupada'}" data-portal-dia="${clave}"
-        title="${encima.mia ? 'Tu sesión' : 'Ocupado'} · ${comoHora(encima.desde)}">${empieza ? (encima.mia ? '●' : '') : ''}</button>`;
+      return `<span class="portal-tramo ${yaPaso ? 'pasado' : 'libre'}" style="grid-row:${fila + 2};grid-column:${columna + 2}" title="${yaPaso ? 'Ya pasó' : 'Disponible'}"></span>`;
     }).join('');
-    // Sólo se rotula la hora en punto: cada media hora sería ilegible.
-    return `<span class="portal-hora">${minuto % 60 === 0 ? comoHora(minuto) : ''}</span>${celdas}`;
+    const etiqueta = minuto % 60 === 0
+      ? `<span class="portal-hora" style="grid-row:${fila + 2};grid-column:1">${comoHora(minuto)}</span>`
+      : `<span class="portal-hora" style="grid-row:${fila + 2};grid-column:1"></span>`;
+    return etiqueta + celdas;
+  }).join('');
+
+  // Y encima, cada sesión como UN bloque que abarca sus tramos. Antes se
+  // pintaba celda a celda, así que una sesión de una hora se veía como dos o
+  // tres bloques separados y parecía que había el triple de actividades.
+  const bloques = ocupados.map(o => {
+    const columna = clavesSemana.indexOf(o.dia);
+    if (columna < 0) return '';
+    const filaInicio = Math.floor((Math.max(o.desde, desde) - desde) / PORTAL_PASO_MINUTOS);
+    const filaFin = Math.ceil((Math.min(o.hasta, hasta) - desde) / PORTAL_PASO_MINUTOS);
+    const cuantas = Math.max(1, filaFin - filaInicio);
+    return `<button type="button" class="portal-bloque ${o.mia ? 'mia' : 'ocupada'}"
+      style="grid-row:${filaInicio + 2} / span ${cuantas};grid-column:${columna + 2}"
+      data-portal-dia="${o.dia}" title="${o.mia ? 'Tu sesión' : 'Ocupado'} · ${comoHora(o.desde)}">${o.mia ? '●' : ''}</button>`;
   }).join('');
 
   const rango = `${new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short' }).format(dias[0])} – ${new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short' }).format(dias[6])}`;
@@ -2801,9 +2816,10 @@ function renderPortalCalendar(ownSessions) {
       <b>${rango}</b>
       <button type="button" class="portal-mes-nav" data-portal-semana="1" aria-label="Semana siguiente">›</button>
     </div>
-    <div class="portal-semana-rejilla">
-      <span class="portal-hora"></span>${cabecera}
-      ${filas}
+    <div class="portal-semana-rejilla" style="grid-template-rows:auto repeat(${tramos.length}, 17px)">
+      ${cabecera}
+      ${fondo}
+      ${bloques}
     </div>
     <p class="portal-leyenda"><span class="marca-mia">●</span> Tu sesión &nbsp; <span class="marca-ocupada">▪</span> Ocupado &nbsp; <span class="marca-libre">▫</span> Disponible &nbsp; <span class="marca-pasada">▫</span> Ya pasó</p>
     <h4 class="portal-dia-titulo">${new Intl.DateTimeFormat('es-PA', { weekday: 'long', day: 'numeric', month: 'long' }).format(fechaElegida)}</h4>

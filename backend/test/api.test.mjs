@@ -424,6 +424,46 @@ describe('corregir una sesión ya guardada', () => {
   });
 });
 
+describe('no se agenda a quien ya no entrena', () => {
+  let clientId;
+  before(async () => {
+    const c = await api.post('/api/clients', { fullName: 'De baja', billingModel: 'single', standardPrice: 30, cutoffDay: 1 });
+    clientId = c.datos.id;
+    await api.patch(`/api/clients/${clientId}`, { fullName: 'De baja', status: 'inactive' });
+  });
+
+  test('ni una sesión suelta', async () => {
+    const { estado, datos } = await api.post('/api/sessions', { clientId, startsAt: '2026-12-01T13:00:00.000Z', durationMinutes: 60 });
+    assert.equal(estado, 409);
+    assert.match(datos.error, /inactivo/i);
+  });
+
+  test('ni por lotes', async () => {
+    const { estado } = await api.post('/api/sessions/batch', { clientId, startsAt: ['2026-12-02T13:00:00.000Z'], durationMinutes: 60, mode: 'Presencial' });
+    assert.equal(estado, 409);
+  });
+
+  test('ni un horario fijo', async () => {
+    const { estado } = await api.post('/api/session-recurrences', { clientId, weekdays: [2], timeOfDay: '06:00' });
+    assert.equal(estado, 409);
+  });
+
+  test('ni moviéndole la sesión de otra persona', async () => {
+    const otro = await api.post('/api/clients', { fullName: 'Sigue activo', billingModel: 'single', standardPrice: 30, cutoffDay: 1 });
+    const lote = await api.post('/api/sessions/batch', { clientId: otro.datos.id, startsAt: ['2026-12-03T13:00:00.000Z'], durationMinutes: 60, mode: 'Presencial' });
+    const { estado } = await api.patch(`/api/sessions/${lote.datos.sesiones[0].id}`, {
+      startsAt: '2026-12-03T13:00:00.000Z', durationMinutes: 60, mode: 'Presencial', clientId
+    });
+    assert.equal(estado, 409, 'la puerta de atrás también debe estar cerrada');
+  });
+
+  test('al reactivarlo vuelve a poderse', async () => {
+    await api.patch(`/api/clients/${clientId}`, { fullName: 'De baja', status: 'active' });
+    const { estado } = await api.post('/api/sessions/batch', { clientId, startsAt: ['2026-12-04T13:00:00.000Z'], durationMinutes: 60, mode: 'Presencial' });
+    assert.equal(estado, 201);
+  });
+});
+
 describe('desactivar clientes', () => {
   let clienteId;
   before(async () => {

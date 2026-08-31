@@ -214,8 +214,9 @@ select.filter{padding:11px 13px;font:600 13px 'DM Sans';cursor:pointer}
 .portal-col-dia.hoy i{background:var(--ink);color:#fff;border-radius:50%;width:22px;height:22px;display:grid;place-items:center}
 .portal-tramo{min-height:17px;border:0;border-radius:4px;padding:0;display:grid;place-items:center;font-size:9px;line-height:1}
 .portal-tramo.libre{background:#f2f4f0}
-.portal-tramo.ocupada{background:#ded7da;color:#6d6167;cursor:pointer}
-.portal-tramo.mia{background:#e9bfd0;color:#7d3f5b;cursor:pointer}
+.portal-bloque{border:0;border-radius:6px;padding:0;display:grid;place-items:center;font-size:10px;line-height:1;cursor:pointer;margin:0}
+.portal-bloque.ocupada{background:#cdc4c8;color:#5f545a}
+.portal-bloque.mia{background:#e3a9c1;color:#6d2f4c}
 .portal-leyenda{margin:12px 0 4px;font-size:11px;color:var(--muted)}
 .portal-leyenda .marca-mia{color:#c07f9b}
 .portal-leyenda .marca-ocupada{color:#b8adb2}

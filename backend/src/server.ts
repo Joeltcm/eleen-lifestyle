@@ -1235,6 +1235,17 @@ app.get('/api/exercises/:id/video-url', { preHandler: requireAuth }, async (requ
   return { exerciseId: id, contentType: exercise.video_content_type, videoUrl: await createDownloadUrl(exercise.video_object_key), expiresInSeconds: 300 };
 });
 
+// Agendar a alguien que ya no entrena no tiene sentido y ensucia su expediente:
+// las sesiones cuentan para su cumplimiento aunque esté dado de baja.
+async function clienteAgendable(clientId: string, ownerId: string) {
+  const [cliente] = await sql`SELECT id, full_name, status FROM clients WHERE id = ${clientId} AND owner_id = ${ownerId}`;
+  if (!cliente) return { error: 'Cliente no encontrado', code: 404 };
+  if (cliente.status !== 'active') {
+    return { error: `${cliente.full_name} está ${cliente.status === 'paused' ? 'en pausa' : 'inactivo'}. Actívalo antes de agendarle sesiones.`, code: 409 };
+  }
+  return { cliente };
+}
+
 const sessionSchema = z.object({ clientId: z.string().uuid(), routineId: z.string().uuid().optional(), startsAt: z.string().datetime(), durationMinutes: z.coerce.number().int().positive().default(60), mode: z.string().default('Presencial'), notes: z.string().optional() });
 app.get('/api/sessions', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
@@ -1242,6 +1253,8 @@ app.get('/api/sessions', { preHandler: requireStaff }, async request => {
 });
 app.post('/api/sessions', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = sessionSchema.parse(request.body);
+  const permiso = await clienteAgendable(input.clientId, auth.sub);
+  if (permiso.error) return reply.code(permiso.code).send({ error: permiso.error });
   const [session] = await sql`INSERT INTO sessions (client_id, routine_id, starts_at, duration_minutes, mode, notes) SELECT c.id, ${input.routineId || null}, ${input.startsAt}, ${input.durationMinutes}, ${input.mode}, ${input.notes || null} FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} RETURNING *`;
   if (!session) return reply.code(404).send({ error: 'Cliente no encontrado' });
   try { await syncSessionToGoogle(auth.sub, session.id); }
@@ -1315,8 +1328,8 @@ const recurrenceSchema = z.object({
 app.post('/api/session-recurrences', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const input = recurrenceSchema.parse(request.body);
-  const [cliente] = await sql`SELECT id FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub}`;
-  if (!cliente) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  const permiso = await clienteAgendable(input.clientId, auth.sub);
+  if (permiso.error) return reply.code(permiso.code).send({ error: permiso.error });
 
   const [regla] = await sql`
     INSERT INTO session_recurrences (client_id, routine_id, weekdays, time_of_day, duration_minutes, mode, notes, ends_on)
@@ -1395,8 +1408,8 @@ const sessionBatchSchema = z.object({
 app.post('/api/sessions/batch', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const input = sessionBatchSchema.parse(request.body);
-  const [client] = await sql`SELECT id FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub}`;
-  if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  const permiso = await clienteAgendable(input.clientId, auth.sub);
+  if (permiso.error) return reply.code(permiso.code).send({ error: permiso.error });
 
   const fechas = [...new Set(input.startsAt)].sort();
   const creadas = await sql.begin(async transaction => {
@@ -1442,8 +1455,8 @@ app.patch('/api/sessions/:id', { preHandler: requireStaff }, async (request, rep
   const id = z.string().uuid().parse((request.params as { id: string }).id);
   const input = sessionScheduleSchema.parse(request.body);
   if (input.clientId) {
-    const [destino] = await sql`SELECT id FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub}`;
-    if (!destino) return reply.code(404).send({ error: 'El cliente elegido no existe' });
+    const destino = await clienteAgendable(input.clientId, auth.sub);
+    if (destino.error) return reply.code(destino.code).send({ error: destino.error });
     // Una sesión ya completada descontó del saldo de quien la hizo; moverla a
     // otra persona dejaría ese descuento colgado del cliente equivocado.
     const [actual] = await sql`
