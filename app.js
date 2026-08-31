@@ -1,4 +1,4 @@
-const APP_VERSION = '94';
+const APP_VERSION = '95';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1305,6 +1305,76 @@ function newRoutine(routine = null, duplicate = false) {
       `${exercise.hasVideo ? '▶ ' : ''}${exercise.name}${exercise.english ? ` · ${exercise.english}` : ''}`, exercise.id)));
     renderReference();
   };
+  // Propuesta con IA: rellena el formulario y lo deja para revisar. No guarda
+  // nada — asignar una rutina a una persona es criterio de la entrenadora, no
+  // del modelo, y más aún cuando hay lesiones de por medio.
+  document.getElementById('routine-suggest').onclick = () => {
+    const caja = document.createElement('div');
+    caja.innerHTML = `<p class="eyebrow">ENTRENAMIENTO</p><h2>Proponer con IA</h2>
+      <p style="color:#6f7b75;margin-top:-12px">Describe lo que buscas. Se usarán sólo ejercicios de tu catálogo, y se tendrán en cuenta las lesiones del cliente y sus rutinas recientes.</p>
+      <form id="sugerencia-form">
+        <label>Qué quieres para esta rutina<textarea name="description" rows="3" required minlength="10" maxlength="600" placeholder="Ej. Fuerza de tren inferior, nivel intermedio, sin saltos por su rodilla"></textarea></label>
+        <label>Para cliente<select name="clientId"><option value="">Sin cliente · sin historial que considerar</option>${data.clients.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('')}</select></label>
+        <label class="checkbox-line"><input type="checkbox" name="repeat" /> Repetir los mismos grupos musculares aunque se hayan trabajado hace poco</label>
+        <button class="primary wide-button">Proponer</button>
+      </form>`;
+    openModal(caja, true);
+    // El cliente ya elegido en la rutina se hereda: es el caso normal.
+    if (clientSelect.value) caja.querySelector('[name="clientId"]').value = clientSelect.value;
+    document.getElementById('sugerencia-form').addEventListener('submit', async evento => {
+      evento.preventDefault();
+      const valores = new FormData(evento.target);
+      const boton = evento.target.querySelector('button');
+      boton.disabled = true; boton.textContent = 'Pensando…';
+      try {
+        const propuesta = await api('/api/routines/suggest', { method: 'POST', body: {
+          description: valores.get('description'),
+          clientId: valores.get('clientId') || undefined,
+          repeatMuscleGroups: Boolean(valores.get('repeat'))
+        } });
+        modal.close();
+        newRoutine();
+        // El formulario se vuelve a abrir, así que hay que esperar a que exista.
+        setTimeout(() => {
+          const form = document.getElementById('routine-form');
+          if (!form) return;
+          form.elements.title.value = propuesta.title;
+          form.elements.description.value = propuesta.description || propuesta.title;
+          form.elements.sessions.value = propuesta.sessionsPerWeek;
+          if (valores.get('clientId')) document.getElementById('routine-client').value = valores.get('clientId');
+          window.dispatchEvent(new CustomEvent('rutina-propuesta', { detail: propuesta }));
+        }, 60);
+      } catch (error) { toast(error.message, true); boton.disabled = false; boton.textContent = 'Proponer'; }
+    });
+  };
+  // Recibe la propuesta cuando el formulario ya está montado.
+  const aplicarPropuesta = evento => {
+    const propuesta = evento.detail;
+    selectedExercises.splice(0, selectedExercises.length);
+    for (const sugerido of propuesta.exercises) {
+      const enCatalogo = exerciseCatalog.find(item => item.name.toLowerCase() === sugerido.name.toLowerCase());
+      selectedExercises.push({
+        catalogId: enCatalogo?.id, name: sugerido.name, english: enCatalogo?.english || '',
+        category: enCatalogo ? exerciseSectionLabels[enCatalogo.section] : 'Propuesto',
+        level: enCatalogo?.level || '', machine: enCatalogo?.machine || '',
+        sets: sugerido.sets || 3, reps: sugerido.reps || '12', notes: sugerido.notes || ''
+      });
+    }
+    renderSelected();
+    const avisos = [];
+    if (propuesta.rationale) avisos.push(propuesta.rationale);
+    if (propuesta.avoided?.length) avisos.push(`Se evitó repetir: ${propuesta.avoided.join(', ')}.`);
+    if (propuesta.descartados?.length) avisos.push(`Se descartaron por no estar en tu catálogo: ${propuesta.descartados.join(', ')}.`);
+    if (avisos.length) {
+      const nota = document.createElement('p');
+      nota.className = 'section-note aviso-ambito';
+      nota.textContent = `${avisos.join(' ')} Revísala antes de guardar.`;
+      document.getElementById('routine-form').prepend(nota);
+    }
+    toast('Propuesta lista · revísala antes de guardar');
+  };
+  window.addEventListener('rutina-propuesta', aplicarPropuesta, { once: true });
+
   const renderSelected = () => {
     selectedList.replaceChildren();
     exerciseCount.textContent = `${selectedExercises.length} ejercicio${selectedExercises.length !== 1 ? 's' : ''}`;

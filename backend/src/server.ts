@@ -11,6 +11,7 @@ import { createDownloadUrl, createUploadUrl, deleteObject, downloadObject, stora
 import { extractInBodyDocument, extractInBodyImage, inbodyAnalysisReady, inbodyAnalysisSetup, prepareInBodyImage, validateExtraction, validateInBodyValues } from './inbody-analysis.js';
 import { registerZohoRoutes } from './zoho-routes.js';
 import { cancelSessionInGoogle, registerGoogleCalendarRoutes, removeSessionFromGoogle, syncSessionToGoogle } from './google-calendar.js';
+import { routineSuggestionsReady, suggestRoutine } from './routine-suggestions.js';
 import { accountStatementPdf, accountsReceivablePdf, compliancePdf, invoicePdf } from './billing-reports.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
@@ -916,6 +917,77 @@ app.get('/api/routines', { preHandler: requireStaff }, async request => {
     WHERE r.owner_id = ${auth.sub} GROUP BY r.id ORDER BY r.created_at DESC
   `;
 });
+// Propuesta de rutina con IA. Devuelve un borrador para que la entrenadora lo
+// revise y lo guarde ella: el modelo propone, no asigna. Una rutina mal puesta
+// a alguien con una lesión no es un error de formato.
+const routineSuggestionSchema = z.object({
+  description: z.string().trim().min(10).max(600),
+  clientId: z.string().uuid().optional(),
+  repeatMuscleGroups: z.boolean().default(false)
+});
+
+app.post('/api/routines/suggest', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  if (!routineSuggestionsReady) return reply.code(503).send({ error: 'La propuesta con IA todavía no está configurada' });
+  const input = routineSuggestionSchema.parse(request.body);
+
+  const catalogo = await sql`
+    SELECT name, section, level, machine FROM exercises
+    WHERE owner_id = ${auth.sub} AND NOT archived ORDER BY section, name
+  `;
+  if (!catalogo.length) return reply.code(409).send({ error: 'No hay ejercicios en el catálogo para proponer una rutina' });
+
+  let historial: Array<{ title: string; assignedOn: string | null; sections: string[] }> = [];
+  let condiciones: string[] = [];
+  let clienteNombre: string | undefined;
+
+  if (input.clientId) {
+    const [cliente] = await sql`SELECT full_name FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub}`;
+    if (!cliente) return reply.code(404).send({ error: 'Cliente no encontrado' });
+    clienteNombre = String(cliente.full_name);
+
+    // Las últimas rutinas del cliente, con los grupos musculares que tocaron.
+    // La sección sale del catálogo: los ejercicios de la rutina se guardan como
+    // JSON y no traen la sección consigo.
+    const previas = await sql`
+      SELECT r.title, ra.starts_on, r.exercises
+      FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id
+      WHERE ra.client_id = ${input.clientId}
+      ORDER BY ra.starts_on DESC NULLS LAST LIMIT 4
+    `;
+    const secciones = new Map(catalogo.map(e => [String(e.name).toLowerCase(), String(e.section)]));
+    historial = previas.map(fila => {
+      const lista = Array.isArray(fila.exercises) ? fila.exercises as Array<{ name?: string }> : [];
+      const suyas = [...new Set(lista.map(e => secciones.get(String(e?.name ?? '').toLowerCase())).filter(Boolean))];
+      return { title: String(fila.title), assignedOn: fila.starts_on ? String(fila.starts_on).slice(0, 10) : null, sections: suyas as string[] };
+    });
+
+    // 'recovered' es el estado de superada; las activas y las que siguen en
+    // observación sí condicionan qué se le puede mandar.
+    const lesiones = await sql`
+      SELECT title, body_area, severity FROM client_conditions
+      WHERE client_id = ${input.clientId} AND status IN ('active', 'monitoring')
+    `;
+    const gravedad: Record<string, string> = { mild: 'leve', moderate: 'moderada', severe: 'grave' };
+    condiciones = lesiones.map(fila =>
+      `${fila.title}${fila.body_area ? ` en ${fila.body_area}` : ''} (${gravedad[String(fila.severity)] || fila.severity})`);
+  }
+
+  try {
+    const propuesta = await suggestRoutine({
+      descripcion: input.description,
+      catalogo: catalogo.map(e => ({ name: String(e.name), section: String(e.section), level: e.level as string, machine: e.machine as string })),
+      historial, condiciones,
+      repetirGrupos: input.repeatMuscleGroups,
+      clienteNombre
+    });
+    return propuesta;
+  } catch (error) {
+    app.log.warn({ err: error, ownerId: auth.sub }, 'No se pudo proponer una rutina');
+    return reply.code(502).send({ error: (error as Error).message });
+  }
+});
+
 app.post('/api/routines', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = routineSchema.parse(request.body);
   const routine = await sql.begin(async transaction => {
