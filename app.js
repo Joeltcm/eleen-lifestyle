@@ -1,4 +1,4 @@
-const APP_VERSION = '103';
+const APP_VERSION = '104';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -878,7 +878,9 @@ function cancelSessionDialog(sesion) {
     <button class="secondary wide-button" id="cancelar-reprogramada">Se reprogramará a otro día</button>
     <p class="section-note">No afecta el cumplimiento: contará la sesión nueva.</p>
     <button class="secondary wide-button" id="cancelar-perdida">No se reprograma</button>
-    <p class="section-note">Cuenta como sesión incumplida y baja su porcentaje.</p>`;
+    <p class="section-note">Cuenta como sesión incumplida y baja su porcentaje.</p>
+    <button class="secondary wide-button" id="cancelar-error">Se creó por error · borrar</button>
+    <p class="section-note">Desaparece de la agenda y de Google. No cuenta como incumplida: una clase que nunca debió existir no es una clase que alguien perdió.</p>`;
   openModal(box, true);
   const cancelar = async reprogramada => {
     try {
@@ -889,6 +891,14 @@ function cancelSessionDialog(sesion) {
   };
   document.getElementById('cancelar-reprogramada').onclick = () => cancelar(true);
   document.getElementById('cancelar-perdida').onclick = () => cancelar(false);
+  document.getElementById('cancelar-error').onclick = async () => {
+    if (!confirm(`¿Borrar la sesión de ${sesion.client} del ${sesion.date}?\n\nNo deja rastro y no afecta su cumplimiento.`)) return;
+    try {
+      await api(`/api/sessions/${sesion.id}/permanent`, { method: 'DELETE' });
+      await loadData(); renderAll(); modal.close();
+      toast('Sesión borrada');
+    } catch (error) { toast(error.message, true); }
+  };
 }
 
 async function recurrenceManager() {
@@ -1026,15 +1036,19 @@ function newSession() {
 function editSessionSchedule(session) {
   if (!session) return;
   const content = document.createElement('div');
-  content.innerHTML = `<form id="edit-session-form"><p class="eyebrow">HORARIO DE ENTRENAMIENTO</p><h2>Editar sesión</h2><p class="form-summary"><b>${escapeHtml(session.client)}</b><br>${escapeHtml(session.routine)}</p><div class="form-row"><label>Fecha<input name="date" type="date" value="${session.date}" required /></label><label>Hora<input name="time" type="time" value="${session.time}" required /></label></div><div class="form-row"><label>Duración<select name="durationMinutes">${[30, 45, 60, 75, 90, 120].map(minutes => `<option value="${minutes}" ${minutes === session.durationMinutes ? 'selected' : ''}>${minutes} minutos</option>`).join('')}</select></label><label>Modalidad<select name="mode">${['Presencial', 'Virtual', 'Exterior'].map(mode => `<option ${mode === session.mode ? 'selected' : ''}>${mode}</option>`).join('')}</select></label></div><label>Notas<textarea name="notes" rows="3" placeholder="Opcional">${escapeHtml(session.notes)}</textarea></label><p class="calendar-edit-help">El cambio se enviará a Google Calendar. Si después arrastras el evento en Google, el nuevo horario regresará automáticamente a Eileen.</p><button class="primary wide-button">Guardar horario</button></form>`;
+  content.innerHTML = `<form id="edit-session-form"><p class="eyebrow">HORARIO DE ENTRENAMIENTO</p><h2>Editar sesión</h2><p class="form-summary">${escapeHtml(session.routine)}</p><label>Cliente<select name="clientId" id="edit-session-client"></select><small>Si la agendaste a la persona equivocada, cámbiala aquí.</small></label><div class="form-row"><label>Fecha<input name="date" type="date" value="${session.date}" required /></label><label>Hora<input name="time" type="time" value="${session.time}" required /></label></div><div class="form-row"><label>Duración<select name="durationMinutes">${[30, 45, 60, 75, 90, 120].map(minutes => `<option value="${minutes}" ${minutes === session.durationMinutes ? 'selected' : ''}>${minutes} minutos</option>`).join('')}</select></label><label>Modalidad<select name="mode">${['Presencial', 'Virtual', 'Exterior'].map(mode => `<option ${mode === session.mode ? 'selected' : ''}>${mode}</option>`).join('')}</select></label></div><label>Notas<textarea name="notes" rows="3" placeholder="Opcional">${escapeHtml(session.notes)}</textarea></label><p class="calendar-edit-help">El cambio se enviará a Google Calendar. Si después arrastras el evento en Google, el nuevo horario regresará automáticamente a Eileen.</p><button class="primary wide-button">Guardar horario</button></form>`;
   openModal(content);
+  const clienteSel = document.getElementById('edit-session-client');
+  data.clients.forEach(c => clienteSel.add(new Option(`${c.name}${c.status === 'Activo' ? '' : ` · ${c.status}`}`, c.id)));
+  clienteSel.value = session.clientId;
   document.getElementById('edit-session-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target);
     try {
       event.target.classList.add('loading-state');
       await api(`/api/sessions/${session.id}`, { method: 'PATCH', body: {
         startsAt: panamaDateTimeIso(form.get('date'), form.get('time')),
-        durationMinutes: Number(form.get('durationMinutes')), mode: form.get('mode'), notes: form.get('notes') || undefined
+        durationMinutes: Number(form.get('durationMinutes')), mode: form.get('mode'), notes: form.get('notes') || undefined,
+        clientId: form.get('clientId') || undefined
       } });
       await Promise.all([refreshSessions(), refreshGoogleCalendarState()]);
       renderDashboard(); renderGoogleCalendar(); renderCalendar(); modal.close();

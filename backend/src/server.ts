@@ -1432,15 +1432,33 @@ const sessionScheduleSchema = z.object({
   startsAt: z.string().datetime(),
   durationMinutes: z.coerce.number().int().min(15).max(480),
   mode: z.string().trim().min(2).max(60),
-  notes: z.string().trim().max(1000).optional()
+  notes: z.string().trim().max(1000).optional(),
+  // Cambiar de cliente: agendar a la persona equivocada es un error frecuente
+  // y hasta ahora obligaba a borrar la sesión y volver a crearla.
+  clientId: z.string().uuid().optional()
 });
 app.patch('/api/sessions/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
   const input = sessionScheduleSchema.parse(request.body);
+  if (input.clientId) {
+    const [destino] = await sql`SELECT id FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub}`;
+    if (!destino) return reply.code(404).send({ error: 'El cliente elegido no existe' });
+    // Una sesión ya completada descontó del saldo de quien la hizo; moverla a
+    // otra persona dejaría ese descuento colgado del cliente equivocado.
+    const [actual] = await sql`
+      SELECT s.status FROM sessions s JOIN clients c ON c.id = s.client_id
+      WHERE s.id = ${id} AND c.owner_id = ${auth.sub}
+    `;
+    if (actual?.status === 'completed') {
+      return reply.code(409).send({ error: 'Esta sesión ya se marcó como realizada. Deshaz el cumplimiento antes de cambiar de cliente.' });
+    }
+  }
   const [session] = await sql`
     UPDATE sessions s SET starts_at = ${input.startsAt}, duration_minutes = ${input.durationMinutes},
-      mode = ${input.mode}, notes = ${input.notes || null}, google_sync_error = NULL, updated_at = now()
+      mode = ${input.mode}, notes = ${input.notes || null},
+      client_id = COALESCE(${input.clientId ?? null}, s.client_id),
+      google_sync_error = NULL, updated_at = now()
     FROM clients c
     WHERE s.id = ${id} AND c.id = s.client_id AND c.owner_id = ${auth.sub} AND s.status <> 'cancelled'
     RETURNING s.*
@@ -1469,8 +1487,12 @@ app.delete('/api/sessions/:id/permanent', { preHandler: requireStaff }, async (r
     WHERE s.id = ${id} AND c.owner_id = ${auth.sub}
   `;
   if (!sesion) return reply.code(404).send({ error: 'Sesión no encontrada' });
-  if (sesion.status !== 'cancelled') {
-    return reply.code(409).send({ error: 'Sólo se borran las sesiones canceladas. Cancélala primero.' });
+  // Una sesión creada por error se borra directamente. Obligarla a pasar por
+  // "cancelada" la contaría como incumplida en el cumplimiento del cliente, y
+  // una clase que nunca debió existir no es una clase que alguien perdió.
+  // Las realizadas no se tocan: descontaron del saldo.
+  if (!['cancelled', 'scheduled'].includes(String(sesion.status))) {
+    return reply.code(409).send({ error: 'Sólo se borran las sesiones programadas o canceladas.' });
   }
   // Primero Google, luego la fila: si se borra antes, se pierde el
   // google_event_id y el evento se queda huérfano en el calendario para

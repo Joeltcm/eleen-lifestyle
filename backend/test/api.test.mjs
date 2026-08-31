@@ -368,18 +368,59 @@ describe('quitar sesiones canceladas de la agenda', () => {
     sesionId = lote.datos.sesiones[0].id;
   });
 
-  test('una sesión en pie no se borra: primero se cancela', async () => {
-    const { estado } = await api.delete(`/api/sessions/${sesionId}/permanent`);
-    assert.equal(estado, 409, 'no se pierde por accidente una sesión que estaba agendada');
-  });
-
-  test('una vez cancelada, se puede quitar del todo', async () => {
-    await api.delete(`/api/sessions/${sesionId}`);
+  test('una cancelada se puede quitar del todo', async () => {
+    await api.delete(`/api/sessions/${sesionId}?rescheduled=false`);
     const borrada = await api.delete(`/api/sessions/${sesionId}/permanent`);
     assert.equal(borrada.estado, 200);
 
     const sesiones = await api.get('/api/sessions');
     assert.ok(!sesiones.datos.find(s => s.id === sesionId), 'no debe quedar en la agenda');
+  });
+
+  test('una realizada no se borra: descontó del saldo', async () => {
+    const lote = await api.post('/api/sessions/batch', { clientId: clienteId, startsAt: ['2026-10-12T13:00:00.000Z'], durationMinutes: 60, mode: 'Presencial' });
+    const id = lote.datos.sesiones[0].id;
+    await api.patch(`/api/sessions/${id}/compliance`, { completed: true, completionPercent: 100 });
+    const { estado } = await api.delete(`/api/sessions/${id}/permanent`);
+    assert.equal(estado, 409, 'borrarla descuadraría el saldo de sesiones');
+  });
+});
+
+describe('corregir una sesión ya guardada', () => {
+  let clientA, clientB, sesionId;
+  before(async () => {
+    const a = await api.post('/api/clients', { fullName: 'Destino A', billingModel: 'single', standardPrice: 30, cutoffDay: 1 });
+    const b = await api.post('/api/clients', { fullName: 'Destino B', billingModel: 'single', standardPrice: 30, cutoffDay: 1 });
+    clientA = a.datos.id; clientB = b.datos.id;
+    const lote = await api.post('/api/sessions/batch', { clientId: clientA, startsAt: ['2026-11-05T13:00:00.000Z'], durationMinutes: 60, mode: 'Presencial' });
+    sesionId = lote.datos.sesiones[0].id;
+  });
+
+  test('se puede cambiar el cliente agendado', async () => {
+    const { estado, datos } = await api.patch(`/api/sessions/${sesionId}`, {
+      startsAt: '2026-11-05T13:00:00.000Z', durationMinutes: 60, mode: 'Presencial', clientId: clientB
+    });
+    assert.equal(estado, 200);
+    assert.equal(datos.client_id, clientB, 'la sesión debe quedar a nombre del cliente nuevo');
+  });
+
+  test('una sesión creada por error se borra sin pasar por cancelada', async () => {
+    const lote = await api.post('/api/sessions/batch', { clientId: clientA, startsAt: ['2026-11-12T13:00:00.000Z'], durationMinutes: 60, mode: 'Presencial' });
+    const id = lote.datos.sesiones[0].id;
+    const { estado } = await api.delete(`/api/sessions/${id}/permanent`);
+    assert.equal(estado, 200, 'programada se borra directamente: cancelarla la contaría como incumplida');
+    const quedan = await api.get('/api/sessions');
+    assert.ok(!quedan.datos.find(s => s.id === id));
+  });
+
+  test('borrarla no deja incumplimiento en el cumplimiento del cliente', async () => {
+    const ayer = new Date(Date.now() - 24 * 3600_000).toISOString();
+    const lote = await api.post('/api/sessions/batch', { clientId: clientA, startsAt: [ayer], durationMinutes: 60, mode: 'Presencial' });
+    const id = lote.datos.sesiones[0].id;
+    await api.delete(`/api/sessions/${id}/permanent`);
+    const resumen = await api.get('/api/compliance/summary?period=month');
+    const suyo = resumen.datos.clients.find(c => c.clientId === clientA);
+    assert.ok(!suyo || suyo.missed === 0, 'una sesión borrada no debe figurar como incumplida');
   });
 });
 
