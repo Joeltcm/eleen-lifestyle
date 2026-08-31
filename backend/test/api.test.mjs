@@ -196,6 +196,32 @@ describe('gastos y ámbito', () => {
   });
 });
 
+describe('vencimiento de los paquetes', () => {
+  let clientId;
+  before(async () => {
+    const c = await api.post('/api/clients', { fullName: 'Compra paquete', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+    clientId = c.datos.id;
+  });
+
+  test('con fecha, la respeta', async () => {
+    const { datos } = await api.post('/api/packages', { clientId, totalSessions: 10, amount: 300, kind: 'package', expiresOn: '2026-12-31' });
+    assert.equal(String(datos.expires_on).slice(0, 10), '2026-12-31');
+  });
+
+  test('sin fecha, el saldo no caduca', async () => {
+    const { datos } = await api.post('/api/packages', { clientId, totalSessions: 10, amount: 300, kind: 'package' });
+    assert.equal(datos.expires_on, null,
+      'la interfaz decía "un mes después" y el servidor guardaba sin vencimiento: ahora la propone y la deja a la vista');
+  });
+
+  test('un paquete sin vencer no impone cuota mensual de cumplimiento', async () => {
+    const { datos } = await api.get(`/api/clients/${clientId}/attendance`);
+    const conCuota = datos.timeline.filter(m => m.basis === 'package');
+    assert.equal(conCuota.length, 0,
+      'sin plazo no hay ritmo pactado: repartir las clases entre meses le exigiría algo que nadie acordó');
+  });
+});
+
 describe('saldos de sesiones', () => {
   let clienteId;
   let saldoId;

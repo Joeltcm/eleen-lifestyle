@@ -1,4 +1,4 @@
-const APP_VERSION = '112';
+const APP_VERSION = '113';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -530,7 +530,7 @@ function renderBilling() {
     const state = pack.status === 'pending' ? 'Pendiente de pago' : remaining ? 'Activo' : 'Agotado';
     const borrable = Number(pack.used) === 0
       ? `<button class="secondary session-use" data-borrar-paquete="${pack.id}">Eliminar</button>` : '';
-    return `<tr><td data-label="Cliente"><b>${escapeHtml(pack.client)}</b></td><td data-label="Paquete">${escapeHtml(pack.label)}</td><td data-label="Compradas">${pack.total}</td><td data-label="Usadas">${pack.used}</td><td data-label="Disponibles"><strong class="session-balance">${remaining}</strong></td><td data-label="Estado"><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span></td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-editar-paquete="${pack.id}">Editar</button>${borrable}</div><small>${pack.status === 'confirmed' && remaining ? 'Descuento automático' : '—'}</small></td></tr>`;
+    return `<tr><td data-label="Cliente"><b>${escapeHtml(pack.client)}</b></td><td data-label="Paquete">${escapeHtml(pack.label)}</td><td data-label="Compradas">${pack.total}</td><td data-label="Usadas">${pack.used}</td><td data-label="Disponibles"><strong class="session-balance">${remaining}</strong></td><td data-label="Estado"><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span><br><small>${pack.expiresOn ? `vence ${dateOnly(pack.expiresOn)}` : 'sin vencimiento'}</small></td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-editar-paquete="${pack.id}">Editar</button>${borrable}</div><small>${pack.status === 'confirmed' && remaining ? 'Descuento automático' : '—'}</small></td></tr>`;
   }).join('') : '<tr><td colspan="7" class="empty">Aún no hay paquetes de sesiones.</td></tr>';
   void ensureBillingAnalytics();
 }
@@ -938,7 +938,24 @@ function newInvoice() {
   };
   concept.addEventListener('change', togglePackage); togglePackage();
   const amountInput = document.querySelector('#invoice-form [name="amount"]'); const dueInput = document.querySelector('#invoice-form [name="due"]'); const sessionsInput = document.querySelector('#invoice-form [name="sessions"]');
-  const fillClientPlan = () => { const client = data.clients.find(item => item.id === selection.value); if (!client) return; amountInput.value = client.plan; concept.value = client.billingModel === 'package' ? 'Paquete de sesiones' : client.billingModel === 'single' ? 'Sesión individual' : 'Mensualidad'; sessionsInput.value = client.packageSessions || client.sessionsIncluded || 0; togglePackage(); };
+  const fillClientPlan = () => { const client = data.clients.find(item => item.id === selection.value); if (!client) return; amountInput.value = client.plan; concept.value = client.billingModel === 'package' ? 'Paquete de sesiones' : client.billingModel === 'single' ? 'Sesión individual' : 'Mensualidad'; sessionsInput.value = client.packageSessions || client.sessionsIncluded || 0;
+    // La fecha se propone a partir de la vigencia del plan, pero queda escrita
+    // y editable: antes el aviso decía "un mes después" y el servidor guardaba
+    // sin vencimiento, así que se creaban paquetes que no caducaban nunca
+    // creyendo lo contrario.
+    const vence = document.getElementById('package-expires');
+    const pista = document.getElementById('package-expires-hint');
+    if (vence) {
+      if (client.billingModel === 'package' && client.validityDays) {
+        const fin = new Date(today); fin.setDate(fin.getDate() + Number(client.validityDays));
+        vence.value = dateKey(fin);
+        pista.textContent = `${client.validityDays} días de vigencia según su plan. Cámbiala si acordaron otra cosa.`;
+      } else {
+        vence.value = '';
+        pista.textContent = 'Su plan no fija vigencia. Sin fecha, el saldo no caduca.';
+      }
+    }
+    togglePackage(); };
   dueInput.value = dateKey(today); selection.addEventListener('change', fillClientPlan); fillClientPlan();
   document.getElementById('invoice-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target); const method = form.get('method');
@@ -1770,7 +1787,7 @@ function linkPackageEditor(cobro, origen) {
       <label>Ya usadas<input name="usedSessions" type="number" min="0" max="500" required value="8" /></label>
     </div>
     <label>Tipo<select name="kind"><option value="monthly">Mensualidad</option><option value="package">Paquete</option></select></label>
-    <label>Vence el<input name="expiresOn" type="date" /><small>Vacío: un mes después de emitido el cobro.</small></label>
+    <label>Vence el<input name="expiresOn" type="date" id="package-expires" /><small id="package-expires-hint">Se propone según la vigencia del plan. Vacío: el saldo no caduca.</small></label>
     ${vencido ? `<p class="section-note"><b>Este cobro es de un período pasado.</b> Deja "ya usadas" igual al total si esas sesiones se dieron. Si pones menos, las restantes contarán como incumplidas y bajarán el cumplimiento de ${escapeHtml(cobro.full_name)}.</p>` : '<p class="section-note">Si el período sigue vigente, pon en "ya usadas" las que realmente se dieron.</p>'}
     <button class="primary wide-button">Vincular</button></form>`;
   openModal(box);
