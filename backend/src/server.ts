@@ -571,7 +571,11 @@ app.post('/api/clients', { preHandler: requireStaff }, async (request, reply) =>
 app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const input = clientSchema.pick({ fullName: true, email: true, phone: true, goal: true, notes: true, monthlySessionTarget: true, billingResponsibleClientId: true, status: true }).parse(request.body);
+  const input = clientSchema.pick({ fullName: true, email: true, phone: true, goal: true, notes: true, monthlySessionTarget: true, billingResponsibleClientId: true, status: true, cutoffDay: true }).parse(request.body);
+  // cutoffDay lleva .default(1) en el esquema, así que si no viene en el cuerpo
+  // llega valiendo 1: editar sólo el nombre habría movido el día de cobro al
+  // primero de mes sin avisar. Se mira si venía de verdad.
+  const tocaCorte = 'cutoffDay' in (request.body as Record<string, unknown>);
   // El pagador debe ser otro cliente de la misma entrenadora, y no puede
   // apuntarse a sí mismo ni encadenar: quien paga por alguien no puede a su vez
   // tener pagador, o el saldo quedaría en un tercero imposible de rastrear.
@@ -583,8 +587,16 @@ app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, repl
     const [dependientes] = await sql`SELECT id FROM clients WHERE billing_responsible_client_id = ${id} LIMIT 1`;
     if (dependientes) return reply.code(409).send({ error: 'Este cliente ya paga por alguien más, no puede depender de otro' });
   }
-  const [client] = await sql`UPDATE clients SET full_name = ${input.fullName}, email = ${input.email || null}, phone = ${input.phone || null}, goal = ${input.goal || null}, notes = ${input.notes || null}, monthly_session_target = ${input.monthlySessionTarget ?? null}, billing_responsible_client_id = ${input.billingResponsibleClientId ?? null}, status = COALESCE(${input.status ?? null}, status), updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
+  const [client] = await sql`UPDATE clients SET full_name = ${input.fullName}, email = ${input.email || null}, phone = ${input.phone || null}, goal = ${input.goal || null}, notes = ${input.notes || null}, monthly_session_target = ${input.monthlySessionTarget ?? null}, billing_responsible_client_id = ${input.billingResponsibleClientId ?? null}, status = COALESCE(${input.status ?? null}, status),
+    billing_cutoff_day = CASE WHEN ${tocaCorte} THEN ${input.cutoffDay}::int ELSE billing_cutoff_day END, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
   if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  // La membresía guarda su propio día de renovación. Si sólo se moviera el del
+  // cliente, quedarían dos fechas distintas para lo mismo y cuál manda
+  // dependería de por dónde se mire.
+  if (tocaCorte) {
+    // memberships no tiene updated_at; añadirlo aquí rompía el guardado entero.
+    await sql`UPDATE memberships SET renewal_day = ${input.cutoffDay} WHERE client_id = ${id} AND status = 'active'`;
+  }
   return client;
 });
 

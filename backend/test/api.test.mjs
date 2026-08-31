@@ -565,6 +565,41 @@ describe('borrado definitivo de planes', () => {
   });
 });
 
+describe('cambiar el día de corte', () => {
+  let clientId;
+  before(async () => {
+    const plan = await api.post('/api/plans', { name: 'Mensual corte', billingModel: 'monthly', price: 90, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Cambia corte', planId: plan.datos.id, cutoffDay: 1 });
+    clientId = c.datos.id;
+  });
+
+  test('se puede mover después de creado', async () => {
+    const { estado, datos } = await api.patch(`/api/clients/${clientId}`, { fullName: 'Cambia corte', cutoffDay: 15 });
+    assert.equal(estado, 200);
+    assert.equal(Number(datos.billing_cutoff_day), 15);
+  });
+
+  test('editar otra cosa no lo mueve', async () => {
+    const { datos } = await api.patch(`/api/clients/${clientId}`, { fullName: 'Cambia corte', goal: 'Otra meta' });
+    assert.equal(Number(datos.billing_cutoff_day), 15, 'sin cutoffDay en el cuerpo, el día se respeta');
+  });
+
+  test('el cobro del mes usa el día nuevo', async () => {
+    // El día se elige a tres días vista para que caiga dentro de la ventana de
+    // generación y después del alta de la membresía. Fijar un 15 hacía que la
+    // prueba dependiera del día en que se ejecutara.
+    const objetivo = new Date(Date.now() + 3 * 24 * 3600_000).getDate();
+    await api.patch(`/api/clients/${clientId}`, { fullName: 'Cambia corte', cutoffDay: objetivo });
+    await api.post('/api/billing/recurring/generate', {});
+
+    const facturas = (await api.get('/api/invoices')).datos.filter(i => i.client_id === clientId && i.auto_generated);
+    assert.ok(facturas.length > 0, 'debe haberse generado su mensualidad');
+    for (const f of facturas) {
+      assert.equal(Number(String(f.due_on).slice(8, 10)), objetivo, 'el vencimiento sigue al día de corte');
+    }
+  });
+});
+
 describe('borrar un expediente duplicado', () => {
   test('se lleva al cliente y deja de aparecer', async () => {
     const c = await api.post('/api/clients', { fullName: 'Duplicado por error', billingModel: 'single', standardPrice: 30, cutoffDay: 1 });
