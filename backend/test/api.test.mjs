@@ -222,7 +222,10 @@ describe('el saldo sale del plan sin tener que teclearlo', () => {
     // El caso que se colaba: el cobro se emitió ayer, o llegó importado de
     // Zoho. Nunca vuelve a salir del INSERT de generación, así que su cliente
     // se quedaba sin saldo para siempre y nadie lo decía.
-    const dia = new Date(Date.now() + 3 * 24 * 3600_000);
+    // A 25 días vista: fuera de la ventana de generación, que sólo emite
+    // cobros de la semana siguiente. El saldo no debe esperar a esa ventana,
+    // o el cliente entrena sin de dónde descontar durante tres semanas.
+    const dia = new Date(Date.now() + 25 * 24 * 3600_000);
     const vence = dia.toISOString().slice(0, 10);
     const plan = await api.post('/api/plans', { name: 'Mensual ya cobrada', billingModel: 'monthly', price: 150, sessionsIncluded: 8 });
     const c = await api.post('/api/clients', { fullName: 'Cobro previo', planId: plan.datos.id, cutoffDay: dia.getDate() });

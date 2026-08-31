@@ -248,8 +248,13 @@ async function generateRecurringInvoices(ownerId?: string) {
         AND i.package_id IS NULL
         -- Sólo el ciclo que viene. Un cobro de un mes cerrado es historial: no
         -- debe repartir sesiones hoy ni corregir nada hacia atrás.
+        --
+        -- Aquí no rige la ventana de días de la generación: ésa existe para no
+        -- emitir un cobro antes de tiempo, y un saldo no es un cobro. Son las
+        -- sesiones de un cobro que ya está emitido, y hacerlas esperar a una
+        -- semana antes del corte deja al cliente entrenando sin de dónde
+        -- descontar. Se toma el corte más cercano y sólo uno por persona.
         AND i.due_on >= current_date
-        AND i.due_on <= current_date + (${config.BILLING_GENERATION_DAYS_AHEAD})::integer
         AND (${selectedOwner}::uuid IS NULL OR c.owner_id = ${selectedOwner}::uuid)
         AND NOT EXISTS (
           SELECT 1 FROM session_packages sp
