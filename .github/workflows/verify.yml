@@ -8,11 +8,42 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+
+    # Las pruebas hablan con un Postgres de verdad y aplican las migraciones
+    # sobre una base vacía. Es lo único que comprueba que una instalación nueva
+    # sigue levantándose, y donde aparecen los fallos de tipos y restricciones
+    # que un doble de la base nunca enseñaría.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGPORT: '5432'
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install
-      - run: npm --prefix backend install
+      - name: Herramientas de cliente de Postgres
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      # En backend hay lockfile, así que npm ci: la gracia de CI es construir
+      # con las versiones exactas que se despliegan. La raíz no tiene lockfile
+      # —tampoco dependencias que instalar— así que ahí npm ci fallaría.
+      - run: npm install --no-audit --no-fund
+      - run: npm --prefix backend ci
       - run: npm run verify
+      - run: npm test
