@@ -186,3 +186,8 @@ dialog.modal-wide{max-width:920px}
 .grupo-clientes:not(:first-child){margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}
 .grupo-clientes span{padding:2px 8px;border-radius:99px;background:#eddde5;color:#7d4a60;font-size:10px}
 select.filter{padding:11px 13px;max-width:none;font:600 13px 'DM Sans';cursor:pointer}
+
+/* Estado del cliente. Quien ya no entrena se ve en rojo, y quien está en pausa
+   en ámbar: son tres situaciones distintas y la etiqueta debía notarlo. */
+.status.estado-inactive{background:#f7e2dc;color:#9c4f3a}
+.status.estado-paused{background:#f7eddc;color:#8a6a2f}
