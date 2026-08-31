@@ -1,4 +1,4 @@
-const APP_VERSION = '93';
+const APP_VERSION = '94';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -735,9 +735,26 @@ function stopCalendarSynchronization() {
 }
 function startCalendarSynchronization() {
   stopCalendarSynchronization();
-  if (!data.googleCalendar.connected || currentUser?.role === 'client') return;
+  if (currentUser?.role === 'client') return;
+  // El temporizador arranca aunque Google no esté conectado en este momento:
+  // synchronizeCalendarSilently ya comprueba la conexión en cada vuelta. Antes
+  // se salía aquí, así que si la conexión estaba caída al abrir la aplicación
+  // —por ejemplo con la API de Google todavía sin habilitar— no volvía a
+  // sincronizar sola hasta recargar la página.
   calendarSyncTimer = setInterval(() => void synchronizeCalendarSilently(), 75_000);
 }
+
+// Al volver a la pestaña se sincroniza en el acto. Mover un evento en Google y
+// tener que esperar setenta y cinco segundos a que aparezca se siente roto,
+// aunque acabe llegando. Se limita a una vez cada veinte segundos para que
+// alternar entre pestañas no dispare una llamada por cada cambio de foco.
+let ultimaSincronizacionVisible = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (Date.now() - ultimaSincronizacionVisible < 20_000) return;
+  ultimaSincronizacionVisible = Date.now();
+  void synchronizeCalendarSilently();
+});
 async function disconnectGoogleCalendar() {
   if (!window.confirm('Se detendrá la sincronización. Los eventos que ya existen en Google Calendar se conservarán.')) return;
   const button = document.getElementById('google-calendar-disconnect');
