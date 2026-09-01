@@ -1418,6 +1418,81 @@ app.get('/api/sessions', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`SELECT s.*, c.full_name, r.title AS routine_title FROM sessions s JOIN clients c ON c.id = s.client_id LEFT JOIN routines r ON r.id = s.routine_id WHERE c.owner_id = ${auth.sub} ORDER BY s.starts_at`;
 });
+// Huecos libres de la entrenadora, para colocar una reposición sin ir
+// probando horas a ver cuál cae.
+//
+// La franja de trabajo no está configurada en ninguna parte, así que se deduce
+// de su propia agenda de los últimos dos meses: desde la clase más temprana
+// hasta el final de la más tardía. Inventar un horario fijo sería peor —le
+// ofrecería huecos a las once de la noche, o le escondería sus 5:30—.
+const availabilitySchema = z.object({
+  from: z.string().date(),
+  to: z.string().date(),
+  durationMinutes: z.coerce.number().int().min(15).max(480).default(60),
+  clientId: z.string().uuid().optional()
+}).refine(v => v.from <= v.to, { message: 'El rango de fechas está al revés' });
+
+app.get('/api/availability', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const query = availabilitySchema.parse(request.query);
+
+  const [franja] = await sql`
+    SELECT
+      COALESCE(min((s.starts_at AT TIME ZONE 'America/Panama')::time), '06:00'::time) AS abre,
+      -- El ::time va DENTRO del max. Fuera, el máximo se toma sobre la marca de
+      -- tiempo entera y devuelve la hora de la clase más reciente en el
+      -- calendario, no la más tardía del día: con eso la franja salía de una
+      -- hora de ancho y casi no ofrecía huecos.
+      COALESCE(max(((s.starts_at + make_interval(mins => s.duration_minutes)) AT TIME ZONE 'America/Panama')::time), '20:00'::time) AS cierra
+    FROM sessions s JOIN clients c ON c.id = s.client_id
+    WHERE c.owner_id = ${auth.sub} AND s.status <> 'cancelled'
+      AND s.starts_at >= now() - interval '60 days'
+  `;
+  // Lo ocupado del rango, con su hora local ya resuelta: comparar instantes en
+  // el cliente obliga a repetir la conversión de huso en cada comparación.
+  const ocupadas = await sql`
+    SELECT (s.starts_at AT TIME ZONE 'America/Panama')::date AS dia,
+      (s.starts_at AT TIME ZONE 'America/Panama')::time AS empieza,
+      s.duration_minutes, c.full_name
+    FROM sessions s JOIN clients c ON c.id = s.client_id
+    WHERE c.owner_id = ${auth.sub} AND s.status <> 'cancelled'
+      AND (s.starts_at AT TIME ZONE 'America/Panama')::date BETWEEN ${query.from}::date AND ${query.to}::date
+    ORDER BY s.starts_at
+  `;
+
+  const aMinutos = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
+  const aTexto = (minutos: number) => `${String(Math.floor(minutos / 60)).padStart(2, '0')}:${String(minutos % 60).padStart(2, '0')}`;
+  // A media hora en punto. Deducir la franja de la agenda real deja bordes
+  // sueltos —una clase de 5:35 abriría la rejilla en :05 y :35—, y ofrecerle
+  // "las 13:05" en vez de "las 13:00" no es una hora que nadie acuerde.
+  const abre = Math.floor(aMinutos(String(franja.abre)) / 30) * 30;
+  const cierra = Math.ceil(aMinutos(String(franja.cierra)) / 30) * 30;
+  const ahora = new Date();
+  const hoyPanama = diaEnPanama(ahora);
+  const [horaAhora, minutoAhora] = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'America/Panama', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+  }).format(ahora).split(':').map(Number);
+  const minutosAhora = horaAhora * 60 + minutoAhora;
+
+  const dias = [];
+  for (let cursor = new Date(`${query.from}T12:00:00-05:00`); diaEnPanama(cursor) <= query.to; cursor.setUTCDate(cursor.getUTCDate() + 1)) {
+    const dia = diaEnPanama(cursor);
+    // Las columnas date vuelven como Date: String() daría "Thu Sep 03 2026" y
+    // la comparación no encajaría nunca, dejando el día entero como libre.
+    const delDia = ocupadas.filter(fila => (fila.dia instanceof Date ? fila.dia.toISOString().slice(0, 10) : String(fila.dia).slice(0, 10)) === dia)
+      .map(fila => ({ inicio: aMinutos(String(fila.empieza)), fin: aMinutos(String(fila.empieza)) + Number(fila.duration_minutes), quien: fila.full_name as string }));
+    const libres = [];
+    for (let inicio = abre; inicio + query.durationMinutes <= cierra; inicio += 30) {
+      // Nada en el pasado: un hueco de esta mañana no es un hueco.
+      if (dia === hoyPanama && inicio <= minutosAhora) continue;
+      const choca = delDia.some(ocupada => ocupada.inicio < inicio + query.durationMinutes && ocupada.fin > inicio);
+      if (!choca) libres.push(aTexto(inicio));
+    }
+    dias.push({ date: dia, libres, ocupadas: delDia.map(o => ({ hora: aTexto(o.inicio), quien: o.quien })) });
+  }
+  return { abre: aTexto(abre), cierra: aTexto(cierra), durationMinutes: query.durationMinutes, dias };
+});
+
 app.post('/api/sessions', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = sessionSchema.parse(request.body);
   const permiso = await clienteAgendable(input.clientId, auth.sub);

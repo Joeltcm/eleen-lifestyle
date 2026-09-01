@@ -282,3 +282,12 @@ select.filter{padding:11px 13px;font:600 13px 'DM Sans';cursor:pointer}
 #calendar-mover-aviso{display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin-bottom:10px}
 #calendar-mover-aviso button{margin-left:auto;font-size:11px;padding:6px 11px}
 @media(max-width:560px){#calendar-mover-aviso button{margin-left:0;width:100%}}
+
+/* Huecos libres para colocar una reposición. Botones grandes: se eligen con el
+   pulgar y con prisa, entre clase y clase. */
+.huecos-dia{margin-top:14px}
+.huecos-dia>b{display:block;margin-bottom:7px;font-size:12px}
+/* Sólo la primera letra: capitalize pondría "Martes, 1 De Septiembre". */
+.huecos-dia>b::first-letter{text-transform:uppercase}
+.huecos-lista{display:grid;grid-template-columns:repeat(auto-fill,minmax(78px,1fr));gap:7px}
+.huecos-lista button{padding:11px 6px;font-size:12px}

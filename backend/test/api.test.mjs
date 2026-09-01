@@ -930,6 +930,60 @@ describe('reposiciones: dos clases y una semana', () => {
   });
 });
 
+describe('huecos libres de la entrenadora', () => {
+  let clientId;
+  // El día se cuenta en Panamá, no en UTC: de madrugada en UTC allí es todavía
+  // la tarde anterior, y "hoy" señalaría al día equivocado.
+  const enPanama = fecha => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Panama', year: 'numeric', month: '2-digit', day: '2-digit' }).format(fecha);
+  const dia = n => { const d = new Date(); d.setDate(d.getDate() + n); return enPanama(d); };
+
+  before(async () => {
+    const c = await api.post('/api/clients', { fullName: 'Ocupa la mañana', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+    clientId = c.datos.id;
+    // Dentro de 70 días: la base es compartida con las demás pruebas y los
+    // días cercanos ya tienen clases de otros clientes que también ocupan.
+    await api.post('/api/sessions', { clientId, startsAt: `${dia(70)}T17:00:00.000Z`, durationMinutes: 60, mode: 'Presencial' });
+    await api.post('/api/sessions', { clientId, startsAt: `${dia(70)}T19:00:00.000Z`, durationMinutes: 60, mode: 'Presencial' });
+  });
+
+  test('no ofrece las horas que ya están ocupadas', async () => {
+    const { estado, datos } = await api.get(`/api/availability?from=${dia(70)}&to=${dia(70)}&durationMinutes=60`);
+    assert.equal(estado, 200);
+    const suyo = datos.dias.find(d => d.date === dia(70));
+    assert.ok(suyo, 'el día pedido tiene que venir');
+    assert.ok(!suyo.libres.includes('12:00'), 'las 12:00 están dadas');
+    assert.ok(!suyo.libres.includes('14:00'), 'las 14:00 también');
+    assert.ok(!suyo.libres.includes('11:30'), 'ni el hueco que se solaparía con las 12:00');
+    // Propiedad, no un hueco concreto: la base es compartida y cualquier otra
+    // prueba puede tener una clase justo ahí. Lo que debe cumplirse siempre es
+    // que ningún hueco ofrecido se solape con nada ocupado.
+    const aMin = h => Number(h.slice(0, 2)) * 60 + Number(h.slice(3, 5));
+    const solapa = suyo.libres.find(libre => suyo.ocupadas.some(ocupada =>
+      aMin(ocupada.hora) < aMin(libre) + 60 && aMin(ocupada.hora) + 60 > aMin(libre)));
+    assert.equal(solapa, undefined, `ofrece ${solapa} y ahí ya hay alguien`);
+    assert.ok(suyo.libres.length, 'y algún hueco tiene que quedar');
+  });
+
+  test('la duración cambia lo que cabe', async () => {
+    // Entre las 13:00 y las 14:00 hay una hora justa: 60 min entra, 90 no.
+    const largo = await api.get(`/api/availability?from=${dia(70)}&to=${dia(70)}&durationMinutes=90`);
+    const suyo = largo.datos.dias.find(d => d.date === dia(70));
+    assert.ok(!suyo.libres.includes('13:00'), 'una clase de 90 no cabe en un hueco de 60');
+  });
+
+  test('no ofrece horas que ya pasaron hoy', async () => {
+    const { datos } = await api.get(`/api/availability?from=${dia(0)}&to=${dia(0)}&durationMinutes=60`);
+    const hoy = datos.dias[0];
+    const ahora = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Panama', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date());
+    assert.ok(hoy.libres.every(h => h > ahora), 'un hueco de esta mañana no es un hueco');
+  });
+
+  test('cubre todos los días del rango', async () => {
+    const { datos } = await api.get(`/api/availability?from=${dia(1)}&to=${dia(7)}&durationMinutes=60`);
+    assert.equal(datos.dias.length, 7, 'la semana de la reposición, entera');
+  });
+});
+
 describe('vencimiento de los paquetes', () => {
   let clientId;
   before(async () => {

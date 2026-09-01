@@ -1,4 +1,4 @@
-const APP_VERSION = '130';
+const APP_VERSION = '131';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -298,6 +298,58 @@ const movimientosDelCiclo = client => {
   if (client.canceladas) partes.push(`${client.canceladas} perdida${client.canceladas === 1 ? '' : 's'}`);
   return partes.length ? `<small class="ciclo-movimientos">Este mes: ${partes.join(' · ')}</small>` : '';
 };
+// Colocar una reposición en un hueco libre.
+//
+// La entrenadora tiene una semana para reponer, y hasta ahora la única forma
+// de encontrar sitio era ir probando horas a ver cuál no chocaba. Esto le
+// enseña lo que le queda libre en esos días, deducido de su propia agenda:
+// desde su clase más temprana hasta el final de la más tardía.
+async function colocarReposicion(client) {
+  const pack = data.packages.find(item => item.clientId === client.id && item.status === 'confirmed' && item.kind === 'makeup' && remainingSessions(item) > 0);
+  if (!pack) { toast('Este cliente no tiene clases por reponer'); return; }
+  const hasta = String(pack.expiresOn).slice(0, 10);
+  const desde = dateKey(today);
+  let datos;
+  try { datos = await api(`/api/availability?from=${desde}&to=${hasta}&durationMinutes=60`); }
+  catch (error) { toast(error.message, true); return; }
+
+  const box = document.createElement('div');
+  const dias = datos.dias.filter(dia => dia.libres.length);
+  box.innerHTML = `
+    <p class="eyebrow">REPOSICIÓN</p>
+    <h2>Colocar la clase</h2>
+    <p class="form-summary"><b>${escapeHtml(client.name)}</b><br>${remainingSessions(pack)} por reponer · vencen el ${formatoDiaCorto(pack.expiresOn)}</p>
+    <p class="section-note">Huecos libres entre las ${datos.abre} y las ${datos.cierra}, que es tu franja según la agenda de los últimos dos meses.</p>
+    ${dias.length ? dias.map(dia => `
+      <div class="huecos-dia">
+        <b>${escapeHtml(formatoDiaLargo(dia.date))}</b>
+        <div class="huecos-lista">${dia.libres.map(hora => `<button type="button" class="secondary" data-hueco="${dia.date}" data-hora="${hora}">${hora}</button>`).join('')}</div>
+      </div>`).join('') : '<p class="empty">No queda ningún hueco libre en esos días. Habría que mover algo primero.</p>'}`;
+  openModal(box, true);
+
+  box.querySelectorAll('[data-hueco]').forEach(boton => {
+    boton.onclick = async () => {
+      const { hueco, hora } = boton.dataset;
+      if (!confirmarGuardado(`Reponer la clase de ${client.name}\n${formatoDiaLargo(hueco)} a las ${hora}`)) return;
+      box.querySelectorAll('[data-hueco]').forEach(b => { b.disabled = true; });
+      try {
+        await api('/api/sessions', { method: 'POST', body: {
+          clientId: client.id, startsAt: panamaDateTimeIso(hueco, hora),
+          durationMinutes: 60, mode: 'Presencial', notes: 'Reposición del mes anterior'
+        } });
+        await loadData(); renderAll(); modal.close();
+        toast('Reposición agendada');
+      } catch (error) {
+        toast(error.message, true);
+        box.querySelectorAll('[data-hueco]').forEach(b => { b.disabled = false; });
+      }
+    };
+  });
+}
+
+const formatoDiaLargo = fecha => new Intl.DateTimeFormat('es-PA', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Panama' })
+  .format(new Date(`${String(fecha).slice(0, 10)}T12:00:00-05:00`));
+
 const saldoDelMes = client => {
   const pack = data.packages.find(item => item.clientId === client.id && item.status === 'confirmed' && item.kind === 'monthly');
   // La reposición se nombra aparte: son clases que el cliente ya pagó el mes
@@ -392,7 +444,7 @@ function renderClients(filter = '') {
       : client.billingModel === 'single'
       ? `<span class="commercial-label single-label">Sesión suelta</span><b>${escapeHtml(client.planName || 'Sesiones individuales')} · ${money.format(client.plan)}</b><small>Por sesión, sin corte mensual</small>`
       : `<span class="commercial-label">Mensualidad</span><b>${escapeHtml(client.planName || 'Mensualidad')} · ${money.format(client.plan)}</b><small>${saldoDelMes(client)}Corte día ${client.cutoffDay}</small>`;
-    return `<article class="client-card"><header><span class="initials">${escapeHtml(initials(client.name))}</span><div><h3>${escapeHtml(client.name)}</h3><small>${escapeHtml(client.goal)}</small></div><span class="status estado-${client.statusRaw}">${client.status}</span></header><p>${client.inbody ? `Último InBody: ${client.inbody.date}` : 'Aún no se ha cargado un InBody.'}${client.portalActive ? ' · Portal activo' : ''}</p><div class="commercial-summary">${commercial}</div>${movimientosDelCiclo(client)}<div class="mini-data">${client.inbody ? `<div><b>${client.inbody.weight} kg</b><span>Peso</span></div><div><b>${client.inbody.smm} kg</b><span>Músculo</span></div><div><b>${client.inbody.pbf}%</b><span>Grasa</span></div>` : `<div><b>—</b><span>Evaluación pendiente</span></div>`}</div><div class="client-actions"><button class="secondary" data-client="${client.id}">Ver expediente</button><button class="secondary" data-edit-client="${client.id}">Editar</button><button class="secondary" data-inbody="${client.id}">+ InBody</button></div></article>`;
+    return `<article class="client-card"><header><span class="initials">${escapeHtml(initials(client.name))}</span><div><h3>${escapeHtml(client.name)}</h3><small>${escapeHtml(client.goal)}</small></div><span class="status estado-${client.statusRaw}">${client.status}</span></header><p>${client.inbody ? `Último InBody: ${client.inbody.date}` : 'Aún no se ha cargado un InBody.'}${client.portalActive ? ' · Portal activo' : ''}</p><div class="commercial-summary">${commercial}</div>${movimientosDelCiclo(client)}${data.packages.some(item => item.clientId === client.id && item.status === 'confirmed' && item.kind === 'makeup' && remainingSessions(item) > 0) ? `<button class="secondary wide-button" data-colocar-reposicion="${client.id}" style="margin-top:9px">Colocar reposición</button>` : ''}<div class="mini-data">${client.inbody ? `<div><b>${client.inbody.weight} kg</b><span>Peso</span></div><div><b>${client.inbody.smm} kg</b><span>Músculo</span></div><div><b>${client.inbody.pbf}%</b><span>Grasa</span></div>` : `<div><b>—</b><span>Evaluación pendiente</span></div>`}</div><div class="client-actions"><button class="secondary" data-client="${client.id}">Ver expediente</button><button class="secondary" data-edit-client="${client.id}">Editar</button><button class="secondary" data-inbody="${client.id}">+ InBody</button></div></article>`;
   };
 
   const grupos = ESTADOS_CLIENTE
@@ -3053,6 +3105,7 @@ document.addEventListener('click', event => {
   if (event.target.dataset.editPayment) confirmInvoice(event.target.dataset.editPayment, true);
   if (event.target.dataset.editInvoice) editInvoice(event.target.dataset.editInvoice);
   if (event.target.dataset.applyCoverage) applyInvoiceCoverage(event.target.dataset.applyCoverage);
+  if (event.target.dataset.colocarReposicion) colocarReposicion(data.clients.find(c => c.id === event.target.dataset.colocarReposicion));
   if (event.target.dataset.purgeSession) {
     const sesion = data.sessions.find(item => item.id === event.target.dataset.purgeSession);
     const cancelada = sesion?.status === 'cancelled';
