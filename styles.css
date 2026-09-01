@@ -260,3 +260,12 @@ select.filter{padding:11px 13px;font:600 13px 'DM Sans';cursor:pointer}
 .notification-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
 .notification-actions button{flex:1 1 auto;font-size:11px;padding:8px 10px}
 @media(max-width:560px){.notification-actions button{flex:1 1 100%}}
+
+/* Días con nombre de tres letras: siete columnas de una letra caben, pero
+   "M" vale igual para martes y miércoles y ese fue justo el error. A 375 px
+   siete columnas de tres letras no entran, así que se parten en cuatro. */
+.dias-semana span{font-size:11px;letter-spacing:-.2px}
+@media(max-width:560px){
+  .dias-semana{grid-template-columns:repeat(4,minmax(0,1fr))}
+  .dias-semana span{min-height:46px;font-size:12px}
+}

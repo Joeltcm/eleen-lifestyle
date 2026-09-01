@@ -1611,6 +1611,63 @@ app.get('/api/session-recurrences', { preHandler: requireStaff }, async request 
 // Detener el horario: la entrenadora confirma que el cliente no sigue. Se
 // retiran las sesiones futuras que aún nadie tocó, y se dejan intactas las
 // pasadas y las que ya tienen asistencia registrada: son historial.
+// Cambiar un horario fijo sin desmontarlo.
+//
+// Hasta ahora sólo se podía detener y crear otro. Para añadir un día olvidado
+// —o corregir la hora— había que tirar abajo el horario entero, con lo que se
+// perdían las sesiones ya puestas, y quedaban dos reglas para la misma persona
+// si no se acordaba de detener la vieja.
+const recurrenceEditSchema = z.object({
+  weekdays: z.array(z.coerce.number().int().min(0).max(6)).min(1).max(7),
+  timeOfDay: z.string().regex(/^\d{2}:\d{2}$/, 'Hora inválida'),
+  durationMinutes: z.coerce.number().int().min(15).max(480),
+  mode: z.string().min(1),
+  notes: z.string().optional().nullable(),
+  endsOn: z.union([z.literal(''), z.null(), z.string().date()]).optional()
+    .transform(valor => (valor === '' || valor === undefined ? null : valor))
+});
+
+app.patch('/api/session-recurrences/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = recurrenceEditSchema.parse(request.body);
+  const dias = [...new Set(input.weekdays)].sort();
+
+  const [regla] = await sql`
+    UPDATE session_recurrences r
+    SET weekdays = ${dias}, time_of_day = ${input.timeOfDay}::time, duration_minutes = ${input.durationMinutes},
+      mode = ${input.mode}, notes = ${input.notes || null}, ends_on = ${input.endsOn}::date, updated_at = now()
+    FROM clients c
+    WHERE r.id = ${id} AND c.id = r.client_id AND c.owner_id = ${auth.sub} AND r.active
+    RETURNING r.*
+  `;
+  if (!regla) return reply.code(404).send({ error: 'Horario no encontrado o ya detenido' });
+
+  // Las futuras que ya no encajan con la regla nueva se retiran: si se quita el
+  // miércoles, las clases de los miércoles que venían de este horario sobran.
+  // Sólo las que nadie ha tocado —programadas y por delante—; una ya marcada o
+  // movida es historia de alguien y no se toca aquí.
+  const sobrantes = await sql`
+    SELECT id FROM sessions
+    WHERE recurrence_id = ${id} AND starts_at > now() AND status = 'scheduled'
+      AND (
+        extract(dow FROM (starts_at AT TIME ZONE 'America/Panama'))::int <> ALL(${dias})
+        OR (starts_at AT TIME ZONE 'America/Panama')::time <> ${input.timeOfDay}::time
+      )
+  `;
+  for (const sesion of sobrantes) {
+    try { await removeSessionFromGoogle(auth.sub, sesion.id as string); }
+    catch (error) { app.log.warn({ err: error, sessionId: sesion.id }, 'Sesión retirada pero el evento sigue en Google Calendar'); }
+  }
+  if (sobrantes.length) {
+    await sql`DELETE FROM sessions WHERE id IN ${sql(sobrantes.map(fila => fila.id as string))}`;
+  }
+  // Y se crean las que faltan con los días nuevos. Forzando, porque el sentido
+  // de editar es que el cambio se vea ya.
+  const { creadas } = await extenderRecurrencias(auth.sub, true);
+  return { recurrence: regla, retiradas: sobrantes.length, creadas };
+});
+
 app.delete('/api/session-recurrences/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);

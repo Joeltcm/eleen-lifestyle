@@ -609,6 +609,65 @@ describe('rellenar repone el día aunque la marca se haya quedado colgada', () =
   });
 });
 
+describe('editar un horario fijo sin desmontarlo', () => {
+  // El caso real: el horario se guardó sin el martes —la fila de días son
+  // siete letras sueltas y en español martes y miércoles empiezan por M— y
+  // para añadirlo había que tirar abajo el horario entero.
+  let clientId, reglaId;
+  const diasDe = async () => {
+    const reglas = (await api.get('/api/session-recurrences')).datos;
+    return reglas.find(r => r.id === reglaId).weekdays.map(Number).sort();
+  };
+  const suyasFuturas = async () => (await api.get('/api/sessions')).datos
+    .filter(x => x.client_id === clientId && x.status === 'scheduled' && new Date(x.starts_at) > new Date());
+
+  before(async () => {
+    const c = await api.post('/api/clients', { fullName: 'Le faltó el martes', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+    clientId = c.datos.id;
+    const r = await api.post('/api/session-recurrences', {
+      clientId, weekdays: [1, 3, 4], timeOfDay: '07:00', durationMinutes: 60, mode: 'Presencial'
+    });
+    reglaId = r.datos.recurrence.id;
+  });
+
+  test('arranca sin martes, como se guardó', async () => {
+    assert.deepEqual(await diasDe(), [1, 3, 4]);
+    const martes = (await suyasFuturas()).filter(x => new Date(x.starts_at).getUTCDay() === 2);
+    assert.equal(martes.length, 0);
+  });
+
+  test('añadir el martes lo agenda sin tocar los demás días', async () => {
+    const lunesAntes = (await suyasFuturas()).filter(x => new Date(x.starts_at).getUTCDay() === 1).length;
+
+    const { estado } = await api.patch(`/api/session-recurrences/${reglaId}`, {
+      weekdays: [1, 2, 3, 4], timeOfDay: '07:00', durationMinutes: 60, mode: 'Presencial'
+    });
+    assert.equal(estado, 200);
+
+    assert.deepEqual(await diasDe(), [1, 2, 3, 4]);
+    const despues = await suyasFuturas();
+    assert.ok(despues.filter(x => new Date(x.starts_at).getUTCDay() === 2).length >= 4, 'los martes ya están agendados');
+    assert.equal(despues.filter(x => new Date(x.starts_at).getUTCDay() === 1).length, lunesAntes,
+      'los lunes que ya estaban no se tocan');
+  });
+
+  test('quitar un día retira sus clases futuras', async () => {
+    await api.patch(`/api/session-recurrences/${reglaId}`, {
+      weekdays: [1, 2, 3], timeOfDay: '07:00', durationMinutes: 60, mode: 'Presencial'
+    });
+    const jueves = (await suyasFuturas()).filter(x => new Date(x.starts_at).getUTCDay() === 4);
+    assert.equal(jueves.length, 0, 'quien quita el jueves no quiere seguir viendo jueves');
+  });
+
+  test('cambiar la hora mueve el horario entero', async () => {
+    await api.patch(`/api/session-recurrences/${reglaId}`, {
+      weekdays: [1, 2, 3], timeOfDay: '06:00', durationMinutes: 60, mode: 'Presencial'
+    });
+    const horas = new Set((await suyasFuturas()).map(x => String(x.starts_at).slice(11, 16)));
+    assert.deepEqual([...horas], ['11:00'], 'las 06:00 de Panamá, y ninguna suelta a la hora vieja');
+  });
+});
+
 describe('rellenar no resucita una clase que se movió dentro del mismo día', () => {
   test('si ese día ya entrena, el día está atendido', async () => {
     const c = await api.post('/api/clients', { fullName: 'Movida el mismo día', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });

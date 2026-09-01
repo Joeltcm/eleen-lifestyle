@@ -1,4 +1,4 @@
-const APP_VERSION = '125';
+const APP_VERSION = '126';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1033,7 +1033,9 @@ function newInvoice() {
 // Horarios fijos: verlos y detenerlos. Un horario indefinido sin un sitio
 // visible donde pararlo sería una trampa —seguiría llenando la agenda de
 // alguien que ya no entrena—, así que esto no es opcional.
-const DIAS_CORTOS = ['D', 'L', 'M', 'X', 'J', 'V', 'S'];
+// Tres letras, no una: 'M' vale igual para martes y para miércoles, y el
+// horario de Beatris se guardó sin el martes por eso mismo.
+const DIAS_CORTOS = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
 // Cancelar preguntando si se reprograma. No es un detalle de formulario: una
 // clase movida a otro día no debe penalizar al cliente, y una que simplemente
 // no se dio, sí. Antes ninguna de las dos contaba, así que cancelar salía
@@ -1062,6 +1064,55 @@ function cancelSessionDialog(sesion) {
 
 }
 
+// Editar el horario en vez de tirarlo abajo. Añadir un día olvidado obligaba a
+// detener el horario entero y crear otro, con lo que se perdían las sesiones ya
+// puestas —y quedaban dos reglas para la misma persona si no se acordaba de
+// detener la vieja—.
+function editarHorarioFijo(regla, alGuardar) {
+  if (!regla) return;
+  const marcados = (regla.weekdays || []).map(Number);
+  const box = document.createElement('div');
+  box.innerHTML = `
+    <form id="editar-horario-form">
+      <p class="eyebrow">HORARIO FIJO</p>
+      <h2>Editar horario</h2>
+      <p class="form-summary">${escapeHtml(regla.full_name)}</p>
+      <fieldset class="repetir-semanal"><legend>Días</legend>
+        <div class="dias-semana" id="editar-dias">
+          ${[[1, 'lun'], [2, 'mar'], [3, 'mié'], [4, 'jue'], [5, 'vie'], [6, 'sáb'], [0, 'dom']]
+            .map(([valor, texto]) => `<label><input type="checkbox" value="${valor}" ${marcados.includes(valor) ? 'checked' : ''} /><span>${texto}</span></label>`).join('')}
+        </div>
+      </fieldset>
+      <div class="form-row">
+        <label>Hora<input name="timeOfDay" type="time" required value="${String(regla.time_of_day).slice(0, 5)}" /></label>
+        <label>Duración<select name="durationMinutes">${[30, 45, 60, 75, 90, 120].map(m => `<option value="${m}" ${Number(regla.duration_minutes) === m ? 'selected' : ''}>${m} minutos</option>`).join('')}</select></label>
+      </div>
+      <label>Modalidad<select name="mode">${['Presencial', 'Virtual', 'Exterior'].map(m => `<option ${m === regla.mode ? 'selected' : ''}>${m}</option>`).join('')}</select></label>
+      <label>Hasta (opcional)<input name="endsOn" type="date" value="${dateOnly(regla.ends_on)}" /><small>En blanco, sigue indefinidamente.</small></label>
+      <p class="commercial-note">Los días que quites retiran sus clases futuras que nadie haya tocado. Las ya marcadas o movidas se quedan.</p>
+      <button class="primary wide-button">Guardar horario</button>
+    </form>`;
+  openModal(box);
+  document.getElementById('editar-horario-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    const dias = [...document.querySelectorAll('#editar-dias input:checked')].map(c => Number(c.value));
+    if (!dias.length) { toast('Marca al menos un día', true); return; }
+    const nombres = ['domingos', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábados'];
+    if (!confirmarGuardado(`${regla.full_name}\nLos ${dias.sort().map(d => nombres[d]).join(', ')} a las ${form.get('timeOfDay')}`)) return;
+    try {
+      event.target.classList.add('loading-state');
+      const r = await api(`/api/session-recurrences/${regla.id}`, { method: 'PATCH', body: {
+        weekdays: dias, timeOfDay: form.get('timeOfDay'), durationMinutes: Number(form.get('durationMinutes')),
+        mode: form.get('mode'), endsOn: form.get('endsOn') || null
+      } });
+      await loadData(); renderAll(); modal.close();
+      if (alGuardar) alGuardar();
+      toast(`Horario guardado · ${r.creadas} agendada${r.creadas === 1 ? '' : 's'}${r.retiradas ? ` · ${r.retiradas} retirada${r.retiradas === 1 ? '' : 's'}` : ''}`);
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+
 async function recurrenceManager() {
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">AGENDA</p><h2>Horarios fijos</h2>
@@ -1081,9 +1132,13 @@ async function recurrenceManager() {
         const hora = String(regla.time_of_day).slice(0, 5);
         return `<article class="gasto-item">
           <div><b>${escapeHtml(regla.full_name)}</b><small>${dias} · ${hora} · ${regla.duration_minutes} min${regla.routine_title ? ` · ${escapeHtml(regla.routine_title)}` : ''}<br>${regla.proximas} sesion${regla.proximas === 1 ? '' : 'es'} ya agendada${regla.proximas === 1 ? '' : 's'}${regla.ends_on ? ` · hasta ${dateOnly(regla.ends_on)}` : ' · sin fecha de fin'}</small></div>
+          <button class="secondary session-use" data-editar-horario="${regla.id}">Editar</button>
           <button class="secondary session-use" data-detener-horario="${regla.id}" data-nombre="${escapeHtml(regla.full_name)}">Detener</button>
         </article>`;
       }).join('')}</div>` : '<p class="empty">No hay horarios fijos activos.</p>';
+      destino.querySelectorAll('[data-editar-horario]').forEach(boton => {
+        boton.onclick = () => editarHorarioFijo(reglas.find(r => r.id === boton.dataset.editarHorario), pintar);
+      });
       const rellenar = document.getElementById('rellenar-horarios');
       if (rellenar) rellenar.onclick = async () => {
         rellenar.disabled = true;
