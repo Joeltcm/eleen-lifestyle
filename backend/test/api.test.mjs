@@ -511,6 +511,67 @@ describe('editar una sesión de un horario indefinido', () => {
   });
 });
 
+describe('el resultado de una sesión se dice, no se deduce', () => {
+  let clientId, sesion;
+  before(async () => {
+    const plan = await api.post('/api/plans', { name: 'Mensual para marcar', billingModel: 'monthly', price: 100, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Se marcó por error', planId: plan.datos.id, cutoffDay: 1 });
+    clientId = c.datos.id;
+    const p = await api.post('/api/packages', { clientId, totalSessions: 8, amount: 100, kind: 'monthly' });
+    await api.post(`/api/invoices/${p.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-01' });
+    // Mañana: todavía no ha ocurrido, así que no puede haberse incumplido.
+    const manana = new Date(Date.now() + 24 * 3600_000).toISOString();
+    const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [manana], durationMinutes: 60, mode: 'Presencial' });
+    sesion = lote.datos.sesiones[0];
+  });
+
+  test('desmarcar por error la devuelve a programada, no a incumplida', async () => {
+    await api.patch(`/api/sessions/${sesion.id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    const marcada = (await api.get('/api/packages')).datos.find(p => p.client_id === clientId);
+    assert.equal(Number(marcada.used_sessions), 1, 'marcarla descuenta');
+
+    const { datos } = await api.patch(`/api/sessions/${sesion.id}/compliance`, { outcome: 'scheduled', completionPercent: 0 });
+    assert.equal(datos.status, 'scheduled',
+      'quitar la marca de una clase que aún no ha ocurrido no puede dejarla incumplida');
+    const devuelta = (await api.get('/api/packages')).datos.find(p => p.client_id === clientId);
+    assert.equal(Number(devuelta.used_sessions), 0, 'y le devuelve la sesión al saldo');
+  });
+
+  test('y no cumplió sigue estando, cuando se quiere decir eso', async () => {
+    const { datos } = await api.patch(`/api/sessions/${sesion.id}/compliance`, { outcome: 'no_show', completionPercent: 0 });
+    assert.equal(datos.status, 'no_show');
+  });
+
+  test('el contrato viejo sigue funcionando', async () => {
+    // El registro diario y el portal siguen mandando 'completed'.
+    const { datos } = await api.patch(`/api/sessions/${sesion.id}/compliance`, { completed: true, completionPercent: 100 });
+    assert.equal(datos.status, 'completed');
+  });
+});
+
+describe('rellenar los días que le falten a un horario fijo', () => {
+  test('vuelve a poner el día que se borró a mano', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Horario con hueco', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+    await api.post('/api/session-recurrences', {
+      clientId: c.datos.id, weekdays: [0, 1, 2, 3, 4, 5, 6], timeOfDay: '06:15', durationMinutes: 60, mode: 'Presencial'
+    });
+    const suyas = (await api.get('/api/sessions')).datos
+      .filter(x => x.client_id === c.datos.id && new Date(x.starts_at) > new Date());
+    const victima = suyas[2];
+    await api.delete(`/api/sessions/${victima.id}?rescheduled=false`);
+    await api.delete(`/api/sessions/${victima.id}/permanent`);
+
+    const { estado, datos } = await api.post('/api/session-recurrences/extend', {});
+    assert.equal(estado, 200);
+    assert.ok(datos.creadas >= 1, 'el día vacío se vuelve a llenar en el momento');
+
+    const despues = (await api.get('/api/sessions')).datos
+      .filter(x => x.client_id === c.datos.id && String(x.starts_at).slice(0, 10) === String(victima.starts_at).slice(0, 10)
+        && x.status === 'scheduled');
+    assert.equal(despues.length, 1);
+  });
+});
+
 describe('vencimiento de los paquetes', () => {
   let clientId;
   before(async () => {

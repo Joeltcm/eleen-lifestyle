@@ -247,3 +247,9 @@ select.filter{padding:11px 13px;font:600 13px 'DM Sans';cursor:pointer}
 /* Aviso de choque de horario. Ámbar, no rojo: no es un error, es un dato que
    la entrenadora puede ignorar a propósito cuando dos entrenan juntos. */
 .conflict-warn{margin:8px 0 0;padding:9px 11px;border-radius:10px;background:#fbf1e8;color:#8a6652;font-size:11px;line-height:1.45}
+
+/* Resultado de la sesión: tres estados en claro, no una casilla que al
+   desmarcarse significaba "no cumplió". */
+.completion-outcome select{font-size:11px;padding:7px 8px;min-width:118px}
+.completion-percent input:disabled{opacity:.45}
+@media(max-width:560px){.completion-outcome{flex:1 1 100%}.completion-outcome select{width:100%}}

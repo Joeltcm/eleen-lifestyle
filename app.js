@@ -1,4 +1,4 @@
-const APP_VERSION = '121';
+const APP_VERSION = '122';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -319,7 +319,11 @@ const calendarPeriodLabel = ({ start, end }) => {
 };
 const sessionsThisWeek = () => { const start = mondayFor(today); const end = new Date(start); end.setDate(start.getDate() + 7); return data.sessions.filter(session => { const date = new Date(`${session.date}T12:00:00`); return date >= start && date < end; }); };
 const sessionStateLabel = session => session.status === 'completed' ? 'Realizada' : session.status === 'no_show' ? 'No cumplió' : session.status === 'cancelled' ? 'Cancelada' : 'Programada';
-const sessionComplianceForm = session => `<form class="session-compliance" data-session-compliance="${session.id}"><label class="completion-check"><input name="completed" type="checkbox" ${session.status === 'completed' ? 'checked' : ''} /><span>Cumplió</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${session.status === 'completed' ? session.completionPercent || 100 : 0}" /><span>%</span></label><button class="secondary" title="Guardar cumplimiento">Guardar</button></form>`;
+// El resultado se elige, no se deduce de una casilla. Con la casilla, quitar
+// una marca puesta por error dejaba la sesión como incumplida —y le bajaba el
+// cumplimiento al cliente por una clase que ni siquiera había llegado—. Los
+// tres estados son distintos y ninguno es el "no" del otro.
+const sessionComplianceForm = session => `<form class="session-compliance" data-session-compliance="${session.id}"><label class="completion-outcome"><select name="outcome"><option value="scheduled" ${session.status !== 'completed' && session.status !== 'no_show' ? 'selected' : ''}>Sin marcar</option><option value="completed" ${session.status === 'completed' ? 'selected' : ''}>Cumplió</option><option value="no_show" ${session.status === 'no_show' ? 'selected' : ''}>No cumplió</option></select></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" ${session.status === 'completed' ? '' : 'disabled'} value="${session.status === 'completed' ? session.completionPercent || 100 : 0}" /><span>%</span></label><button class="secondary" title="Guardar cumplimiento">Guardar</button></form>`;
 function renderDashboard() {
   const confirmed = monthInvoices().filter(item => item.status === 'confirmed').reduce((sum, item) => sum + item.amount, 0);
   const pending = data.invoices.filter(item => item.status === 'pending').reduce((sum, item) => sum + item.balance, 0);
@@ -1037,6 +1041,8 @@ async function recurrenceManager() {
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">AGENDA</p><h2>Horarios fijos</h2>
     <p style="color:#6f7b75;margin-top:-12px">Se repiten solos hasta que los detengas. Detener uno retira sus sesiones futuras y deja intactas las pasadas.</p>
+    <p style="color:#6f7b75;margin-top:-12px">Si a un horario le falta un día, "Rellenar" vuelve a crear los que estén vacíos en las próximas ocho semanas. Si tras pulsarlo el día sigue vacío, es que la regla no lo incluye.</p>
+    <button type="button" class="secondary wide-button" id="rellenar-horarios">Rellenar días que falten</button>
     <div id="recurrencias-lista"><p class="empty">Cargando…</p></div>`;
   openModal(box, true);
   const pintar = async () => {
@@ -1052,6 +1058,16 @@ async function recurrenceManager() {
           <button class="secondary session-use" data-detener-horario="${regla.id}" data-nombre="${escapeHtml(regla.full_name)}">Detener</button>
         </article>`;
       }).join('')}</div>` : '<p class="empty">No hay horarios fijos activos.</p>';
+      const rellenar = document.getElementById('rellenar-horarios');
+      if (rellenar) rellenar.onclick = async () => {
+        rellenar.disabled = true;
+        try {
+          const r = await api('/api/session-recurrences/extend', { method: 'POST' });
+          await loadData(); renderAll(); pintar();
+          toast(r.creadas ? `${r.creadas} sesion${r.creadas === 1 ? '' : 'es'} rellenada${r.creadas === 1 ? '' : 's'}` : 'No faltaba ningún día');
+        } catch (error) { toast(error.message, true); }
+        finally { rellenar.disabled = false; }
+      };
       destino.querySelectorAll('[data-detener-horario]').forEach(boton => {
         boton.onclick = async () => {
           if (!confirm(`¿Detener el horario fijo de ${boton.dataset.nombre}?\n\nSe retiran sus sesiones futuras que todavía nadie marcó. Las pasadas y las que ya tienen asistencia se quedan.`)) return;
@@ -2809,13 +2825,22 @@ document.addEventListener('click', event => {
 });
 document.addEventListener('submit', async event => {
   const form = event.target.closest('[data-session-compliance]'); if (!form) return;
-  event.preventDefault(); const completed = form.elements.completed.checked; const completionPercent = completed ? Number(form.elements.completionPercent.value) : 0;
-  try { form.classList.add('loading-state'); await api(`/api/sessions/${form.dataset.sessionCompliance}/compliance`, { method: 'PATCH', body: { completed, completionPercent } }); await loadData(); renderAll(); toast('Cumplimiento actualizado'); }
+  event.preventDefault();
+  const outcome = form.elements.outcome ? form.elements.outcome.value : (form.elements.completed.checked ? 'completed' : 'no_show');
+  const completionPercent = outcome === 'completed' ? Number(form.elements.completionPercent.value) : 0;
+  const dicho = { scheduled: 'Sin marcar', completed: 'Cumplió', no_show: 'No cumplió' }[outcome];
+  try { form.classList.add('loading-state'); await api(`/api/sessions/${form.dataset.sessionCompliance}/compliance`, { method: 'PATCH', body: { outcome, completionPercent } }); await loadData(); renderAll(); toast(`Guardado · ${dicho}`); }
   catch (error) { toast(error.message, true); form.classList.remove('loading-state'); }
 });
 document.addEventListener('change', event => {
   const checkbox = event.target.matches('input[name="completed"]') ? event.target : null;
   if (checkbox && checkbox.closest('[data-session-compliance], [data-portal-routine], [data-portal-session]')) { const percent = checkbox.closest('form').elements.completionPercent; percent.value = checkbox.checked ? (Number(percent.value) || 100) : 0; }
+  const outcome = event.target.matches('select[name="outcome"]') ? event.target : null;
+  if (outcome && outcome.closest('[data-session-compliance]')) {
+    const percent = outcome.closest('form').elements.completionPercent;
+    percent.value = outcome.value === 'completed' ? (Number(percent.value) || 100) : 0;
+    percent.disabled = outcome.value !== 'completed';
+  }
 });
 document.querySelector('.modal-close').addEventListener('click', () => modal.close());
 document.getElementById('client-search').addEventListener('input', event => renderClients(event.target.value));

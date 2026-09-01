@@ -1504,6 +1504,15 @@ app.post('/api/session-recurrences', { preHandler: requireStaff }, async (reques
   return reply.code(201).send({ recurrence: regla, creadas });
 });
 
+// Rellenar ahora los días que le falten a los horarios fijos. El proceso pasa
+// solo cada seis horas, y esperar media jornada para ver si un día aparece no
+// es forma de averiguar nada. Con esto se comprueba en el momento: si el día
+// sigue vacío después de pulsar, es que la regla no lo incluye.
+app.post('/api/session-recurrences/extend', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  return { creadas: await extenderRecurrencias(auth.sub) };
+});
+
 app.get('/api/session-recurrences', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`
@@ -1693,10 +1702,33 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
   catch (error) { app.log.warn({ err: error, sessionId: id }, 'Session cancelled but Google Calendar deletion failed'); }
   return { cancelled: true, session };
 });
-async function recordSessionCompliance(id: string, ownerId: string, markedBy: string, completed: boolean, completionPercent: number) {
+// El resultado de una sesión es de tres estados, no de dos. Antes se deducía
+// de una casilla: desmarcarla equivalía a decir "no cumplió", así que quien la
+// marcaba por error no tenía forma de retirar la marca —al quitarla y guardar,
+// la sesión quedaba incumplida y le bajaba el cumplimiento al cliente por algo
+// que ni siquiera había ocurrido todavía—. Volver a "programada" es su propio
+// estado, y se pide en claro.
+type ResultadoSesion = 'scheduled' | 'completed' | 'no_show';
+
+async function recordSessionCompliance(id: string, ownerId: string, markedBy: string, resultado: ResultadoSesion, completionPercent: number) {
+  const completed = resultado === 'completed';
   return sql.begin(async transaction => {
     const [current] = await transaction`SELECT s.* FROM sessions s JOIN clients c ON c.id = s.client_id WHERE s.id = ${id} AND c.owner_id = ${ownerId} FOR UPDATE`;
     if (!current) return null;
+    // Devolverla a programada: se deshace lo que la marca había hecho —incluido
+    // el descuento del saldo— y la sesión vuelve a estar por delante, sin
+    // contar ni a favor ni en contra.
+    if (resultado === 'scheduled') {
+      if (current.package_debited && current.package_id) {
+        await transaction`UPDATE session_packages SET used_sessions = GREATEST(0, used_sessions - 1), status = 'active' WHERE id = ${current.package_id}`;
+      }
+      const [devuelta] = await transaction`
+        UPDATE sessions SET status = 'scheduled', completion_percent = 0, package_id = null, package_debited = false,
+          completed_by_user_id = null, completion_recorded_at = null, updated_at = now()
+        WHERE id = ${id} RETURNING *
+      `;
+      return devuelta;
+    }
     if (!completed && current.package_debited && current.package_id) {
       await transaction`UPDATE session_packages SET used_sessions = GREATEST(0, used_sessions - 1), status = 'active' WHERE id = ${current.package_id}`;
       const [updated] = await transaction`
@@ -1746,14 +1778,21 @@ async function recordSessionCompliance(id: string, ownerId: string, markedBy: st
 
 app.post('/api/sessions/:id/complete', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const session = await recordSessionCompliance(id, auth.sub, auth.sub, true, 100);
+  const session = await recordSessionCompliance(id, auth.sub, auth.sub, 'completed', 100);
   if (!session) return reply.code(404).send({ error: 'Sesión no encontrada' }); return session;
 });
 
-const sessionComplianceSchema = z.object({ completed: z.boolean(), completionPercent: z.coerce.number().int().min(0).max(100) });
+// 'completed' se sigue aceptando: lo usan el registro diario y el portal, y
+// cambiarles el contrato de golpe rompería dos pantallas por arreglar una.
+const sessionComplianceSchema = z.object({
+  completed: z.boolean().optional(),
+  outcome: z.enum(['scheduled', 'completed', 'no_show']).optional(),
+  completionPercent: z.coerce.number().int().min(0).max(100)
+}).refine(v => v.outcome !== undefined || v.completed !== undefined, { message: 'Falta el resultado de la sesión' });
 app.patch('/api/sessions/:id/compliance', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = sessionComplianceSchema.parse(request.body);
-  const session = await recordSessionCompliance(id, auth.sub, auth.sub, input.completed, input.completed ? input.completionPercent : 0);
+  const resultado: ResultadoSesion = input.outcome ?? (input.completed ? 'completed' : 'no_show');
+  const session = await recordSessionCompliance(id, auth.sub, auth.sub, resultado, resultado === 'completed' ? input.completionPercent : 0);
   if (!session) return reply.code(404).send({ error: 'Sesión no encontrada' });
   return session;
 });
@@ -1834,7 +1873,7 @@ app.post('/api/trainings/daily', { preHandler: requireStaff }, async (request, r
 
   // El descuento del paquete reutiliza la misma ruta que completar una sesión
   // desde la agenda, para que no haya dos maneras distintas de consumirlo.
-  for (const sessionId of result.created) await recordSessionCompliance(sessionId, auth.sub, auth.sub, true, 100);
+  for (const sessionId of result.created) await recordSessionCompliance(sessionId, auth.sub, auth.sub, 'completed', 100);
 
   return reply.code(201).send({ date: input.date, registrados: result.created.length, eliminados: result.removed });
 });
@@ -3032,7 +3071,7 @@ app.patch('/api/portal/sessions/:id/compliance', { preHandler: requireAuth }, as
   const id = z.string().uuid().parse((request.params as { id: string }).id); const input = sessionComplianceSchema.parse(request.body);
   const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
   const [owned] = await sql`SELECT id FROM sessions WHERE id = ${id} AND client_id = ${client.id}`; if (!owned) return reply.code(404).send({ error: 'Sesión no encontrada' });
-  const session = await recordSessionCompliance(id, client.owner_id, auth.sub, input.completed, input.completed ? input.completionPercent : 0);
+  const session = await recordSessionCompliance(id, client.owner_id, auth.sub, input.outcome ?? (input.completed ? 'completed' : 'no_show'), input.completed ? input.completionPercent : 0);
   return session;
 });
 
