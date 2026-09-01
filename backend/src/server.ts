@@ -1418,7 +1418,15 @@ app.post('/api/sessions', { preHandler: requireStaff }, async (request, reply) =
 // las sesiones de las próximas semanas, en vez de intentar guardar infinitas.
 const HORIZONTE_DIAS = 56;
 
-async function extenderRecurrencias(ownerId?: string) {
+// `forzar` es la diferencia entre el proceso automático y el botón.
+//
+// El automático es prudente: si una ocurrencia ya está marcada, no la vuelve a
+// crear, porque puede ser una clase que alguien movió o canceló y resucitarla
+// sería deshacer una decisión. El botón lo pulsa una persona diciendo
+// "rellena lo que falte", y entonces manda ella: si ese día está vacío a esa
+// hora, se crea, aunque quede una marca vieja apuntando a otra parte. La marca
+// suelta se libera antes, que si no el índice único rechazaría la nueva.
+async function extenderRecurrencias(ownerId?: string, forzar = false) {
   const reglas = await sql`
     SELECT r.id, r.client_id, r.routine_id, r.weekdays, r.time_of_day, r.duration_minutes,
            r.mode, r.notes, r.starts_on, r.ends_on, c.owner_id
@@ -1435,6 +1443,24 @@ async function extenderRecurrencias(ownerId?: string) {
     // Una sola consulta por regla: genera los días del horizonte, se queda con
     // los de la semana elegidos y salta los que ya tienen sesión viva. El
     // AT TIME ZONE convierte "las 5:30 en Panamá" al instante correcto.
+    if (forzar) {
+      // Se sueltan sólo las marcas de días en los que el cliente no tiene
+      // ninguna clase viva. Mirar únicamente "a esa hora" no bastaba: una clase
+      // movida a otra hora del mismo día dejaba libre la hora de la regla, y
+      // rellenar le habría puesto una segunda encima —resucitando justo lo que
+      // se movió a propósito—. Si ese día ya entrena, el día está atendido.
+      await sql`
+        UPDATE sessions SET recurrence_on = NULL
+        WHERE recurrence_id = ${regla.id} AND recurrence_on IS NOT NULL
+          AND recurrence_on >= current_date
+          AND NOT EXISTS (
+            SELECT 1 FROM sessions viva
+            WHERE viva.client_id = ${regla.client_id}
+              AND viva.status <> 'cancelled'
+              AND (viva.starts_at AT TIME ZONE 'America/Panama')::date = sessions.recurrence_on
+          )
+      `;
+    }
     const filas = await sql`
       INSERT INTO sessions (client_id, routine_id, starts_at, duration_minutes, mode, notes, recurrence_id, recurrence_on)
       SELECT ${regla.client_id}, ${regla.routine_id}, candidato.momento,
@@ -1520,7 +1546,8 @@ app.post('/api/session-recurrences', { preHandler: requireStaff }, async (reques
 // sigue vacío después de pulsar, es que la regla no lo incluye.
 app.post('/api/session-recurrences/extend', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
-  const { creadas, fallidas } = await extenderRecurrencias(auth.sub);
+  // El botón fuerza; el proceso de cada seis horas no.
+  const { creadas, fallidas } = await extenderRecurrencias(auth.sub, true);
   return { creadas, fallidas, saltados: await diasSaltados(auth.sub) };
 });
 

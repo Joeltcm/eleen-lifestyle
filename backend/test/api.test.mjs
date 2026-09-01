@@ -572,24 +572,85 @@ describe('rellenar los días que le falten a un horario fijo', () => {
   });
 });
 
-describe('por qué un día del horario fijo sigue vacío', () => {
-  test('lo dice cuando la clase se movió a otra hora', async () => {
-    const c = await api.post('/api/clients', { fullName: 'Se movió su clase', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+describe('rellenar repone el día aunque la marca se haya quedado colgada', () => {
+  // El caso de Beatris: el martes lleva semanas sin aparecer y el proceso
+  // automático no lo repone porque la ocurrencia figura como atendida. El
+  // botón lo pulsa una persona diciendo "rellena": ahí manda ella.
+  test('el día vacío se crea, y el que tiene clase no se duplica', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Marca colgada', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
     await api.post('/api/session-recurrences', {
-      clientId: c.datos.id, weekdays: [0, 1, 2, 3, 4, 5, 6], timeOfDay: '06:45', durationMinutes: 60, mode: 'Presencial'
+      clientId: c.datos.id, weekdays: [0, 1, 2, 3, 4, 5, 6], timeOfDay: '06:20', durationMinutes: 60, mode: 'Presencial'
+    });
+    const suyas = (await api.get('/api/sessions')).datos
+      .filter(x => x.client_id === c.datos.id && new Date(x.starts_at) > new Date())
+      .sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)));
+    // Se mueve a OTRO día: el suyo queda del todo vacío y la marca, colgada
+    // apuntando a un día en el que ya no hay nada. Es el caso de los martes.
+    const movida = suyas[4];
+    const diaVacio = String(movida.starts_at).slice(0, 10);
+    const otroDia = new Date(movida.starts_at); otroDia.setUTCDate(otroDia.getUTCDate() + 14); otroDia.setUTCHours(otroDia.getUTCHours() + 6);
+    await api.patch(`/api/sessions/${movida.id}`, { startsAt: otroDia.toISOString(), durationMinutes: 60, mode: 'Presencial' });
+
+    const antes = (await api.get('/api/sessions')).datos
+      .filter(x => x.client_id === c.datos.id && x.status !== 'cancelled' && String(x.starts_at).slice(0, 10) === diaVacio);
+    assert.equal(antes.length, 0, 'el día quedó vacío del todo');
+
+    await api.post('/api/session-recurrences/extend', {});
+
+    const despues = (await api.get('/api/sessions')).datos
+      .filter(x => x.client_id === c.datos.id && x.status !== 'cancelled');
+    const enSuHora = despues.filter(x => String(x.starts_at).slice(0, 10) === diaVacio && String(x.starts_at).slice(11, 16) === '11:20');
+    assert.equal(enSuHora.length, 1, 'el botón repone la clase del día vacío');
+
+    // Y los días que sí tenían clase siguen con una sola.
+    const diaIntacto = String(suyas[6].starts_at).slice(0, 10);
+    const delOtro = despues.filter(x => String(x.starts_at).slice(0, 10) === diaIntacto);
+    assert.equal(delOtro.length, 1, 'forzar no puede duplicar lo que ya estaba');
+  });
+});
+
+describe('rellenar no resucita una clase que se movió dentro del mismo día', () => {
+  test('si ese día ya entrena, el día está atendido', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Movida el mismo día', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+    await api.post('/api/session-recurrences', {
+      clientId: c.datos.id, weekdays: [0, 1, 2, 3, 4, 5, 6], timeOfDay: '13:40', durationMinutes: 60, mode: 'Presencial'
     });
     const suyas = (await api.get('/api/sessions')).datos
       .filter(x => x.client_id === c.datos.id && new Date(x.starts_at) > new Date())
       .sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)));
     const movida = suyas[3];
-    const nueva = new Date(movida.starts_at); nueva.setUTCHours(nueva.getUTCHours() + 5);
-    await api.patch(`/api/sessions/${movida.id}`, { startsAt: nueva.toISOString(), durationMinutes: 60, mode: 'Presencial' });
+    const dia = String(movida.starts_at).slice(0, 10);
+    // Misma fecha, dos horas más tarde: la entrenadora la corrió a propósito.
+    const masTarde = new Date(movida.starts_at); masTarde.setUTCHours(masTarde.getUTCHours() + 2);
+    await api.patch(`/api/sessions/${movida.id}`, { startsAt: masTarde.toISOString(), durationMinutes: 60, mode: 'Presencial' });
+
+    await api.post('/api/session-recurrences/extend', {});
+
+    const eseDia = (await api.get('/api/sessions')).datos
+      .filter(x => x.client_id === c.datos.id && x.status !== 'cancelled' && String(x.starts_at).slice(0, 10) === dia);
+    assert.equal(eseDia.length, 1,
+      'correr una clase de hora no es dejar el día libre: rellenar no puede ponerle otra');
+  });
+});
+
+describe('por qué un día del horario fijo sigue vacío', () => {
+  test('después de forzar no queda ningún día sin explicar', async () => {
+    // Tras rellenar, un día vacío sólo puede seguir vacío por algo que la
+    // aplicación no sabe nombrar, y eso es justo lo que hay que ver.
+    const c = await api.post('/api/clients', { fullName: 'Nada sin explicar', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+    await api.post('/api/session-recurrences', {
+      clientId: c.datos.id, weekdays: [0, 1, 2, 3, 4, 5, 6], timeOfDay: '21:35', durationMinutes: 60, mode: 'Presencial'
+    });
+    const suyas = (await api.get('/api/sessions')).datos
+      .filter(x => x.client_id === c.datos.id && new Date(x.starts_at) > new Date())
+      .sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)));
+    const movida = suyas[2];
+    const otraHora = new Date(movida.starts_at); otraHora.setUTCHours(otraHora.getUTCHours() + 3);
+    await api.patch(`/api/sessions/${movida.id}`, { startsAt: otraHora.toISOString(), durationMinutes: 60, mode: 'Presencial' });
 
     const { datos } = await api.post('/api/session-recurrences/extend', {});
-    const suelto = (datos.saltados || []).find(f => f.full_name === 'Se movió su clase');
-    assert.ok(suelto, 'el día vacío tiene que salir explicado, no en silencio');
-    assert.ok(suelto.marcada, 'y el motivo es que su clase está en otra hora');
-    assert.equal(String(suelto.marcada.id), String(movida.id));
+    const suyos = (datos.saltados || []).filter(f => f.full_name === 'Nada sin explicar');
+    assert.equal(suyos.length, 0, 'forzar repuso el día, así que no queda nada que explicar');
   });
 
   test('y no inventa motivos donde no los hay', async () => {

@@ -1,4 +1,4 @@
-const APP_VERSION = '124';
+const APP_VERSION = '125';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1066,7 +1066,7 @@ async function recurrenceManager() {
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">AGENDA</p><h2>Horarios fijos</h2>
     <p style="color:#6f7b75;margin-top:-12px">Se repiten solos hasta que los detengas. Detener uno retira sus sesiones futuras y deja intactas las pasadas.</p>
-    <p style="color:#6f7b75;margin-top:-12px">Si a un horario le falta un día, "Rellenar" vuelve a crear los que estén vacíos en las próximas ocho semanas. Si tras pulsarlo el día sigue vacío, es que la regla no lo incluye.</p>
+    <p style="color:#6f7b75;margin-top:-12px">Vuelve a crear los días en los que el cliente no tiene ninguna clase, dentro de las próximas ocho semanas. No toca los días en que sí entrena, aunque la clase se haya corrido de hora.</p>
     <button type="button" class="secondary wide-button" id="rellenar-horarios">Rellenar días que falten</button>
     <div id="recurrencias-lista"><p class="empty">Cargando…</p></div>
     <div id="horarios-diagnostico"></div>`;
