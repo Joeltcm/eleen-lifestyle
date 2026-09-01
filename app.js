@@ -1,4 +1,4 @@
-const APP_VERSION = '134';
+const APP_VERSION = '135';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -618,8 +618,38 @@ function renderCalendar() {
   grid.classList.toggle('eligiendo-dia', Boolean(sesionAMover));
   const periodName = calendarMode === 'day' ? 'del día' : calendarMode === 'week' ? 'de la semana' : 'del mes';
   document.getElementById('session-control-title').textContent = `Sesiones ${periodName}`;
-  document.getElementById('session-control-copy').textContent = visibleSessions.length ? `${visibleSessions.length} sesión${visibleSessions.length !== 1 ? 'es' : ''} en el período visible` : 'No hay sesiones en el período visible';
-  document.getElementById('session-list').innerHTML = visibleSessions.length ? visibleSessions.map(session => `<div class="session-row"><div class="session-date"><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric' }).format(new Date(`${session.date}T12:00:00`))}</b><span>${session.time} · ${session.durationMinutes} min</span></div><div class="session-person"><b>${escapeHtml(session.client)}</b><span>${escapeHtml(session.routine)} · ${escapeHtml(session.mode)}</span>${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}</div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span>${session.status === 'cancelled' ? `<div class="session-management"><button type="button" class="secondary" data-purge-session="${session.id}">Quitar de la agenda</button></div>` : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button><button type="button" class="secondary" data-cancel-session="${session.id}">Cancelar</button><button type="button" class="secondary" data-purge-session="${session.id}">Eliminar</button>${sessionComplianceForm(session)}</div>`}</div>`).join('') : `<p class="empty">No hay sesiones programadas ${periodName}.</p>`;
+  document.getElementById('session-control-copy').textContent = visibleSessions.length ? `${visibleSessions.length} ${visibleSessions.length === 1 ? 'sesión' : 'sesiones'} en el período visible` : 'No hay sesiones en el período visible';
+  // Agrupada por día y plegada. Cuarenta clientes hacen una lista que no se
+  // acaba nunca, y el noventa por ciento de lo que ocupa —editar, cancelar,
+  // eliminar, marcar cumplimiento— sólo hace falta en la clase que se está
+  // tocando. Cada línea se abre sola al pulsarla; el resto se queda en una
+  // línea de hora, nombre y estado.
+  const porDia = new Map();
+  for (const session of visibleSessions) {
+    if (!porDia.has(session.date)) porDia.set(session.date, []);
+    porDia.get(session.date).push(session);
+  }
+  const hoyClave = dateKey(today);
+  document.getElementById('session-list').innerHTML = visibleSessions.length
+    ? [...porDia.entries()].map(([dia, sesiones]) => {
+      const titulo = new Intl.DateTimeFormat('es-PA', { weekday: 'long', day: 'numeric', month: 'short' }).format(new Date(`${dia}T12:00:00`));
+      const pendientes = sesiones.filter(s => s.status === 'scheduled').length;
+      return `<section class="dia-sesiones${dia === hoyClave ? ' hoy' : ''}">
+        <h4>${escapeHtml(titulo)}<span>${sesiones.length} clase${sesiones.length === 1 ? '' : 's'}${pendientes && pendientes !== sesiones.length ? ` · ${pendientes} sin marcar` : ''}</span></h4>
+        ${sesiones.map(session => `<details class="session-row"${session.date === hoyClave && session.status === 'scheduled' ? '' : ''}>
+          <summary>
+            <b class="sesion-hora">${session.time}</b>
+            <span class="sesion-quien">${escapeHtml(session.client)}<small>${escapeHtml(session.routine)} · ${session.durationMinutes} min</small></span>
+            <span class="session-state ${session.status}">${sessionStateLabel(session)}</span>
+          </summary>
+          ${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}
+          ${session.status === 'cancelled'
+            ? `<div class="session-management"><button type="button" class="secondary" data-purge-session="${session.id}">Quitar de la agenda</button></div>`
+            : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button><button type="button" class="secondary" data-cancel-session="${session.id}">Cancelar</button><button type="button" class="secondary" data-purge-session="${session.id}">Eliminar</button>${sessionComplianceForm(session)}</div>`}
+        </details>`).join('')}
+      </section>`;
+    }).join('')
+    : `<p class="empty">No hay sesiones programadas ${periodName}.</p>`;
 }
 const routineVideoCount = routine => (routine.exercises || []).filter(exercise => {
   const entry = exerciseCatalog.find(item => item.id === exercise.catalogId || item.slug === exercise.catalogId);
