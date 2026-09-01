@@ -1,4 +1,4 @@
-const APP_VERSION = '126';
+const APP_VERSION = '127';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -986,7 +986,31 @@ function newInvoice() {
       ? 'Vence en el próximo corte del cliente. Déjalo en 0 si esta mensualidad no limita sesiones.'
       : 'Se descuentan al completar cada sesión.';
   };
-  concept.addEventListener('change', togglePackage); togglePackage();
+  // Si el cliente ya tiene saldo, decirlo antes de cobrar otro. Un cobro extra
+  // no reemplaza al que ya está: se suma. Sin verlo aquí, la única forma de
+  // saber con cuántas clases acaba el cliente era ir a Control de paquetes,
+  // hacer la cuenta de cabeza y volver.
+  const avisoSaldo = document.createElement('p');
+  avisoSaldo.className = 'conflict-warn';
+  avisoSaldo.hidden = true;
+  concept.closest('label').after(avisoSaldo);
+
+  const revisarSaldoExistente = () => {
+    const cliente = data.clients.find(item => item.id === selection.value);
+    const suyos = cliente
+      ? data.packages.filter(pack => pack.clientId === cliente.id && pack.status === 'confirmed' && remainingSessions(pack) > 0)
+      : [];
+    if (!cliente || !suyos.length || !conSesiones()) { avisoSaldo.hidden = true; return; }
+    const disponibles = suyos.reduce((total, pack) => total + remainingSessions(pack), 0);
+    const detalle = suyos.map(pack => `${pack.kind === 'monthly' ? 'mensualidad' : 'paquete'} de ${pack.total} (${remainingSessions(pack)} disponible${remainingSessions(pack) === 1 ? '' : 's'}${pack.expiresOn ? `, vence ${formatoDiaCorto(pack.expiresOn)}` : ', sin vencimiento'})`).join(' · ');
+    const nuevas = Number(sessionsInput?.value) || 0;
+    avisoSaldo.innerHTML = `<b>${escapeHtml(cliente.name)} ya tiene saldo:</b> ${escapeHtml(detalle)}.<br>${nuevas
+      ? `Estas ${nuevas} <b>se suman</b>: quedaría con <b>${disponibles + nuevas} sesiones disponibles</b>.`
+      : 'Este cobro no añade sesiones al saldo que ya tiene.'}`;
+    avisoSaldo.hidden = false;
+  };
+
+  concept.addEventListener('change', () => { togglePackage(); revisarSaldoExistente(); }); togglePackage();
   const amountInput = document.querySelector('#invoice-form [name="amount"]'); const dueInput = document.querySelector('#invoice-form [name="due"]'); const sessionsInput = document.querySelector('#invoice-form [name="sessions"]');
   const fillClientPlan = () => { const client = data.clients.find(item => item.id === selection.value); if (!client) return; amountInput.value = client.plan; concept.value = client.billingModel === 'package' ? 'Paquete de sesiones' : client.billingModel === 'single' ? 'Sesión individual' : 'Mensualidad'; sessionsInput.value = client.packageSessions || client.sessionsIncluded || 0;
     // La fecha se propone a partir de la vigencia del plan, pero queda escrita
@@ -1005,8 +1029,10 @@ function newInvoice() {
         pista.textContent = 'Su plan no fija vigencia. Sin fecha, el saldo no caduca.';
       }
     }
-    togglePackage(); };
+    togglePackage(); revisarSaldoExistente(); };
   dueInput.value = dateKey(today); selection.addEventListener('change', fillClientPlan); fillClientPlan();
+  sessionsInput?.addEventListener('input', revisarSaldoExistente);
+  revisarSaldoExistente();
   document.getElementById('invoice-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target); const method = form.get('method');
     const cliente = data.clients.find(c => c.id === form.get('client'));
