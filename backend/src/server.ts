@@ -3661,6 +3661,12 @@ app.get('/api/clients/:clientId/inbody', { preHandler: requireStaff }, async (re
   });
   return { assessments: withChanges };
 });
+// Resumen de evaluaciones para la pantalla de clientes. Evita el patrón N+1
+// de pedir un endpoint separado por cada expediente al iniciar la PWA.
+app.get('/api/inbody', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  return sql`SELECT ia.* FROM inbody_assessments ia JOIN clients c ON c.id = ia.client_id WHERE c.owner_id = ${auth.sub} ORDER BY ia.client_id, ia.tested_at`;
+});
 app.post('/api/inbody', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = inbodySchema.parse(request.body);
   const [assessment] = await sql`INSERT INTO inbody_assessments (client_id, document_id, device_model, tested_at, values, confidence, extraction_status) SELECT c.id, ${input.documentId || null}, ${input.deviceModel || null}, ${input.testedAt}, ${sql.json(input.values)}, ${sql.json(input.confidence)}, ${input.extractionStatus} FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} RETURNING *`;

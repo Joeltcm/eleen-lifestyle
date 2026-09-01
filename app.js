@@ -194,7 +194,7 @@ async function refreshGoogleCalendarState() {
   data.googleCalendar = await api('/api/integrations/google-calendar/status').catch(() => ({ configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } }));
 }
 async function loadData() {
-  const [clients, invoices, packages, sessions, routines, plans, compliance, notifications, googleCalendar, catalog] = await Promise.all([
+  const [clients, invoices, packages, sessions, routines, plans, compliance, notifications, googleCalendar, catalog, allInbody] = await Promise.all([
     api('/api/clients'), api('/api/invoices'), api('/api/packages'), api('/api/sessions'), api('/api/routines'),
     api('/api/plans'),
     api(`/api/compliance/summary?period=${compliancePeriod}`).catch(() => ({ compliancePercent: 0, activities: 0, clients: [] })),
@@ -202,7 +202,8 @@ async function loadData() {
     api('/api/integrations/google-calendar/status').catch(() => ({ configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } })),
     // El catálogo iba en un segundo viaje, después de esperar a los otros
     // nueve: un viaje de ida y vuelta entero por nada.
-    api('/api/exercises').catch(() => null)
+    api('/api/exercises').catch(() => null),
+    api('/api/inbody').catch(() => [])
   ]);
   exerciseCatalog = catalog ? catalog.map(exercise => ({
     id: exercise.id, slug: exercise.slug, name: exercise.name, english: exercise.english || '',
@@ -211,9 +212,14 @@ async function loadData() {
     cues: exercise.cues || '', usesWeight: Boolean(exercise.uses_weight), hasVideo: Boolean(exercise.has_video),
     videoDurationSeconds: exercise.video_duration_seconds ? Number(exercise.video_duration_seconds) : null
   })) : fallbackCatalog;
-  const assessments = await Promise.all(clients.map(client => api(`/api/clients/${client.id}/inbody`)));
+  const assessmentsByClient = new Map();
+  (Array.isArray(allInbody) ? allInbody : []).forEach(item => {
+    if (!assessmentsByClient.has(item.client_id)) assessmentsByClient.set(item.client_id, []);
+    assessmentsByClient.get(item.client_id).push(item);
+  });
   data.clients = clients.map((client, index) => {
-    const readyAssessments = assessments[index].assessments.filter(item => item.extraction_status === 'ready');
+    const clientAssessments = assessmentsByClient.get(client.id) || [];
+    const readyAssessments = clientAssessments.filter(item => item.extraction_status === 'ready');
     // El delta se calcula sobre el historial ya filtrado a 'ready'. El campo
     // changes que manda la API compara contra la medición inmediatamente
     // anterior aunque esté en revisión, y entonces no cuadraría con las filas
@@ -223,7 +229,7 @@ async function loadData() {
       const reading = {
         id: item.id, documentId: item.document_id || null,
         date: String(item.tested_at).slice(0, 10), weight: Number(item.values.weightKg), smm: Number(item.values.skeletalMuscleMassKg),
-        fat: Number(item.values.bodyFatMassKg), pbf: Number(item.values.percentBodyFat), score: Number(item.values.inBodyScore)
+        fat: Number(item.values.bodyFatMassKg), pbf: Number(item.values.percentBodyFat), score: Number(item.values.inBodyScore), values: item.values || {}
       };
       if (!previous) return { ...reading, delta: null, previousDate: null };
       const delta = {};
@@ -234,7 +240,7 @@ async function loadData() {
       return { ...reading, delta, previousDate: String(previous.tested_at).slice(0, 10) };
     });
     const latest = history.at(-1);
-    const inbodyReviews = assessments[index].assessments.filter(item => item.extraction_status === 'review');
+    const inbodyReviews = clientAssessments.filter(item => item.extraction_status === 'review');
     return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), reprogramaciones: Number(client.reprogramaciones_ciclo || 0), canceladas: Number(client.canceladas_ciclo || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), status: { active: 'Activo', paused: 'En pausa', inactive: 'Inactivo' }[client.status] || 'Inactivo', statusRaw: client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
   });
   data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, concept: item.concept, amount: Number(item.amount), balance: item.source_system ? Number(item.balance) : item.status === 'pending' ? Number(item.amount) : 0, due: dateOnly(item.due_on), issued: dateOnly(item.issued_on || item.due_on), paidOn: item.confirmed_at ? String(item.confirmed_at).slice(0, 10) : '', method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '' }));
@@ -416,7 +422,7 @@ function renderDashboard() {
     return `<div class="progress-item"><span class="initials">${escapeHtml(initials(client.name))}</span><div><b>${escapeHtml(client.name)}</b><small>${escapeHtml(client.goal)} · InBody ${client.inbody.date}</small></div><span class="delta ${Number(fatDelta) > 0 ? 'warn' : ''}">Músculo ${muscleDelta > 0 ? '+' : ''}${muscleDelta} kg<br>Grasa ${fatDelta > 0 ? '+' : ''}${fatDelta} kg</span></div>`;
   }).join('') : '<p class="empty">Aún no hay evaluaciones InBody.</p>';
   const todaySessions = data.sessions.filter(session => session.date === dateKey(today)).sort((a, b) => a.time.localeCompare(b.time));
-  document.getElementById('today-sessions').innerHTML = todaySessions.length ? todaySessions.map(session => `<div class="agenda-item"><span class="agenda-time">${session.time}</span><div><b>${escapeHtml(session.client)}</b><span>${session.routine} · ${session.mode.toLowerCase()}</span></div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span></div>`).join('') : '<p class="empty">No hay sesiones para hoy.</p>';
+  document.getElementById('today-sessions').innerHTML = todaySessions.length ? todaySessions.map(session => `<div class="agenda-item"><span class="agenda-time">${session.time}</span><div><b>${escapeHtml(session.client)}</b><span>${escapeHtml(session.routine)} · ${escapeHtml(session.mode.toLowerCase())}</span></div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span></div>`).join('') : '<p class="empty">No hay sesiones para hoy.</p>';
   const noInbody = data.clients.filter(client => !client.inbody).map(client => `<div class="alert-item"><b>${escapeHtml(client.name)}</b><span>Sin evaluación InBody registrada.</span></div>`).join('');
   document.getElementById('alerts').innerHTML = `${noInbody || '<div class="alert-item"><b>Todo al día</b><span>No hay alertas de seguimiento.</span></div>'}<div class="alert-item"><b>${data.invoices.filter(item => item.status === 'pending').length} cobro pendiente</b><span>Revisa pagos y comprobantes.</span></div>`;
   document.getElementById('compliance-list').innerHTML = data.compliance.clients.length ? data.compliance.clients.map(client => `<div class="compliance-row"><span class="initials">${escapeHtml(initials(client.name))}</span><div><b>${escapeHtml(client.name)}</b><small>${client.completed} de ${client.activities} actividades con avance${client.late ? ` · ${client.late} fuera de fecha` : ''}${client.missed ? ` · ${client.missed} sin hacer` : ''}${avanceDelMes(client.clientId)}</small><span class="compliance-track"><i style="width:${client.compliancePercent}%"></i></span></div><strong>${client.compliancePercent}%</strong></div>`).join('') : '<p class="empty">Aún no hay entrenamientos vencidos en este período.</p>';
@@ -576,7 +582,7 @@ function renderCalendar() {
     const key = dateKey(range.start);
     const sessions = visibleSessions.filter(session => session.date === key);
     grid.className = 'calendar-grid calendar-day';
-    grid.innerHTML = `<div class="day-focus"><span>${new Intl.DateTimeFormat('es-PA', { weekday: 'long' }).format(range.start)}</span><strong>${range.start.getDate()}</strong><small>${capitalized(new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric' }).format(range.start))}</small></div><div class="day-timeline">${sessions.length ? sessions.map(session => `<article class="day-session ${session.status}"><time>${session.time}</time><div><b>${escapeHtml(session.client)}</b><span>${session.routine}</span><small>${session.mode}</small></div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span></article>`).join('') : '<div class="calendar-empty"><b>Día disponible</b><span>No hay sesiones programadas.</span><button class="secondary" data-action="new-session">+ Agendar sesión</button></div>'}</div>`;
+    grid.innerHTML = `<div class="day-focus"><span>${new Intl.DateTimeFormat('es-PA', { weekday: 'long' }).format(range.start)}</span><strong>${range.start.getDate()}</strong><small>${capitalized(new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric' }).format(range.start))}</small></div><div class="day-timeline">${sessions.length ? sessions.map(session => `<article class="day-session ${session.status}"><time>${session.time}</time><div><b>${escapeHtml(session.client)}</b><span>${escapeHtml(session.routine)}</span><small>${escapeHtml(session.mode)}</small></div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span></article>`).join('') : '<div class="calendar-empty"><b>Día disponible</b><span>No hay sesiones programadas.</span><button class="secondary" data-action="new-session">+ Agendar sesión</button></div>'}</div>`;
   } else if (calendarMode === 'week') {
     const names = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
     grid.className = 'calendar-grid calendar-week';
@@ -608,7 +614,7 @@ function renderCalendar() {
   const periodName = calendarMode === 'day' ? 'del día' : calendarMode === 'week' ? 'de la semana' : 'del mes';
   document.getElementById('session-control-title').textContent = `Sesiones ${periodName}`;
   document.getElementById('session-control-copy').textContent = visibleSessions.length ? `${visibleSessions.length} sesión${visibleSessions.length !== 1 ? 'es' : ''} en el período visible` : 'No hay sesiones en el período visible';
-  document.getElementById('session-list').innerHTML = visibleSessions.length ? visibleSessions.map(session => `<div class="session-row"><div class="session-date"><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric' }).format(new Date(`${session.date}T12:00:00`))}</b><span>${session.time} · ${session.durationMinutes} min</span></div><div class="session-person"><b>${escapeHtml(session.client)}</b><span>${session.routine} · ${session.mode}</span>${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}</div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span>${session.status === 'cancelled' ? `<div class="session-management"><button type="button" class="secondary" data-purge-session="${session.id}">Quitar de la agenda</button></div>` : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button><button type="button" class="secondary" data-cancel-session="${session.id}">Cancelar</button><button type="button" class="secondary" data-purge-session="${session.id}">Eliminar</button>${sessionComplianceForm(session)}</div>`}</div>`).join('') : `<p class="empty">No hay sesiones programadas ${periodName}.</p>`;
+  document.getElementById('session-list').innerHTML = visibleSessions.length ? visibleSessions.map(session => `<div class="session-row"><div class="session-date"><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric' }).format(new Date(`${session.date}T12:00:00`))}</b><span>${session.time} · ${session.durationMinutes} min</span></div><div class="session-person"><b>${escapeHtml(session.client)}</b><span>${escapeHtml(session.routine)} · ${escapeHtml(session.mode)}</span>${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}</div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span>${session.status === 'cancelled' ? `<div class="session-management"><button type="button" class="secondary" data-purge-session="${session.id}">Quitar de la agenda</button></div>` : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button><button type="button" class="secondary" data-cancel-session="${session.id}">Cancelar</button><button type="button" class="secondary" data-purge-session="${session.id}">Eliminar</button>${sessionComplianceForm(session)}</div>`}</div>`).join('') : `<p class="empty">No hay sesiones programadas ${periodName}.</p>`;
 }
 const routineVideoCount = routine => (routine.exercises || []).filter(exercise => {
   const entry = exerciseCatalog.find(item => item.id === exercise.catalogId || item.slug === exercise.catalogId);
@@ -2690,6 +2696,22 @@ function inbodyComparison(inbody) {
     `<article><span>${label}</span>${deltaChip(key, latest.delta[key])}</article>`).join('')}</div>`;
 }
 
+const inbodyNumber = (values, key, decimals = 1) => {
+  const value = Number(values?.[key]);
+  return Number.isFinite(value) ? value.toFixed(decimals) : '—';
+};
+function inbodyDetailSection(values = {}) {
+  const segments = [
+    ['Brazo derecho', 'rightArm'], ['Brazo izquierdo', 'leftArm'], ['Tronco', 'trunk'], ['Pierna derecha', 'rightLeg'], ['Pierna izquierda', 'leftLeg']
+  ];
+  const hasDetails = ['totalBodyWaterL','softLeanMassKg','visceralFatAreaCm2','phaseAngleDeg','basalMetabolicRateKcal'].some(key => Number.isFinite(Number(values[key])));
+  if (!hasDetails) return '';
+  const metricCard = (label, key, unit = '', decimals = 1) => `<article class="inbody-detail-card"><span>${label}</span><strong>${inbodyNumber(values, key, decimals)}${Number.isFinite(Number(values[key])) ? unit : ''}</strong></article>`;
+  return `<section class="inbody-detail-panel"><p class="eyebrow">DETALLE DE LA EVALUACIÓN</p><div class="inbody-detail-grid">
+    ${metricCard('Agua corporal total','totalBodyWaterL',' L')}${metricCard('Masa libre de grasa','fatFreeMassKg',' kg')}${metricCard('Masa magra suave','softLeanMassKg',' kg')}${metricCard('Proteína','proteinKg',' kg')}${metricCard('Minerales','mineralsKg',' kg')}${metricCard('Área grasa visceral','visceralFatAreaCm2',' cm²')}${metricCard('Nivel grasa visceral','visceralFatLevel','',0)}${metricCard('ECW ratio','ecwRatio','',3)}${metricCard('Ángulo de fase','phaseAngleDeg','°')}${metricCard('Metabolismo basal','basalMetabolicRateKcal',' kcal',0)}${metricCard('Calorías recomendadas','recommendedCaloriesKcal',' kcal',0)}${metricCard('Cintura','waistCircumferenceCm',' cm')}${metricCard('Cintura/cadera','waistHipRatio','',2)}${metricCard('Masa mineral ósea','boneMineralContentKg',' kg')}
+  </div><h3 class="inbody-detail-heading">Distribución segmental</h3><div class="table-wrap"><table class="inbody-segment-table"><thead><tr><th>Segmento</th><th>Magra</th><th>% ideal</th><th>% actual</th><th>Grasa</th><th>% grasa</th><th>ECW</th></tr></thead><tbody>${segments.map(([label, key]) => `<tr><td>${label}</td><td>${inbodyNumber(values, `${key}LeanKg`)} kg</td><td>${inbodyNumber(values, `${key}LeanPercentIdeal`,0)}%</td><td>${inbodyNumber(values, `${key}LeanPercentCurrent`,0)}%</td><td>${inbodyNumber(values, `${key}FatKg`)} kg</td><td>${inbodyNumber(values, `${key}FatPercent`,0)}%</td><td>${inbodyNumber(values, `${key}EcwRatio`,3)}</td></tr>`).join('')}</tbody></table></div><h3 class="inbody-detail-heading">Control de peso</h3><div class="inbody-control-grid">${metricCard('Peso objetivo','targetWeightKg',' kg')}${metricCard('Control de peso','weightControlKg',' kg')}${metricCard('Control de grasa','fatControlKg',' kg')}${metricCard('Control muscular','muscleControlKg',' kg')}</div><p class="inbody-review-note">Métricas de seguimiento tomadas del reporte; no constituyen diagnóstico médico.</p></section>`;
+}
+
 // Saldos en el expediente, en lista y no en tabla: la tabla de paquetes se
 // desplaza en horizontal en el teléfono y su última columna queda escondida.
 // Ver el archivo original de un expediente. Hasta ahora sólo se podía borrar:
@@ -2982,6 +3004,10 @@ function clientDetail(id) {
   const reviewNotice = client.inbodyReviews.length ? `<button class="secondary wide-button" id="review-inbody">Revisar ${client.inbodyReviews.length} evaluación${client.inbodyReviews.length > 1 ? 'es' : ''} pendiente${client.inbodyReviews.length > 1 ? 's' : ''}</button>` : '';
   box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${escapeHtml(client.name)}</h2><p style="color:#6f7b75;margin-top:-12px">${escapeHtml(client.goal)}<br>${commercialDescription}${notaPago}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">CAMBIO DESDE LA MEDICIÓN ANTERIOR</p>${inbodyComparison(inbody)}<p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th>vs. anterior</th><th></th></tr></thead><tbody>${inbody.history.slice().reverse().map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td class="delta-cell">${reading.delta ? `${deltaChip('weight', reading.delta.weight)}${deltaChip('smm', reading.delta.smm)}${deltaChip('pbf', reading.delta.pbf)}` : '<span class="delta neutral">primera</span>'}</td><td>${reading.documentId ? `<button class="secondary session-use" data-view-inbody="${reading.documentId}" data-inbody-client="${client.id}">Ver reporte</button>` : ''}<button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">SALDO DE SESIONES</p><div id="client-balances"><p class="empty">Cargando saldos…</p></div><p class="eyebrow" style="margin-top:20px">ASISTENCIA MENSUAL</p><div id="client-attendance"><p class="empty">Calculando cumplimiento…</p></div><p class="eyebrow" style="margin-top:20px">LESIONES Y PADECIMIENTOS</p><div id="client-conditions"><p class="empty">Cargando expediente clínico…</p></div><p class="eyebrow" style="margin-top:20px">FOTOS DE PROGRESO</p><div id="client-photos"><p class="empty">Cargando fotos…</p></div><p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="client-report">Informe de cumplimiento</button><button class="secondary" id="portal-link">${client.portalActive ? 'Enviar enlace de acceso' : 'Activar portal con enlace'}</button><button class="secondary" id="portal-access">${client.portalActive ? 'Poner contraseña a mano' : 'Activar con contraseña'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
   openModal(box); document.getElementById('open-scan').onclick = () => inbodyImport(client); document.getElementById('edit-client-contact').onclick = () => editClient(client); document.getElementById('edit-client-plan').onclick = () => clientPlanEditor(client); document.getElementById('portal-access').onclick = () => portalAccessEditor(client); document.getElementById('portal-link').onclick = () => portalAccessLink(client); document.getElementById('client-report').onclick = () => complianceReport(client); document.getElementById('delete-client').onclick = () => deleteResource(`/api/clients/${client.id}`, `¿Eliminar a ${client.name}? También se eliminarán sus documentos, sesiones y cobros asociados.`, 'Cliente eliminado');
+  if (inbody) {
+    const summary = box.querySelector('.metrics');
+    if (summary) summary.insertAdjacentHTML('afterend', inbodyDetailSection(inbody.values));
+  }
   if (client.inbodyReviews.length) document.getElementById('review-inbody').onclick = () => inbodyReview(client, client.inbodyReviews);
   balancesSection(document.getElementById('client-balances'), client);
   attendanceSection(document.getElementById('client-attendance'), client.id);
@@ -3010,8 +3036,9 @@ function clientDetail(id) {
 
 const inbodyReviewFields = [
   ['weightKg', 'Peso', 'kg'], ['skeletalMuscleMassKg', 'Músculo', 'kg'], ['bodyFatMassKg', 'Masa grasa', 'kg'],
-  ['percentBodyFat', 'Grasa', '%'], ['bmi', 'IMC', ''], ['visceralFatLevel', 'Grasa visceral', 'nivel'],
-  ['ecwRatio', 'ECW', ''], ['inBodyScore', 'Score', '']
+  ['percentBodyFat', 'Grasa', '%'], ['bmi', 'IMC', ''], ['visceralFatAreaCm2', 'Área grasa visceral', 'cm²'], ['visceralFatLevel', 'Nivel grasa visceral', 'nivel'],
+  ['totalBodyWaterL', 'Agua corporal total', 'L'], ['softLeanMassKg', 'Masa magra suave', 'kg'], ['fatFreeMassKg', 'Masa libre de grasa', 'kg'],
+  ['ecwRatio', 'ECW', ''], ['phaseAngleDeg', 'Ángulo de fase', '°'], ['basalMetabolicRateKcal', 'Metabolismo basal', 'kcal'], ['inBodyScore', 'Score', '']
 ];
 
 function inbodyReview(client, assessments, pageErrors = [], skippedPages = []) {
@@ -3055,10 +3082,14 @@ function inbodyImport(client) {
     }
   };
   api(`/api/documents?clientId=${encodeURIComponent(client.id)}`).then(documents => {
-    const latest = documents.find(document => document.kind === 'inbody' && document.upload_status === 'ready');
-    if (!latest || result.children.length) return;
-    result.innerHTML = `<div class="alert-item inbody-retry" style="margin-top:15px"><b>Archivo guardado disponible</b><span>${escapeHtml(latest.original_name)} ya está en el expediente. Puedes analizarlo sin volver a subirlo.</span><button class="secondary" id="retry-saved-inbody">Analizar último archivo guardado</button></div>`;
-    document.getElementById('retry-saved-inbody').addEventListener('click', () => analyzeDocuments([latest.id]));
+    const saved = documents.filter(document => document.kind === 'inbody' && document.upload_status === 'ready');
+    if (!saved.length || result.children.length) return;
+    result.innerHTML = `<div class="alert-item inbody-retry" style="margin-top:15px"><b>${saved.length > 1 ? `${saved.length} archivos guardados disponibles` : 'Archivo guardado disponible'}</b><span>${saved.length > 1 ? 'Puedes volver a analizar todos juntos para reconstruir el historial completo y comparar las fechas.' : `${escapeHtml(saved[0].original_name)} ya está en el expediente.`}</span><div class="saved-inbody-list">${saved.map(document => `<label><input type="checkbox" data-saved-inbody value="${document.id}" checked> ${escapeHtml(document.original_name)}</label>`).join('')}</div><button class="secondary" id="retry-saved-inbody">Volver a analizar seleccionados</button></div>`;
+    document.getElementById('retry-saved-inbody').addEventListener('click', () => {
+      const ids = [...result.querySelectorAll('[data-saved-inbody]:checked')].map(input => input.value);
+      if (!ids.length) return toast('Selecciona al menos un archivo', true);
+      analyzeDocuments(ids);
+    });
   }).catch(() => {});
   document.getElementById('inbody-file').addEventListener('change', async event => {
     const files = [...event.target.files]; if (!files.length) return;

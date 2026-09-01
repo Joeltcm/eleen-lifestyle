@@ -9,9 +9,12 @@ const FILES = ['./index.html', ...VERSIONED, './manifest.webmanifest', './icon.s
 self.addEventListener('install', event => event.waitUntil((async () => {
   const cache = await caches.open(CACHE);
   await Promise.all(FILES.map(async file => {
-    const response = await fetch(file, { cache: 'reload' });
-    if (!response.ok) throw new Error(`No se pudo guardar ${file}`);
-    await cache.put(file, response);
+    try {
+      const response = await fetch(file, { cache: 'reload' });
+      if (response.ok) await cache.put(file, response);
+    } catch {
+      // Un asset opcional no debe impedir la instalación del shell de la PWA.
+    }
   }));
   await self.skipWaiting();
 })()));

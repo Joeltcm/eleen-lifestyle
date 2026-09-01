@@ -12,8 +12,16 @@ export const inbodyAnalysisSetup = inbodyAnalysisProvider === 'deepseek'
   : 'Agrega a Railway un token de Cloudflare con permisos Workers AI Read y Edit.';
 
 const metricKeys = [
-  'heightCm', 'weightKg', 'skeletalMuscleMassKg', 'bodyFatMassKg', 'percentBodyFat', 'bmi',
-  'inBodyScore', 'visceralFatLevel', 'ecwRatio'
+  'heightCm', 'weightKg', 'softLeanMassKg', 'fatFreeMassKg', 'totalBodyWaterL', 'proteinKg', 'mineralsKg',
+  'skeletalMuscleMassKg', 'bodyFatMassKg', 'percentBodyFat', 'bmi', 'inBodyScore', 'visceralFatAreaCm2',
+  'visceralFatLevel', 'ecwRatio', 'phaseAngleDeg', 'intracellularWaterL', 'extracellularWaterL',
+  'basalMetabolicRateKcal', 'waistHipRatio', 'waistCircumferenceCm', 'boneMineralContentKg',
+  'recommendedCaloriesKcal', 'targetWeightKg', 'weightControlKg', 'fatControlKg', 'muscleControlKg',
+  'rightArmLeanKg', 'rightArmLeanPercentIdeal', 'rightArmLeanPercentCurrent', 'leftArmLeanKg', 'leftArmLeanPercentIdeal', 'leftArmLeanPercentCurrent',
+  'trunkLeanKg', 'trunkLeanPercentIdeal', 'trunkLeanPercentCurrent', 'rightLegLeanKg', 'rightLegLeanPercentIdeal', 'rightLegLeanPercentCurrent',
+  'leftLegLeanKg', 'leftLegLeanPercentIdeal', 'leftLegLeanPercentCurrent', 'rightArmFatKg', 'rightArmFatPercent', 'leftArmFatKg', 'leftArmFatPercent',
+  'trunkFatKg', 'trunkFatPercent', 'rightLegFatKg', 'rightLegFatPercent', 'leftLegFatKg', 'leftLegFatPercent',
+  'rightArmEcwRatio', 'leftArmEcwRatio', 'trunkEcwRatio', 'rightLegEcwRatio', 'leftLegEcwRatio'
 ] as const;
 
 export type InBodyMetricKey = typeof metricKeys[number];
@@ -57,9 +65,15 @@ export function validateInBodyValues(values: InBodyValues, requireCore = true) {
 }
 
 const ranges: Partial<Record<InBodyMetricKey, [number, number]>> = {
-  heightCm: [100, 230], weightKg: [20, 400], skeletalMuscleMassKg: [5, 120], bodyFatMassKg: [0, 250],
-  percentBodyFat: [1, 75], bmi: [10, 80], inBodyScore: [0, 120], visceralFatLevel: [1, 30],
-  ecwRatio: [0.3, 0.5]
+  heightCm: [100, 230], weightKg: [20, 400], softLeanMassKg: [5, 200], fatFreeMassKg: [5, 250], totalBodyWaterL: [5, 150],
+  proteinKg: [1, 50], mineralsKg: [0.5, 20], skeletalMuscleMassKg: [5, 120], bodyFatMassKg: [0, 250], percentBodyFat: [1, 75],
+  bmi: [10, 80], inBodyScore: [0, 120], visceralFatAreaCm2: [0, 500], visceralFatLevel: [1, 30], ecwRatio: [0.3, 0.5], phaseAngleDeg: [0, 20],
+  intracellularWaterL: [1, 120], extracellularWaterL: [1, 80], basalMetabolicRateKcal: [500, 5000], waistHipRatio: [0.3, 2], waistCircumferenceCm: [30, 250],
+  boneMineralContentKg: [0.5, 15], recommendedCaloriesKcal: [500, 6000], targetWeightKg: [20, 400], weightControlKg: [-100, 100], fatControlKg: [-100, 100], muscleControlKg: [-100, 100],
+  rightArmLeanKg: [0, 50], leftArmLeanKg: [0, 50], trunkLeanKg: [0, 100], rightLegLeanKg: [0, 80], leftLegLeanKg: [0, 80],
+  rightArmLeanPercentIdeal: [0, 500], rightArmLeanPercentCurrent: [0, 500], leftArmLeanPercentIdeal: [0, 500], leftArmLeanPercentCurrent: [0, 500], trunkLeanPercentIdeal: [0, 500], trunkLeanPercentCurrent: [0, 500], rightLegLeanPercentIdeal: [0, 500], rightLegLeanPercentCurrent: [0, 500], leftLegLeanPercentIdeal: [0, 500], leftLegLeanPercentCurrent: [0, 500],
+  rightArmFatKg: [0, 100], leftArmFatKg: [0, 100], trunkFatKg: [0, 150], rightLegFatKg: [0, 100], leftLegFatKg: [0, 100], rightArmFatPercent: [0, 1000], leftArmFatPercent: [0, 1000], trunkFatPercent: [0, 1000], rightLegFatPercent: [0, 1000], leftLegFatPercent: [0, 1000],
+  rightArmEcwRatio: [0.25, 0.6], leftArmEcwRatio: [0.25, 0.6], trunkEcwRatio: [0.25, 0.6], rightLegEcwRatio: [0.25, 0.6], leftLegEcwRatio: [0.25, 0.6]
 };
 
 const canonicalKeys = metricKeys.join(', ');
@@ -79,6 +93,8 @@ General rules:
 - Omit any metric that is not clearly visible. Never infer or guess a number.
 - Use decimal points and preserve negative signs.
 - confidence is an object of 0-to-1 scores by metric; use an empty object when uncertain.
+- Distinguish visceralFatAreaCm2 (Visceral Fat Area/VFA in cm², often a decimal such as 93.8) from visceralFatLevel (Visceral Fat Level, typically an integer 1-30). Never put an area value in the level field.
+- For segmental lean analysis, use the matching segment LeanKg plus PercentIdeal and PercentCurrent when both bars are visible. For segmental fat use FatKg and FatPercent. For segmental ECW use the ratio fields.
 - Never return patient name, ID, birth date, diagnosis, recommendations, or medical interpretation.`;
 
 function apiError(payload: unknown, status: number, provider = 'Cloudflare') {
@@ -244,7 +260,8 @@ function allowedMetricsForFile(fileName: string) {
   const historyPage = fileName.match(/body[\s_-]*history[\s_-]*(\d+)/i);
   if (!historyPage) return new Set<InBodyMetricKey>(metricKeys);
   if (historyPage[1] === '0') return new Set<InBodyMetricKey>(['weightKg', 'skeletalMuscleMassKg', 'bodyFatMassKg', 'percentBodyFat', 'ecwRatio']);
-  if (historyPage[1] === '1') return new Set<InBodyMetricKey>(['bmi', 'visceralFatLevel']);
+  if (historyPage[1] === '1') return new Set<InBodyMetricKey>(['bmi', 'visceralFatLevel', 'visceralFatAreaCm2']);
+  if (historyPage[1] === '2' || historyPage[1] === '3') return new Set<InBodyMetricKey>(metricKeys.filter(key => /(?:Arm|Leg|trunk)(?:Lean|Fat|Ecw)/.test(key)));
   return new Set<InBodyMetricKey>();
 }
 
