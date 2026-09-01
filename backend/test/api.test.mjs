@@ -572,6 +572,37 @@ describe('rellenar los días que le falten a un horario fijo', () => {
   });
 });
 
+describe('por qué un día del horario fijo sigue vacío', () => {
+  test('lo dice cuando la clase se movió a otra hora', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Se movió su clase', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+    await api.post('/api/session-recurrences', {
+      clientId: c.datos.id, weekdays: [0, 1, 2, 3, 4, 5, 6], timeOfDay: '06:45', durationMinutes: 60, mode: 'Presencial'
+    });
+    const suyas = (await api.get('/api/sessions')).datos
+      .filter(x => x.client_id === c.datos.id && new Date(x.starts_at) > new Date())
+      .sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)));
+    const movida = suyas[3];
+    const nueva = new Date(movida.starts_at); nueva.setUTCHours(nueva.getUTCHours() + 5);
+    await api.patch(`/api/sessions/${movida.id}`, { startsAt: nueva.toISOString(), durationMinutes: 60, mode: 'Presencial' });
+
+    const { datos } = await api.post('/api/session-recurrences/extend', {});
+    const suelto = (datos.saltados || []).find(f => f.full_name === 'Se movió su clase');
+    assert.ok(suelto, 'el día vacío tiene que salir explicado, no en silencio');
+    assert.ok(suelto.marcada, 'y el motivo es que su clase está en otra hora');
+    assert.equal(String(suelto.marcada.id), String(movida.id));
+  });
+
+  test('y no inventa motivos donde no los hay', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Sin huecos', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+    await api.post('/api/session-recurrences', {
+      clientId: c.datos.id, weekdays: [0, 1, 2, 3, 4, 5, 6], timeOfDay: '20:45', durationMinutes: 60, mode: 'Presencial'
+    });
+    const { datos } = await api.post('/api/session-recurrences/extend', {});
+    const suyos = (datos.saltados || []).filter(f => f.full_name === 'Sin huecos');
+    assert.equal(suyos.length, 0, 'un horario completo no tiene nada que explicar');
+  });
+});
+
 describe('vencimiento de los paquetes', () => {
   let clientId;
   before(async () => {

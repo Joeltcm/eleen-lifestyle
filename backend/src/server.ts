@@ -1429,7 +1429,9 @@ async function extenderRecurrencias(ownerId?: string) {
       AND (${ownerId ?? null}::uuid IS NULL OR c.owner_id = ${ownerId ?? null}::uuid)
   `;
   let creadas = 0;
+  const fallidas: { cliente: string; error: string }[] = [];
   for (const regla of reglas) {
+    try {
     // Una sola consulta por regla: genera los días del horizonte, se queda con
     // los de la semana elegidos y salta los que ya tienen sesión viva. El
     // AT TIME ZONE convierte "las 5:30 en Panamá" al instante correcto.
@@ -1472,8 +1474,16 @@ async function extenderRecurrencias(ownerId?: string) {
       try { await syncSessionToGoogle(String(regla.owner_id), sesion.id as string); }
       catch { /* el calendario se reintenta solo; la sesión ya es válida aquí */ }
     }
+    } catch (error) {
+      // Una regla que falla no puede llevarse por delante a las demás. El
+      // INSERT crea todos los días de una vez, así que un solo choque dejaba
+      // a ese cliente sin ninguna sesión nueva —y, al propagarse, a todos los
+      // que venían detrás—. Se anota y se sigue.
+      fallidas.push({ cliente: String(regla.client_id), error: error instanceof Error ? error.message : String(error) });
+      app.log.error({ err: error, recurrenceId: regla.id }, 'No se pudo extender un horario fijo');
+    }
   }
-  return creadas;
+  return { creadas, fallidas };
 }
 
 const recurrenceSchema = z.object({
@@ -1500,7 +1510,7 @@ app.post('/api/session-recurrences', { preHandler: requireStaff }, async (reques
       ${input.timeOfDay}::time, ${input.durationMinutes}, ${input.mode}, ${input.notes || null}, ${input.endsOn}::date)
     RETURNING *
   `;
-  const creadas = await extenderRecurrencias(auth.sub);
+  const { creadas } = await extenderRecurrencias(auth.sub);
   return reply.code(201).send({ recurrence: regla, creadas });
 });
 
@@ -1510,8 +1520,53 @@ app.post('/api/session-recurrences', { preHandler: requireStaff }, async (reques
 // sigue vacío después de pulsar, es que la regla no lo incluye.
 app.post('/api/session-recurrences/extend', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
-  return { creadas: await extenderRecurrencias(auth.sub) };
+  const { creadas, fallidas } = await extenderRecurrencias(auth.sub);
+  return { creadas, fallidas, saltados: await diasSaltados(auth.sub) };
 });
+
+// Por qué un día de un horario fijo sigue vacío después de rellenar.
+//
+// Un día puede quedarse sin sesión por dos motivos legítimos, y desde fuera se
+// ven igual: que la ocurrencia ya esté marcada —la sesión existe pero se movió
+// a otro día u hora, o se canceló— o que el cliente ya tenga algo a esa misma
+// hora. Sin decirlo, el único camino era adivinar.
+async function diasSaltados(ownerId: string) {
+  return sql`
+    WITH reglas AS (
+      SELECT r.id, r.client_id, r.weekdays, r.time_of_day, r.starts_on, r.ends_on, c.full_name
+      FROM session_recurrences r
+      JOIN clients c ON c.id = r.client_id
+      WHERE r.active AND c.status = 'active' AND c.owner_id = ${ownerId}
+        AND (r.ends_on IS NULL OR r.ends_on >= current_date)
+    ), candidatos AS (
+      SELECT r.*, dia::date AS dia,
+        ((dia::date + r.time_of_day) AT TIME ZONE 'America/Panama') AS momento
+      FROM reglas r
+      CROSS JOIN generate_series(
+        GREATEST(current_date, r.starts_on),
+        LEAST(current_date + (${HORIZONTE_DIAS})::int, COALESCE(r.ends_on, current_date + (${HORIZONTE_DIAS})::int)),
+        interval '1 day'
+      ) AS dia
+      WHERE extract(dow FROM dia)::int = ANY(r.weekdays)
+    )
+    SELECT c.full_name, c.dia,
+      -- La sesión que se quedó con la ocurrencia, esté donde esté ahora.
+      (SELECT json_build_object('id', s.id, 'starts_at', s.starts_at, 'status', s.status)
+        FROM sessions s WHERE s.recurrence_id = c.id AND s.recurrence_on = c.dia LIMIT 1) AS marcada,
+      -- O algo del propio cliente ocupando ya esa hora exacta.
+      (SELECT json_build_object('id', s.id, 'status', s.status)
+        FROM sessions s WHERE s.client_id = c.client_id AND s.starts_at = c.momento AND s.status <> 'cancelled' LIMIT 1) AS choque
+    FROM candidatos c
+    -- Sólo los días que de verdad quedaron vacíos: si hay una sesión viva ese
+    -- día a esa hora, no hay nada que explicar.
+    WHERE NOT EXISTS (
+      SELECT 1 FROM sessions s
+      WHERE s.client_id = c.client_id AND s.starts_at = c.momento AND s.status = 'scheduled'
+    )
+    ORDER BY c.full_name, c.dia
+    LIMIT 40
+  `;
+}
 
 app.get('/api/session-recurrences', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;

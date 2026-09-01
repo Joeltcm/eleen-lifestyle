@@ -1,4 +1,4 @@
-const APP_VERSION = '122';
+const APP_VERSION = '123';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1043,7 +1043,8 @@ async function recurrenceManager() {
     <p style="color:#6f7b75;margin-top:-12px">Se repiten solos hasta que los detengas. Detener uno retira sus sesiones futuras y deja intactas las pasadas.</p>
     <p style="color:#6f7b75;margin-top:-12px">Si a un horario le falta un día, "Rellenar" vuelve a crear los que estén vacíos en las próximas ocho semanas. Si tras pulsarlo el día sigue vacío, es que la regla no lo incluye.</p>
     <button type="button" class="secondary wide-button" id="rellenar-horarios">Rellenar días que falten</button>
-    <div id="recurrencias-lista"><p class="empty">Cargando…</p></div>`;
+    <div id="recurrencias-lista"><p class="empty">Cargando…</p></div>
+    <div id="horarios-diagnostico"></div>`;
   openModal(box, true);
   const pintar = async () => {
     const destino = document.getElementById('recurrencias-lista');
@@ -1065,6 +1066,24 @@ async function recurrenceManager() {
           const r = await api('/api/session-recurrences/extend', { method: 'POST' });
           await loadData(); renderAll(); pintar();
           toast(r.creadas ? `${r.creadas} sesion${r.creadas === 1 ? '' : 'es'} rellenada${r.creadas === 1 ? '' : 's'}` : 'No faltaba ningún día');
+          // Los días que siguen vacíos, con el motivo. Sin esto sólo queda
+          // mirar el calendario y adivinar por qué falta uno.
+          const diagnostico = document.getElementById('horarios-diagnostico');
+          if (!diagnostico) return;
+          if (r.fallidas?.length) toast(`${r.fallidas.length} horario${r.fallidas.length === 1 ? '' : 's'} dio error al rellenar`, true);
+          const saltados = r.saltados || [];
+          diagnostico.innerHTML = saltados.length ? `
+            <p class="eyebrow" style="margin-top:16px">DÍAS QUE SIGUEN VACÍOS</p>
+            ${saltados.map(fila => {
+              const cuando = formatoDiaCorto(fila.dia);
+              if (fila.marcada) {
+                const donde = new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'America/Panama' }).format(new Date(fila.marcada.starts_at));
+                const estados = { scheduled: 'programada', completed: 'realizada', cancelled: 'cancelada', no_show: 'no cumplió' };
+                return `<p class="commercial-note"><b>${escapeHtml(fila.full_name)} · ${cuando}</b><br>Su clase de ese día está ahora el ${donde} (${estados[fila.marcada.status] || fila.marcada.status}). Por eso no se vuelve a crear.</p>`;
+              }
+              if (fila.choque) return `<p class="commercial-note"><b>${escapeHtml(fila.full_name)} · ${cuando}</b><br>Ya tiene otra sesión a esa misma hora.</p>`;
+              return `<p class="commercial-note"><b>${escapeHtml(fila.full_name)} · ${cuando}</b><br>Vacío sin motivo aparente. Avísame de esto.</p>`;
+            }).join('')}` : '';
         } catch (error) { toast(error.message, true); }
         finally { rellenar.disabled = false; }
       };
