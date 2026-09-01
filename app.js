@@ -1,4 +1,4 @@
-const APP_VERSION = '120';
+const APP_VERSION = '121';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1069,6 +1069,63 @@ async function recurrenceManager() {
   await pintar();
 }
 
+// Choques de horario: aviso, no barrera.
+//
+// A veces dos personas entrenan a la vez a propósito —una pareja, un grupo—,
+// así que impedirlo sería estorbar. Pero agendar encima de alguien sin
+// enterarse es un problema real, y la entrenadora lo descubre el día de la
+// clase. Se avisa y se deja seguir.
+//
+// Una sesión cancelada no cuenta: dejó el hueco libre, y avisar de ella sería
+// avisar de algo que no va a pasar. Es justo el caso de mover a alguien de
+// hora y volver a poner a otro en la que quedó vacía.
+const minutosDelDia = hora => Number(String(hora).slice(0, 2)) * 60 + Number(String(hora).slice(3, 5));
+const choquesEn = (fecha, hora, duracionMinutos, ignorarSesionId) => {
+  if (!fecha || !hora) return [];
+  const inicio = minutosDelDia(hora);
+  const fin = inicio + (Number(duracionMinutos) || 60);
+  return data.sessions.filter(sesion => sesion.date === fecha
+    && sesion.id !== ignorarSesionId
+    && sesion.status !== 'cancelled'
+    // Se solapan de verdad, no sólo si empiezan a la misma hora: una clase de
+    // 7:00 a 8:00 choca con otra de 7:30 aunque no coincidan los relojes.
+    && minutosDelDia(sesion.time) < fin
+    && minutosDelDia(sesion.time) + sesion.durationMinutes > inicio);
+};
+
+const diaCorto = fecha => new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'America/Panama' })
+  .format(new Date(`${fecha}T12:00:00-05:00`));
+
+// El texto del aviso para uno o varios días. Se nombra a quién ya está ahí:
+// "choca con algo" no sirve para decidir, y "choca con Julio a las 7:00" sí.
+const textoDeChoques = (fechas, hora, duracionMinutos, ignorarSesionId) => {
+  const conChoque = fechas
+    .map(fecha => ({ fecha, choques: choquesEn(fecha, hora, duracionMinutos, ignorarSesionId) }))
+    .filter(item => item.choques.length);
+  if (!conChoque.length) return '';
+  if (fechas.length === 1) {
+    const quienes = conChoque[0].choques.map(s => `${escapeHtml(s.client)} (${s.time})`).join(', ');
+    return `Ojo: a esa hora ya está ${quienes}. Puedes agendar igual.`;
+  }
+  const muestra = conChoque.slice(0, 3)
+    .map(item => `${diaCorto(item.fecha)} con ${escapeHtml(item.choques[0].client)}`).join(', ');
+  const resto = conChoque.length > 3 ? ` y ${conChoque.length - 3} más` : '';
+  return `Ojo: ${conChoque.length} de esos días chocan — ${muestra}${resto}. Puedes agendar igual.`;
+};
+
+// Los días que generará un horario indefinido en las próximas cuatro semanas.
+// No están creados todavía, así que hay que calcularlos para poder avisar.
+const proximosDiasDe = (desde, marcados, semanas = 4) => {
+  if (!desde || !marcados.length) return [];
+  const cursor = new Date(`${desde}T12:00:00`);
+  const salida = [];
+  for (let i = 0; i < semanas * 7; i += 1) {
+    if (marcados.includes(cursor.getDay())) salida.push(dateKey(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return salida;
+};
+
 function newSession() {
   const content = formFromTemplate('new-session-template'); openModal(content);
   const clientSelect = document.getElementById('session-client'); data.clients.filter(client => client.status === 'Activo').forEach(client => clientSelect.add(new Option(client.name, client.id)));
@@ -1083,6 +1140,12 @@ function newSession() {
   const hastaInput = hastaLabel.querySelector('input');
   const pista = document.getElementById('session-repeat-hint');
   const boton = document.getElementById('session-submit');
+  const aviso = document.createElement('p');
+  aviso.className = 'conflict-warn';
+  aviso.hidden = true;
+  pista.after(aviso);
+  const horaInput = document.querySelector('#session-form [name="time"]');
+  const duracionInput = document.querySelector('#session-form [name="durationMinutes"]');
 
   const fechasRepetidas = () => {
     const marcados = dias();
@@ -1123,7 +1186,21 @@ function newSession() {
     const total = marcados.length ? fechasRepetidas().length : 1;
     pista.textContent = marcados.length ? `Se agendarán ${total} sesion${total === 1 ? '' : 'es'}.` : '';
     boton.textContent = total > 1 ? `Agendar ${total} sesiones` : 'Agendar sesión';
+    revisarChoques();
   };
+
+  const revisarChoques = () => {
+    const marcados = dias();
+    const fechas = marcados.length
+      ? (perpetua.checked ? proximosDiasDe(fechaInput.value, marcados) : fechasRepetidas())
+      : (fechaInput.value ? [fechaInput.value] : []);
+    const texto = textoDeChoques(fechas, horaInput.value, Number(duracionInput.value));
+    aviso.innerHTML = texto;
+    aviso.hidden = !texto;
+  };
+  horaInput.addEventListener('change', revisarChoques);
+  horaInput.addEventListener('input', revisarChoques);
+  duracionInput.addEventListener('change', revisarChoques);
   perpetua.addEventListener('change', refrescar);
   document.querySelectorAll('#session-weekdays input').forEach(c => c.addEventListener('change', refrescar));
   fechaInput.addEventListener('change', refrescar);
@@ -1179,7 +1256,24 @@ function editSessionSchedule(session) {
     .filter(c => c.statusRaw === 'active' || c.id === session.clientId)
     .forEach(c => clienteSel.add(new Option(`${c.name}${c.status === 'Activo' ? '' : ` · ${c.status}`}`, c.id)));
   clienteSel.value = session.clientId;
-  document.getElementById('edit-session-form').addEventListener('submit', async event => {
+  const formulario = document.getElementById('edit-session-form');
+  const avisoEdicion = document.createElement('p');
+  avisoEdicion.className = 'conflict-warn';
+  avisoEdicion.hidden = true;
+  formulario.querySelector('.calendar-edit-help').before(avisoEdicion);
+  const revisarChoquesEdicion = () => {
+    // Se excluye la propia sesión: chocaría consigo misma en cuanto se abriera.
+    const texto = textoDeChoques([formulario.elements.date.value], formulario.elements.time.value,
+      Number(formulario.elements.durationMinutes.value), session.id);
+    avisoEdicion.innerHTML = texto;
+    avisoEdicion.hidden = !texto;
+  };
+  ['date', 'time', 'durationMinutes'].forEach(campo => {
+    formulario.elements[campo].addEventListener('change', revisarChoquesEdicion);
+    formulario.elements[campo].addEventListener('input', revisarChoquesEdicion);
+  });
+  revisarChoquesEdicion();
+  formulario.addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target);
     try {
       event.target.classList.add('loading-state');
