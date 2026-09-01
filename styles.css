@@ -272,3 +272,13 @@ select.filter{padding:11px 13px;font:600 13px 'DM Sans';cursor:pointer}
 
 /* Movimientos del ciclo en la ficha: dato de contexto, no titular. */
 .ciclo-movimientos{display:block;margin-top:9px;color:var(--muted);font-size:10px}
+
+/* Mover una clase desde el calendario. La que va "en la mano" se marca, y los
+   días se resaltan como destino posible: sin eso, el segundo toque es a ciegas. */
+.session-chip[data-mover-sesion]{cursor:pointer}
+.session-chip.moviendo{outline:2px solid var(--ink);outline-offset:1px;opacity:.6}
+.calendar-week.eligiendo-dia .day-col{background:#f3eef7;box-shadow:inset 0 0 0 1px #d8cbe4}
+.calendar-week.eligiendo-dia .day-col:hover,.day-col.destino-posible{background:#e9dff2;box-shadow:inset 0 0 0 2px #a98cc4}
+#calendar-mover-aviso{display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin-bottom:10px}
+#calendar-mover-aviso button{margin-left:auto;font-size:11px;padding:6px 11px}
+@media(max-width:560px){#calendar-mover-aviso button{margin-left:0;width:100%}}

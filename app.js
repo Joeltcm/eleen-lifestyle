@@ -1,4 +1,4 @@
-const APP_VERSION = '128';
+const APP_VERSION = '129';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -423,11 +423,92 @@ function renderGoogleCalendar() {
     connect.textContent = 'Sincronizar ahora'; connect.disabled = false; disconnect.hidden = false;
   }
 }
+// Mover una clase de día desde el propio calendario.
+//
+// En pantalla grande se arrastra, como en Google. En móvil se toca la clase y
+// después el día: arrastrar en una rejilla de siete columnas, con el dedo
+// tapando justo lo que se mueve, no acierta nunca. Los dos caminos terminan en
+// el mismo sitio, proponiendo la hora.
+function proponerHoraLibre(fecha, horaOriginal, duracion, ignorarId) {
+  // Se propone la misma hora: es lo que espera quien mueve una clase de día.
+  // Si ese hueco ya está ocupado, se busca el más cercano libre en pasos de
+  // media hora, para no proponer de entrada algo que ya choca.
+  if (!choquesEn(fecha, horaOriginal, duracion, ignorarId).length) return horaOriginal;
+  const base = minutosDelDia(horaOriginal);
+  for (let salto = 30; salto <= 240; salto += 30) {
+    for (const candidato of [base + salto, base - salto]) {
+      if (candidato < 5 * 60 || candidato + duracion > 22 * 60) continue;
+      const hora = `${String(Math.floor(candidato / 60)).padStart(2, '0')}:${String(candidato % 60).padStart(2, '0')}`;
+      if (!choquesEn(fecha, hora, duracion, ignorarId).length) return hora;
+    }
+  }
+  return horaOriginal;
+}
+
+function moverSesionA(sesion, fechaDestino) {
+  if (!sesion || !fechaDestino) return;
+  const propuesta = proponerHoraLibre(fechaDestino, sesion.time, sesion.durationMinutes, sesion.id);
+  const box = document.createElement('div');
+  box.innerHTML = `
+    <form id="mover-sesion-form">
+      <p class="eyebrow">REPROGRAMAR</p>
+      <h2>Mover la clase</h2>
+      <p class="form-summary"><b>${escapeHtml(sesion.client)}</b><br>${sesion.date} · ${sesion.time} → <b>${fechaDestino}</b></p>
+      <label>Hora<input name="time" type="time" required value="${propuesta}" /></label>
+      <p class="section-note">${propuesta === sesion.time
+        ? 'Se propone la misma hora. Cámbiala si acordaron otra.'
+        : `A las ${sesion.time} ese día ya hay alguien, así que se propone el hueco libre más cercano.`}</p>
+      <p class="conflict-warn" id="mover-choque" hidden></p>
+      <p class="section-note">Cuenta como reprogramación del mes y se actualiza en Google Calendar.</p>
+      <button class="primary wide-button">Mover la clase</button>
+    </form>`;
+  openModal(box);
+  const form = document.getElementById('mover-sesion-form');
+  const aviso = document.getElementById('mover-choque');
+  const revisar = () => {
+    const texto = textoDeChoques([fechaDestino], form.elements.time.value, sesion.durationMinutes, sesion.id);
+    aviso.innerHTML = texto;
+    aviso.hidden = !texto;
+  };
+  form.elements.time.addEventListener('input', revisar);
+  form.elements.time.addEventListener('change', revisar);
+  revisar();
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const hora = form.elements.time.value;
+    if (!confirmarGuardado(`Mover a ${escapeHtml(sesion.client)}\n${sesion.date} ${sesion.time} → ${fechaDestino} ${hora}`)) return;
+    try {
+      event.target.classList.add('loading-state');
+      await api(`/api/sessions/${sesion.id}`, { method: 'PATCH', body: {
+        startsAt: panamaDateTimeIso(fechaDestino, hora),
+        durationMinutes: sesion.durationMinutes, mode: sesion.mode, notes: sesion.notes || undefined
+      } });
+      sesionAMover = null;
+      await loadData(); renderAll(); modal.close();
+      toast('Clase movida · cuenta como reprogramación');
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+
+// La clase que la entrenadora tiene "en la mano" mientras elige el día nuevo.
+// En móvil no se arrastra: se toca la clase, se toca el día, y listo. Arrastrar
+// en una rejilla de siete columnas con el dedo encima de lo que mueves no
+// acierta nunca.
+let sesionAMover = null;
+
 function renderCalendar() {
   const grid = document.getElementById('week-calendar');
   const range = calendarRange();
   const visibleSessions = sessionsBetween(range.start, range.end);
   document.getElementById('calendar-period').textContent = calendarPeriodLabel(range);
+  const cartel = document.getElementById('calendar-mover-aviso');
+  if (cartel) {
+    const enMano = sesionAMover ? data.sessions.find(item => item.id === sesionAMover) : null;
+    cartel.innerHTML = enMano
+      ? `Moviendo la clase de <b>${escapeHtml(enMano.client)}</b> del ${enMano.date} · ${enMano.time}. Toca el día nuevo. <button type="button" class="secondary" id="calendar-mover-cancelar">Dejarlo</button>`
+      : '';
+    cartel.hidden = !enMano;
+  }
   document.querySelectorAll('[data-calendar-mode]').forEach(button => {
     const active = button.dataset.calendarMode === calendarMode;
     button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active));
@@ -443,7 +524,7 @@ function renderCalendar() {
     grid.innerHTML = names.map((name, index) => {
       const date = addDays(range.start, index); const key = dateKey(date);
       const sessions = visibleSessions.filter(session => session.date === key);
-      return `<button type="button" class="day-col ${key === dateKey(today) ? 'today' : ''} ${key === dateKey(calendarCursor) ? 'selected' : ''}" data-calendar-date="${key}"><span class="day-name">${name}</span><span class="day-num">${date.getDate()}</span>${sessions.map(session => `<span class="session-chip ${session.status}"><b>${session.time}</b> ${session.client.split(' ')[0]}</span>`).join('')}</button>`;
+      return `<button type="button" class="day-col ${key === dateKey(today) ? 'today' : ''} ${key === dateKey(calendarCursor) ? 'selected' : ''}" data-calendar-date="${key}"><span class="day-name">${name}</span><span class="day-num">${date.getDate()}</span>${sessions.map(session => `<span class="session-chip ${session.status} ${sesionAMover === session.id ? 'moviendo' : ''}" data-mover-sesion="${session.id}" draggable="${session.status === 'scheduled'}"><b>${session.time}</b> ${session.client.split(' ')[0]}</span>`).join('')}</button>`;
     }).join('');
     requestAnimationFrame(() => {
       const selected = grid.querySelector('.selected');
@@ -462,6 +543,9 @@ function renderCalendar() {
       return `<button type="button" class="month-day ${date.getMonth() !== calendarCursor.getMonth() ? 'outside' : ''} ${key === dateKey(today) ? 'today' : ''}" data-calendar-date="${key}"><span class="month-day-number">${date.getDate()}</span><span class="month-events">${sessions.slice(0, 2).map(session => `<span class="month-event ${session.status}"><i></i><b>${session.time}</b> ${session.client.split(' ')[0]}</span>`).join('')}${sessions.length > 2 ? `<small>+${sessions.length - 2} más</small>` : ''}</span></button>`;
     }).join('')}`;
   }
+  // Después de las ramas: cada una reescribe grid.className entero, así que
+  // marcarlo antes se perdía sin dejar rastro.
+  grid.classList.toggle('eligiendo-dia', Boolean(sesionAMover));
   const periodName = calendarMode === 'day' ? 'del día' : calendarMode === 'week' ? 'de la semana' : 'del mes';
   document.getElementById('session-control-title').textContent = `Sesiones ${periodName}`;
   document.getElementById('session-control-copy').textContent = visibleSessions.length ? `${visibleSessions.length} sesión${visibleSessions.length !== 1 ? 'es' : ''} en el período visible` : 'No hay sesiones en el período visible';
@@ -2857,6 +2941,37 @@ document.querySelectorAll('.nav-link').forEach(link => link.addEventListener('cl
 document.querySelectorAll('[data-view-go]').forEach(button => button.addEventListener('click', event => {
   event.preventDefault(); navigate(button.dataset.viewGo);
 }));
+// Arrastrar, en pantalla grande. Es el mismo gesto que en Google y termina en
+// el mismo diálogo que el de tocar: una sola forma de confirmar.
+document.addEventListener('dragstart', event => {
+  const chip = event.target.closest?.('[data-mover-sesion]');
+  if (!chip) return;
+  event.dataTransfer.setData('text/plain', chip.dataset.moverSesion);
+  event.dataTransfer.effectAllowed = 'move';
+  chip.classList.add('moviendo');
+});
+document.addEventListener('dragend', event => {
+  event.target.closest?.('[data-mover-sesion]')?.classList.remove('moviendo');
+});
+document.addEventListener('dragover', event => {
+  const dia = event.target.closest?.('[data-calendar-date]');
+  if (!dia) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+  dia.classList.add('destino-posible');
+});
+document.addEventListener('dragleave', event => {
+  event.target.closest?.('[data-calendar-date]')?.classList.remove('destino-posible');
+});
+document.addEventListener('drop', event => {
+  const dia = event.target.closest?.('[data-calendar-date]');
+  if (!dia) return;
+  event.preventDefault();
+  dia.classList.remove('destino-posible');
+  const sesion = data.sessions.find(item => item.id === event.dataTransfer.getData('text/plain'));
+  sesionAMover = null; renderCalendar();
+  if (sesion && sesion.date !== dia.dataset.calendarDate) moverSesionA(sesion, dia.dataset.calendarDate);
+});
 window.addEventListener('popstate', () => { if (currentUser?.role !== 'client') view(viewFromHash()); });
 window.addEventListener('hashchange', () => { if (currentUser?.role !== 'client') view(viewFromHash()); });
 document.addEventListener('click', event => {
@@ -2866,6 +2981,27 @@ document.addEventListener('click', event => {
   const calendarModeButton = event.target.closest('[data-calendar-mode]');
   const calendarShiftButton = event.target.closest('[data-calendar-shift]');
   const calendarDateButton = event.target.closest('[data-calendar-date]');
+  // Tocar una clase la pone "en la mano"; el siguiente toque en un día la
+  // mueve allí. Tiene que salir antes que el manejador del día, o el propio
+  // toque que la coge saltaría también al día donde ya estaba.
+  const chipSesion = event.target.closest('[data-mover-sesion]');
+  if (chipSesion) {
+    event.preventDefault(); event.stopPropagation();
+    const sesion = data.sessions.find(item => item.id === chipSesion.dataset.moverSesion);
+    if (!sesion || sesion.status !== 'scheduled') { toast('Sólo se pueden mover las clases programadas'); return; }
+    sesionAMover = sesionAMover === sesion.id ? null : sesion.id;
+    renderCalendar();
+    return;
+  }
+  if (event.target.closest('#calendar-mover-cancelar')) { sesionAMover = null; renderCalendar(); return; }
+  if (calendarDateButton && sesionAMover) {
+    event.preventDefault();
+    const sesion = data.sessions.find(item => item.id === sesionAMover);
+    const destino = calendarDateButton.dataset.calendarDate;
+    sesionAMover = null; renderCalendar();
+    if (sesion && sesion.date !== destino) moverSesionA(sesion, destino);
+    return;
+  }
   if (calendarModeButton) { calendarMode = calendarModeButton.dataset.calendarMode; renderCalendar(); }
   if (calendarShiftButton) {
     const amount = Number(calendarShiftButton.dataset.calendarShift);
