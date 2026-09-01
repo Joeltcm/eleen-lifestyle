@@ -6,6 +6,7 @@ import webpush from 'web-push';
 import { createHash, randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
 import { config } from './config.js';
+import type { TransactionSql } from 'postgres';
 import { sql } from './db.js';
 import { createDownloadUrl, createUploadUrl, deleteObject, downloadObject, storageReady, uploadObject, verifyUpload } from './storage.js';
 import { extractInBodyDocument, extractInBodyImage, inbodyAnalysisReady, inbodyAnalysisSetup, prepareInBodyImage, validateExtraction, validateInBodyValues } from './inbody-analysis.js';
@@ -145,6 +146,50 @@ function mediodiaEnPanama(fecha: Date | string): Date {
   return new Date(`${dia}T12:00:00-05:00`);
 }
 
+// Un saldo que se abre tarde tiene que hacerse cargo de las clases que ya se
+// dieron dentro de su ciclo.
+//
+// El orden real de los hechos es ése: la clase se marca dada por la mañana y
+// el saldo se abre después, al aplicar el pago o al renovar. Al marcarla no
+// había de dónde descontar, así que la sesión quedó completada y sin cobrar a
+// ningún saldo, y nada volvía a mirarla: el saldo nacía entero y esa clase no
+// se le descontaba a nadie nunca.
+//
+// Esto no es tocar el pasado, que es lo que no se debe hacer con el dinero.
+// Es al revés: la clase se dio, y el saldo tiene que decir la verdad sobre lo
+// que queda. Sólo alcanza a las de su propio ciclo, nunca a las de un mes ya
+// cerrado, y nunca gasta más sesiones de las que el saldo tiene.
+async function cobrarClasesYaDadas(
+  transaction: TransactionSql | typeof sql,
+  packageId: string,
+  clientId: string,
+  expiresOn: string,
+  totalSessions: number
+) {
+  const pendientes = await transaction`
+    SELECT id FROM sessions
+    WHERE client_id = ${clientId} AND status = 'completed' AND package_debited = false
+      AND starts_at > (${expiresOn}::date - interval '1 month')
+      AND starts_at < (${expiresOn}::date + interval '1 day')
+    ORDER BY starts_at
+    LIMIT ${totalSessions}
+  `;
+  if (!pendientes.length) return 0;
+  const ids = pendientes.map(fila => fila.id as string);
+  await transaction`
+    UPDATE sessions SET package_id = ${packageId}, package_debited = true,
+      debited_group_id = ${clientId}, updated_at = now()
+    WHERE id IN ${transaction(ids)}
+  `;
+  await transaction`
+    UPDATE session_packages
+    SET used_sessions = ${ids.length},
+      status = ${ids.length >= totalSessions ? 'exhausted' : 'active'}
+    WHERE id = ${packageId}
+  `;
+  return ids.length;
+}
+
 async function generateRecurringInvoices(ownerId?: string) {
   const selectedOwner = ownerId || null;
   const invoices = await sql`
@@ -275,7 +320,7 @@ async function generateRecurringInvoices(ownerId?: string) {
     ORDER BY entrena, due_on
   `;
   for (const cobro of pendientes) {
-    await sql`
+    const [abierto] = await sql`
       INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
       VALUES (${cobro.entrena},
         ${'Mensualidad ' + new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric', timeZone: 'America/Panama' }).format(mediodiaEnPanama(cobro.billing_period))},
@@ -291,7 +336,10 @@ async function generateRecurringInvoices(ownerId?: string) {
         -- las clases del ciclo son suyas. Si no lo fueran, el cumplimiento
         -- mediría mal a quien sí entrenó, que es peor que cobrar tarde.
         'active')
+      RETURNING id
     `;
+    await cobrarClasesYaDadas(sql, abierto.id as string, cobro.entrena as string,
+      String(cobro.due_on).slice(0, 10), Number(cobro.total_sessions));
   }
   return { generated: invoices.length, balances: pendientes.length, invoices };
 }
@@ -2091,6 +2139,7 @@ app.post('/api/invoices/:id/coverage', { preHandler: requireStaff }, async (requ
           RETURNING id
         `;
         packageId = pack.id;
+        await cobrarClasesYaDadas(transaction, pack.id, cliente.id, vence, entry.sessions);
       }
       // El índice único de (cliente, período) es lo que hace inofensivo pulsar
       // dos veces: la segunda no abre otro saldo, actualiza el mismo.

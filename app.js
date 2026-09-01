@@ -1,4 +1,4 @@
-const APP_VERSION = '119';
+const APP_VERSION = '120';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -238,7 +238,7 @@ async function loadData() {
     return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), status: { active: 'Activo', paused: 'En pausa', inactive: 'Inactivo' }[client.status] || 'Inactivo', statusRaw: client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
   });
   data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, concept: item.concept, amount: Number(item.amount), balance: item.source_system ? Number(item.balance) : item.status === 'pending' ? Number(item.amount) : 0, due: dateOnly(item.due_on), issued: dateOnly(item.issued_on || item.due_on), paidOn: item.confirmed_at ? String(item.confirmed_at).slice(0, 10) : '', method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '' }));
-  data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), expiresOn: item.expires_on || '', status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired' }));
+  data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, kind: item.kind, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), expiresOn: item.expires_on || '', status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired' }));
   data.sessions = sessions.map(sessionFromApi);
   data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: (item.assigned_client_ids || []).length, assignedClientIds: item.assigned_client_ids || [], sessions: item.sessions_per_week, dueOn: item.due_on || null, exercises: item.exercises || [] }));
   data.plans = plans.map(item => ({ id: item.id, name: item.name, description: item.description || '', billingModel: item.billing_model, price: Number(item.price), sessionsIncluded: Number(item.sessions_included || 0), validityDays: Number(item.validity_days || 0), active: item.active }));
@@ -275,6 +275,27 @@ const billingPeriodInvoices = () => data.invoices.filter(invoice => {
   return matchesYear && matchesMonth && matchesSource;
 }).sort((a, b) => invoicePeriodDate(b) - invoicePeriodDate(a));
 const remainingSessions = pack => Math.max(0, pack.total - pack.used);
+// El saldo de una mensualidad no se veía en ninguna parte: la ficha sólo
+// enseñaba sesiones disponibles cuando el modelo era paquete, de cuando las
+// mensualidades no llevaban saldo. Ahora lo llevan, y sin esto la entrenadora
+// no tiene dónde mirar cuántas clases le quedan al cliente en el mes.
+// El avance del mes junto al del período. El panel de cumplimiento mide lo que
+// ya pasó —una clase dada esta semana es 1 de 1, 100%—, y esa es la medida
+// correcta: castigar hoy por clases que aún se pueden dar sería injusto. Pero
+// la pregunta que la entrenadora le hace al panel es "¿cuántas le quedan?", y
+// esa vivía sólo en Control de paquetes.
+const avanceDelMes = clientId => {
+  const pack = data.packages.find(item => item.clientId === clientId && item.status === 'confirmed' && item.kind === 'monthly');
+  if (!pack) return '';
+  return ` · ${pack.used} de ${pack.total} del mes`;
+};
+const saldoDelMes = client => {
+  const pack = data.packages.find(item => item.clientId === client.id && item.status === 'confirmed' && item.kind === 'monthly');
+  if (!pack) return '';
+  const vence = pack.expiresOn ? ` · vence ${formatoDiaCorto(pack.expiresOn)}` : '';
+  return `${remainingSessions(pack)} de ${pack.total} sesiones${vence} · `;
+};
+const formatoDiaCorto = fecha => new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short', timeZone: 'America/Panama' }).format(new Date(`${String(fecha).slice(0, 10)}T12:00:00-05:00`));
 const clientPackage = name => data.packages.find(pack => pack.client === name && pack.status === 'confirmed' && remainingSessions(pack) > 0) || data.packages.find(pack => pack.client === name && pack.status === 'pending') || data.packages.find(pack => pack.client === name && pack.status !== 'expired');
 const mondayFor = date => { const monday = new Date(date); monday.setDate(date.getDate() - ((date.getDay() + 6) % 7)); monday.setHours(0, 0, 0, 0); return monday; };
 const addDays = (date, amount) => { const next = new Date(date); next.setDate(next.getDate() + amount); return next; };
@@ -326,7 +347,7 @@ function renderDashboard() {
   document.getElementById('today-sessions').innerHTML = todaySessions.length ? todaySessions.map(session => `<div class="agenda-item"><span class="agenda-time">${session.time}</span><div><b>${escapeHtml(session.client)}</b><span>${session.routine} · ${session.mode.toLowerCase()}</span></div><span class="session-state ${session.status}">${sessionStateLabel(session)}</span></div>`).join('') : '<p class="empty">No hay sesiones para hoy.</p>';
   const noInbody = data.clients.filter(client => !client.inbody).map(client => `<div class="alert-item"><b>${escapeHtml(client.name)}</b><span>Sin evaluación InBody registrada.</span></div>`).join('');
   document.getElementById('alerts').innerHTML = `${noInbody || '<div class="alert-item"><b>Todo al día</b><span>No hay alertas de seguimiento.</span></div>'}<div class="alert-item"><b>${data.invoices.filter(item => item.status === 'pending').length} cobro pendiente</b><span>Revisa pagos y comprobantes.</span></div>`;
-  document.getElementById('compliance-list').innerHTML = data.compliance.clients.length ? data.compliance.clients.map(client => `<div class="compliance-row"><span class="initials">${escapeHtml(initials(client.name))}</span><div><b>${escapeHtml(client.name)}</b><small>${client.completed} de ${client.activities} actividades con avance${client.late ? ` · ${client.late} fuera de fecha` : ''}${client.missed ? ` · ${client.missed} sin hacer` : ''}</small><span class="compliance-track"><i style="width:${client.compliancePercent}%"></i></span></div><strong>${client.compliancePercent}%</strong></div>`).join('') : '<p class="empty">Aún no hay entrenamientos vencidos en este período.</p>';
+  document.getElementById('compliance-list').innerHTML = data.compliance.clients.length ? data.compliance.clients.map(client => `<div class="compliance-row"><span class="initials">${escapeHtml(initials(client.name))}</span><div><b>${escapeHtml(client.name)}</b><small>${client.completed} de ${client.activities} actividades con avance${client.late ? ` · ${client.late} fuera de fecha` : ''}${client.missed ? ` · ${client.missed} sin hacer` : ''}${avanceDelMes(client.clientId)}</small><span class="compliance-track"><i style="width:${client.compliancePercent}%"></i></span></div><strong>${client.compliancePercent}%</strong></div>`).join('') : '<p class="empty">Aún no hay entrenamientos vencidos en este período.</p>';
   const notificationCount = document.getElementById('notification-count'); notificationCount.textContent = data.notifications.length; notificationCount.hidden = !data.notifications.length;
 }
 // Los inactivos aparte y al final. Mezclados alfabéticamente obligaban a leer
@@ -350,7 +371,7 @@ function renderClients(filter = '') {
       ? `<span class="commercial-label package-label">Paquete</span><b>${pack?.status === 'pending' ? 'Pago pendiente' : `${pack ? remainingSessions(pack) : client.sessionsIncluded || 0} sesiones disponibles`}</b><small>${escapeHtml(client.planName || 'Plan por sesiones')} · ${money.format(client.plan)}</small>`
       : client.billingModel === 'single'
       ? `<span class="commercial-label single-label">Sesión suelta</span><b>${escapeHtml(client.planName || 'Sesiones individuales')} · ${money.format(client.plan)}</b><small>Por sesión, sin corte mensual</small>`
-      : `<span class="commercial-label">Mensualidad</span><b>${escapeHtml(client.planName || 'Mensualidad')} · ${money.format(client.plan)}</b><small>Corte día ${client.cutoffDay}</small>`;
+      : `<span class="commercial-label">Mensualidad</span><b>${escapeHtml(client.planName || 'Mensualidad')} · ${money.format(client.plan)}</b><small>${saldoDelMes(client)}Corte día ${client.cutoffDay}</small>`;
     return `<article class="client-card"><header><span class="initials">${escapeHtml(initials(client.name))}</span><div><h3>${escapeHtml(client.name)}</h3><small>${escapeHtml(client.goal)}</small></div><span class="status estado-${client.statusRaw}">${client.status}</span></header><p>${client.inbody ? `Último InBody: ${client.inbody.date}` : 'Aún no se ha cargado un InBody.'}${client.portalActive ? ' · Portal activo' : ''}</p><div class="commercial-summary">${commercial}</div><div class="mini-data">${client.inbody ? `<div><b>${client.inbody.weight} kg</b><span>Peso</span></div><div><b>${client.inbody.smm} kg</b><span>Músculo</span></div><div><b>${client.inbody.pbf}%</b><span>Grasa</span></div>` : `<div><b>—</b><span>Evaluación pendiente</span></div>`}</div><div class="client-actions"><button class="secondary" data-client="${client.id}">Ver expediente</button><button class="secondary" data-edit-client="${client.id}">Editar</button><button class="secondary" data-inbody="${client.id}">+ InBody</button></div></article>`;
   };
 
@@ -1204,7 +1225,7 @@ async function renderDailyLog(date) {
         const cumplida = Boolean(row.session_id) && Number(row.completion_percent) > 0;
         return `<label class="daily-item${agendada ? ' locked' : ''}">
           <input type="checkbox" data-daily-client="${row.client_id}" ${cumplida ? 'checked' : ''} ${agendada ? 'disabled' : ''} />
-          <span class="daily-name"><b>${escapeHtml(row.full_name)}</b><small>${agendada ? `Sesión agendada${row.routine_title ? `: ${escapeHtml(row.routine_title)}` : ''} · se marca desde la agenda` : row.billing_model === 'package' ? `${row.available_sessions} sesiones disponibles` : 'Mensualidad'}</small></span>
+          <span class="daily-name"><b>${escapeHtml(row.full_name)}</b><small>${agendada ? `Sesión agendada${row.routine_title ? `: ${escapeHtml(row.routine_title)}` : ''} · se marca desde la agenda` : row.billing_model === 'package' ? `${row.available_sessions} sesiones disponibles` : row.billing_model === 'monthly' && Number(row.available_sessions) ? `Mensualidad · ${row.available_sessions} sesiones disponibles` : 'Mensualidad'}</small></span>
         </label>`;
       }).join('')}</div>
       <button class="primary wide-button" id="daily-save">Guardar entrenamientos</button>`;

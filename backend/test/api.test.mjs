@@ -405,6 +405,49 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     assert.equal(testigo.length, 1, 'a quien no está cubierto sí se le emite');
   });
 
+  test('el saldo se hace cargo de las clases ya dadas del ciclo', async () => {
+    // El orden real: la clase se marcó dada esta mañana, cuando todavía no
+    // existía el saldo, y la cobertura se aplicó después. Sin esto el saldo
+    // nace en 12 y esa clase no se le descuenta a nadie nunca.
+    const plan = await api.post('/api/plans', { name: 'Mensual con clase previa', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
+    const c = await api.post('/api/clients', { fullName: 'Entrenó antes del saldo', planId: plan.datos.id, cutoffDay: 28 });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: new Date().toISOString().slice(0, 10) });
+
+    const s = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: [new Date(Date.now() - 3600_000).toISOString()], durationMinutes: 60, mode: 'Presencial' });
+    await api.patch(`/api/sessions/${s.datos.sesiones[0].id}/compliance`, { completed: true, completionPercent: 100 });
+    const sinSaldo = (await api.get('/api/clients')).datos.find(x => x.id === c.datos.id);
+    assert.equal(Number(sinSaldo.available_sessions), 0, 'todavía no hay de dónde descontar');
+
+    await api.post(`/api/invoices/${f.datos.id}/coverage`, {
+      billingPeriod: mesQueCubre,
+      entries: [{ clientId: c.datos.id, amount: 175, sessions: 12 }]
+    });
+
+    const despues = (await api.get('/api/clients')).datos.find(x => x.id === c.datos.id);
+    assert.equal(Number(despues.available_sessions), 11,
+      'la clase de esta mañana ya se dio: el saldo nace con 11, no con 12');
+  });
+
+  test('pero no de las de un ciclo ya cerrado', async () => {
+    // El límite importa: si alcanzara hacia atrás sin fin, un saldo nuevo
+    // nacería consumido por clases de meses que ya se cobraron y se cerraron.
+    const plan = await api.post('/api/plans', { name: 'Mensual con clase vieja', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
+    const c = await api.post('/api/clients', { fullName: 'Entrenó hace meses', planId: plan.datos.id, cutoffDay: 28 });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: new Date().toISOString().slice(0, 10) });
+    const haceTresMeses = new Date(); haceTresMeses.setMonth(haceTresMeses.getMonth() - 3);
+    const s = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: [haceTresMeses.toISOString()], durationMinutes: 60, mode: 'Presencial' });
+    await api.patch(`/api/sessions/${s.datos.sesiones[0].id}/compliance`, { completed: true, completionPercent: 100 });
+
+    await api.post(`/api/invoices/${f.datos.id}/coverage`, {
+      billingPeriod: mesQueCubre,
+      entries: [{ clientId: c.datos.id, amount: 175, sessions: 12 }]
+    });
+
+    const despues = (await api.get('/api/clients')).datos.find(x => x.id === c.datos.id);
+    assert.equal(Number(despues.available_sessions), 12,
+      'una clase de hace tres meses no sale del saldo de este mes');
+  });
+
   test('quitar la cobertura se lleva el saldo que nadie usó', async () => {
     const { datos } = await api.get(`/api/invoices/${factura}/coverage`);
     const suya = datos.applied.find(a => a.client_id === beatris);
