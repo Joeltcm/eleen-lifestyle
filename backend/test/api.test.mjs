@@ -420,8 +420,12 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     const sinSaldo = (await api.get('/api/clients')).datos.find(x => x.id === c.datos.id);
     assert.equal(Number(sinSaldo.available_sessions), 0, 'todavía no hay de dónde descontar');
 
+    // El mes en curso, no el siguiente: la clase de hoy pertenece a este ciclo
+    // y con el mes siguiente quedaría fuera de la ventana según el día del mes
+    // en que corra la prueba.
+    const mesEnCurso = new Date().toISOString().slice(0, 8) + '01';
     await api.post(`/api/invoices/${f.datos.id}/coverage`, {
-      billingPeriod: mesQueCubre,
+      billingPeriod: mesEnCurso,
       entries: [{ clientId: c.datos.id, amount: 175, sessions: 12 }]
     });
 
@@ -1028,6 +1032,103 @@ describe('horario de trabajo con turnos', () => {
     await api.put('/api/working-hours', { tramos: [] });
     const { datos } = await api.get(`/api/availability?from=${dia(3)}&to=${dia(3)}&durationMinutes=60`);
     assert.equal(datos.configurado, false, 'quien no lo ha configurado no se queda sin huecos');
+  });
+});
+
+describe('cuando cancela la entrenadora', () => {
+  let clientId, planId;
+  const suSaldo = async tipo => (await api.get('/api/packages')).datos.find(p => p.client_id === clientId && p.kind === tipo);
+  const agendarPasada = async () => {
+    const cuando = new Date(Date.now() - 2 * 3600_000).toISOString();
+    const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [cuando], durationMinutes: 60, mode: 'Presencial' });
+    return lote.datos.sesiones[0];
+  };
+
+  before(async () => {
+    const plan = await api.post('/api/plans', { name: 'Mensual 8 por 280', billingModel: 'monthly', price: 280, sessionsIncluded: 8 });
+    planId = plan.datos.id;
+    const c = await api.post('/api/clients', { fullName: 'No fue culpa suya', planId, cutoffDay: 1 });
+    clientId = c.datos.id;
+  });
+
+  test('no le baja el cumplimiento al cliente', async () => {
+    const s = await agendarPasada();
+    await api.delete(`/api/sessions/${s.id}?rescheduled=false&by=trainer`);
+    const fila = (await api.get('/api/compliance/summary?period=month')).datos.clients.find(x => x.clientId === clientId);
+    const cuenta = fila ? fila.activities : 0;
+    assert.equal(cuenta, 0, 'no puede apuntarse como incumplida una clase que canceló ella');
+  });
+
+  test('y la del cliente sí', async () => {
+    const s = await agendarPasada();
+    await api.delete(`/api/sessions/${s.id}?rescheduled=false&by=client`);
+    const fila = (await api.get('/api/compliance/summary?period=month')).datos.clients.find(x => x.clientId === clientId);
+    assert.equal(fila.activities, 1, 'la que perdió el cliente sí cuenta');
+    assert.equal(fila.missed, 1);
+  });
+
+  test('ni en sus clases perdidas, que van aparte', async () => {
+    const c = (await api.get('/api/clients')).datos.find(x => x.id === clientId);
+    assert.equal(Number(c.canceladas_ciclo), 1, 'sólo la que perdió él');
+    assert.equal(Number(c.canceladas_por_ella_ciclo), 1, 'la suya se cuenta aparte, no se esconde');
+  });
+
+  test('tampoco cuenta en sus reprogramaciones del mes', async () => {
+    const antes = (await api.get('/api/clients')).datos.find(c => c.id === clientId).reprogramaciones_ciclo;
+    const s = await agendarPasada();
+    await api.delete(`/api/sessions/${s.id}?rescheduled=true&by=trainer`);
+    const despues = (await api.get('/api/clients')).datos.find(c => c.id === clientId).reprogramaciones_ciclo;
+    assert.equal(Number(despues), Number(antes), 'ese contador mide al cliente, no a ella');
+  });
+
+  test('reponer le abre una clase sin fecha límite', async () => {
+    const s = await agendarPasada();
+    const { datos } = await api.delete(`/api/sessions/${s.id}?rescheduled=true&by=trainer&resolution=makeup`);
+    assert.equal(datos.compensacion.tipo, 'makeup');
+    const saldo = await suSaldo('makeup');
+    assert.ok(saldo, 'le queda una clase a favor');
+    assert.equal(saldo.expires_on, null, 'sin fecha: el cliente no provocó el problema');
+  });
+
+  test('cancelar dos veces suma sobre el mismo saldo', async () => {
+    const antes = Number((await suSaldo('makeup')).total_sessions);
+    const s = await agendarPasada();
+    await api.delete(`/api/sessions/${s.id}?rescheduled=true&by=trainer&resolution=makeup`);
+    assert.equal(Number((await suSaldo('makeup')).total_sessions), antes + 1, 'no abre un saldo nuevo por cada clase');
+  });
+
+  test('el descuento baja el cobro del mes siguiente', async () => {
+    // Corte a tres días vista para que la generación llegue a emitirlo.
+    const corte = new Date(Date.now() + 3 * 24 * 3600_000).getDate();
+    const c = await api.post('/api/clients', { fullName: 'Le deben dos clases', planId, cutoffDay: corte });
+    for (let i = 1; i <= 2; i += 1) {
+      const cuando = new Date(Date.now() - i * 2 * 3600_000).toISOString();
+      const lote = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: [cuando], durationMinutes: 60, mode: 'Presencial' });
+      await api.delete(`/api/sessions/${lote.datos.sesiones[0].id}?rescheduled=false&by=trainer&resolution=discount`);
+    }
+
+    const { datos } = await api.post('/api/billing/recurring/generate', {});
+    assert.equal(datos.descuentos, 2, 'los dos créditos se aplican');
+
+    const suyas = (await api.get('/api/invoices')).datos.filter(x => x.client_id === c.datos.id);
+    assert.equal(suyas.length, 1);
+    assert.equal(Number(suyas[0].amount), 210, '280 menos dos clases de 35');
+    assert.match(suyas[0].concept, /menos 2 clases no dadas/, 'y el cobro dice por qué es menor');
+
+    // Y se consumen: un crédito que sigue pendiente después de aplicarse
+    // volvería a bajar el cobro del mes siguiente, regalando el doble.
+    const cliente = (await api.get('/api/clients')).datos.find(x => x.id === c.datos.id);
+    assert.equal(Number(cliente.credito_pendiente), 0, 'aplicado es aplicado, no se cobra dos veces');
+  });
+
+  test('descontar deja el crédito por el valor de la clase', async () => {
+    const otro = await api.post('/api/clients', { fullName: 'Prefiere descuento', planId, cutoffDay: 1 });
+    const cuando = new Date(Date.now() - 2 * 3600_000).toISOString();
+    const lote = await api.post('/api/sessions/batch', { clientId: otro.datos.id, startsAt: [cuando], durationMinutes: 60, mode: 'Presencial' });
+    const { datos } = await api.delete(`/api/sessions/${lote.datos.sesiones[0].id}?rescheduled=false&by=trainer&resolution=discount`);
+    assert.equal(datos.compensacion.tipo, 'discount');
+    // 280 entre 8 clases: 35 la clase.
+    assert.match(datos.compensacion.detalle, /35\.00/, 'el valor sale del plan, no se teclea');
   });
 });
 

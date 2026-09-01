@@ -337,3 +337,7 @@ body{background:radial-gradient(circle at 12% 0%,#fffafa 0,#fbf9f8 42%,#f7f3f4 1
   .dashboard-grid .wide{grid-column:1/-1}
   dialog{max-height:calc(100dvh - 32px);overflow-y:auto}
 }
+
+/* Descuento a favor del cliente: se debe hasta que baje un cobro, así que no
+   se pinta como un dato más del mes. */
+.ciclo-movimientos.credito{color:#8a6652;font-weight:600}

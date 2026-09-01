@@ -349,7 +349,8 @@ async function generateRecurringInvoices(ownerId?: string) {
       String(cobro.due_on).slice(0, 10), Number(cobro.total_sessions));
   }
   const reposiciones = await abrirReposiciones(ownerId);
-  return { generated: invoices.length, balances: pendientes.length, reposiciones, invoices };
+  const descuentos = await aplicarCreditos(invoices as unknown as CobroGenerado[]);
+  return { generated: invoices.length, balances: pendientes.length, reposiciones, descuentos, invoices };
 }
 
 app.get('/api/billing/recurring/status', { preHandler: requireStaff }, async request => {
@@ -364,7 +365,7 @@ app.post('/api/billing/recurring/generate', { preHandler: requireStaff }, async 
     return { ...status, generated: 0, message: 'La facturación automática se activará después del corte final de Zoho.' };
   }
   const result = await generateRecurringInvoices(auth.sub);
-  return { ...(await recurringBillingStatus(auth.sub)), generated: result.generated, balances: result.balances, reposiciones: result.reposiciones };
+  return { ...(await recurringBillingStatus(auth.sub)), generated: result.generated, balances: result.balances, reposiciones: result.reposiciones, descuentos: result.descuentos };
 });
 
 app.get('/health', async () => {
@@ -655,9 +656,23 @@ app.get('/api/clients', { preHandler: requireStaff }, async request => {
       -- cliente, lo segundo el desgaste de la agenda. Juntos no dicen nada.
       (SELECT count(*)::int FROM session_reschedules sr
         WHERE sr.client_id = c.id AND sr.created_at >= inicio_ciclo(c.billing_cutoff_day)) AS reprogramaciones_ciclo,
+      -- Sólo las que perdió el cliente. Las que canceló la entrenadora no son
+      -- de él: se le reponen o se le descuentan, y contarlas aquí sería
+      -- pasarle la cuenta de algo ajeno.
       (SELECT count(*)::int FROM sessions s
         WHERE s.client_id = c.id AND s.status = 'cancelled' AND s.cancellation_kind = 'not_rescheduled'
-          AND s.starts_at >= inicio_ciclo(c.billing_cutoff_day)) AS canceladas_ciclo
+          AND COALESCE(s.cancelled_by, 'client') = 'client'
+          AND s.starts_at >= inicio_ciclo(c.billing_cutoff_day)) AS canceladas_ciclo,
+      -- Y aparte, lo que canceló ella: es un número suyo, no del cliente, pero
+      -- verlo junto al otro dice de un vistazo de quién viene el desorden.
+      (SELECT count(*)::int FROM sessions s
+        WHERE s.client_id = c.id AND s.status = 'cancelled' AND s.cancelled_by = 'trainer'
+          AND s.starts_at >= inicio_ciclo(c.billing_cutoff_day)) AS canceladas_por_ella_ciclo,
+      -- Descuentos que se le deben y todavía no se han aplicado. Sin verlos,
+      -- la única señal de que existen es que un cobro sale más bajo el mes que
+      -- viene, y para entonces ya nadie recuerda por qué.
+      COALESCE((SELECT sum(bc.amount) FROM billing_credits bc
+        WHERE bc.client_id = c.id AND bc.applied_invoice_id IS NULL), 0)::numeric(12,2) AS credito_pendiente
     FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id
     WHERE c.owner_id = ${auth.sub} ORDER BY c.full_name
   `;
@@ -1595,6 +1610,47 @@ const HORIZONTE_DIAS = 56;
 const REPOSICIONES_MAXIMAS = 2;
 const DIAS_PARA_REPONER = 7;
 
+// Bajar del cobro nuevo lo que se le debe al cliente por clases que no se
+// dieron. Se aplica sobre el cobro de quien entrena —el crédito es suyo—
+// aunque el cobro salga a nombre de quien paga, y nunca deja el cobro en
+// negativo: lo que sobre queda pendiente para el mes siguiente.
+type CobroGenerado = { id: string; billed_for_client_id: string | null; client_id: string; amount: string };
+
+async function aplicarCreditos(invoices: CobroGenerado[]) {
+  let aplicados = 0;
+  for (const invoice of invoices) {
+    const entrena = invoice.billed_for_client_id || invoice.client_id;
+    const creditos = await sql`
+      SELECT id, concept, amount FROM billing_credits
+      WHERE client_id = ${entrena} AND applied_invoice_id IS NULL
+      ORDER BY created_at
+    `;
+    if (!creditos.length) continue;
+    let restante = Number(invoice.amount);
+    const usados = [];
+    for (const credito of creditos) {
+      if (Number(credito.amount) > restante) break;
+      restante = Math.round((restante - Number(credito.amount)) * 100) / 100;
+      usados.push(credito);
+    }
+    if (!usados.length) continue;
+    await sql`
+      UPDATE billing_credits SET applied_invoice_id = ${invoice.id}, applied_on = current_date
+      WHERE id IN ${sql(usados.map(c => c.id as string))}
+    `;
+    const detalle = usados.map(c => c.concept).join(' · ');
+    await sql`
+      UPDATE invoices
+      SET amount = ${restante}, subtotal = ${restante},
+        concept = concept || ' · menos ' || ${usados.length}::text || ' clase' || CASE WHEN ${usados.length} = 1 THEN '' ELSE 's' END || ' no dada' || CASE WHEN ${usados.length} = 1 THEN '' ELSE 's' END,
+        notes = COALESCE(notes || E'\n', '') || ${`Descuento aplicado: ${detalle}`}
+      WHERE id = ${invoice.id}
+    `;
+    aplicados += usados.length;
+  }
+  return aplicados;
+}
+
 async function abrirReposiciones(ownerId?: string) {
   const candidatos = await sql`
     SELECT c.id AS client_id, inicio_ciclo(c.billing_cutoff_day) AS desde,
@@ -2068,20 +2124,79 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
   // No se usa z.coerce.boolean(): convierte la cadena "false" en true, porque
   // cualquier texto no vacío es verdadero. Se compara con "true" a mano.
   const reprogramada = (request.query as { rescheduled?: string }).rescheduled === 'true';
-  const [session] = await sql`UPDATE sessions s SET status = 'cancelled', cancellation_kind = ${reprogramada ? 'rescheduled' : 'not_rescheduled'}, updated_at = now() FROM clients c WHERE s.id = ${id} AND c.id = s.client_id AND c.owner_id = ${auth.sub} AND s.status <> 'cancelled' RETURNING s.*`;
+  // Quién cancela cambia a quién se le cobra la falta. Por omisión, el
+  // cliente: es como se contaron todas las anteriores.
+  const consulta = request.query as { by?: string; resolution?: string; amount?: string };
+  const laCancelaEllaSola = consulta.by === 'trainer';
+  const compensa = consulta.resolution === 'discount' ? 'discount' : 'makeup';
+
+  const [session] = await sql`
+    UPDATE sessions s SET status = 'cancelled',
+      cancellation_kind = ${reprogramada ? 'rescheduled' : 'not_rescheduled'},
+      cancelled_by = ${laCancelaEllaSola ? 'trainer' : 'client'}, updated_at = now()
+    FROM clients c WHERE s.id = ${id} AND c.id = s.client_id AND c.owner_id = ${auth.sub} AND s.status <> 'cancelled'
+    RETURNING s.*
+  `;
   if (!session) return reply.code(404).send({ error: 'Sesión no encontrada o ya cancelada' });
   // Cancelar pidiendo otro día es reprogramar; cancelar y perderla, no. Sólo
   // la primera se cuenta, que es la distinción que la entrenadora ya hace en
   // el diálogo y que hasta ahora no se guardaba en ninguna parte.
-  if (reprogramada) {
+  // El contador de reprogramaciones mide al cliente; lo que cancela ella no
+  // pinta ahí. Mezclarlos haría ilegible el único número que dice algo del
+  // cliente.
+  if (reprogramada && !laCancelaEllaSola) {
     await sql`
       INSERT INTO session_reschedules (session_id, client_id, from_starts_at, origin)
       VALUES (${id}, ${session.client_id}, ${session.starts_at}, 'cancelled')
     `;
   }
+
+  // Cuando cancela ella, el cliente queda a favor y hay que devolverle el
+  // valor: otra clase, o menos dinero. Se resuelve aquí y no se deja para
+  // luego, que es como se olvida.
+  let compensacion: { tipo: string; detalle: string } | null = null;
+  if (laCancelaEllaSola) {
+    const [cliente] = await sql`
+      SELECT c.id, c.standard_price, COALESCE(p.sessions_included, c.monthly_session_target, 0)::int AS incluidas
+      FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id WHERE c.id = ${session.client_id}
+    `;
+    if (compensa === 'discount') {
+      // El valor de la clase sale del plan; si no se puede deducir, se toma lo
+      // que venga en la petición. Un descuento de cero no es un descuento.
+      const porClase = Number(consulta.amount) > 0
+        ? Number(consulta.amount)
+        : (Number(cliente?.incluidas) > 0 ? Number(cliente.standard_price) / Number(cliente.incluidas) : 0);
+      if (porClase > 0) {
+        await sql`
+          INSERT INTO billing_credits (client_id, session_id, concept, amount)
+          VALUES (${session.client_id}, ${id},
+            ${`Clase no dada del ${new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'long', timeZone: 'America/Panama' }).format(new Date(session.starts_at as string))}`},
+            ${Math.round(porClase * 100) / 100})
+        `;
+        compensacion = { tipo: 'discount', detalle: `Descuento de ${porClase.toFixed(2)} para el próximo cobro` };
+      }
+    } else {
+      // Reposición sin tope y sin fecha: el cliente no provocó el problema, y
+      // darle una semana para arreglarlo sería trasladarle la prisa de otro.
+      const [existente] = await sql`
+        SELECT id, total_sessions FROM session_packages
+        WHERE client_id = ${session.client_id} AND kind = 'makeup' AND makeup_for_period IS NULL AND status = 'active'
+        ORDER BY created_at DESC LIMIT 1
+      `;
+      if (existente) {
+        await sql`UPDATE session_packages SET total_sessions = total_sessions + 1 WHERE id = ${existente.id}`;
+      } else {
+        await sql`
+          INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
+          VALUES (${session.client_id}, 'Reposición · clases canceladas por la entrenadora', 1, 0, NULL, 'makeup', current_date, 'active')
+        `;
+      }
+      compensacion = { tipo: 'makeup', detalle: 'Una clase por reponer, sin fecha límite' };
+    }
+  }
   try { await cancelSessionInGoogle(auth.sub, id); }
   catch (error) { app.log.warn({ err: error, sessionId: id }, 'Session cancelled but Google Calendar deletion failed'); }
-  return { cancelled: true, session };
+  return { cancelled: true, session, compensacion };
 });
 // El resultado de una sesión es de tres estados, no de dos. Antes se deducía
 // de una casilla: desmarcarla equivalía a decir "no cumplió", así que quien la
@@ -3050,7 +3165,11 @@ async function complianceRows(ownerId: string, period: z.infer<typeof reportPeri
       -- incumplidas con 0%. Si se movieron a otro día, la que cuenta es la
       -- nueva sesión y penalizar ambas sería cobrar dos veces lo mismo.
       WHERE c.owner_id = ${ownerId} AND s.starts_at >= ${start} AND s.starts_at <= now()
-        AND (s.status <> 'cancelled' OR s.cancellation_kind = 'not_rescheduled')
+        -- Las canceladas entran sólo si nadie las reprogramó Y las canceló el
+        -- cliente. Una clase que canceló la entrenadora no es un incumplimiento
+        -- de él: se le repone o se le descuenta, pero no se le apunta.
+        AND (s.status <> 'cancelled'
+          OR (s.cancellation_kind = 'not_rescheduled' AND COALESCE(s.cancelled_by, 'client') = 'client'))
       UNION ALL
       SELECT c.id AS client_id, c.full_name, rc.completed_on::timestamptz AS occurred_at, 'Rutina'::text AS source,
         r.title AS activity, 'completed'::text AS status, rc.completion_percent,

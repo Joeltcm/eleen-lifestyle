@@ -1,4 +1,4 @@
-const APP_VERSION = '132';
+const APP_VERSION = '133';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -241,7 +241,7 @@ async function loadData() {
     });
     const latest = history.at(-1);
     const inbodyReviews = clientAssessments.filter(item => item.extraction_status === 'review');
-    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), reprogramaciones: Number(client.reprogramaciones_ciclo || 0), canceladas: Number(client.canceladas_ciclo || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), status: { active: 'Activo', paused: 'En pausa', inactive: 'Inactivo' }[client.status] || 'Inactivo', statusRaw: client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
+    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), reprogramaciones: Number(client.reprogramaciones_ciclo || 0), canceladas: Number(client.canceladas_ciclo || 0), canceladasPorElla: Number(client.canceladas_por_ella_ciclo || 0), creditoPendiente: Number(client.credito_pendiente || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), status: { active: 'Activo', paused: 'En pausa', inactive: 'Inactivo' }[client.status] || 'Inactivo', statusRaw: client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
   });
   data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, concept: item.concept, amount: Number(item.amount), balance: item.source_system ? Number(item.balance) : item.status === 'pending' ? Number(item.amount) : 0, due: dateOnly(item.due_on), issued: dateOnly(item.issued_on || item.due_on), paidOn: item.confirmed_at ? String(item.confirmed_at).slice(0, 10) : '', method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '' }));
   data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, kind: item.kind, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), expiresOn: item.expires_on || '', status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired' }));
@@ -302,7 +302,12 @@ const movimientosDelCiclo = client => {
   const partes = [];
   if (client.reprogramaciones) partes.push(`${client.reprogramaciones} reprogramada${client.reprogramaciones === 1 ? '' : 's'}`);
   if (client.canceladas) partes.push(`${client.canceladas} perdida${client.canceladas === 1 ? '' : 's'}`);
-  return partes.length ? `<small class="ciclo-movimientos">Este mes: ${partes.join(' · ')}</small>` : '';
+  if (client.canceladasPorElla) partes.push(`${client.canceladasPorElla} cancelada${client.canceladasPorElla === 1 ? '' : 's'} por ti`);
+  // El crédito pendiente va aparte del "este mes": no caduca con el ciclo,
+  // sigue debiéndose hasta que baje un cobro.
+  const credito = client.creditoPendiente > 0
+    ? `<small class="ciclo-movimientos credito">${money.format(client.creditoPendiente)} de descuento pendiente para su próximo cobro</small>` : '';
+  return `${partes.length ? `<small class="ciclo-movimientos">Este mes: ${partes.join(' · ')}</small>` : ''}${credito}`;
 };
 // Colocar una reposición en un hueco libre.
 //
@@ -1226,34 +1231,77 @@ const DIAS_CORTOS = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
 // gratis y quien cancelaba media agenda seguía apareciendo al 100%.
 function cancelSessionDialog(sesion) {
   if (!sesion) return;
+  const cliente = data.clients.find(c => c.id === sesion.clientId);
   const box = document.createElement('div');
-  box.innerHTML = `<p class="eyebrow">AGENDA</p><h2>Cancelar sesión</h2>
-    <p class="form-summary"><b>${escapeHtml(sesion.client)}</b><br>${sesion.date} · ${sesion.time}</p>
-    ${(() => {
-      const cliente = data.clients.find(c => c.id === sesion.clientId);
-      if (!cliente || (!cliente.reprogramaciones && !cliente.canceladas)) return '';
-      const partes = [];
-      if (cliente.reprogramaciones) partes.push(`<b>${cliente.reprogramaciones}</b> reprogramada${cliente.reprogramaciones === 1 ? '' : 's'}`);
-      if (cliente.canceladas) partes.push(`<b>${cliente.canceladas}</b> perdida${cliente.canceladas === 1 ? '' : 's'}`);
-      return `<p class="conflict-warn">Este mes lleva ${partes.join(' y ')}.</p>`;
-    })()}
-    <p style="color:#6f7b75">En Google Calendar quedará en rojo como CANCELADA, no desaparecerá.</p>
-    <button class="secondary wide-button" id="cancelar-reprogramada">Se reprogramará a otro día</button>
-    <p class="section-note">No afecta el cumplimiento: contará la sesión nueva.</p>
-    <button class="secondary wide-button" id="cancelar-perdida">No se reprograma</button>
-    <p class="section-note">Cuenta como sesión incumplida y baja su porcentaje.</p>
-    <p class="section-note">Si la agendaste por error, ciérra esto y usa <b>Eliminar</b>: desaparece sin contar como incumplida.</p>`;
-  openModal(box, true);
-  const cancelar = async reprogramada => {
+
+  // Dos preguntas y no cuatro botones: quién cancela y qué se hace. La
+  // primera decide a quién se le apunta la falta —hasta ahora una clase que
+  // cancelaba la entrenadora le bajaba el cumplimiento al cliente— y sólo
+  // entonces tiene sentido la segunda.
+  const cabecera = `<p class="eyebrow">AGENDA</p><h2>Cancelar sesión</h2>
+    <p class="form-summary"><b>${escapeHtml(sesion.client)}</b><br>${sesion.date} · ${sesion.time}</p>`;
+
+  const porClase = cliente && cliente.sessionsIncluded > 0 ? cliente.plan / cliente.sessionsIncluded : 0;
+
+  const preguntarQuien = () => {
+    const historial = cliente && (cliente.reprogramaciones || cliente.canceladas)
+      ? `<p class="conflict-warn">Este mes lleva ${[
+          cliente.reprogramaciones ? `<b>${cliente.reprogramaciones}</b> reprogramada${cliente.reprogramaciones === 1 ? '' : 's'}` : null,
+          cliente.canceladas ? `<b>${cliente.canceladas}</b> perdida${cliente.canceladas === 1 ? '' : 's'}` : null
+        ].filter(Boolean).join(' y ')}.</p>` : '';
+    box.innerHTML = `${cabecera}${historial}
+      <p style="color:#6f7b75">¿Quién cancela?</p>
+      <button class="secondary wide-button" id="cancela-cliente">La cancela el cliente</button>
+      <p class="section-note">Cuenta en su historial del mes y puede afectar su cumplimiento.</p>
+      <button class="secondary wide-button" id="cancela-entrenadora">La cancelo yo</button>
+      <p class="section-note">No toca su cumplimiento ni su contador. Se le repone o se le descuenta.</p>
+      <p class="section-note">Si la agendaste por error, cierra esto y usa <b>Eliminar</b>: desaparece sin contar como incumplida.</p>`;
+    box.querySelector('#cancela-cliente').onclick = preguntarDestinoCliente;
+    box.querySelector('#cancela-entrenadora').onclick = preguntarCompensacion;
+  };
+
+  const preguntarDestinoCliente = () => {
+    box.innerHTML = `${cabecera}
+      <p style="color:#6f7b75">La cancela el cliente. ¿Va a reponerla?</p>
+      <button class="secondary wide-button" id="cancelar-reprogramada">Se reprogramará a otro día</button>
+      <p class="section-note">No afecta el cumplimiento: contará la sesión nueva. Suma a sus reprogramaciones del mes.</p>
+      <button class="secondary wide-button" id="cancelar-perdida">No se reprograma</button>
+      <p class="section-note">Cuenta como sesión incumplida y baja su porcentaje.</p>`;
+    box.querySelector('#cancelar-reprogramada').onclick = () => cancelar({ reprogramada: true, quien: 'client' });
+    box.querySelector('#cancelar-perdida').onclick = () => cancelar({ reprogramada: false, quien: 'client' });
+  };
+
+  const preguntarCompensacion = () => {
+    box.innerHTML = `${cabecera}
+      <p style="color:#6f7b75">La cancelas tú. ¿Qué le devuelves?</p>
+      <button class="secondary wide-button" id="compensar-reponer">Reponer la clase</button>
+      <p class="section-note">Le queda una clase a favor, <b>sin fecha límite</b>: el problema no lo causó él.</p>
+      <button class="secondary wide-button" id="compensar-descuento">Descontar del próximo cobro</button>
+      <p class="section-note">${porClase > 0
+        ? `Deja un crédito de <b>${money.format(porClase)}</b> —su mensualidad entre las clases que incluye— que baja el cobro del mes que viene.`
+        : 'Su plan no dice cuántas clases incluye, así que no se puede calcular el valor de una. Configúraselo o repón la clase.'}</p>`;
+    box.querySelector('#compensar-reponer').onclick = () => cancelar({ reprogramada: true, quien: 'trainer', compensa: 'makeup' });
+    const descuento = box.querySelector('#compensar-descuento');
+    descuento.disabled = !(porClase > 0);
+    descuento.onclick = () => cancelar({ reprogramada: false, quien: 'trainer', compensa: 'discount' });
+  };
+
+  const cancelar = async ({ reprogramada, quien, compensa }) => {
+    const resumen = quien === 'trainer'
+      ? `Cancelar la clase de ${sesion.client}\n${compensa === 'discount' ? `Descuento de ${money.format(porClase)} al próximo cobro` : 'Queda una clase por reponer'}`
+      : `Cancelar la clase de ${sesion.client}\n${reprogramada ? 'Se reprogramará' : 'No se reprograma: cuenta como incumplida'}`;
+    if (!confirmarGuardado(resumen)) return;
     try {
-      await api(`/api/sessions/${sesion.id}?rescheduled=${reprogramada}`, { method: 'DELETE' });
+      const partes = [`rescheduled=${reprogramada}`, `by=${quien}`];
+      if (compensa) partes.push(`resolution=${compensa}`);
+      const r = await api(`/api/sessions/${sesion.id}?${partes.join('&')}`, { method: 'DELETE' });
       await loadData(); renderAll(); modal.close();
-      toast(reprogramada ? 'Sesión cancelada para reprogramar' : 'Sesión cancelada · cuenta como incumplida');
+      toast(r.compensacion ? `Cancelada · ${r.compensacion.detalle}` : (reprogramada ? 'Cancelada para reprogramar' : 'Cancelada · cuenta como incumplida'));
     } catch (error) { toast(error.message, true); }
   };
-  document.getElementById('cancelar-reprogramada').onclick = () => cancelar(true);
-  document.getElementById('cancelar-perdida').onclick = () => cancelar(false);
 
+  preguntarQuien();
+  openModal(box, true);
 }
 
 // Editar el horario en vez de tirarlo abajo. Añadir un día olvidado obligaba a
