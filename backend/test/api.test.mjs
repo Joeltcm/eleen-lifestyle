@@ -312,6 +312,110 @@ describe('la pareja que paga uno y entrenan los dos', () => {
   });
 });
 
+describe('aplicar un cobro a las mensualidades que cubre', () => {
+  // El caso de Zoho: una sola línea de $350 a nombre de quien paga. La factura
+  // no dice que son dos mensualidades de $175, y no se puede editar.
+  let eduardo, beatris, ajena, factura;
+  const mesQueCubre = (() => {
+    const d = new Date(); d.setMonth(d.getMonth() + 1, 1);
+    return d.toISOString().slice(0, 10);
+  })();
+
+  before(async () => {
+    const plan = await api.post('/api/plans', { name: 'Pareja por persona', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
+    const a = await api.post('/api/clients', { fullName: 'Paga los dos', planId: plan.datos.id, cutoffDay: 28 });
+    const b = await api.post('/api/clients', { fullName: 'La cubierta', planId: plan.datos.id, cutoffDay: 28 });
+    const c = await api.post('/api/clients', { fullName: 'Ajena a la pareja', planId: plan.datos.id, cutoffDay: 28 });
+    eduardo = a.datos.id; beatris = b.datos.id; ajena = c.datos.id;
+    await api.patch(`/api/clients/${beatris}`, { fullName: 'La cubierta', billingResponsibleClientId: eduardo });
+    const f = await api.post('/api/invoices', { clientId: eduardo, concept: 'Mensualidad', amount: 350, dueOn: new Date().toISOString().slice(0, 10) });
+    factura = f.datos.id;
+  });
+
+  test('propone a quién cubre y con qué plan', async () => {
+    const { estado, datos } = await api.get(`/api/invoices/${factura}/coverage`);
+    assert.equal(estado, 200);
+    const nombres = datos.candidates.map(c => c.full_name);
+    assert.ok(nombres.includes('Paga los dos'), 'quien paga también entrena');
+    assert.ok(nombres.includes('La cubierta'), 'y la persona a su cargo');
+    assert.ok(!nombres.includes('Ajena a la pareja'), 'nadie más');
+    assert.equal(Number(datos.candidates[0].suggested_sessions), 12, 'las sesiones salen del plan');
+    assert.equal(Number(datos.candidates[0].suggested_amount), 175);
+  });
+
+  test('abre el saldo de cada uno sin emitir cobros nuevos', async () => {
+    const antes = (await api.get('/api/invoices')).datos.length;
+    const { estado } = await api.post(`/api/invoices/${factura}/coverage`, {
+      billingPeriod: mesQueCubre,
+      entries: [{ clientId: eduardo, amount: 175, sessions: 12 }, { clientId: beatris, amount: 175, sessions: 12 }]
+    });
+    assert.equal(estado, 201);
+    const clientes = (await api.get('/api/clients')).datos;
+    assert.equal(Number(clientes.find(c => c.id === eduardo).available_sessions), 12);
+    assert.equal(Number(clientes.find(c => c.id === beatris).available_sessions), 12);
+    assert.equal((await api.get('/api/invoices')).datos.length, antes, 'la cobertura no cobra nada nuevo');
+  });
+
+  test('aplicarlo dos veces no regala clases', async () => {
+    await api.post(`/api/invoices/${factura}/coverage`, {
+      billingPeriod: mesQueCubre,
+      entries: [{ clientId: beatris, amount: 175, sessions: 12 }]
+    });
+    const clientes = (await api.get('/api/clients')).datos;
+    assert.equal(Number(clientes.find(c => c.id === beatris).available_sessions), 12,
+      'la segunda vez no abre otro saldo');
+  });
+
+  test('no deja cubrir a quien no depende de quien paga', async () => {
+    const { estado } = await api.post(`/api/invoices/${factura}/coverage`, {
+      billingPeriod: mesQueCubre,
+      entries: [{ clientId: ajena, amount: 175, sessions: 12 }]
+    });
+    assert.equal(estado, 400, 'sería mover dinero de un expediente a otro');
+  });
+
+  test('a quien ya está cubierto no se le vuelve a cobrar el mes', async () => {
+    // Con el corte dentro de la ventana de generación, a esta persona sí se le
+    // emitiría su mensualidad. Lo único que lo impide es la cobertura.
+    const corte = new Date(Date.now() + 4 * 24 * 3600_000).getDate();
+    const mesEnCurso = new Date().toISOString().slice(0, 8) + '01';
+    const plan = await api.post('/api/plans', { name: 'Pareja en ventana', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
+    const p = await api.post('/api/clients', { fullName: 'Paga ya', planId: plan.datos.id, cutoffDay: corte });
+    const d = await api.post('/api/clients', { fullName: 'Cubierta ya', planId: plan.datos.id, cutoffDay: corte });
+    await api.patch(`/api/clients/${d.datos.id}`, { fullName: 'Cubierta ya', billingResponsibleClientId: p.datos.id });
+    const t = await api.post('/api/clients', { fullName: 'Sin cobertura', planId: plan.datos.id, cutoffDay: corte });
+    const suelta = t.datos.id;
+    const f = await api.post('/api/invoices', { clientId: p.datos.id, concept: 'Mensualidad de los dos', amount: 350, dueOn: new Date().toISOString().slice(0, 10) });
+    await api.post(`/api/invoices/${f.datos.id}/coverage`, {
+      billingPeriod: mesEnCurso,
+      entries: [{ clientId: d.datos.id, amount: 175, sessions: 12 }]
+    });
+
+    await api.post('/api/billing/recurring/generate', {});
+
+    const facturas = (await api.get('/api/invoices')).datos;
+    const suyas = facturas.filter(i => i.billed_for_client_id === d.datos.id && i.auto_generated
+      && String(i.billing_period).slice(0, 7) === mesEnCurso.slice(0, 7));
+    assert.equal(suyas.length, 0,
+      'su mensualidad ya entró dentro de los $350: cobrarla otra vez la daría por impaga');
+    // Un testigo con el mismo corte y sin cobertura: si a él tampoco se le
+    // emitiera nada, la prueba de arriba no estaría demostrando nada.
+    const testigo = facturas.filter(i => i.billed_for_client_id === suelta && i.auto_generated
+      && String(i.billing_period).slice(0, 7) === mesEnCurso.slice(0, 7));
+    assert.equal(testigo.length, 1, 'a quien no está cubierto sí se le emite');
+  });
+
+  test('quitar la cobertura se lleva el saldo que nadie usó', async () => {
+    const { datos } = await api.get(`/api/invoices/${factura}/coverage`);
+    const suya = datos.applied.find(a => a.client_id === beatris);
+    const { estado } = await api.delete(`/api/invoices/${factura}/coverage/${suya.id}`);
+    assert.equal(estado, 200);
+    const clientes = (await api.get('/api/clients')).datos;
+    assert.equal(Number(clientes.find(c => c.id === beatris).available_sessions), 0,
+      'sin cobertura no hay sesiones: dejarlas sueltas sería regalarlas');
+  });
+});
+
 describe('vencimiento de los paquetes', () => {
   let clientId;
   before(async () => {

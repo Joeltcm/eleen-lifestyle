@@ -201,6 +201,15 @@ async function generateRecurringInvoices(ownerId?: string) {
               OR lower(i.concept) LIKE '%mensual%'
             )
         )
+        -- Ni a quien ya está cubierto por un cobro ajeno. Los $350 de un
+        -- pagador son una sola línea en Zoho: sin esto, a la persona que no
+        -- aparece en la factura se le emitiría su mensualidad otra vez, como
+        -- si no hubiera pagado.
+        AND NOT EXISTS (
+          SELECT 1 FROM invoice_coverage cov
+          JOIN invoices ci ON ci.id = cov.invoice_id AND ci.status <> 'void'
+          WHERE cov.client_id = s.billed_for_client_id AND cov.billing_period = s.billing_period
+        )
     )
     INSERT INTO invoices (
       client_id, billed_for_client_id, concept, amount, due_on, issued_on, subtotal,
@@ -1967,6 +1976,173 @@ app.delete('/api/invoices/:id', { preHandler: requireStaff }, async (request, re
   const [invoice] = await sql`UPDATE invoices i SET status = 'void' FROM clients c WHERE i.id = ${id} AND c.id = i.client_id AND c.owner_id = ${auth.sub} AND i.status = 'pending' AND i.source_system IS DISTINCT FROM 'zoho_invoice' RETURNING i.*`;
   if (!invoice) return reply.code(404).send({ error: 'Solo se pueden anular cobros locales pendientes' });
   return { deleted: true, voided: true, invoice };
+});
+
+// ---------------------------------------------------------------------------
+// Cobertura: a quién cubre un cobro cuando el cobro no lo dice.
+//
+// Las facturas de Zoho llegan como llegan —una línea de $350 a nombre de quien
+// paga— y no hay forma de editarlas: sobre lo suyo manda Zoho. Esto permite
+// anotar por fuera que esos $350 son la mensualidad de dos personas, y abrirle
+// a cada una sus sesiones sin emitir un cobro nuevo ni tocar la factura.
+// ---------------------------------------------------------------------------
+
+// El mes que cubre un cobro. La mensualidad se paga por adelantado, así que lo
+// normal es que el pago del 28 de agosto cubra septiembre. Es sólo la
+// propuesta: Eileen elige el mes en la pantalla y manda lo que elija.
+function mesCubiertoPorDefecto(dueOn: Date | string): string {
+  const dia = mediodiaEnPanama(dueOn);
+  return new Date(Date.UTC(dia.getUTCFullYear(), dia.getUTCMonth() + 1, 1)).toISOString().slice(0, 10);
+}
+
+// El día en que se cierra el ciclo cubierto: el corte del cliente dentro del
+// mes que cubre. Sin esto el saldo no vencería nunca y las sesiones no dadas
+// se acumularían mes tras mes.
+function cierreDelCiclo(periodo: string, diaDeCorte: number): string {
+  const inicio = mediodiaEnPanama(periodo);
+  const ultimo = new Date(Date.UTC(inicio.getUTCFullYear(), inicio.getUTCMonth() + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(inicio.getUTCFullYear(), inicio.getUTCMonth(), Math.min(diaDeCorte || 1, ultimo))).toISOString().slice(0, 10);
+}
+
+async function coberturaDeCobro(ownerId: string, invoiceId: string) {
+  const [invoice] = await sql`
+    SELECT i.id, i.client_id, i.concept, i.amount, i.due_on, i.billing_period, i.status,
+      i.source_system, c.full_name
+    FROM invoices i JOIN clients c ON c.id = i.client_id
+    WHERE i.id = ${invoiceId} AND c.owner_id = ${ownerId}
+  `;
+  if (!invoice) return null;
+  // El titular del cobro y todas las personas a su cargo. Quien paga suele
+  // entrenar también, así que entra en la lista como uno más.
+  const candidates = await sql`
+    SELECT c.id, c.full_name, c.status, c.billing_cutoff_day,
+      COALESCE(p.price, c.standard_price, 0) AS suggested_amount,
+      COALESCE(p.sessions_included, c.monthly_session_target, 0)::integer AS suggested_sessions,
+      p.name AS plan_name
+    FROM clients c
+    LEFT JOIN service_plans p ON p.id = c.plan_id
+    WHERE c.owner_id = ${ownerId}
+      AND (c.id = ${invoice.client_id} OR c.billing_responsible_client_id = ${invoice.client_id})
+    ORDER BY (c.id = ${invoice.client_id}) DESC, c.full_name
+  `;
+  const applied = await sql`
+    SELECT cov.id, cov.client_id, cov.amount, cov.billing_period, cov.package_id,
+      c.full_name, sp.total_sessions, sp.used_sessions, sp.expires_on
+    FROM invoice_coverage cov
+    JOIN clients c ON c.id = cov.client_id
+    LEFT JOIN session_packages sp ON sp.id = cov.package_id
+    WHERE cov.invoice_id = ${invoiceId}
+    ORDER BY c.full_name
+  `;
+  return { invoice, candidates, applied, suggestedPeriod: mesCubiertoPorDefecto(invoice.billing_period || invoice.due_on) };
+}
+
+app.get('/api/invoices/:id/coverage', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const datos = await coberturaDeCobro(auth.sub, id);
+  if (!datos) return reply.code(404).send({ error: 'Cobro no encontrado' });
+  return datos;
+});
+
+const coverageSchema = z.object({
+  billingPeriod: z.string().date(),
+  entries: z.array(z.object({
+    clientId: z.string().uuid(),
+    amount: z.coerce.number().min(0),
+    sessions: z.coerce.number().int().min(0)
+  })).min(1)
+});
+
+app.post('/api/invoices/:id/coverage', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = coverageSchema.parse(request.body);
+  const [invoice] = await sql`
+    SELECT i.id, i.client_id, i.amount FROM invoices i JOIN clients c ON c.id = i.client_id
+    WHERE i.id = ${id} AND c.owner_id = ${auth.sub} AND i.status <> 'void'
+  `;
+  if (!invoice) return reply.code(404).send({ error: 'Cobro no encontrado' });
+  // El mes se guarda siempre por su día uno: es la unidad con la que compara
+  // la generación, y un día suelto la haría fallar por un día de diferencia.
+  const periodo = input.billingPeriod.slice(0, 8) + '01';
+
+  const resultado = await sql.begin(async transaction => {
+    const abiertos = [];
+    for (const entry of input.entries) {
+      const [cliente] = await transaction`
+        SELECT c.id, c.full_name, c.billing_cutoff_day
+        FROM clients c
+        WHERE c.id = ${entry.clientId} AND c.owner_id = ${auth.sub}
+          AND (c.id = ${invoice.client_id} OR c.billing_responsible_client_id = ${invoice.client_id})
+      `;
+      // Sólo el titular del cobro y su gente: cubrir a un tercero desde aquí
+      // sería mover dinero de un expediente a otro sin dejar rastro.
+      if (!cliente) return { error: 'Esa persona no depende de quien paga este cobro', code: 400 };
+
+      let packageId: string | null = null;
+      if (entry.sessions > 0) {
+        const vence = cierreDelCiclo(periodo, Number(cliente.billing_cutoff_day) || 1);
+        const [pack] = await transaction`
+          INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
+          VALUES (${cliente.id},
+            ${'Mensualidad ' + new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric', timeZone: 'America/Panama' }).format(mediodiaEnPanama(periodo))},
+            ${entry.sessions}, ${entry.amount}, ${vence}::date, 'monthly', current_date, 'active')
+          RETURNING id
+        `;
+        packageId = pack.id;
+      }
+      // El índice único de (cliente, período) es lo que hace inofensivo pulsar
+      // dos veces: la segunda no abre otro saldo, actualiza el mismo.
+      const [cov] = await transaction`
+        INSERT INTO invoice_coverage (invoice_id, client_id, package_id, amount, billing_period)
+        VALUES (${id}, ${cliente.id}, ${packageId}, ${entry.amount}, ${periodo}::date)
+        ON CONFLICT (client_id, billing_period) DO NOTHING
+        RETURNING id
+      `;
+      if (!cov) {
+        // Ya estaba cubierta. El saldo que se acaba de abrir sobra y se
+        // deshace: dejarlo suelto le regalaría las clases por partida doble.
+        if (packageId) await transaction`DELETE FROM session_packages WHERE id = ${packageId}`;
+        continue;
+      }
+      abiertos.push({ clientId: cliente.id, fullName: cliente.full_name, sessions: entry.sessions, packageId });
+    }
+    return { abiertos };
+  });
+  if ('error' in resultado) return reply.code(resultado.code || 400).send({ error: resultado.error });
+  return reply.code(201).send({ applied: resultado.abiertos, ...(await coberturaDeCobro(auth.sub, id)) });
+});
+
+app.delete('/api/invoices/:id/coverage/:coverageId', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const params = request.params as { id: string; coverageId: string };
+  const id = z.string().uuid().parse(params.id);
+  const coverageId = z.string().uuid().parse(params.coverageId);
+  const resultado = await sql.begin(async transaction => {
+    const [cov] = await transaction`
+      SELECT cov.id, cov.package_id, c.full_name
+      FROM invoice_coverage cov
+      JOIN clients c ON c.id = cov.client_id
+      WHERE cov.id = ${coverageId} AND cov.invoice_id = ${id} AND c.owner_id = ${auth.sub}
+      FOR UPDATE OF cov
+    `;
+    if (!cov) return { error: 'Cobertura no encontrada', code: 404 };
+    // El saldo se va con la cobertura, pero sólo si nadie lo usó. Con clases
+    // ya dadas encima, borrarlo dejaría a esas clases sin de dónde salieron.
+    let saldoBorrado = false;
+    if (cov.package_id) {
+      const [pack] = await transaction`SELECT id, used_sessions FROM session_packages WHERE id = ${cov.package_id} FOR UPDATE`;
+      if (pack && Number(pack.used_sessions) === 0) {
+        await transaction`DELETE FROM session_packages WHERE id = ${pack.id}`;
+        saldoBorrado = true;
+      }
+    }
+    await transaction`DELETE FROM invoice_coverage WHERE id = ${coverageId}`;
+    return { deleted: true, saldoBorrado, fullName: cov.full_name };
+  });
+  if ('error' in resultado) return reply.code(resultado.code || 400).send({ error: resultado.error });
+  return resultado;
 });
 
 // Borrado definitivo, para cobros que nunca debieron existir: pruebas,

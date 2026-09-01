@@ -225,3 +225,21 @@ select.filter{padding:11px 13px;font:600 13px 'DM Sans';cursor:pointer}
 .portal-tramo.pasado{background:#efeeec;opacity:.5}
 .portal-leyenda .marca-pasada{color:#c9c6c2}
 .portal-mes-nav:disabled{opacity:.35;cursor:default}
+
+/* Aplicar un cobro a las mensualidades que cubre. En móvil cada persona se
+   apila: tres columnas a 375 px dejan los campos de monto ilegibles. */
+.coverage-list{display:grid;gap:10px;margin:12px 0}
+.coverage-row{display:grid;grid-template-columns:1fr 96px 96px;gap:10px;align-items:end;padding:11px;border:1px solid var(--line);border-radius:11px;background:#fff}
+.coverage-row-done{opacity:.55}
+.coverage-pick{display:flex;align-items:center;gap:9px}
+.coverage-pick input{width:auto;margin:0}
+.coverage-pick span{display:block;line-height:1.3}
+.coverage-pick small{display:block;color:var(--muted);font-size:9px}
+.coverage-warn{color:#a8674c}
+.coverage-applied{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.coverage-applied-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 0;font-size:11px}
+@media(max-width:560px){
+  .coverage-row{grid-template-columns:1fr 1fr}
+  .coverage-pick{grid-column:1/-1}
+  .coverage-applied-row{flex-direction:column;align-items:stretch}
+}

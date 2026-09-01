@@ -1,4 +1,4 @@
-const APP_VERSION = '118';
+const APP_VERSION = '119';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -523,7 +523,7 @@ function renderBilling() {
   document.getElementById('active-packages').textContent = data.packages.filter(pack => pack.status === 'confirmed' && remainingSessions(pack) > 0).length;
   document.getElementById('billing-pending').textContent = money.format(pending);
   document.getElementById('plan-grid').innerHTML = data.plans.length ? data.plans.map(plan => `<article class="plan-card ${plan.active ? '' : 'inactive'}"><div><span class="commercial-label ${plan.billingModel === 'package' ? 'package-label' : ''}${plan.billingModel === 'single' ? ' single-label' : ''}">${modalidadPlan(plan.billingModel)}</span><h4>${escapeHtml(plan.name)}</h4><p>${escapeHtml(plan.description || (plan.billingModel === 'package' ? `${plan.sessionsIncluded} sesiones · ${plan.validityDays} días` : plan.billingModel === 'single' ? 'Se cobra por sesión' : `${plan.sessionsIncluded} sesiones / mes`))}</p></div><div class="plan-price"><strong>${money.format(plan.price)}</strong><small>${plan.active ? 'Disponible' : 'Inactivo'}</small></div><button class="text-button" data-edit-plan="${plan.id}">Editar</button></article>`).join('') : '<p class="empty">Crea el primer plan para asignarlo a tus clientes.</p>';
-  document.getElementById('invoice-table').innerHTML = visibleInvoices.length ? visibleInvoices.map(invoice => { const label = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'; const concept = invoice.invoiceNumber ? `<small>${invoice.source === 'zoho_invoice' ? 'Zoho' : 'Eileen'} · ${escapeHtml(invoice.invoiceNumber)}</small><br>${escapeHtml(invoice.concept)}` : escapeHtml(invoice.concept); const local = invoice.source !== 'zoho_invoice'; return `<tr><td data-label="Cliente"><b>${escapeHtml(invoice.client)}</b></td><td data-label="Concepto">${concept}</td><td data-label="Vence">${invoice.due}</td><td data-label="Método">${invoice.method === 'pending' ? '—' : escapeHtml(invoice.method)}</td><td data-label="Monto">${money.format(invoice.amount)}${invoice.status === 'pending' && invoice.balance !== invoice.amount ? `<br><small>Saldo ${money.format(invoice.balance)}</small>` : ''}</td><td data-label="Estado"><span class="payment-status ${invoice.status}">${label}</span></td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoiceNumber || invoice.id.slice(0, 8))}">Ver PDF</button>${invoice.status === 'pending' && local ? `<button class="secondary session-use" data-confirm-invoice="${invoice.id}">Confirmar pago</button><button class="secondary session-use" data-edit-invoice="${invoice.id}">Editar</button><button class="secondary session-use" data-delete-invoice="${invoice.id}">Anular</button><button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar</button>` : ''}${invoice.status === 'void' && local ? `<button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar definitivamente</button>` : ''}${invoice.status === 'confirmed' && local ? `<button class="secondary session-use" data-edit-payment="${invoice.id}">Editar pago</button><button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar definitivamente</button>` : ''}</div></td></tr>`; }).join('') : '<tr><td colspan="7" class="empty">No hay facturas con estos filtros.</td></tr>';
+  document.getElementById('invoice-table').innerHTML = visibleInvoices.length ? visibleInvoices.map(invoice => { const label = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'; const concept = invoice.invoiceNumber ? `<small>${invoice.source === 'zoho_invoice' ? 'Zoho' : 'Eileen'} · ${escapeHtml(invoice.invoiceNumber)}</small><br>${escapeHtml(invoice.concept)}` : escapeHtml(invoice.concept); const local = invoice.source !== 'zoho_invoice'; return `<tr><td data-label="Cliente"><b>${escapeHtml(invoice.client)}</b></td><td data-label="Concepto">${concept}</td><td data-label="Vence">${invoice.due}</td><td data-label="Método">${invoice.method === 'pending' ? '—' : escapeHtml(invoice.method)}</td><td data-label="Monto">${money.format(invoice.amount)}${invoice.status === 'pending' && invoice.balance !== invoice.amount ? `<br><small>Saldo ${money.format(invoice.balance)}</small>` : ''}</td><td data-label="Estado"><span class="payment-status ${invoice.status}">${label}</span></td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoiceNumber || invoice.id.slice(0, 8))}">Ver PDF</button>${invoice.status !== 'void' ? `<button class="secondary session-use" data-apply-coverage="${invoice.id}">Aplicar a mensualidades</button>` : ''}${invoice.status === 'pending' && local ? `<button class="secondary session-use" data-confirm-invoice="${invoice.id}">Confirmar pago</button><button class="secondary session-use" data-edit-invoice="${invoice.id}">Editar</button><button class="secondary session-use" data-delete-invoice="${invoice.id}">Anular</button><button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar</button>` : ''}${invoice.status === 'void' && local ? `<button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar definitivamente</button>` : ''}${invoice.status === 'confirmed' && local ? `<button class="secondary session-use" data-edit-payment="${invoice.id}">Editar pago</button><button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar definitivamente</button>` : ''}</div></td></tr>`; }).join('') : '<tr><td colspan="7" class="empty">No hay facturas con estos filtros.</td></tr>';
   const loadMore = document.getElementById('billing-load-more'); loadMore.hidden = visibleInvoices.length >= periodInvoices.length; loadMore.textContent = `Mostrar más facturas (${periodInvoices.length - visibleInvoices.length} restantes)`;
   document.getElementById('package-table').innerHTML = data.packages.length ? data.packages.map(pack => {
     const remaining = remainingSessions(pack);
@@ -2038,6 +2038,112 @@ function confirmInvoice(id, editing = false) {
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
+// Aplicar un cobro a las mensualidades que cubre.
+//
+// Una factura de Zoho llega como una sola línea a nombre de quien paga: los
+// $350 de Eduardo no dicen en ninguna parte que son la mensualidad suya y la
+// de Beatris. Y no se pueden editar, porque sobre lo suyo manda Zoho. Aquí se
+// anota por fuera a quién cubren, y de ahí sale el saldo de sesiones de cada
+// uno sin emitir un cobro nuevo.
+async function applyInvoiceCoverage(id) {
+  let datos;
+  try { datos = await api(`/api/invoices/${id}/coverage`); }
+  catch (error) { toast(error.message, true); return; }
+
+  const { invoice, candidates, applied, suggestedPeriod } = datos;
+  const box = document.createElement('div');
+  const mes = String(suggestedPeriod).slice(0, 7);
+  const yaCubierto = new Set(applied.map(a => a.client_id));
+
+  const filas = candidates.map(persona => {
+    const cubierta = yaCubierto.has(persona.id);
+    const inactiva = persona.status !== 'active';
+    return `
+      <div class="coverage-row${cubierta ? ' coverage-row-done' : ''}">
+        <label class="coverage-pick">
+          <input type="checkbox" name="pick" value="${persona.id}" ${cubierta || inactiva ? 'disabled' : 'checked'} />
+          <span><b>${escapeHtml(persona.full_name)}</b><small>${escapeHtml(persona.plan_name || 'Sin plan comercial')}${inactiva ? ' · inactivo' : ''}</small></span>
+        </label>
+        <label>Monto<input type="number" min="0" step="0.01" name="amount-${persona.id}" value="${Number(persona.suggested_amount) || 0}" ${cubierta ? 'disabled' : ''} /></label>
+        <label>Sesiones<input type="number" min="0" step="1" name="sessions-${persona.id}" value="${Number(persona.suggested_sessions) || 0}" ${cubierta ? 'disabled' : ''} /></label>
+      </div>`;
+  }).join('');
+
+  const aplicadas = applied.length ? `
+    <div class="coverage-applied">
+      <p class="eyebrow">YA APLICADO</p>
+      ${applied.map(a => `<div class="coverage-applied-row"><span>${escapeHtml(a.full_name)} · ${money.format(a.amount)}${a.total_sessions ? ` · ${Number(a.total_sessions) - Number(a.used_sessions || 0)} de ${a.total_sessions} sesiones` : ''}</span><button type="button" class="secondary session-use" data-drop-coverage="${a.id}">Quitar</button></div>`).join('')}
+    </div>` : '';
+
+  box.innerHTML = `
+    <form id="coverage-form">
+      <p class="eyebrow">${invoice.source_system === 'zoho_invoice' ? 'COBRO DE ZOHO' : 'COBRO LOCAL'}</p>
+      <h2>Aplicar a mensualidades</h2>
+      <p class="commercial-note">${escapeHtml(invoice.full_name)} · ${escapeHtml(invoice.concept)} · <b>${money.format(invoice.amount)}</b></p>
+      <label>Mes que cubre<input type="month" name="period" value="${mes}" required /></label>
+      <div class="coverage-list">${filas || '<p class="empty">Nadie a quien aplicar este cobro.</p>'}</div>
+      <p class="commercial-note" id="coverage-total"></p>
+      ${aplicadas}
+      <button class="primary wide-button">Abrir saldos</button>
+    </form>`;
+  openModal(box);
+
+  const form = document.getElementById('coverage-form');
+  // El aviso de descuadre se recalcula al vuelo: es lo que deja ver de un
+  // golpe si el reparto se pasa o se queda corto frente al total cobrado.
+  const totalizar = () => {
+    const suma = candidates.reduce((acumulado, persona) => {
+      const pick = form.querySelector(`input[name="pick"][value="${persona.id}"]`);
+      if (!pick?.checked) return acumulado;
+      return acumulado + (Number(form.elements[`amount-${persona.id}`]?.value) || 0);
+    }, 0);
+    const total = Number(invoice.amount) || 0;
+    const nota = document.getElementById('coverage-total');
+    const yaAplicado = applied.reduce((acumulado, a) => acumulado + Number(a.amount || 0), 0);
+    const cuadra = Math.abs(suma + yaAplicado - total) < 0.01;
+    nota.textContent = cuadra
+      ? `Reparte los ${money.format(total)} completos.`
+      : `Repartes ${money.format(suma + yaAplicado)} de ${money.format(total)}. Puede ser correcto si el cobro incluye algo más.`;
+    nota.classList.toggle('coverage-warn', !cuadra);
+  };
+  form.addEventListener('input', totalizar);
+  totalizar();
+
+  form.querySelectorAll('[data-drop-coverage]').forEach(boton => {
+    boton.onclick = async () => {
+      if (!confirm('¿Quitar esta cobertura?\n\nSe lleva el saldo de sesiones si no se ha usado ninguna.')) return;
+      try {
+        await api(`/api/invoices/${id}/coverage/${boton.dataset.dropCoverage}`, { method: 'DELETE' });
+        await loadData(); renderAll(); modal.close(); toast('Cobertura quitada');
+      } catch (error) { toast(error.message, true); }
+    };
+  });
+
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const entries = candidates
+      .filter(persona => form.querySelector(`input[name="pick"][value="${persona.id}"]`)?.checked)
+      .map(persona => ({
+        clientId: persona.id,
+        amount: Number(form.elements[`amount-${persona.id}`].value) || 0,
+        sessions: Number(form.elements[`sessions-${persona.id}`].value) || 0
+      }));
+    if (!entries.length) { toast('Marca al menos a una persona', true); return; }
+    const periodo = `${form.elements.period.value}-01`;
+    const resumen = entries.map(e => {
+      const persona = candidates.find(c => c.id === e.clientId);
+      return `${persona.full_name} · ${money.format(e.amount)} · ${e.sessions} sesiones`;
+    }).join('\n');
+    if (!confirmarGuardado(`Aplicar este cobro a:\n${resumen}\n\nMes cubierto: ${form.elements.period.value}`)) return;
+    try {
+      event.target.classList.add('loading-state');
+      await api(`/api/invoices/${id}/coverage`, { method: 'POST', body: { billingPeriod: periodo, entries } });
+      await loadData(); renderAll(); modal.close();
+      toast(`${entries.length} saldo${entries.length === 1 ? '' : 's'} abierto${entries.length === 1 ? '' : 's'}`);
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+
 function editInvoice(id) {
   const invoice = data.invoices.find(item => item.id === id); if (!invoice) return;
   const box = document.createElement('div');
@@ -2530,6 +2636,7 @@ document.addEventListener('click', event => {
   if (event.target.dataset.confirmInvoice) confirmInvoice(event.target.dataset.confirmInvoice);
   if (event.target.dataset.editPayment) confirmInvoice(event.target.dataset.editPayment, true);
   if (event.target.dataset.editInvoice) editInvoice(event.target.dataset.editInvoice);
+  if (event.target.dataset.applyCoverage) applyInvoiceCoverage(event.target.dataset.applyCoverage);
   if (event.target.dataset.purgeSession) {
     const sesion = data.sessions.find(item => item.id === event.target.dataset.purgeSession);
     const cancelada = sesion?.status === 'cancelled';
