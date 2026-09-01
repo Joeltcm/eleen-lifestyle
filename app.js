@@ -1,4 +1,4 @@
-const APP_VERSION = '129';
+const APP_VERSION = '130';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -300,9 +300,16 @@ const movimientosDelCiclo = client => {
 };
 const saldoDelMes = client => {
   const pack = data.packages.find(item => item.clientId === client.id && item.status === 'confirmed' && item.kind === 'monthly');
-  if (!pack) return '';
+  // La reposición se nombra aparte: son clases que el cliente ya pagó el mes
+  // pasado y que sólo valen esta semana. Sumarlas al total las escondería justo
+  // cuando hay que darles prioridad.
+  const reposicion = data.packages.find(item => item.clientId === client.id && item.status === 'confirmed' && item.kind === 'makeup' && remainingSessions(item) > 0);
+  const extra = reposicion
+    ? `${remainingSessions(reposicion)} por reponer${reposicion.expiresOn ? ` hasta el ${formatoDiaCorto(reposicion.expiresOn)}` : ''} · `
+    : '';
+  if (!pack) return extra;
   const vence = pack.expiresOn ? ` · vence ${formatoDiaCorto(pack.expiresOn)}` : '';
-  return `${remainingSessions(pack)} de ${pack.total} sesiones${vence} · `;
+  return `${extra}${remainingSessions(pack)} de ${pack.total} sesiones${vence} · `;
 };
 const formatoDiaCorto = fecha => new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short', timeZone: 'America/Panama' }).format(new Date(`${String(fecha).slice(0, 10)}T12:00:00-05:00`));
 const clientPackage = name => data.packages.find(pack => pack.client === name && pack.status === 'confirmed' && remainingSessions(pack) > 0) || data.packages.find(pack => pack.client === name && pack.status === 'pending') || data.packages.find(pack => pack.client === name && pack.status !== 'expired');

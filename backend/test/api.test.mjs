@@ -264,7 +264,9 @@ describe('descuento de clases individual', () => {
   });
 
   test('entrenar juntos descuenta una clase a cada uno', async () => {
-    const cuando = '2026-11-16T13:00:00.000Z';
+    // Dentro de la vigencia del saldo: una clase de dentro de dos meses no
+    // puede pagarse con un saldo que vence en el próximo corte.
+    const cuando = new Date(Date.now() - 3600_000).toISOString();
     const s1 = await api.post('/api/sessions/batch', { clientId: pagador, startsAt: [cuando], durationMinutes: 60, mode: 'Presencial' });
     const s2 = await api.post('/api/sessions/batch', { clientId: dependiente, startsAt: [cuando], durationMinutes: 60, mode: 'Presencial' });
 
@@ -813,8 +815,13 @@ describe('cancelar y reprogramar se cuentan por separado', () => {
     return { reprogramaciones: Number(c.reprogramaciones_ciclo), canceladas: Number(c.canceladas_ciclo) };
   };
   const agendar = async desplazamientoDias => {
-    const cuando = new Date(Date.now() + desplazamientoDias * 24 * 3600_000).toISOString();
-    const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [cuando], durationMinutes: 60, mode: 'Presencial' });
+    // A media mañana de Panamá, no "ahora + N días": corriendo de noche,
+    // sumarle 90 minutos cruzaría la medianoche y sí cambiaría de día.
+    const dia = new Date(Date.now() + desplazamientoDias * 24 * 3600_000).toISOString().slice(0, 10);
+    // Hora distinta por llamada: si dos caen en el mismo instante, la segunda
+    // se omite por duplicada y la prueba se queda sin sesión.
+    const hora = String(10 + desplazamientoDias).padStart(2, '0');
+    const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [`${dia}T${hora}:00:00.000Z`], durationMinutes: 60, mode: 'Presencial' });
     return lote.datos.sesiones[0];
   };
 
@@ -854,6 +861,72 @@ describe('cancelar y reprogramar se cuentan por separado', () => {
     await api.patch(`/api/sessions/${s.id}`, { startsAt: masTarde.toISOString(), durationMinutes: 60, mode: 'Presencial' });
     const despues = await conteo();
     assert.equal(despues.reprogramaciones, 2, 'ajustar la hora no es reprogramar');
+  });
+});
+
+describe('reposiciones: dos clases y una semana', () => {
+  let clientId;
+  const saldos = async () => (await api.get('/api/packages')).datos.filter(p => p.client_id === clientId);
+
+  before(async () => {
+    // Corte hoy: el ciclo acaba de empezar, así que estamos dentro de la
+    // semana de gracia.
+    const hoy = new Date().getDate();
+    const plan = await api.post('/api/plans', { name: 'Mensual con reposiciones', billingModel: 'monthly', price: 280, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Pidió mover tres', planId: plan.datos.id, cutoffDay: hoy });
+    clientId = c.datos.id;
+    // La mensualidad del ciclo que acaba de cerrar: 8 clases, 5 dadas.
+    // Vencida hace días, sin ambigüedad de huso: si se pone "ayer", según la
+    // hora a la que corra la prueba el día de Panamá puede ser todavía el
+    // mismo y el saldo seguiría vivo.
+    const ayer = new Date(); ayer.setDate(ayer.getDate() - 10);
+    const p = await api.post('/api/packages', { clientId, totalSessions: 8, amount: 280, kind: 'monthly', expiresOn: ayer.toISOString().slice(0, 10) });
+    await api.post(`/api/invoices/${p.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-01' });
+    await api.patch(`/api/packages/${p.datos.id}`, { label: 'Mensualidad cerrada', totalSessions: 8, usedSessions: 5, expiresOn: ayer.toISOString().slice(0, 10) });
+    // Y tres de las que faltaron fueron porque pidió moverlas.
+    for (let i = 1; i <= 3; i += 1) {
+      const cuando = new Date(); cuando.setDate(cuando.getDate() - (i + 1));
+      const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [cuando.toISOString()], durationMinutes: 60, mode: 'Presencial' });
+      await api.delete(`/api/sessions/${lote.datos.sesiones[0].id}?rescheduled=true`);
+    }
+  });
+
+  test('pidió mover tres, pero sólo cruzan dos', async () => {
+    await api.post('/api/billing/recurring/generate', {});
+    const reposicion = (await saldos()).find(p => p.kind === 'makeup');
+    assert.ok(reposicion, 'las clases que pidió mover no se pierden sin más');
+    assert.equal(Number(reposicion.total_sessions), 2, 'el tope son dos, pidiera las que pidiera');
+    assert.equal(Number(reposicion.amount), 0, 'ya se cobraron dentro de la mensualidad del mes cerrado');
+  });
+
+  test('vencen a la semana del corte', async () => {
+    const reposicion = (await saldos()).find(p => p.kind === 'makeup');
+    const dias = Math.round((new Date(reposicion.expires_on) - new Date()) / 86400000);
+    assert.ok(dias >= 6 && dias <= 8, `la semana de gracia, no más: ${dias} días`);
+  });
+
+  test('son extra, no salen de las del mes', async () => {
+    const cliente = (await api.get('/api/clients')).datos.find(c => c.id === clientId);
+    const mensual = (await saldos()).find(p => p.kind === 'monthly');
+    const quedaban = Number(mensual.total_sessions) - Number(mensual.used_sessions);
+    assert.equal(Number(cliente.available_sessions), quedaban + 2,
+      'si se comieran dos de las del mes, cruzarlas no serviría de nada');
+  });
+
+  test('la clase que da se descuenta de la reposición, que vence antes', async () => {
+    const cuando = new Date(Date.now() - 3600_000).toISOString();
+    const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [cuando], durationMinutes: 60, mode: 'Presencial' });
+    await api.patch(`/api/sessions/${lote.datos.sesiones[0].id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    const despues = await saldos();
+    assert.equal(Number(despues.find(p => p.kind === 'makeup').used_sessions), 1);
+    assert.equal(Number(despues.find(p => p.kind === 'monthly').used_sessions), 5,
+      'la mensualidad cerrada no se toca: está vencida y ya no se gasta');
+  });
+
+  test('generar dos veces no le regala más reposiciones', async () => {
+    await api.post('/api/billing/recurring/generate', {});
+    const cuantas = (await saldos()).filter(p => p.kind === 'makeup').length;
+    assert.equal(cuantas, 1, 'una por ciclo, por mucho que el proceso repita');
   });
 });
 

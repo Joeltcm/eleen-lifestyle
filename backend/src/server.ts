@@ -348,7 +348,8 @@ async function generateRecurringInvoices(ownerId?: string) {
     await cobrarClasesYaDadas(sql, abierto.id as string, cobro.entrena as string,
       String(cobro.due_on).slice(0, 10), Number(cobro.total_sessions));
   }
-  return { generated: invoices.length, balances: pendientes.length, invoices };
+  const reposiciones = await abrirReposiciones(ownerId);
+  return { generated: invoices.length, balances: pendientes.length, reposiciones, invoices };
 }
 
 app.get('/api/billing/recurring/status', { preHandler: requireStaff }, async request => {
@@ -363,7 +364,7 @@ app.post('/api/billing/recurring/generate', { preHandler: requireStaff }, async 
     return { ...status, generated: 0, message: 'La facturación automática se activará después del corte final de Zoho.' };
   }
   const result = await generateRecurringInvoices(auth.sub);
-  return { ...(await recurringBillingStatus(auth.sub)), generated: result.generated, balances: result.balances };
+  return { ...(await recurringBillingStatus(auth.sub)), generated: result.generated, balances: result.balances, reposiciones: result.reposiciones };
 });
 
 app.get('/health', async () => {
@@ -1441,6 +1442,66 @@ const HORIZONTE_DIAS = 56;
 // "rellena lo que falte", y entonces manda ella: si ese día está vacío a esa
 // hora, se crea, aunque quede una marca vieja apuntando a otra parte. La marca
 // suelta se libera antes, que si no el índice único rechazaría la nueva.
+// Abrir las reposiciones del ciclo que acaba de cerrar.
+//
+// Se cuentan las clases que el cliente pidió mover y no se llegaron a dar, con
+// tope de dos, y se le abre un saldo aparte que vive una semana desde su
+// corte. Ni se acumulan de un mes a otro ni se suman a las del mes siguiente:
+// son dos, esta semana, o se pierden.
+const REPOSICIONES_MAXIMAS = 2;
+const DIAS_PARA_REPONER = 7;
+
+async function abrirReposiciones(ownerId?: string) {
+  const candidatos = await sql`
+    SELECT c.id AS client_id, inicio_ciclo(c.billing_cutoff_day) AS desde,
+      -- Lo que quedó sin dar en la mensualidad que acaba de cerrar. Es la
+      -- deuda real: si el cliente dio sus 8, no hay nada que reponer por mucho
+      -- que haya movido clases de sitio dentro del mes.
+      COALESCE((
+        SELECT max(sp.total_sessions - sp.used_sessions) FROM session_packages sp
+        WHERE sp.client_id = c.id AND sp.kind = 'monthly' AND sp.expires_on IS NOT NULL
+          AND sp.expires_on < inicio_ciclo(c.billing_cutoff_day) + 1
+          AND sp.expires_on >= inicio_ciclo(c.billing_cutoff_day) - interval '1 month'
+      ), 0) AS sin_dar,
+      -- Y de esas, cuántas fueron porque el cliente pidió moverla. Una clase
+      -- que simplemente perdió no se repone: ésa es la diferencia que la
+      -- entrenadora ya declara al cancelar.
+      (SELECT count(*)::int FROM session_reschedules sr
+        WHERE sr.client_id = c.id
+          AND sr.from_starts_at >= inicio_ciclo(c.billing_cutoff_day) - interval '1 month'
+          AND sr.from_starts_at < inicio_ciclo(c.billing_cutoff_day)) AS pedidas
+    FROM clients c
+    WHERE c.status = 'active' AND c.billing_model = 'monthly'
+      AND (${ownerId ?? null}::uuid IS NULL OR c.owner_id = ${ownerId ?? null}::uuid)
+      -- Sólo durante la semana de gracia: abrirla más tarde daría unos días
+      -- que ya no le corresponden.
+      AND current_date < inicio_ciclo(c.billing_cutoff_day) + (${DIAS_PARA_REPONER})::int
+  `;
+  let abiertas = 0;
+  for (const fila of candidatos) {
+    const cuantas = Math.min(Number(fila.sin_dar) || 0, Number(fila.pedidas) || 0, REPOSICIONES_MAXIMAS);
+    if (!cuantas) continue;
+    // Las columnas date vuelven de postgres.js como Date, y tratarlas como
+    // texto da "Invalid time value" —el mismo tropiezo de la renovación—.
+    const inicio = mediodiaEnPanama(fila.desde as Date);
+    const desde = inicio.toISOString().slice(0, 10);
+    const vence = new Date(inicio);
+    vence.setUTCDate(vence.getUTCDate() + DIAS_PARA_REPONER);
+    // El índice único por (cliente, ciclo) es lo que hace inofensivo que el
+    // proceso pase varias veces durante esa semana.
+    const [creada] = await sql`
+      INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status, makeup_for_period)
+      VALUES (${fila.client_id},
+        ${`Reposición · ${cuantas} clase${cuantas === 1 ? '' : 's'} del mes anterior`},
+        ${cuantas}, 0, ${vence.toISOString().slice(0, 10)}::date, 'makeup', ${desde}::date, 'active', ${desde}::date)
+      ON CONFLICT DO NOTHING
+      RETURNING id
+    `;
+    if (creada) abiertas += 1;
+  }
+  return abiertas;
+}
+
 async function extenderRecurrencias(ownerId?: string, forzar = false) {
   const reglas = await sql`
     SELECT r.id, r.client_id, r.routine_id, r.weekdays, r.time_of_day, r.duration_minutes,
@@ -1935,6 +1996,15 @@ async function recordSessionCompliance(id: string, ownerId: string, markedBy: st
       const [pack] = await transaction`
         SELECT * FROM session_packages
         WHERE client_id = ${grupo} AND status = 'active' AND used_sessions < total_sessions
+          -- Un saldo vencido no se gasta. Seguía estando 'active' después de
+          -- su fecha, así que una clase dada hoy salía de un mes ya cerrado y
+          -- las sesiones del ciclo en curso —o la reposición, que dura una
+          -- semana— se quedaban intactas para vencer después.
+          --
+          -- Se compara contra el día de la clase y no contra hoy: una clase
+          -- del 30 marcada el 2 se pagó con el saldo de aquel mes, que era el
+          -- que estaba vivo cuando ocurrió.
+          AND (expires_on IS NULL OR expires_on >= (${current.starts_at}::timestamptz AT TIME ZONE 'America/Panama')::date)
         ORDER BY expires_on ASC NULLS LAST, purchased_on
         LIMIT 1 FOR UPDATE
       `;
