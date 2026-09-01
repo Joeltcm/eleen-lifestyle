@@ -253,3 +253,10 @@ select.filter{padding:11px 13px;font:600 13px 'DM Sans';cursor:pointer}
 .completion-outcome select{font-size:11px;padding:7px 8px;min-width:118px}
 .completion-percent input:disabled{opacity:.45}
 @media(max-width:560px){.completion-outcome{flex:1 1 100%}.completion-outcome select{width:100%}}
+
+/* Clases que ya pasaron y siguen sin marcar. Ámbar, como el aviso de choque:
+   pide una decisión, no denuncia un error. */
+.notification-item.pending{background:#fbf1e8;border-left:3px solid #c9a288}
+.notification-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
+.notification-actions button{flex:1 1 auto;font-size:11px;padding:8px 10px}
+@media(max-width:560px){.notification-actions button{flex:1 1 100%}}

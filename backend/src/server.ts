@@ -2943,7 +2943,28 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
     SELECT i.due_on, i.amount, i.concept, c.full_name FROM invoices i JOIN clients c ON c.id = i.client_id
     WHERE c.owner_id = ${auth.sub} AND i.status = 'pending' AND i.due_on <= current_date + (${paymentDays})::integer ORDER BY i.due_on
   `;
+  // Clases cuya hora ya pasó y siguen sin resolverse. Una sesión que se quedó
+  // en 'programada' después de su hora no dice nada: ni que se dio, ni que se
+  // perdió, ni que se canceló. Y el cumplimiento del cliente la cuenta como
+  // incumplida en cuanto vence su saldo, sin que nadie lo haya decidido.
+  //
+  // Se miran sólo los últimos siete días: más atrás es historial que ya no se
+  // va a marcar de memoria, y una lista infinita no se revisa nunca.
+  const pendientes = await sql`
+    SELECT s.id, s.starts_at, s.duration_minutes, c.full_name
+    FROM sessions s JOIN clients c ON c.id = s.client_id
+    WHERE c.owner_id = ${auth.sub} AND s.status = 'scheduled'
+      AND s.starts_at + make_interval(mins => s.duration_minutes) <= now()
+      AND s.starts_at >= now() - interval '7 days'
+    ORDER BY s.starts_at DESC
+  `;
   return [
+    ...pendientes.map(session => ({
+      type: 'pending', sessionId: session.id,
+      title: `Falta marcar: ${session.full_name}`,
+      body: `${new Date(session.starts_at).toLocaleString('es-PA', { timeZone: 'America/Panama', weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })} · ya terminó y sigue sin marcar.`,
+      scheduledFor: session.starts_at
+    })),
     ...sessions.map(session => ({ type: 'session', title: `Sesión con ${session.full_name}`, body: new Date(session.starts_at).toLocaleString('es-PA', { timeZone: 'America/Panama' }), scheduledFor: session.starts_at })),
     ...invoices.map(invoice => ({ type: 'payment', title: `Pago de ${invoice.full_name}`, body: `${invoice.concept}: $${Number(invoice.amount).toFixed(2)} · vence ${invoice.due_on}.`, scheduledFor: invoice.due_on }))
   ];
@@ -2951,7 +2972,7 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
 
 type ReminderCandidate = {
   user_id: string;
-  kind: 'session' | 'payment';
+  kind: 'session' | 'payment' | 'pending';
   reference_id: string;
   role: AuthUser['role'];
   full_name: string;
@@ -3041,7 +3062,27 @@ async function dispatchReminders() {
     `
   ]);
 
-  for (const reminder of [...sessionRows, ...paymentRows]) {
+  // La clase terminó y nadie dijo si se dio. Es el único aviso que llega
+  // *después* del hecho, y por eso hace falta: los otros dos recuerdan lo que
+  // viene, y esto se olvida justo por haber pasado. Sólo a la entrenadora: al
+  // cliente no le toca resolverlo.
+  const pendingRows = await sql<ReminderCandidate[]>`
+    SELECT u.id AS user_id, 'pending' AS kind, s.id AS reference_id, u.role, c.full_name, s.starts_at
+    FROM notification_preferences np
+    JOIN users u ON u.id = np.user_id AND u.active = true AND u.role IN ('admin', 'trainer')
+    JOIN clients c ON c.owner_id = u.id
+    JOIN sessions s ON s.client_id = c.id
+    WHERE np.browser_enabled = true AND s.status = 'scheduled'
+      AND s.starts_at + make_interval(mins => s.duration_minutes) <= now()
+      AND s.starts_at >= now() - interval '7 days'
+      AND EXISTS (SELECT 1 FROM push_subscriptions ps WHERE ps.user_id = u.id AND ps.active = true)
+      AND NOT EXISTS (
+        SELECT 1 FROM notification_deliveries nd
+        WHERE nd.user_id = u.id AND nd.kind = 'pending' AND nd.reference_id = s.id
+      )
+  `;
+
+  for (const reminder of [...pendingRows, ...sessionRows, ...paymentRows]) {
     const [reserved] = await sql`
       INSERT INTO notification_deliveries (user_id, kind, reference_id)
       VALUES (${reminder.user_id}, ${reminder.kind}, ${reminder.reference_id})
@@ -3049,7 +3090,13 @@ async function dispatchReminders() {
     `;
     if (!reserved) continue;
     const isClient = reminder.role === 'client';
-    const payload = reminder.kind === 'session'
+    const payload = reminder.kind === 'pending'
+      ? {
+          title: `Falta marcar: ${reminder.full_name}`,
+          body: `Su clase de ${new Date(reminder.starts_at!).toLocaleString('es-PA', { timeZone: 'America/Panama', weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })} ya terminó. ¿Cumplió?`,
+          url: new URL('/#calendar', config.APP_URL).toString()
+        }
+      : reminder.kind === 'session'
       ? {
           title: isClient ? 'Próximo entrenamiento' : `Sesión con ${reminder.full_name}`,
           body: `Programada para ${new Date(reminder.starts_at!).toLocaleString('es-PA', { timeZone: 'America/Panama' })}.`,

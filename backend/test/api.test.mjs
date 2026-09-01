@@ -603,6 +603,57 @@ describe('por qué un día del horario fijo sigue vacío', () => {
   });
 });
 
+describe('avisar de las clases que se quedaron sin marcar', () => {
+  let clientId, pasada, futura;
+  before(async () => {
+    const c = await api.post('/api/clients', { fullName: 'Entrenó y nadie marcó', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+    clientId = c.datos.id;
+    const haceDosHoras = new Date(Date.now() - 2 * 3600_000).toISOString();
+    const enDosHoras = new Date(Date.now() + 2 * 3600_000).toISOString();
+    const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [haceDosHoras, enDosHoras], durationMinutes: 60, mode: 'Presencial' });
+    [pasada, futura] = lote.datos.sesiones.sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)));
+  });
+
+  test('avisa de la que ya terminó, no de la que viene', async () => {
+    // Otras pruebas dejan sesiones sueltas del mismo dueño, así que se mira
+    // sólo a este cliente.
+    const avisos = (await api.get('/api/notifications')).datos
+      .filter(n => n.type === 'pending' && /Entrenó y nadie marcó/.test(n.title));
+    assert.equal(avisos.length, 1, 'sólo la que ya pasó necesita decisión');
+    assert.equal(String(avisos[0].sessionId), String(pasada.id));
+    assert.ok(!avisos.some(a => String(a.sessionId) === String(futura.id)), 'la que viene no se pregunta');
+  });
+
+  test('no avisa de una clase en curso', async () => {
+    // Empezó hace diez minutos y dura una hora: todavía está pasando.
+    const enCurso = new Date(Date.now() - 10 * 60_000).toISOString();
+    const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [enCurso], durationMinutes: 60, mode: 'Presencial' });
+    const avisos = (await api.get('/api/notifications')).datos.filter(n => n.type === 'pending');
+    assert.ok(!avisos.some(a => String(a.sessionId) === String(lote.datos.sesiones[0].id)),
+      'avisar antes de que acabe la clase es avisar de nada');
+  });
+
+  test('al marcarla, el aviso desaparece', async () => {
+    await api.patch(`/api/sessions/${pasada.id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    const avisos = (await api.get('/api/notifications')).datos.filter(n => n.type === 'pending');
+    assert.ok(!avisos.some(a => String(a.sessionId) === String(pasada.id)));
+  });
+
+  test('y cancelarla también lo quita', async () => {
+    const ayer = new Date(Date.now() - 26 * 3600_000).toISOString();
+    const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [ayer], durationMinutes: 60, mode: 'Presencial' });
+    const suelta = lote.datos.sesiones[0];
+    const antes = (await api.get('/api/notifications')).datos.filter(n => n.type === 'pending');
+    assert.ok(antes.some(a => String(a.sessionId) === String(suelta.id)), 'la de ayer sí pide decisión');
+
+    await api.delete(`/api/sessions/${suelta.id}?rescheduled=false`);
+
+    const despues = (await api.get('/api/notifications')).datos.filter(n => n.type === 'pending');
+    assert.ok(!despues.some(a => String(a.sessionId) === String(suelta.id)),
+      'cancelarla es decidir: ya no hay nada que preguntar');
+  });
+});
+
 describe('vencimiento de los paquetes', () => {
   let clientId;
   before(async () => {
