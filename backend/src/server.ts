@@ -2128,7 +2128,12 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
   // cliente: es como se contaron todas las anteriores.
   const consulta = request.query as { by?: string; resolution?: string; amount?: string };
   const laCancelaEllaSola = consulta.by === 'trainer';
-  const compensa = consulta.resolution === 'discount' ? 'discount' : 'makeup';
+  // 'none' es una respuesta legítima: puede que lo hable con el cliente y
+  // decida después, o que no haya nada que compensar. Obligarla a elegir entre
+  // reponer y descontar la empujaría a marcar cualquiera de las dos por salir
+  // del paso, y eso ensucia el saldo o el cobro.
+  const compensa = consulta.resolution === 'discount' ? 'discount'
+    : consulta.resolution === 'none' ? 'none' : 'makeup';
 
   const [session] = await sql`
     UPDATE sessions s SET status = 'cancelled',
@@ -2155,7 +2160,7 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
   // valor: otra clase, o menos dinero. Se resuelve aquí y no se deja para
   // luego, que es como se olvida.
   let compensacion: { tipo: string; detalle: string } | null = null;
-  if (laCancelaEllaSola) {
+  if (laCancelaEllaSola && compensa !== 'none') {
     const [cliente] = await sql`
       SELECT c.id, c.standard_price, COALESCE(p.sessions_included, c.monthly_session_target, 0)::int AS incluidas
       FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id WHERE c.id = ${session.client_id}
@@ -3157,7 +3162,11 @@ async function complianceRows(ownerId: string, period: z.infer<typeof reportPeri
     WITH activities AS (
       SELECT c.id AS client_id, c.full_name, s.starts_at AS occurred_at, 'Sesión'::text AS source,
         COALESCE(r.title, CASE WHEN s.quick_logged THEN 'Entrenamiento presencial' ELSE 'Evaluación / seguimiento' END) AS activity,
-        CASE WHEN s.status = 'cancelled' THEN 'missed' ELSE s.status END AS status,
+        -- No presentarse cuenta como no hecha, igual que cancelar y no
+        -- reponer. Las dos daban ya el mismo 0%, pero sólo la cancelada
+        -- entraba en el recuento de "sin hacer", así que ese número decía
+        -- menos de lo que había pasado.
+        CASE WHEN s.status IN ('cancelled', 'no_show') THEN 'missed' ELSE s.status END AS status,
         CASE WHEN s.status = 'cancelled' THEN 0::smallint ELSE s.completion_percent END AS completion_percent,
         false AS late
       FROM sessions s JOIN clients c ON c.id = s.client_id LEFT JOIN routines r ON r.id = s.routine_id

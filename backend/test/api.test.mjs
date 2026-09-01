@@ -1121,6 +1121,43 @@ describe('cuando cancela la entrenadora', () => {
     assert.equal(Number(cliente.credito_pendiente), 0, 'aplicado es aplicado, no se cobra dos veces');
   });
 
+  test('puede cancelar sin compensar, y tampoco le afecta al cliente', async () => {
+    const otro = await api.post('/api/clients', { fullName: 'Sin compensacion', planId, cutoffDay: 1 });
+    const cuando = new Date(Date.now() - 2 * 3600_000).toISOString();
+    const lote = await api.post('/api/sessions/batch', { clientId: otro.datos.id, startsAt: [cuando], durationMinutes: 60, mode: 'Presencial' });
+    const { datos } = await api.delete(`/api/sessions/${lote.datos.sesiones[0].id}?rescheduled=false&by=trainer&resolution=none`);
+    assert.equal(datos.compensacion, null, 'ni saldo a favor ni crédito: se decidirá luego o no hay nada que compensar');
+
+    const cliente = (await api.get('/api/clients')).datos.find(x => x.id === otro.datos.id);
+    assert.equal(Number(cliente.credito_pendiente), 0, 'no se le inventa un descuento');
+    const saldos = (await api.get('/api/packages')).datos.filter(p => p.client_id === otro.datos.id);
+    assert.equal(saldos.length, 0, 'ni una clase a favor');
+
+    const fila = (await api.get('/api/compliance/summary?period=month')).datos.clients.find(x => x.clientId === otro.datos.id);
+    assert.equal(fila, undefined, 'y su cumplimiento sigue intacto: la canceló ella');
+  });
+
+  test('cancelada por el cliente sin reponer cuenta igual que no cumplió', async () => {
+    // Es la equivalencia que importa: el rótulo dice "Cancelada", pero en el
+    // cumplimiento pesa lo mismo que una clase a la que no se presentó.
+    const a = await api.post('/api/clients', { fullName: 'Canceló y no repuso', planId, cutoffDay: 1 });
+    const b = await api.post('/api/clients', { fullName: 'No se presentó', planId, cutoffDay: 1 });
+    const cuando = new Date(Date.now() - 2 * 3600_000).toISOString();
+    const uno = await api.post('/api/sessions/batch', { clientId: a.datos.id, startsAt: [cuando], durationMinutes: 60, mode: 'Presencial' });
+    const dos = await api.post('/api/sessions/batch', { clientId: b.datos.id, startsAt: [cuando], durationMinutes: 60, mode: 'Presencial' });
+    await api.delete(`/api/sessions/${uno.datos.sesiones[0].id}?rescheduled=false&by=client`);
+    await api.patch(`/api/sessions/${dos.datos.sesiones[0].id}/compliance`, { outcome: 'no_show', completionPercent: 0 });
+
+    const resumen = (await api.get('/api/compliance/summary?period=month')).datos.clients;
+    const cancelada = resumen.find(x => x.clientId === a.datos.id);
+    const noPresentada = resumen.find(x => x.clientId === b.datos.id);
+    assert.deepEqual(
+      { act: cancelada.activities, miss: cancelada.missed, pct: cancelada.compliancePercent },
+      { act: noPresentada.activities, miss: noPresentada.missed, pct: noPresentada.compliancePercent },
+      'cancelar sin reponer y no presentarse pesan lo mismo');
+    assert.equal(cancelada.compliancePercent, 0);
+  });
+
   test('descontar deja el crédito por el valor de la clase', async () => {
     const otro = await api.post('/api/clients', { fullName: 'Prefiere descuento', planId, cutoffDay: 1 });
     const cuando = new Date(Date.now() - 2 * 3600_000).toISOString();

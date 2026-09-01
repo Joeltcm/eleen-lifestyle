@@ -1,4 +1,4 @@
-const APP_VERSION = '133';
+const APP_VERSION = '134';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1279,16 +1279,20 @@ function cancelSessionDialog(sesion) {
       <button class="secondary wide-button" id="compensar-descuento">Descontar del próximo cobro</button>
       <p class="section-note">${porClase > 0
         ? `Deja un crédito de <b>${money.format(porClase)}</b> —su mensualidad entre las clases que incluye— que baja el cobro del mes que viene.`
-        : 'Su plan no dice cuántas clases incluye, así que no se puede calcular el valor de una. Configúraselo o repón la clase.'}</p>`;
+        : 'Su plan no dice cuántas clases incluye, así que no se puede calcular el valor de una. Configúraselo o repón la clase.'}</p>
+      <button class="secondary wide-button" id="compensar-nada">Ninguna de las dos por ahora</button>
+      <p class="section-note">Se cancela sin más. Su cumplimiento no se toca igualmente, y siempre puedes reponerle o descontarle después.</p>`;
     box.querySelector('#compensar-reponer').onclick = () => cancelar({ reprogramada: true, quien: 'trainer', compensa: 'makeup' });
     const descuento = box.querySelector('#compensar-descuento');
     descuento.disabled = !(porClase > 0);
     descuento.onclick = () => cancelar({ reprogramada: false, quien: 'trainer', compensa: 'discount' });
+    box.querySelector('#compensar-nada').onclick = () => cancelar({ reprogramada: false, quien: 'trainer', compensa: 'none' });
   };
 
   const cancelar = async ({ reprogramada, quien, compensa }) => {
     const resumen = quien === 'trainer'
-      ? `Cancelar la clase de ${sesion.client}\n${compensa === 'discount' ? `Descuento de ${money.format(porClase)} al próximo cobro` : 'Queda una clase por reponer'}`
+      ? `Cancelar la clase de ${sesion.client}\n${compensa === 'discount' ? `Descuento de ${money.format(porClase)} al próximo cobro`
+          : compensa === 'none' ? 'Sin reposición ni descuento' : 'Queda una clase por reponer'}`
       : `Cancelar la clase de ${sesion.client}\n${reprogramada ? 'Se reprogramará' : 'No se reprograma: cuenta como incumplida'}`;
     if (!confirmarGuardado(resumen)) return;
     try {
