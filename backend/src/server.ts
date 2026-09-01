@@ -1418,6 +1418,56 @@ app.get('/api/sessions', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`SELECT s.*, c.full_name, r.title AS routine_title FROM sessions s JOIN clients c ON c.id = s.client_id LEFT JOIN routines r ON r.id = s.routine_id WHERE c.owner_id = ${auth.sub} ORDER BY s.starts_at`;
 });
+// El horario de trabajo, por tramos. Sin tramos configurados la aplicación
+// sigue deduciéndolo de la agenda, que es lo que hacía hasta ahora: nadie se
+// queda sin huecos por no haber entrado aquí todavía.
+const workingHoursSchema = z.object({
+  tramos: z.array(z.object({
+    weekday: z.coerce.number().int().min(0).max(6),
+    startsAt: z.string().regex(/^\d{2}:\d{2}$/, 'Hora inválida'),
+    endsAt: z.string().regex(/^\d{2}:\d{2}$/, 'Hora inválida')
+  }).refine(t => t.endsAt > t.startsAt, { message: 'El tramo termina antes de empezar' })).max(40)
+});
+
+app.get('/api/working-hours', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const tramos = await sql`
+    SELECT id, weekday, to_char(starts_at, 'HH24:MI') AS starts_at, to_char(ends_at, 'HH24:MI') AS ends_at
+    FROM working_hours WHERE owner_id = ${auth.sub} ORDER BY weekday, starts_at
+  `;
+  return { tramos };
+});
+
+app.put('/api/working-hours', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const input = workingHoursSchema.parse(request.body);
+  // Dos tramos del mismo día que se pisan no son un horario: son un error de
+  // dedo, y dejarlos pasar haría que un hueco saliera dos veces.
+  const porDia = new Map<number, { startsAt: string; endsAt: string }[]>();
+  for (const tramo of input.tramos) {
+    const lista = porDia.get(tramo.weekday) || [];
+    if (lista.some(otro => tramo.startsAt < otro.endsAt && tramo.endsAt > otro.startsAt)) {
+      return reply.code(400).send({ error: 'Hay dos tramos que se solapan el mismo día' });
+    }
+    lista.push(tramo);
+    porDia.set(tramo.weekday, lista);
+  }
+  await sql.begin(async transaction => {
+    await transaction`DELETE FROM working_hours WHERE owner_id = ${auth.sub}`;
+    for (const tramo of input.tramos) {
+      await transaction`
+        INSERT INTO working_hours (owner_id, weekday, starts_at, ends_at)
+        VALUES (${auth.sub}, ${tramo.weekday}, ${tramo.startsAt}::time, ${tramo.endsAt}::time)
+      `;
+    }
+  });
+  const tramos = await sql`
+    SELECT id, weekday, to_char(starts_at, 'HH24:MI') AS starts_at, to_char(ends_at, 'HH24:MI') AS ends_at
+    FROM working_hours WHERE owner_id = ${auth.sub} ORDER BY weekday, starts_at
+  `;
+  return { tramos };
+});
+
 // Huecos libres de la entrenadora, para colocar una reposición sin ir
 // probando horas a ver cuál cae.
 //
@@ -1474,23 +1524,42 @@ app.get('/api/availability', { preHandler: requireStaff }, async request => {
   }).format(ahora).split(':').map(Number);
   const minutosAhora = horaAhora * 60 + minutoAhora;
 
+  // Los tramos configurados mandan sobre la franja deducida. Si no hay
+  // ninguno, se sigue con lo deducido, que es lo que había antes.
+  const tramos = await sql`
+    SELECT weekday, to_char(starts_at, 'HH24:MI') AS starts_at, to_char(ends_at, 'HH24:MI') AS ends_at
+    FROM working_hours WHERE owner_id = ${auth.sub} ORDER BY weekday, starts_at
+  `;
+  const configurado = tramos.length > 0;
+
   const dias = [];
   for (let cursor = new Date(`${query.from}T12:00:00-05:00`); diaEnPanama(cursor) <= query.to; cursor.setUTCDate(cursor.getUTCDate() + 1)) {
     const dia = diaEnPanama(cursor);
+    // El día de la semana en Panamá, no en UTC: de madrugada allí es todavía
+    // el día anterior y se aplicarían los tramos del día equivocado.
+    const diaSemana = new Date(`${dia}T12:00:00-05:00`).getUTCDay();
+    const delDiaTramos = configurado
+      ? tramos.filter(t => Number(t.weekday) === diaSemana).map(t => ({ abre: aMinutos(String(t.starts_at)), cierra: aMinutos(String(t.ends_at)) }))
+      : [{ abre, cierra }];
     // Las columnas date vuelven como Date: String() daría "Thu Sep 03 2026" y
     // la comparación no encajaría nunca, dejando el día entero como libre.
     const delDia = ocupadas.filter(fila => (fila.dia instanceof Date ? fila.dia.toISOString().slice(0, 10) : String(fila.dia).slice(0, 10)) === dia)
       .map(fila => ({ inicio: aMinutos(String(fila.empieza)), fin: aMinutos(String(fila.empieza)) + Number(fila.duration_minutes), quien: fila.full_name as string }));
     const libres = [];
-    for (let inicio = abre; inicio + query.durationMinutes <= cierra; inicio += 30) {
-      // Nada en el pasado: un hueco de esta mañana no es un hueco.
-      if (dia === hoyPanama && inicio <= minutosAhora) continue;
-      const choca = delDia.some(ocupada => ocupada.inicio < inicio + query.durationMinutes && ocupada.fin > inicio);
-      if (!choca) libres.push(aTexto(inicio));
+    for (const tramo of delDiaTramos) {
+      // La rejilla arranca en la media hora en punto de cada tramo: el de
+      // tarde no tiene por qué heredar los minutos del de mañana.
+      const primero = Math.ceil(tramo.abre / 30) * 30;
+      for (let inicio = primero; inicio + query.durationMinutes <= tramo.cierra; inicio += 30) {
+        // Nada en el pasado: un hueco de esta mañana no es un hueco.
+        if (dia === hoyPanama && inicio <= minutosAhora) continue;
+        const choca = delDia.some(ocupada => ocupada.inicio < inicio + query.durationMinutes && ocupada.fin > inicio);
+        if (!choca) libres.push(aTexto(inicio));
+      }
     }
     dias.push({ date: dia, libres, ocupadas: delDia.map(o => ({ hora: aTexto(o.inicio), quien: o.quien })) });
   }
-  return { abre: aTexto(abre), cierra: aTexto(cierra), durationMinutes: query.durationMinutes, dias };
+  return { abre: aTexto(abre), cierra: aTexto(cierra), configurado, durationMinutes: query.durationMinutes, dias };
 });
 
 app.post('/api/sessions', { preHandler: requireStaff }, async (request, reply) => {

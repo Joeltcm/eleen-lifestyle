@@ -291,3 +291,14 @@ select.filter{padding:11px 13px;font:600 13px 'DM Sans';cursor:pointer}
 .huecos-dia>b::first-letter{text-transform:uppercase}
 .huecos-lista{display:grid;grid-template-columns:repeat(auto-fill,minmax(78px,1fr));gap:7px}
 .huecos-lista button{padding:11px 6px;font-size:12px}
+
+/* Mi horario de trabajo. Cada día con sus turnos, y en móvil el turno se
+   apila para que los dos campos de hora no queden de 40 px. */
+.turnos-dia{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.turnos-cabecera{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.turnos-cabecera button{font-size:11px;padding:6px 11px}
+.turno-fila{display:flex;align-items:center;gap:8px;margin-top:9px}
+.turno-fila input{flex:1 1 auto;min-width:0}
+.turno-fila span{color:var(--muted);font-size:11px}
+.turno-fila button{flex:0 0 auto;font-size:11px;padding:8px 11px}
+@media(max-width:430px){.turno-fila{flex-wrap:wrap}.turno-fila button{width:100%}}

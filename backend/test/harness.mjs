@@ -110,6 +110,7 @@ export function cliente(base) {
     get: (r, c) => llamar('GET', r, undefined, c),
     post: (r, b, c) => llamar('POST', r, b, c),
     patch: (r, b, c) => llamar('PATCH', r, b, c),
+    put: (r, b, c) => llamar('PUT', r, b, c),
     delete: (r, c) => llamar('DELETE', r, undefined, c),
     usarToken: t => { token = t; },
     token: () => token

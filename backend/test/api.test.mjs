@@ -984,6 +984,53 @@ describe('huecos libres de la entrenadora', () => {
   });
 });
 
+describe('horario de trabajo con turnos', () => {
+  const enPanama = fecha => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Panama', year: 'numeric', month: '2-digit', day: '2-digit' }).format(fecha);
+  const dia = n => { const d = new Date(); d.setDate(d.getDate() + n); return enPanama(d); };
+
+  after(async () => {
+    // Se deja como estaba: el resto de las pruebas cuenta con la franja
+    // deducida, no con estos turnos.
+    await api.put('/api/working-hours', { tramos: [] });
+  });
+
+  test('guarda dos turnos el mismo día', async () => {
+    const tramos = [];
+    for (let d = 0; d <= 6; d += 1) {
+      tramos.push({ weekday: d, startsAt: '05:00', endsAt: '11:00' });
+      tramos.push({ weekday: d, startsAt: '16:00', endsAt: '20:00' });
+    }
+    const { estado, datos } = await api.put('/api/working-hours', { tramos });
+    assert.equal(estado, 200);
+    assert.equal(datos.tramos.length, 14, 'siete días con turno de mañana y de tarde');
+  });
+
+  test('el corte del mediodía deja de ofrecerse', async () => {
+    const { datos } = await api.get(`/api/availability?from=${dia(3)}&to=${dia(3)}&durationMinutes=60`);
+    assert.equal(datos.configurado, true, 'manda lo configurado, no lo deducido');
+    const horas = datos.dias[0].libres;
+    // Propiedad y no horas concretas: la base es compartida y cualquier hueco
+    // suelto puede estar ocupado por otra prueba. Lo que debe cumplirse
+    // siempre es que ninguno caiga fuera de los turnos.
+    const fuera = horas.filter(h => !((h >= '05:00' && h <= '10:00') || (h >= '16:00' && h <= '19:00')));
+    assert.deepEqual(fuera, [], 'entre turno y turno no trabaja, y después de las 20:00 tampoco');
+    assert.ok(horas.length, 'y algún hueco tiene que quedar dentro de los turnos');
+  });
+
+  test('rechaza dos turnos que se pisan', async () => {
+    const { estado } = await api.put('/api/working-hours', {
+      tramos: [{ weekday: 1, startsAt: '05:00', endsAt: '11:00' }, { weekday: 1, startsAt: '10:00', endsAt: '14:00' }]
+    });
+    assert.equal(estado, 400, 'un hueco saldría dos veces');
+  });
+
+  test('sin turnos vuelve a deducir la franja', async () => {
+    await api.put('/api/working-hours', { tramos: [] });
+    const { datos } = await api.get(`/api/availability?from=${dia(3)}&to=${dia(3)}&durationMinutes=60`);
+    assert.equal(datos.configurado, false, 'quien no lo ha configurado no se queda sin huecos');
+  });
+});
+
 describe('vencimiento de los paquetes', () => {
   let clientId;
   before(async () => {

@@ -1,4 +1,4 @@
-const APP_VERSION = '131';
+const APP_VERSION = '132';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1297,6 +1297,90 @@ function editarHorarioFijo(regla, alGuardar) {
       toast(`Horario guardado · ${r.creadas} agendada${r.creadas === 1 ? '' : 's'}${r.retiradas ? ` · ${r.retiradas} retirada${r.retiradas === 1 ? '' : 's'}` : ''}`);
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
+}
+
+// Mi horario de trabajo, por turnos.
+//
+// Antes se deducía de la agenda —de la clase más temprana a la más tardía— y
+// eso no sabe de cortes: quien entrena de 5 a 11 y de 4 a 8 tenía toda la
+// tarde muerta ofrecida como hueco libre. Aquí se dice en claro, y cada día
+// puede tener los turnos que haga falta.
+const DIAS_SEMANA = [[1, 'Lunes'], [2, 'Martes'], [3, 'Miércoles'], [4, 'Jueves'], [5, 'Viernes'], [6, 'Sábado'], [0, 'Domingo']];
+
+async function workingHoursEditor() {
+  let tramos;
+  try { tramos = (await api('/api/working-hours')).tramos; }
+  catch (error) { toast(error.message, true); return; }
+
+  const box = document.createElement('div');
+  const pintar = () => {
+    box.innerHTML = `
+      <p class="eyebrow">AGENDA</p>
+      <h2>Mi horario de trabajo</h2>
+      <p style="color:#6f7b75;margin-top:-12px">Marca en qué franjas atiendes. Un día puede tener varios turnos: mañana y tarde, con el corte del mediodía en medio. Un día sin turnos es un día libre.</p>
+      ${tramos.length ? '' : '<p class="conflict-warn">Todavía no lo has configurado. Mientras tanto, los huecos libres se deducen de tu propia agenda, de tu clase más temprana a la más tardía, y no saben de cortes.</p>'}
+      ${DIAS_SEMANA.map(([valor, nombre]) => {
+        const suyos = tramos.filter(t => Number(t.weekday) === valor);
+        return `
+          <div class="turnos-dia">
+            <div class="turnos-cabecera"><b>${nombre}</b><button type="button" class="secondary" data-anadir="${valor}">+ Turno</button></div>
+            ${suyos.length ? suyos.map((t, indice) => `
+              <div class="turno-fila">
+                <input type="time" value="${t.starts_at}" data-campo="starts_at" data-dia="${valor}" data-indice="${indice}" />
+                <span>a</span>
+                <input type="time" value="${t.ends_at}" data-campo="ends_at" data-dia="${valor}" data-indice="${indice}" />
+                <button type="button" class="secondary" data-quitar="${valor}" data-indice="${indice}">Quitar</button>
+              </div>`).join('') : '<p class="section-note">Día libre.</p>'}
+          </div>`;
+      }).join('')}
+      <button type="button" class="primary wide-button" id="guardar-horario">Guardar horario</button>`;
+
+    box.querySelectorAll('[data-anadir]').forEach(boton => {
+      boton.onclick = () => {
+        const dia = Number(boton.dataset.anadir);
+        const suyos = tramos.filter(t => Number(t.weekday) === dia);
+        // El segundo turno se propone por la tarde: es el caso para el que
+        // existe esto, y así no hay que teclear las cuatro horas.
+        tramos.push(suyos.length
+          ? { weekday: dia, starts_at: '16:00', ends_at: '20:00' }
+          : { weekday: dia, starts_at: '05:00', ends_at: '11:00' });
+        pintar();
+      };
+    });
+    box.querySelectorAll('[data-quitar]').forEach(boton => {
+      boton.onclick = () => {
+        const dia = Number(boton.dataset.quitar);
+        const suyos = tramos.filter(t => Number(t.weekday) === dia);
+        const fuera = suyos[Number(boton.dataset.indice)];
+        tramos = tramos.filter(t => t !== fuera);
+        pintar();
+      };
+    });
+    box.querySelectorAll('[data-campo]').forEach(campo => {
+      campo.onchange = () => {
+        const dia = Number(campo.dataset.dia);
+        const suyos = tramos.filter(t => Number(t.weekday) === dia);
+        suyos[Number(campo.dataset.indice)][campo.dataset.campo] = campo.value;
+      };
+    });
+    // Dentro de box y no del documento: la primera pintada ocurre antes de
+    // que el modal esté insertado, y getElementById devolvería null.
+    box.querySelector('#guardar-horario').onclick = async () => {
+      const cuerpo = { tramos: tramos.map(t => ({ weekday: Number(t.weekday), startsAt: t.starts_at, endsAt: t.ends_at })) };
+      const resumen = DIAS_SEMANA.map(([valor, nombre]) => {
+        const suyos = cuerpo.tramos.filter(t => t.weekday === valor);
+        return suyos.length ? `${nombre}: ${suyos.map(t => `${t.startsAt}–${t.endsAt}`).join(' y ')}` : `${nombre}: libre`;
+      }).join('\n');
+      if (!confirmarGuardado(resumen)) return;
+      try {
+        tramos = (await api('/api/working-hours', { method: 'PUT', body: cuerpo })).tramos;
+        pintar();
+        toast('Horario guardado');
+      } catch (error) { toast(error.message, true); }
+    };
+  };
+  pintar();
+  openModal(box, true);
 }
 
 async function recurrenceManager() {
@@ -3077,6 +3161,7 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'exercise-catalog') exerciseCatalogManager();
   if (actionButton?.dataset.action === 'daily-log') dailyTrainingLog();
   if (actionButton?.dataset.action === 'recurrences') recurrenceManager();
+  if (actionButton?.dataset.action === 'working-hours') workingHoursEditor();
   if (actionButton?.dataset.action === 'pending-collections') pendingCollections();
   if (actionButton?.dataset.action === 'expenses') expensesManager();
   if (actionButton?.dataset.action === 'finance') financeDashboard();
