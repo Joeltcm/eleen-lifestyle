@@ -1,4 +1,4 @@
-const APP_VERSION = '127';
+const APP_VERSION = '128';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -235,7 +235,7 @@ async function loadData() {
     });
     const latest = history.at(-1);
     const inbodyReviews = assessments[index].assessments.filter(item => item.extraction_status === 'review');
-    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), status: { active: 'Activo', paused: 'En pausa', inactive: 'Inactivo' }[client.status] || 'Inactivo', statusRaw: client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
+    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), reprogramaciones: Number(client.reprogramaciones_ciclo || 0), canceladas: Number(client.canceladas_ciclo || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), status: { active: 'Activo', paused: 'En pausa', inactive: 'Inactivo' }[client.status] || 'Inactivo', statusRaw: client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
   });
   data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, concept: item.concept, amount: Number(item.amount), balance: item.source_system ? Number(item.balance) : item.status === 'pending' ? Number(item.amount) : 0, due: dateOnly(item.due_on), issued: dateOnly(item.issued_on || item.due_on), paidOn: item.confirmed_at ? String(item.confirmed_at).slice(0, 10) : '', method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '' }));
   data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, kind: item.kind, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), expiresOn: item.expires_on || '', status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired' }));
@@ -288,6 +288,15 @@ const avanceDelMes = clientId => {
   const pack = data.packages.find(item => item.clientId === clientId && item.status === 'confirmed' && item.kind === 'monthly');
   if (!pack) return '';
   return ` · ${pack.used} de ${pack.total} del mes`;
+};
+// Movimientos del ciclo, en la ficha. Un cliente que mueve la clase cuatro
+// veces al mes y otro que la pierde cuatro veces no son el mismo problema, y
+// hasta ahora los dos se veían igual: como una agenda con huecos.
+const movimientosDelCiclo = client => {
+  const partes = [];
+  if (client.reprogramaciones) partes.push(`${client.reprogramaciones} reprogramada${client.reprogramaciones === 1 ? '' : 's'}`);
+  if (client.canceladas) partes.push(`${client.canceladas} perdida${client.canceladas === 1 ? '' : 's'}`);
+  return partes.length ? `<small class="ciclo-movimientos">Este mes: ${partes.join(' · ')}</small>` : '';
 };
 const saldoDelMes = client => {
   const pack = data.packages.find(item => item.clientId === client.id && item.status === 'confirmed' && item.kind === 'monthly');
@@ -376,7 +385,7 @@ function renderClients(filter = '') {
       : client.billingModel === 'single'
       ? `<span class="commercial-label single-label">Sesión suelta</span><b>${escapeHtml(client.planName || 'Sesiones individuales')} · ${money.format(client.plan)}</b><small>Por sesión, sin corte mensual</small>`
       : `<span class="commercial-label">Mensualidad</span><b>${escapeHtml(client.planName || 'Mensualidad')} · ${money.format(client.plan)}</b><small>${saldoDelMes(client)}Corte día ${client.cutoffDay}</small>`;
-    return `<article class="client-card"><header><span class="initials">${escapeHtml(initials(client.name))}</span><div><h3>${escapeHtml(client.name)}</h3><small>${escapeHtml(client.goal)}</small></div><span class="status estado-${client.statusRaw}">${client.status}</span></header><p>${client.inbody ? `Último InBody: ${client.inbody.date}` : 'Aún no se ha cargado un InBody.'}${client.portalActive ? ' · Portal activo' : ''}</p><div class="commercial-summary">${commercial}</div><div class="mini-data">${client.inbody ? `<div><b>${client.inbody.weight} kg</b><span>Peso</span></div><div><b>${client.inbody.smm} kg</b><span>Músculo</span></div><div><b>${client.inbody.pbf}%</b><span>Grasa</span></div>` : `<div><b>—</b><span>Evaluación pendiente</span></div>`}</div><div class="client-actions"><button class="secondary" data-client="${client.id}">Ver expediente</button><button class="secondary" data-edit-client="${client.id}">Editar</button><button class="secondary" data-inbody="${client.id}">+ InBody</button></div></article>`;
+    return `<article class="client-card"><header><span class="initials">${escapeHtml(initials(client.name))}</span><div><h3>${escapeHtml(client.name)}</h3><small>${escapeHtml(client.goal)}</small></div><span class="status estado-${client.statusRaw}">${client.status}</span></header><p>${client.inbody ? `Último InBody: ${client.inbody.date}` : 'Aún no se ha cargado un InBody.'}${client.portalActive ? ' · Portal activo' : ''}</p><div class="commercial-summary">${commercial}</div>${movimientosDelCiclo(client)}<div class="mini-data">${client.inbody ? `<div><b>${client.inbody.weight} kg</b><span>Peso</span></div><div><b>${client.inbody.smm} kg</b><span>Músculo</span></div><div><b>${client.inbody.pbf}%</b><span>Grasa</span></div>` : `<div><b>—</b><span>Evaluación pendiente</span></div>`}</div><div class="client-actions"><button class="secondary" data-client="${client.id}">Ver expediente</button><button class="secondary" data-edit-client="${client.id}">Editar</button><button class="secondary" data-inbody="${client.id}">+ InBody</button></div></article>`;
   };
 
   const grupos = ESTADOS_CLIENTE
@@ -1071,6 +1080,14 @@ function cancelSessionDialog(sesion) {
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">AGENDA</p><h2>Cancelar sesión</h2>
     <p class="form-summary"><b>${escapeHtml(sesion.client)}</b><br>${sesion.date} · ${sesion.time}</p>
+    ${(() => {
+      const cliente = data.clients.find(c => c.id === sesion.clientId);
+      if (!cliente || (!cliente.reprogramaciones && !cliente.canceladas)) return '';
+      const partes = [];
+      if (cliente.reprogramaciones) partes.push(`<b>${cliente.reprogramaciones}</b> reprogramada${cliente.reprogramaciones === 1 ? '' : 's'}`);
+      if (cliente.canceladas) partes.push(`<b>${cliente.canceladas}</b> perdida${cliente.canceladas === 1 ? '' : 's'}`);
+      return `<p class="conflict-warn">Este mes lleva ${partes.join(' y ')}.</p>`;
+    })()}
     <p style="color:#6f7b75">En Google Calendar quedará en rojo como CANCELADA, no desaparecerá.</p>
     <button class="secondary wide-button" id="cancelar-reprogramada">Se reprogramará a otro día</button>
     <p class="section-note">No afecta el cumplimiento: contará la sesión nueva.</p>

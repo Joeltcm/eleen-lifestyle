@@ -275,6 +275,19 @@ async function pullGoogleChanges(ownerId: string, token: string, connection: Cal
 
     const scheduleChanged = startsAt.getTime() !== new Date(session.starts_at).getTime()
       || durationMinutes !== Number(session.duration_minutes);
+    // Arrastrar la cita a otro día en Google es la forma habitual de
+    // reprogramar, y hasta ahora no dejaba rastro: se movía la misma sesión y
+    // no se cancelaba nada, así que el contador de reprogramaciones habría
+    // dicho cero mientras la entrenadora movía citas todo el mes.
+    const diaPanama = (valor: Date | string) => new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Panama', year: 'numeric', month: '2-digit', day: '2-digit'
+    }).format(new Date(valor));
+    if (diaPanama(session.starts_at) !== diaPanama(startsAt)) {
+      await sql`
+        INSERT INTO session_reschedules (session_id, client_id, from_starts_at, to_starts_at, origin)
+        VALUES (${session.id}, ${session.client_id}, ${session.starts_at}, ${startsAt.toISOString()}, 'moved')
+      `;
+    }
     await sql`
       UPDATE sessions SET starts_at = ${startsAt.toISOString()}, duration_minutes = ${durationMinutes},
         google_event_link = ${event.htmlLink ? String(event.htmlLink) : session.google_event_link},

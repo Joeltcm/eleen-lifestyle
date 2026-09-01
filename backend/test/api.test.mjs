@@ -806,6 +806,57 @@ describe('con dos saldos, se gasta el que vence antes', () => {
   });
 });
 
+describe('cancelar y reprogramar se cuentan por separado', () => {
+  let clientId;
+  const conteo = async () => {
+    const c = (await api.get('/api/clients')).datos.find(x => x.id === clientId);
+    return { reprogramaciones: Number(c.reprogramaciones_ciclo), canceladas: Number(c.canceladas_ciclo) };
+  };
+  const agendar = async desplazamientoDias => {
+    const cuando = new Date(Date.now() + desplazamientoDias * 24 * 3600_000).toISOString();
+    const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [cuando], durationMinutes: 60, mode: 'Presencial' });
+    return lote.datos.sesiones[0];
+  };
+
+  before(async () => {
+    const c = await api.post('/api/clients', { fullName: 'Mueve y cancela', billingModel: 'monthly', standardPrice: 280, cutoffDay: 1 });
+    clientId = c.datos.id;
+  });
+
+  test('arranca en cero', async () => {
+    assert.deepEqual(await conteo(), { reprogramaciones: 0, canceladas: 0 });
+  });
+
+  test('cancelar sin reponer no cuenta como reprogramación', async () => {
+    const s = await agendar(2);
+    await api.delete(`/api/sessions/${s.id}?rescheduled=false`);
+    assert.deepEqual(await conteo(), { reprogramaciones: 0, canceladas: 1 },
+      'perder una clase mide el cumplimiento del cliente, no el desgaste de la agenda');
+  });
+
+  test('cancelar pidiendo otro día sí', async () => {
+    const s = await agendar(3);
+    await api.delete(`/api/sessions/${s.id}?rescheduled=true`);
+    assert.deepEqual(await conteo(), { reprogramaciones: 1, canceladas: 1 });
+  });
+
+  test('correrla a otro día cuenta, aunque nadie cancele nada', async () => {
+    // Es lo que hace la entrenadora al arrastrar la cita en Google.
+    const s = await agendar(4);
+    const otroDia = new Date(s.starts_at); otroDia.setUTCDate(otroDia.getUTCDate() + 2);
+    await api.patch(`/api/sessions/${s.id}`, { startsAt: otroDia.toISOString(), durationMinutes: 60, mode: 'Presencial' });
+    assert.deepEqual(await conteo(), { reprogramaciones: 2, canceladas: 1 });
+  });
+
+  test('pero correrla de hora dentro del mismo día no', async () => {
+    const s = await agendar(6);
+    const masTarde = new Date(s.starts_at); masTarde.setUTCMinutes(masTarde.getUTCMinutes() + 90);
+    await api.patch(`/api/sessions/${s.id}`, { startsAt: masTarde.toISOString(), durationMinutes: 60, mode: 'Presencial' });
+    const despues = await conteo();
+    assert.equal(despues.reprogramaciones, 2, 'ajustar la hora no es reprogramar');
+  });
+});
+
 describe('vencimiento de los paquetes', () => {
   let clientId;
   before(async () => {

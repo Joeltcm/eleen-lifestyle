@@ -141,6 +141,13 @@ async function recurringBillingStatus(ownerId: string) {
 // 'T12:00:00-05:00' producía "Invalid Date" y tumbaba toda la generación con un
 // 500 sin pista: el error salía al formatear el nombre del saldo, no al leerlo.
 // Mediodía porque a medianoche el cambio de huso mueve el día un mes atrás.
+// El día natural en Panamá. Comparar instantes en UTC diría que una clase de
+// las 19:00 y otra de las 21:00 del mismo día son días distintos en invierno.
+function diaEnPanama(fecha: Date | string): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Panama', year: 'numeric', month: '2-digit', day: '2-digit' })
+    .format(new Date(fecha));
+}
+
 function mediodiaEnPanama(fecha: Date | string): Date {
   const dia = fecha instanceof Date ? fecha.toISOString().slice(0, 10) : String(fecha).slice(0, 10);
   return new Date(`${dia}T12:00:00-05:00`);
@@ -641,7 +648,15 @@ app.get('/api/clients', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`
     SELECT c.*, p.name AS plan_name, p.sessions_included, p.validity_days,
-      COALESCE((SELECT sum(total_sessions - used_sessions) FROM session_packages sp WHERE sp.client_id = c.id AND sp.status = 'active'), 0)::integer AS available_sessions
+      COALESCE((SELECT sum(total_sessions - used_sessions) FROM session_packages sp WHERE sp.client_id = c.id AND sp.status = 'active'), 0)::integer AS available_sessions,
+      -- Movimientos del ciclo en curso, separados. Cancelar y perder la clase
+      -- no es lo mismo que pedir otro día: lo primero mide el cumplimiento del
+      -- cliente, lo segundo el desgaste de la agenda. Juntos no dicen nada.
+      (SELECT count(*)::int FROM session_reschedules sr
+        WHERE sr.client_id = c.id AND sr.created_at >= inicio_ciclo(c.billing_cutoff_day)) AS reprogramaciones_ciclo,
+      (SELECT count(*)::int FROM sessions s
+        WHERE s.client_id = c.id AND s.status = 'cancelled' AND s.cancellation_kind = 'not_rescheduled'
+          AND s.starts_at >= inicio_ciclo(c.billing_cutoff_day)) AS canceladas_ciclo
     FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id
     WHERE c.owner_id = ${auth.sub} ORDER BY c.full_name
   `;
@@ -1778,6 +1793,10 @@ app.patch('/api/sessions/:id', { preHandler: requireStaff }, async (request, rep
       return reply.code(409).send({ error: 'Esta sesión ya se marcó como realizada. Deshaz el cumplimiento antes de cambiar de cliente.' });
     }
   }
+  const [anterior] = await sql`
+    SELECT s.starts_at FROM sessions s JOIN clients c ON c.id = s.client_id
+    WHERE s.id = ${id} AND c.owner_id = ${auth.sub}
+  `;
   const [session] = await sql`
     UPDATE sessions s SET starts_at = ${input.startsAt}, duration_minutes = ${input.durationMinutes},
       mode = ${input.mode}, notes = ${input.notes || null},
@@ -1788,6 +1807,15 @@ app.patch('/api/sessions/:id', { preHandler: requireStaff }, async (request, rep
     RETURNING s.*
   `;
   if (!session) return reply.code(404).send({ error: 'Sesión no encontrada o cancelada' });
+  // Correrla de hora dentro del mismo día no es reprogramar: es ajustar. Lo
+  // que cuenta es cambiarla de día, que es lo que el cliente pide cuando no
+  // puede venir.
+  if (anterior && diaEnPanama(anterior.starts_at) !== diaEnPanama(session.starts_at)) {
+    await sql`
+      INSERT INTO session_reschedules (session_id, client_id, from_starts_at, to_starts_at, origin)
+      VALUES (${session.id}, ${session.client_id}, ${anterior.starts_at}, ${session.starts_at}, 'moved')
+    `;
+  }
   try { await syncSessionToGoogle(auth.sub, session.id); }
   catch (error) { app.log.warn({ err: error, sessionId: session.id }, 'Session updated but Google Calendar sync failed'); }
   const [updated] = await sql`SELECT * FROM sessions WHERE id = ${session.id}`;
@@ -1837,6 +1865,15 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
   const reprogramada = (request.query as { rescheduled?: string }).rescheduled === 'true';
   const [session] = await sql`UPDATE sessions s SET status = 'cancelled', cancellation_kind = ${reprogramada ? 'rescheduled' : 'not_rescheduled'}, updated_at = now() FROM clients c WHERE s.id = ${id} AND c.id = s.client_id AND c.owner_id = ${auth.sub} AND s.status <> 'cancelled' RETURNING s.*`;
   if (!session) return reply.code(404).send({ error: 'Sesión no encontrada o ya cancelada' });
+  // Cancelar pidiendo otro día es reprogramar; cancelar y perderla, no. Sólo
+  // la primera se cuenta, que es la distinción que la entrenadora ya hace en
+  // el diálogo y que hasta ahora no se guardaba en ninguna parte.
+  if (reprogramada) {
+    await sql`
+      INSERT INTO session_reschedules (session_id, client_id, from_starts_at, origin)
+      VALUES (${id}, ${session.client_id}, ${session.starts_at}, 'cancelled')
+    `;
+  }
   try { await cancelSessionInGoogle(auth.sub, id); }
   catch (error) { app.log.warn({ err: error, sessionId: id }, 'Session cancelled but Google Calendar deletion failed'); }
   return { cancelled: true, session };

@@ -269,3 +269,6 @@ select.filter{padding:11px 13px;font:600 13px 'DM Sans';cursor:pointer}
   .dias-semana{grid-template-columns:repeat(4,minmax(0,1fr))}
   .dias-semana span{min-height:46px;font-size:12px}
 }
+
+/* Movimientos del ciclo en la ficha: dato de contexto, no titular. */
+.ciclo-movimientos{display:block;margin-top:9px;color:var(--muted);font-size:10px}
