@@ -1889,7 +1889,18 @@ async function recordSessionCompliance(id: string, ownerId: string, markedBy: st
       // Lo que sigue siendo del pagador es el dinero, no las clases.
       const grupo = current.client_id as string;
 
-      const [pack] = await transaction`SELECT * FROM session_packages WHERE client_id = ${grupo} AND status = 'active' AND used_sessions < total_sessions ORDER BY purchased_on LIMIT 1 FOR UPDATE`;
+      // Se gasta el saldo que caduca antes. Ir por el más antiguo parecía
+      // razonable hasta que un cliente tuvo dos a la vez: su mensualidad, que
+      // vence en el corte, y un paquete suelto comprado antes que no vence
+      // nunca. Con el orden viejo se consumía el paquete y las clases de la
+      // mensualidad se perdían al vencer —y el cumplimiento se las apuntaba
+      // como incumplidas, cuando el cliente sí había entrenado—.
+      const [pack] = await transaction`
+        SELECT * FROM session_packages
+        WHERE client_id = ${grupo} AND status = 'active' AND used_sessions < total_sessions
+        ORDER BY expires_on ASC NULLS LAST, purchased_on
+        LIMIT 1 FOR UPDATE
+      `;
       if (!pack) {
         const [updated] = await transaction`
           UPDATE sessions SET status = 'completed', completion_percent = ${completionPercent}, debited_group_id = ${grupo}, completed_by_user_id = ${markedBy}, completion_recorded_at = now(), updated_at = now()

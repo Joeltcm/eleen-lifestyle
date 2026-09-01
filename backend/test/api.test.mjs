@@ -774,6 +774,38 @@ describe('avisar de las clases que se quedaron sin marcar', () => {
   });
 });
 
+describe('con dos saldos, se gasta el que vence antes', () => {
+  // El caso de Ernesto: su mensualidad la paga otro, y él se compra aparte un
+  // paquete de clases sueltas que no caduca. Al mes siguiente ese paquete es
+  // el más antiguo, y gastarlo primero dejaría vencer sin usar las clases de
+  // la mensualidad —que sí caducan— y se las contaría como incumplidas.
+  let clientId;
+  before(async () => {
+    const c = await api.post('/api/clients', { fullName: 'Mensualidad y extra', billingModel: 'monthly', standardPrice: 280, cutoffDay: 28 });
+    clientId = c.datos.id;
+    // Primero el paquete suelto, sin vencimiento.
+    const extra = await api.post('/api/packages', { clientId, totalSessions: 4, amount: 140, kind: 'package' });
+    await api.post(`/api/invoices/${extra.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-01' });
+    // Después la mensualidad, que vence en el corte.
+    const vence = new Date(Date.now() + 10 * 24 * 3600_000).toISOString().slice(0, 10);
+    const mensual = await api.post('/api/packages', { clientId, totalSessions: 8, amount: 280, kind: 'monthly', expiresOn: vence });
+    await api.post(`/api/invoices/${mensual.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-01' });
+  });
+
+  test('la clase sale de la mensualidad, no del paquete sin vencimiento', async () => {
+    const cuando = new Date(Date.now() - 3600_000).toISOString();
+    const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [cuando], durationMinutes: 60, mode: 'Presencial' });
+    await api.patch(`/api/sessions/${lote.datos.sesiones[0].id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+
+    const saldos = (await api.get('/api/packages')).datos.filter(p => p.client_id === clientId);
+    const mensual = saldos.find(p => p.kind === 'monthly');
+    const extra = saldos.find(p => p.kind === 'package');
+    assert.equal(Number(mensual.used_sessions), 1,
+      'se gasta lo que caduca primero, o se pierde y encima cuenta como incumplida');
+    assert.equal(Number(extra.used_sessions), 0, 'el paquete sin vencimiento puede esperar');
+  });
+});
+
 describe('vencimiento de los paquetes', () => {
   let clientId;
   before(async () => {
