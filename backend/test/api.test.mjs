@@ -459,6 +459,58 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
   });
 });
 
+describe('editar una sesión de un horario indefinido', () => {
+  let clientId, otro, sesion;
+  before(async () => {
+    const c = await api.post('/api/clients', { fullName: 'Entrena fijo', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+    const o = await api.post('/api/clients', { fullName: 'El otro fijo', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+    clientId = c.datos.id; otro = o.datos.id;
+    // Todos los días de la semana, para que siempre haya una sesión cercana.
+    await api.post('/api/session-recurrences', {
+      clientId, weekdays: [0, 1, 2, 3, 4, 5, 6], timeOfDay: '05:30', durationMinutes: 60, mode: 'Presencial'
+    });
+    const suyas = (await api.get('/api/sessions')).datos
+      .filter(x => x.client_id === clientId && new Date(x.starts_at) > new Date());
+    sesion = suyas[0];
+  });
+
+  // Extender otra regla cualquiera vuelve a pasar por todas las del dueño, que
+  // es lo que hace el proceso periódico cada seis horas.
+  const volverAExtender = async () => {
+    await api.post('/api/session-recurrences', {
+      clientId: otro, weekdays: [3], timeOfDay: '19:15', durationMinutes: 60, mode: 'Presencial'
+    });
+  };
+
+  test('mover la hora no hace reaparecer la vieja', async () => {
+    const movida = new Date(sesion.starts_at); movida.setUTCMinutes(movida.getUTCMinutes() + 45);
+    await api.patch(`/api/sessions/${sesion.id}`, { startsAt: movida.toISOString(), durationMinutes: 60, mode: 'Presencial' });
+
+    await volverAExtender();
+
+    const suyas = (await api.get('/api/sessions')).datos
+      .filter(x => x.client_id === clientId && x.status !== 'cancelled');
+    const mismoDia = suyas.filter(x => String(x.starts_at).slice(0, 10) === String(movida.toISOString()).slice(0, 10));
+    assert.equal(mismoDia.length, 1,
+      'el hueco que deja la sesión movida no es una sesión que falte: recrearla deja dos');
+  });
+
+  test('cancelarla no la hace reaparecer', async () => {
+    const suyas = (await api.get('/api/sessions')).datos
+      .filter(x => x.client_id === clientId && x.status === 'scheduled' && new Date(x.starts_at) > new Date());
+    const objetivo = suyas.at(-1);
+    await api.delete(`/api/sessions/${objetivo.id}?rescheduled=false`);
+
+    await volverAExtender();
+
+    const despues = (await api.get('/api/sessions')).datos
+      .filter(x => x.client_id === clientId && x.status === 'scheduled'
+        && String(x.starts_at).slice(0, 10) === String(objetivo.starts_at).slice(0, 10));
+    assert.equal(despues.length, 0,
+      'una clase cancelada que vuelve sola es una clase que la entrenadora ya dijo que no daba');
+  });
+});
+
 describe('vencimiento de los paquetes', () => {
   let clientId;
   before(async () => {

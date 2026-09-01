@@ -1434,11 +1434,11 @@ async function extenderRecurrencias(ownerId?: string) {
     // los de la semana elegidos y salta los que ya tienen sesión viva. El
     // AT TIME ZONE convierte "las 5:30 en Panamá" al instante correcto.
     const filas = await sql`
-      INSERT INTO sessions (client_id, routine_id, starts_at, duration_minutes, mode, notes, recurrence_id)
+      INSERT INTO sessions (client_id, routine_id, starts_at, duration_minutes, mode, notes, recurrence_id, recurrence_on)
       SELECT ${regla.client_id}, ${regla.routine_id}, candidato.momento,
-             ${regla.duration_minutes}, ${regla.mode}, ${regla.notes}, ${regla.id}
+             ${regla.duration_minutes}, ${regla.mode}, ${regla.notes}, ${regla.id}, candidato.dia
       FROM (
-        SELECT ((dia::date + ${regla.time_of_day}::time) AT TIME ZONE 'America/Panama') AS momento
+        SELECT dia::date AS dia, ((dia::date + ${regla.time_of_day}::time) AT TIME ZONE 'America/Panama') AS momento
         FROM generate_series(
           GREATEST(current_date, ${regla.starts_on}::date),
           -- Los ::int hacen falta: sin ellos el número llega sin tipo y
@@ -1449,7 +1449,19 @@ async function extenderRecurrencias(ownerId?: string) {
         ) AS dia
         WHERE extract(dow FROM dia)::int = ANY(${regla.weekdays as number[]})
       ) AS candidato
+      -- Cada día de la regla se crea una sola vez, pase lo que pase después.
+      -- Mirar sólo si "hay algo a esa hora" convertía cualquier cambio en un
+      -- duplicado: al mover la sesión, el hueco que dejaba se volvía a llenar,
+      -- y al cancelarla reaparecía sola. Un hueco no es una sesión que falte:
+      -- es una decisión que alguien tomó sobre ese día.
       WHERE NOT EXISTS (
+        SELECT 1 FROM sessions s
+        WHERE s.recurrence_id = ${regla.id} AND s.recurrence_on = candidato.dia
+      )
+      -- Y sigue sin pisarse con lo que ya haya a esa misma hora, venga de
+      -- donde venga: dos clases a la vez para la misma persona no es un
+      -- horario, es un choque.
+      AND NOT EXISTS (
         SELECT 1 FROM sessions s
         WHERE s.client_id = ${regla.client_id} AND s.starts_at = candidato.momento AND s.status <> 'cancelled'
       )
