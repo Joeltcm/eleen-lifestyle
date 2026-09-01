@@ -342,14 +342,7 @@ body{background:radial-gradient(circle at 12% 0%,#fffafa 0,#fbf9f8 42%,#f7f3f4 1
    se pinta como un dato más del mes. */
 .ciclo-movimientos.credito{color:#8a6652;font-weight:600}
 
-/* Agenda plegada: una línea por clase, agrupadas por día. Con cuarenta
-   clientes la lista abierta no se acababa nunca. */
-.dia-sesiones{margin-bottom:16px}
-.dia-sesiones h4{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:0 0 8px;font:600 13px Fraunces}
-.dia-sesiones h4::first-letter{text-transform:uppercase}
-.dia-sesiones h4 span{color:var(--muted);font:400 10px 'DM Sans';letter-spacing:.02em}
-.dia-sesiones.hoy h4{color:var(--ink)}
-.dia-sesiones.hoy h4 span{color:#8a6652}
+/* Una línea por clase; el detalle se abre al pulsarla. */
 details.session-row{display:block;padding:0;margin-bottom:6px;border:1px solid var(--line);border-radius:11px;background:#fff;overflow:hidden}
 details.session-row>summary{display:flex;align-items:center;gap:11px;padding:11px 13px;cursor:pointer;list-style:none}
 details.session-row>summary::-webkit-details-marker{display:none}
@@ -360,3 +353,18 @@ details.session-row[open]>summary{border-bottom:1px solid var(--line)}
 details.session-row .session-state{flex:0 0 auto}
 details.session-row .session-management,details.session-row .google-session-state{padding:0 13px 12px}
 details.session-row .google-session-state{display:block;padding-top:10px}
+
+/* Tira de días de la agenda: el día se elige aquí y la lista enseña sólo ése.
+   Toda la semana de golpe, aun plegada, seguía siendo una pared. */
+.session-day-picker{margin-bottom:13px}
+.tira-semana{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+.tira-semana b{font:600 12px Fraunces}
+.tira-semana button{padding:7px 13px;font-size:15px;line-height:1}
+.dia-tira{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:5px}
+.dia-chip{display:grid;gap:1px;padding:8px 2px;border:1px solid var(--line);border-radius:10px;background:#fff;cursor:pointer;text-align:center}
+.dia-chip span{color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.04em}
+.dia-chip b{font:700 14px 'DM Sans';font-variant-numeric:tabular-nums}
+.dia-chip small{color:var(--muted);font-size:9px}
+.dia-chip.hoy{border-color:#c9a288}
+.dia-chip.activo{background:var(--ink);border-color:var(--ink);color:#fff}
+.dia-chip.activo span,.dia-chip.activo small{color:#ffffffb3}
