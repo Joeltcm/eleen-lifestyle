@@ -1,4 +1,4 @@
-const APP_VERSION = '137';
+const APP_VERSION = '138';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1198,8 +1198,22 @@ function newInvoice() {
     if (rotulo) rotulo.childNodes[0].nodeValue = concept.value === 'Mensualidad' ? 'Sesiones incluidas al mes' : 'Sesiones incluidas';
     const nota = document.getElementById('invoice-sessions-note');
     if (nota) nota.textContent = concept.value === 'Mensualidad'
-      ? 'Vence en el próximo corte del cliente. Déjalo en 0 si esta mensualidad no limita sesiones.'
+      ? 'Se descuentan al completar cada sesión. Déjalo en 0 si esta mensualidad no limita sesiones.'
       : 'Se descuentan al completar cada sesión.';
+    // En una mensualidad las dos fechas son la misma —el corte cierra el mes y
+    // caducan sus sesiones—, y pedirlas dos veces sólo invita a que se
+    // contradigan. En un paquete sí son distintas: puede pagarse hoy y valer
+    // dos meses, así que ahí se sigue preguntando.
+    const esMensual = concept.value === 'Mensualidad';
+    const etiquetaCaduca = document.getElementById('package-expires-label');
+    if (etiquetaCaduca) etiquetaCaduca.hidden = esMensual;
+    const pistaVence = document.getElementById('invoice-due-hint');
+    // Se busca el campo aquí y no se usa la constante de abajo: togglePackage
+    // corre antes de que esa constante exista y explotaría en la zona muerta.
+    const sesionesCampo = document.querySelector('#invoice-form [name="sessions"]');
+    if (pistaVence) pistaVence.textContent = esMensual && Number(sesionesCampo?.value) > 0
+      ? 'Es también el día en que caducan las sesiones del mes.'
+      : '';
   };
   // Si el cliente ya tiene saldo, decirlo antes de cobrar otro. Un cobro extra
   // no reemplaza al que ya está: se suma. Sin verlo aquí, la única forma de
@@ -1247,11 +1261,28 @@ function newInvoice() {
     togglePackage(); revisarSaldoExistente(); };
   dueInput.value = dateKey(today); selection.addEventListener('change', fillClientPlan); fillClientPlan();
   sessionsInput?.addEventListener('input', revisarSaldoExistente);
+  sessionsInput?.addEventListener('input', togglePackage);
   revisarSaldoExistente();
+
+  // La fecha del pago sólo tiene sentido si hay pago. Se propone hoy, pero se
+  // puede corregir: el dinero entra un día y a veces se registra otro, y
+  // fecharlo cuando se teclea descuadra el mes en el que se cobró.
+  const metodo = document.querySelector('#invoice-form [name="method"]');
+  const etiquetaPago = document.getElementById('invoice-paid-on-label');
+  const pagoInput = etiquetaPago?.querySelector('input');
+  const togglePagado = () => {
+    if (!etiquetaPago) return;
+    const hayPago = metodo.value !== 'pending';
+    etiquetaPago.hidden = !hayPago;
+    if (hayPago && !pagoInput.value) pagoInput.value = dateKey(today);
+  };
+  metodo?.addEventListener('change', togglePagado);
+  togglePagado();
   document.getElementById('invoice-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target); const method = form.get('method');
     const cliente = data.clients.find(c => c.id === form.get('client'));
-    if (!confirmarGuardado(`Cobro de ${money.format(Number(form.get('amount')) || 0)} a ${cliente?.name || 'cliente'}\n${form.get('concept')} · vence ${form.get('due') || 'hoy'}`)) return;
+    const cobrado = method !== 'pending' ? `\nPagado el ${form.get('paidOn') || dateKey(today)} · ${method}` : '';
+    if (!confirmarGuardado(`Cobro de ${money.format(Number(form.get('amount')) || 0)} a ${cliente?.name || 'cliente'}\n${form.get('concept')} · vence ${form.get('due') || 'hoy'}${cobrado}`)) return;
     try {
       event.target.classList.add('loading-state');
       let invoice;
@@ -1261,12 +1292,15 @@ function newInvoice() {
       // mensualidad sigue siendo un cobro simple como hasta ahora.
       if (concepto === 'Paquete de sesiones' || (concepto === 'Mensualidad' && sesiones > 0)) {
         const pack = await api('/api/packages', { method: 'POST', body: { clientId: form.get('client'), totalSessions: sesiones, amount: Number(form.get('amount')), kind: concepto === 'Mensualidad' ? 'monthly' : 'package',
-          dueOn: form.get('due') || undefined, expiresOn: form.get('expiresOn') || undefined } });
+          dueOn: form.get('due') || undefined,
+          // En la mensualidad la caducidad es el propio vencimiento; en el
+          // paquete, la fecha que se haya puesto aparte.
+          expiresOn: (concepto === 'Mensualidad' ? form.get('due') : form.get('expiresOn')) || undefined } });
         invoice = { id: pack.invoice_id };
       } else {
         invoice = await api('/api/invoices', { method: 'POST', body: { clientId: form.get('client'), concept: concepto, amount: Number(form.get('amount')), dueOn: form.get('due') } });
       }
-      if (invoice && method !== 'pending') await api(`/api/invoices/${invoice.id}/confirm`, { method: 'POST', body: { method, reference: form.get('reference') || undefined, paidOn: dateKey(today) } });
+      if (invoice && method !== 'pending') await api(`/api/invoices/${invoice.id}/confirm`, { method: 'POST', body: { method, reference: form.get('reference') || undefined, paidOn: form.get('paidOn') || dateKey(today) } });
       await loadData(); renderAll(); modal.close(); navigate('billing'); toast('Cobro registrado');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
