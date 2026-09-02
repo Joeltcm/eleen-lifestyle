@@ -3606,7 +3606,19 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
   const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
   const [invoices, routines, sessions, busySlots, assessments, completions, exercises, packages, credits] = await Promise.all([
-    sql`SELECT id, concept, amount, balance, currency, due_on, status, payment_method, invoice_number, issued_on FROM invoices WHERE client_id = ${client.id} ORDER BY COALESCE(issued_on, due_on) DESC LIMIT 60`,
+    sql`
+      SELECT id, concept, amount, currency, due_on, status, payment_method, invoice_number, issued_on,
+        -- Lo que de verdad falta por pagar. La columna balance sólo la mantiene
+        -- Zoho; en un cobro nacido aquí vale 0 por omisión, y el portal la
+        -- sumaba tal cual: un cliente con su mensualidad sin pagar veía
+        -- "Saldo pendiente $0.00" y se quedaba tan tranquilo.
+        CASE
+          WHEN source_system = 'zoho_invoice' THEN balance
+          WHEN status = 'pending' THEN amount
+          ELSE 0
+        END::numeric(12,2) AS balance
+      FROM invoices WHERE client_id = ${client.id} ORDER BY COALESCE(issued_on, due_on) DESC LIMIT 60
+    `,
     sql`SELECT ra.id AS assignment_id, ra.due_on, r.id, r.title, r.description, r.sessions_per_week, r.exercises FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id WHERE ra.client_id = ${client.id} AND ra.active = true AND (ra.ends_on IS NULL OR ra.ends_on >= current_date) ORDER BY ra.starts_on DESC`,
     sql`SELECT s.id, s.routine_id, s.starts_at, s.duration_minutes, s.mode, s.status, s.completion_percent, r.title AS routine_title FROM sessions s LEFT JOIN routines r ON r.id = s.routine_id WHERE s.client_id = ${client.id} AND s.starts_at >= now() - interval '1 year' ORDER BY s.starts_at`,
     sql`SELECT s.id, s.starts_at, s.duration_minutes, (s.client_id = ${client.id}) AS is_mine FROM sessions s JOIN clients c ON c.id = s.client_id WHERE c.owner_id = ${client.owner_id} AND s.status <> 'cancelled' AND s.starts_at BETWEEN now() - interval '60 days' AND now() + interval '90 days' ORDER BY s.starts_at`,

@@ -1196,6 +1196,30 @@ describe('la clase suelta se registra ya dada', () => {
   });
 });
 
+describe('lo que el portal dice que se debe', () => {
+  test('un cobro local sin pagar sí suma en el saldo pendiente', async () => {
+    // La columna balance sólo la mantiene Zoho; en un cobro nacido aquí vale 0
+    // por omisión, y el portal la sumaba tal cual: el cliente veía "$0.00" con
+    // su mensualidad sin pagar. Se comprueba entrando al portal de verdad, que
+    // es donde estaba el fallo.
+    const c = await api.post('/api/clients', { fullName: 'Debe la mensualidad', billingModel: 'monthly', standardPrice: 175, cutoffDay: 1, email: 'debe@prueba.test' });
+    await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: new Date().toISOString().slice(0, 10) });
+
+    const enlace = await api.post(`/api/clients/${c.datos.id}/access-link`, {});
+    const token = String(enlace.datos.url).split('acceso=')[1];
+    const acceso = await api.post(`/api/auth/access-link/${token}`, { password: 'clave-del-portal-larga' });
+    assert.equal(acceso.estado, 200, 'el cliente entra a su portal');
+
+    const portal = cliente(servidor.base);
+    portal.usarToken(acceso.datos.token);
+    const resumen = await portal.get('/api/portal/summary');
+    const pendiente = resumen.datos.invoices
+      .filter(i => i.status === 'pending')
+      .reduce((suma, i) => suma + Number(i.balance || 0), 0);
+    assert.equal(pendiente, 175, 'debe 175, no 0');
+  });
+});
+
 describe('vencimiento de los paquetes', () => {
   let clientId;
   before(async () => {

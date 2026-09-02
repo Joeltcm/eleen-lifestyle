@@ -1,4 +1,4 @@
-const APP_VERSION = '140';
+const APP_VERSION = '141';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -3792,7 +3792,10 @@ function renderPortal() {
   const client = portalData.client; const activities = portalActivities(); const overall = activities.length ? Math.round(activities.reduce((sum, item) => sum + item.percent, 0) / activities.length) : 0;
   document.getElementById('portal-welcome').textContent = `Hola, ${client.full_name.split(' ')[0]}`; document.getElementById('portal-compliance').textContent = `${overall}%`;
   const upcoming = portalData.sessions.filter(item => new Date(item.starts_at) >= today && item.status === 'scheduled').length;
-  const pending = portalData.invoices.filter(item => item.status === 'pending').reduce((sum, item) => sum + Number(item.balance ?? item.amount), 0);
+  // El servidor ya manda en balance lo que falta por pagar de verdad: aquí
+  // sólo se suma. Antes se sumaba la columna cruda, que en un cobro local vale
+  // 0, y el portal decía "estás al día" con la mensualidad sin pagar.
+  const pending = portalData.invoices.filter(item => item.status === 'pending').reduce((sum, item) => sum + Number(item.balance || 0), 0);
   // Lo primero que quiere saber quien entrena: cuántas clases le quedan. Antes
   // el portal no lo decía en ninguna parte y había que preguntárselo a Eileen.
   const saldos = portalData.packages || [];
