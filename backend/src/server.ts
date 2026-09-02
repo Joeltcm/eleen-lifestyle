@@ -1428,7 +1428,10 @@ async function clienteAgendable(clientId: string, ownerId: string) {
   return { cliente };
 }
 
-const sessionSchema = z.object({ clientId: z.string().uuid(), routineId: z.string().uuid().optional(), startsAt: z.string().datetime(), durationMinutes: z.coerce.number().int().positive().default(60), mode: z.string().default('Presencial'), notes: z.string().optional() });
+// completionPercent llega cuando la clase se registra ya dada: es el caso de
+// la clase suelta que se cobra y se da en el mismo momento. Crearla y marcarla
+// en dos llamadas dejaba una sesión programada colgando si la segunda fallaba.
+const sessionSchema = z.object({ clientId: z.string().uuid(), routineId: z.string().uuid().optional(), startsAt: z.string().datetime(), durationMinutes: z.coerce.number().int().positive().default(60), mode: z.string().default('Presencial'), notes: z.string().optional(), completionPercent: z.coerce.number().int().min(0).max(100).optional() });
 app.get('/api/sessions', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`SELECT s.*, c.full_name, r.title AS routine_title FROM sessions s JOIN clients c ON c.id = s.client_id LEFT JOIN routines r ON r.id = s.routine_id WHERE c.owner_id = ${auth.sub} ORDER BY s.starts_at`;
@@ -1583,9 +1586,12 @@ app.post('/api/sessions', { preHandler: requireStaff }, async (request, reply) =
   if (permiso.error) return reply.code(permiso.code).send({ error: permiso.error });
   const [session] = await sql`INSERT INTO sessions (client_id, routine_id, starts_at, duration_minutes, mode, notes) SELECT c.id, ${input.routineId || null}, ${input.startsAt}, ${input.durationMinutes}, ${input.mode}, ${input.notes || null} FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} RETURNING *`;
   if (!session) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  const marcada = input.completionPercent === undefined
+    ? session
+    : await recordSessionCompliance(session.id, auth.sub, auth.sub, 'completed', input.completionPercent);
   try { await syncSessionToGoogle(auth.sub, session.id); }
   catch (error) { app.log.warn({ err: error, sessionId: session.id }, 'Session created but Google Calendar sync failed'); }
-  return reply.code(201).send(session);
+  return reply.code(201).send(marcada || session);
 });
 // ── Horarios que se repiten sin fecha de fin ──────────────────────────────
 // Un cliente que entrena lunes y miércoles a las 5:30 no tiene fecha de fin:

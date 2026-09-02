@@ -1169,6 +1169,33 @@ describe('cuando cancela la entrenadora', () => {
   });
 });
 
+describe('la clase suelta se registra ya dada', () => {
+  test('nace realizada con el porcentaje que le pone la entrenadora', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Sólo clases sueltas', billingModel: 'single', standardPrice: 45, cutoffDay: 1 });
+    const cuando = new Date(Date.now() - 3600_000).toISOString();
+    const { estado, datos } = await api.post('/api/sessions', {
+      clientId: c.datos.id, startsAt: cuando, durationMinutes: 60, mode: 'Presencial', completionPercent: 70
+    });
+    assert.equal(estado, 201);
+    assert.equal(datos.status, 'completed', 'se cobró y se dio en el mismo momento');
+    assert.equal(Number(datos.completion_percent), 70, 'el porcentaje es el observado, no un 100 por defecto');
+  });
+
+  test('y cuenta en su cumplimiento con ese porcentaje', async () => {
+    const fila = (await api.get('/api/compliance/summary?period=month')).datos.clients
+      .find(x => x.name === 'Sólo clases sueltas');
+    assert.ok(fila, 'entrenó, así que aparece');
+    assert.equal(fila.compliancePercent, 70);
+  });
+
+  test('sin porcentaje sigue naciendo programada', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Agendada normal', billingModel: 'single', standardPrice: 45, cutoffDay: 1 });
+    const manana = new Date(Date.now() + 24 * 3600_000).toISOString();
+    const { datos } = await api.post('/api/sessions', { clientId: c.datos.id, startsAt: manana, durationMinutes: 60, mode: 'Presencial' });
+    assert.equal(datos.status, 'scheduled', 'agendar para mañana no es marcar nada');
+  });
+});
+
 describe('vencimiento de los paquetes', () => {
   let clientId;
   before(async () => {

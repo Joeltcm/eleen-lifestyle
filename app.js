@@ -1,4 +1,4 @@
-const APP_VERSION = '138';
+const APP_VERSION = '139';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1194,6 +1194,11 @@ function newInvoice() {
   const conSesiones = () => ['Paquete de sesiones', 'Mensualidad'].includes(concept.value);
   const togglePackage = () => {
     packageFields.hidden = !conSesiones();
+    // Ocultar no basta: un campo escondido sigue validándose, y el navegador
+    // bloquea el envío sin decir dónde —"an invalid form control is not
+    // focusable"— si el número de sesiones queda en 0 con min=1. Deshabilitado
+    // no valida y tampoco viaja en el formulario.
+    packageFields.querySelectorAll('input').forEach(campo => { campo.disabled = packageFields.hidden; });
     const rotulo = packageFields.querySelector('label');
     if (rotulo) rotulo.childNodes[0].nodeValue = concept.value === 'Mensualidad' ? 'Sesiones incluidas al mes' : 'Sesiones incluidas';
     const nota = document.getElementById('invoice-sessions-note');
@@ -1204,6 +1209,19 @@ function newInvoice() {
     // caducan sus sesiones—, y pedirlas dos veces sólo invita a que se
     // contradigan. En un paquete sí son distintas: puede pagarse hoy y valer
     // dos meses, así que ahí se sigue preguntando.
+    // La clase suelta se cobra y se da en el mismo momento: se registra aquí,
+    // con el porcentaje que la entrenadora observó, en vez de obligarla a
+    // agendarla aparte y volver a marcarla.
+    const suelta = document.getElementById('invoice-single-fields');
+    if (suelta) {
+      const esSuelta = concept.value === 'Sesión individual';
+      suelta.hidden = !esSuelta;
+      suelta.querySelectorAll('input').forEach(campo => { campo.disabled = !esSuelta; });
+      if (esSuelta && !suelta.querySelector('[name="claseDia"]').value) {
+        suelta.querySelector('[name="claseDia"]').value = dateKey(today);
+        suelta.querySelector('[name="claseHora"]').value = panamaDateTimeParts(new Date()).time;
+      }
+    }
     const esMensual = concept.value === 'Mensualidad';
     const etiquetaCaduca = document.getElementById('package-expires-label');
     if (etiquetaCaduca) etiquetaCaduca.hidden = esMensual;
@@ -1282,7 +1300,9 @@ function newInvoice() {
     event.preventDefault(); const form = new FormData(event.target); const method = form.get('method');
     const cliente = data.clients.find(c => c.id === form.get('client'));
     const cobrado = method !== 'pending' ? `\nPagado el ${form.get('paidOn') || dateKey(today)} · ${method}` : '';
-    if (!confirmarGuardado(`Cobro de ${money.format(Number(form.get('amount')) || 0)} a ${cliente?.name || 'cliente'}\n${form.get('concept')} · vence ${form.get('due') || 'hoy'}${cobrado}`)) return;
+    const claseDada = form.get('concept') === 'Sesión individual' && form.get('registrarClase')
+      ? `\nClase del ${form.get('claseDia')} a las ${form.get('claseHora')} · ${form.get('claseCumplimiento')}% de cumplimiento` : '';
+    if (!confirmarGuardado(`Cobro de ${money.format(Number(form.get('amount')) || 0)} a ${cliente?.name || 'cliente'}\n${form.get('concept')} · vence ${form.get('due') || 'hoy'}${cobrado}${claseDada}`)) return;
     try {
       event.target.classList.add('loading-state');
       let invoice;
@@ -1301,6 +1321,16 @@ function newInvoice() {
         invoice = await api('/api/invoices', { method: 'POST', body: { clientId: form.get('client'), concept: concepto, amount: Number(form.get('amount')), dueOn: form.get('due') } });
       }
       if (invoice && method !== 'pending') await api(`/api/invoices/${invoice.id}/confirm`, { method: 'POST', body: { method, reference: form.get('reference') || undefined, paidOn: form.get('paidOn') || dateKey(today) } });
+      // La sesión se crea ya marcada, en una sola llamada: en dos, si la
+      // segunda fallaba quedaba una clase programada que nadie pidió.
+      if (concepto === 'Sesión individual' && form.get('registrarClase')) {
+        await api('/api/sessions', { method: 'POST', body: {
+          clientId: form.get('client'),
+          startsAt: panamaDateTimeIso(form.get('claseDia') || dateKey(today), form.get('claseHora') || '08:00'),
+          durationMinutes: 60, mode: 'Presencial', notes: 'Clase individual',
+          completionPercent: Number(form.get('claseCumplimiento') ?? 100)
+        } });
+      }
       await loadData(); renderAll(); modal.close(); navigate('billing'); toast('Cobro registrado');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
