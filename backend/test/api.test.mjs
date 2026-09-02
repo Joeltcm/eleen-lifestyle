@@ -1220,6 +1220,37 @@ describe('lo que el portal dice que se debe', () => {
   });
 });
 
+describe('el saldo se renueva aunque no haya pagado, pero se avisa', () => {
+  let clientId;
+  before(async () => {
+    const plan = await api.post('/api/plans', { name: 'Mensual que se renueva', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
+    // Corte a tres días vista, para que la generación llegue a emitir.
+    const corte = new Date(Date.now() + 3 * 24 * 3600_000).getDate();
+    const c = await api.post('/api/clients', { fullName: 'No ha pagado aún', planId: plan.datos.id, cutoffDay: corte });
+    clientId = c.datos.id;
+  });
+
+  test('se le abre el saldo del mes sin haber pagado', async () => {
+    await api.post('/api/billing/recurring/generate', {});
+    const saldo = (await api.get('/api/packages')).datos.find(p => p.client_id === clientId && p.kind === 'monthly');
+    assert.ok(saldo, 'no se le cierra la puerta por un pago que no ha entrado');
+    assert.equal(saldo.status, 'active', 'y sus clases se pueden usar');
+    assert.equal(Number(saldo.total_sessions), 12);
+  });
+
+  test('y queda dicho que su cobro está sin pagar', async () => {
+    const c = (await api.get('/api/clients')).datos.find(x => x.id === clientId);
+    assert.equal(Number(c.deuda_pendiente), 175, 'el aviso sale del cobro emitido y no confirmado');
+  });
+
+  test('al confirmarlo, el aviso desaparece', async () => {
+    const suya = (await api.get('/api/invoices')).datos.find(i => i.client_id === clientId && i.status === 'pending');
+    await api.post(`/api/invoices/${suya.id}/confirm`, { method: 'Efectivo', paidOn: new Date().toISOString().slice(0, 10) });
+    const c = (await api.get('/api/clients')).datos.find(x => x.id === clientId);
+    assert.equal(Number(c.deuda_pendiente), 0);
+  });
+});
+
 describe('vencimiento de los paquetes', () => {
   let clientId;
   before(async () => {

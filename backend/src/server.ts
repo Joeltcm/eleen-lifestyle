@@ -672,7 +672,15 @@ app.get('/api/clients', { preHandler: requireStaff }, async request => {
       -- la única señal de que existen es que un cobro sale más bajo el mes que
       -- viene, y para entonces ya nadie recuerda por qué.
       COALESCE((SELECT sum(bc.amount) FROM billing_credits bc
-        WHERE bc.client_id = c.id AND bc.applied_invoice_id IS NULL), 0)::numeric(12,2) AS credito_pendiente
+        WHERE bc.client_id = c.id AND bc.applied_invoice_id IS NULL), 0)::numeric(12,2) AS credito_pendiente,
+      -- Lo que se debe por las clases de esta persona, aunque el cobro salga a
+      -- nombre de quien paga. El saldo se renueva igual —no se le cierra la
+      -- puerta a nadie por un pago que entra tarde—, pero queda dicho.
+      COALESCE((
+        SELECT sum(CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance ELSE i.amount END)
+        FROM invoices i
+        WHERE COALESCE(i.billed_for_client_id, i.client_id) = c.id AND i.status = 'pending'
+      ), 0)::numeric(12,2) AS deuda_pendiente
     FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id
     WHERE c.owner_id = ${auth.sub} ORDER BY c.full_name
   `;

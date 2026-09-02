@@ -1,4 +1,4 @@
-const APP_VERSION = '141';
+const APP_VERSION = '142';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -241,7 +241,7 @@ async function loadData() {
     });
     const latest = history.at(-1);
     const inbodyReviews = clientAssessments.filter(item => item.extraction_status === 'review');
-    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), reprogramaciones: Number(client.reprogramaciones_ciclo || 0), canceladas: Number(client.canceladas_ciclo || 0), canceladasPorElla: Number(client.canceladas_por_ella_ciclo || 0), creditoPendiente: Number(client.credito_pendiente || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), status: { active: 'Activo', paused: 'En pausa', inactive: 'Inactivo' }[client.status] || 'Inactivo', statusRaw: client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
+    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), reprogramaciones: Number(client.reprogramaciones_ciclo || 0), canceladas: Number(client.canceladas_ciclo || 0), canceladasPorElla: Number(client.canceladas_por_ella_ciclo || 0), creditoPendiente: Number(client.credito_pendiente || 0), deudaPendiente: Number(client.deuda_pendiente || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), status: { active: 'Activo', paused: 'En pausa', inactive: 'Inactivo' }[client.status] || 'Inactivo', statusRaw: client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
   });
   data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, concept: item.concept, amount: Number(item.amount), balance: item.source_system ? Number(item.balance) : item.status === 'pending' ? Number(item.amount) : 0, due: dateOnly(item.due_on), issued: dateOnly(item.issued_on || item.due_on), paidOn: item.confirmed_at ? String(item.confirmed_at).slice(0, 10) : '', method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '' }));
   data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, kind: item.kind, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), expiresOn: item.expires_on || '', status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired' }));
@@ -372,7 +372,11 @@ const saldoDelMes = client => {
     : '';
   if (!pack) return extra;
   const vence = pack.expiresOn ? ` · vence ${formatoDiaCorto(pack.expiresOn)}` : '';
-  return `${extra}${remainingSessions(pack)} de ${pack.total} sesiones${vence} · `;
+  // El saldo se renueva pague o no —no se le cierra la puerta a nadie por un
+  // pago que entra tarde—, pero queda dicho junto a las clases, que es donde
+  // se mira, y no sólo enterrado en cuentas por cobrar.
+  const sinPagar = client.deudaPendiente > 0 ? ' · pago pendiente' : '';
+  return `${extra}${remainingSessions(pack)} de ${pack.total} sesiones${vence}${sinPagar} · `;
 };
 const formatoDiaCorto = fecha => new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short', timeZone: 'America/Panama' }).format(new Date(`${String(fecha).slice(0, 10)}T12:00:00-05:00`));
 const clientPackage = name => data.packages.find(pack => pack.client === name && pack.status === 'confirmed' && remainingSessions(pack) > 0) || data.packages.find(pack => pack.client === name && pack.status === 'pending') || data.packages.find(pack => pack.client === name && pack.status !== 'expired');
@@ -3811,7 +3815,12 @@ function renderPortal() {
 
   const tarjetas = [];
   if (principal) {
-    tarjetas.push(`<article><span>${mensual ? 'Clases de este mes' : 'Clases de tu paquete'}</span><strong>${quedan(principal)}<em> de ${principal.total_sessions}</em></strong><small>${venceEl(principal)}</small></article>`);
+    // Las clases están ahí aunque el cobro esté sin pagar: no se le cierra la
+    // puerta a nadie. Pero decirlo junto a las clases —y no sólo en Pagos— es
+    // lo que hace que se entere quien tiene que enterarse.
+    const sinPagar = pending > 0
+      ? `<small class="aviso-pago">Pendiente de pago: ${money.format(pending)}</small>` : '';
+    tarjetas.push(`<article${pending > 0 ? ' class="con-aviso"' : ''}><span>${mensual ? 'Clases de este mes' : 'Clases de tu paquete'}</span><strong>${quedan(principal)}<em> de ${principal.total_sessions}</em></strong><small>${venceEl(principal)}</small>${sinPagar}</article>`);
   }
   if (reposicion) {
     tarjetas.push(`<article class="destacada"><span>Clases por reponer</span><strong>${quedan(reposicion)}</strong><small>${venceEl(reposicion)}</small></article>`);

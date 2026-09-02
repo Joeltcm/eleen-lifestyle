@@ -405,3 +405,8 @@ details.session-row .google-session-state{display:block;padding-top:10px}
 .portal-lema{margin:6px 0 4px !important;font:600 21px Fraunces;line-height:1.1;color:#fff}
 .portal-lema i{font-style:normal;color:#f0c9d9}
 @media(max-width:560px){.portal-lema{font-size:19px}}
+
+/* Aviso de pago pendiente sobre las clases del mes: las clases siguen ahí,
+   pero el cobro no está saldado y eso se dice donde se mira. */
+.portal-metrics article.con-aviso{border-color:#e6d2c1}
+.portal-metrics .aviso-pago{display:block;margin-top:7px;padding-top:7px;border-top:1px solid var(--line);color:#8a6652;font-weight:600}
