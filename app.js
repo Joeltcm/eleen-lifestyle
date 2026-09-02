@@ -1,4 +1,4 @@
-const APP_VERSION = '139';
+const APP_VERSION = '140';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -3793,7 +3793,64 @@ function renderPortal() {
   document.getElementById('portal-welcome').textContent = `Hola, ${client.full_name.split(' ')[0]}`; document.getElementById('portal-compliance').textContent = `${overall}%`;
   const upcoming = portalData.sessions.filter(item => new Date(item.starts_at) >= today && item.status === 'scheduled').length;
   const pending = portalData.invoices.filter(item => item.status === 'pending').reduce((sum, item) => sum + Number(item.balance ?? item.amount), 0);
-  document.getElementById('portal-metrics').innerHTML = `<article><span>Próximas sesiones</span><strong>${upcoming}</strong><small>en tu agenda</small></article><article><span>Rutinas activas</span><strong>${portalData.routines.length}</strong><small>asignadas</small></article><article><span>Saldo pendiente</span><strong>${money.format(pending)}</strong><small>facturación</small></article>`;
+  // Lo primero que quiere saber quien entrena: cuántas clases le quedan. Antes
+  // el portal no lo decía en ninguna parte y había que preguntárselo a Eileen.
+  const saldos = portalData.packages || [];
+  const mensual = saldos.find(pack => pack.kind === 'monthly');
+  const reposicion = saldos.find(pack => pack.kind === 'makeup');
+  const paquete = saldos.find(pack => pack.kind === 'package');
+  const principal = mensual || paquete;
+  const quedan = pack => Math.max(0, Number(pack.total_sessions) - Number(pack.used_sessions));
+  const venceEl = pack => pack.expires_on
+    ? `vencen el ${new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short', timeZone: 'America/Panama' }).format(new Date(`${String(pack.expires_on).slice(0, 10)}T12:00:00-05:00`))}`
+    : 'sin fecha de vencimiento';
+  const credito = (portalData.credits || []).reduce((total, item) => total + Number(item.amount), 0);
+
+  const tarjetas = [];
+  if (principal) {
+    tarjetas.push(`<article><span>${mensual ? 'Clases de este mes' : 'Clases de tu paquete'}</span><strong>${quedan(principal)}<em> de ${principal.total_sessions}</em></strong><small>${venceEl(principal)}</small></article>`);
+  }
+  if (reposicion) {
+    tarjetas.push(`<article class="destacada"><span>Clases por reponer</span><strong>${quedan(reposicion)}</strong><small>${venceEl(reposicion)}</small></article>`);
+  }
+  tarjetas.push(`<article><span>Próximas sesiones</span><strong>${upcoming}</strong><small>en tu agenda</small></article>`);
+  if (portalData.routines.length) tarjetas.push(`<article><span>Rutinas activas</span><strong>${portalData.routines.length}</strong><small>asignadas</small></article>`);
+  tarjetas.push(`<article><span>Saldo pendiente</span><strong>${money.format(pending)}</strong><small>${pending > 0 ? 'por pagar' : 'estás al día'}</small></article>`);
+  if (credito > 0) tarjetas.push(`<article class="destacada"><span>A tu favor</span><strong>${money.format(credito)}</strong><small>se descuenta del próximo cobro</small></article>`);
+  document.getElementById('portal-metrics').innerHTML = tarjetas.join('');
+
+  // Informes que el cliente se descarga solo, sin pedírselos a nadie.
+  const informes = document.getElementById('portal-reports-list');
+  if (informes) {
+    informes.innerHTML = `
+      <article class="card portal-report">
+        <div><h3>Mi cumplimiento</h3><p>Cómo has venido cumpliendo mes a mes en los últimos seis.</p></div>
+        <button class="secondary" data-portal-report="compliance">Descargar PDF</button>
+      </article>
+      <article class="card portal-report">
+        <div><h3>Estado de cuenta</h3><p>Lo facturado, lo pagado y lo pendiente de los últimos seis meses.</p></div>
+        <button class="secondary" data-portal-report="statement">Descargar PDF</button>
+      </article>`;
+    informes.querySelectorAll('[data-portal-report]').forEach(boton => {
+      boton.onclick = async () => {
+        const cual = boton.dataset.portalReport;
+        const ruta = cual === 'compliance' ? '/api/portal/reports/compliance.pdf' : '/api/portal/reports/account-statement.pdf';
+        const texto = boton.textContent;
+        boton.disabled = true; boton.textContent = 'Preparando…';
+        try {
+          const respuesta = await fetch(`${API_BASE}${ruta}`, { headers: { Authorization: `Bearer ${authToken}` } });
+          if (!respuesta.ok) throw new Error('No se pudo generar el informe');
+          const url = URL.createObjectURL(await respuesta.blob());
+          const enlace = document.createElement('a');
+          enlace.href = url;
+          enlace.download = cual === 'compliance' ? 'mi-cumplimiento.pdf' : 'mi-estado-de-cuenta.pdf';
+          enlace.click();
+          URL.revokeObjectURL(url);
+        } catch (error) { toast(error.message, true); }
+        finally { boton.disabled = false; boton.textContent = texto; }
+      };
+    });
+  }
   const buckets = Array.from({ length: 6 }, (_, index) => { const date = new Date(today.getFullYear(), today.getMonth() - 5 + index, 1, 12); return { key: `${date.getFullYear()}-${date.getMonth()}`, date, values: [] }; });
   activities.forEach(item => buckets.find(bucket => bucket.key === `${item.date.getFullYear()}-${item.date.getMonth()}`)?.values.push(item.percent));
   document.getElementById('portal-chart').innerHTML = buckets.map(bucket => { const percent = bucket.values.length ? Math.round(bucket.values.reduce((sum, value) => sum + value, 0) / bucket.values.length) : 0; return `<div class="chart-column"><span>${percent}%</span><i style="height:${Math.max(4, percent)}%"></i><small>${monthLabel(bucket.date)}</small></div>`; }).join('');

@@ -3605,7 +3605,7 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   const auth = request.user as AuthUser;
   if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
   const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
-  const [invoices, routines, sessions, busySlots, assessments, completions, exercises] = await Promise.all([
+  const [invoices, routines, sessions, busySlots, assessments, completions, exercises, packages, credits] = await Promise.all([
     sql`SELECT id, concept, amount, balance, currency, due_on, status, payment_method, invoice_number, issued_on FROM invoices WHERE client_id = ${client.id} ORDER BY COALESCE(issued_on, due_on) DESC LIMIT 60`,
     sql`SELECT ra.id AS assignment_id, ra.due_on, r.id, r.title, r.description, r.sessions_per_week, r.exercises FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id WHERE ra.client_id = ${client.id} AND ra.active = true AND (ra.ends_on IS NULL OR ra.ends_on >= current_date) ORDER BY ra.starts_on DESC`,
     sql`SELECT s.id, s.routine_id, s.starts_at, s.duration_minutes, s.mode, s.status, s.completion_percent, r.title AS routine_title FROM sessions s LEFT JOIN routines r ON r.id = s.routine_id WHERE s.client_id = ${client.id} AND s.starts_at >= now() - interval '1 year' ORDER BY s.starts_at`,
@@ -3619,6 +3619,18 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
       SELECT id, slug, name, english, section, level, machine, free_weight, cues,
              video_duration_seconds, (video_object_key IS NOT NULL) AS has_video
       FROM exercises WHERE owner_id = ${client.owner_id} AND archived = false
+    `,
+    // Su saldo de clases: es lo primero que quiere saber quien entrena y no
+    // estaba en ninguna parte del portal.
+    sql`
+      SELECT id, label, kind, total_sessions, used_sessions, expires_on, status
+      FROM session_packages
+      WHERE client_id = ${client.id} AND status = 'active' AND used_sessions < total_sessions
+      ORDER BY expires_on ASC NULLS LAST, purchased_on
+    `,
+    sql`
+      SELECT concept, amount FROM billing_credits
+      WHERE client_id = ${client.id} AND applied_invoice_id IS NULL ORDER BY created_at
     `
   ]);
   const profile = {
@@ -3629,7 +3641,42 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   const privateBusySlots = busySlots.map(slot => slot.is_mine
     ? { id: slot.id, starts_at: slot.starts_at, duration_minutes: slot.duration_minutes, is_mine: true }
     : { starts_at: slot.starts_at, duration_minutes: slot.duration_minutes, is_mine: false });
-  return { client: profile, invoices, routines, sessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, exercises };
+  return { client: profile, invoices, routines, sessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, exercises, packages, credits };
+});
+
+// Informes que el cliente puede descargarse solo. Se calculan con su propio
+// identificador —el del token—, nunca con uno que venga en la petición: los de
+// la entrenadora reciben el cliente por parámetro, y aquí eso permitiría pedir
+// el estado de cuenta de cualquiera.
+app.get('/api/portal/reports/account-statement.pdf', { preHandler: requireAuth }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
+  const client = await portalClient(auth.sub);
+  if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+  const rango = z.object({
+    from: z.string().date().default(new Date(Date.now() - 180 * 86400000).toISOString().slice(0, 10)),
+    to: z.string().date().default(new Date().toISOString().slice(0, 10))
+  }).parse(request.query);
+  const report = await accountStatementData(client.owner_id as string, { clientId: client.id as string, ...rango });
+  if (!report) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  return sendPdf(reply, await accountStatementPdf(report.client, report.rows, rango.from, rango.to), `estado-de-cuenta-${rango.from}-${rango.to}.pdf`);
+});
+
+app.get('/api/portal/reports/compliance.pdf', { preHandler: requireAuth }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
+  const client = await portalClient(auth.sub);
+  if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+  const meses = z.object({ months: z.coerce.number().int().min(1).max(24).default(6) }).parse(request.query).months;
+  const timeline = await complianceMonthly(client.owner_id as string, client.id as string, meses);
+  const conDatos = timeline.filter(mes => mes.compliancePercent !== null);
+  const resumen = {
+    meses: conDatos.length,
+    promedio: conDatos.length ? Math.round(conDatos.reduce((suma, mes) => suma + (mes.compliancePercent || 0), 0) / conDatos.length) : null,
+    mejor: conDatos.length ? conDatos.reduce((mejor, mes) => (mes.compliancePercent || 0) > (mejor.compliancePercent || 0) ? mes : mejor) : null,
+    peor: conDatos.length ? conDatos.reduce((peor, mes) => (mes.compliancePercent || 0) < (peor.compliancePercent || 0) ? mes : peor) : null
+  };
+  return sendPdf(reply, await compliancePdf({ id: client.id, full_name: client.full_name, email: client.email }, resumen, timeline), `cumplimiento-${String(client.full_name).toLowerCase().replace(/[^a-z0-9]+/g, '-')}.pdf`);
 });
 
 const routineCompletionSchema = z.object({ routineId: z.string().uuid(), completedOn: z.string().date(), completionPercent: z.coerce.number().int().min(0).max(100), notes: z.string().max(300).optional() });
