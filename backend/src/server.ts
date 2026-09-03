@@ -3613,7 +3613,7 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   const auth = request.user as AuthUser;
   if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
   const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
-  const [invoices, routines, sessions, busySlots, assessments, completions, exercises, packages, credits] = await Promise.all([
+  const [invoices, routines, sessions, busySlots, assessments, completions, exercises, packages, credits, weightLogs] = await Promise.all([
     sql`
       SELECT id, concept, amount, currency, due_on, status, payment_method, invoice_number, issued_on,
         -- Lo que de verdad falta por pagar. La columna balance sólo la mantiene
@@ -3651,6 +3651,10 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
     sql`
       SELECT concept, amount FROM billing_credits
       WHERE client_id = ${client.id} AND applied_invoice_id IS NULL ORDER BY created_at
+    `,
+    sql`
+      SELECT id, weight_kg, weight_value, unit, measured_at, note
+      FROM client_weight_logs WHERE client_id = ${client.id} ORDER BY measured_at DESC LIMIT 500
     `
   ]);
   const profile = {
@@ -3661,7 +3665,73 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   const privateBusySlots = busySlots.map(slot => slot.is_mine
     ? { id: slot.id, starts_at: slot.starts_at, duration_minutes: slot.duration_minutes, is_mine: true }
     : { starts_at: slot.starts_at, duration_minutes: slot.duration_minutes, is_mine: false });
-  return { client: profile, invoices, routines, sessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, exercises, packages, credits };
+  return { client: profile, invoices, routines, sessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, exercises, packages, credits, weightLogs };
+});
+
+const clientWeightLogSchema = z.object({
+  weight: z.coerce.number().finite().positive().max(1100),
+  unit: z.enum(['kg', 'lb']).default('kg'),
+  measuredAt: z.string().datetime({ offset: true }).optional(),
+  note: z.string().trim().max(300).optional()
+});
+
+// La entrenadora ve estos registros separados de los InBody: son útiles para
+// tendencia, pero no representan una evaluación de composición corporal.
+app.get('/api/clients/:clientId/weight-logs', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const clientId = z.string().uuid().parse((request.params as { clientId: string }).clientId);
+  const [owned] = await sql`SELECT id FROM clients WHERE id = ${clientId} AND owner_id = ${auth.sub}`;
+  if (!owned) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  return sql`SELECT id, weight_kg, weight_value, unit, measured_at, note FROM client_weight_logs WHERE client_id = ${clientId} ORDER BY measured_at DESC`;
+});
+
+app.post('/api/portal/weight-logs', { preHandler: requireAuth }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
+  const input = clientWeightLogSchema.parse(request.body);
+  const client = await portalClient(auth.sub);
+  if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+  const weightKg = input.unit === 'lb' ? input.weight * 0.45359237 : input.weight;
+  if (weightKg > 500) return reply.code(400).send({ error: 'El peso está fuera del rango permitido' });
+  const [entry] = await sql`
+    INSERT INTO client_weight_logs (client_id, weight_kg, weight_value, unit, measured_at, note)
+    VALUES (${client.id}, ${weightKg.toFixed(3)}, ${input.weight.toFixed(3)}, ${input.unit}, ${input.measuredAt ? new Date(input.measuredAt) : new Date()}, ${input.note || null})
+    RETURNING id, weight_kg, weight_value, unit, measured_at, note
+  `;
+  await sendPushToUser(client.owner_id, {
+    title: 'Nuevo registro de peso',
+    body: `${client.full_name} registró ${Number(input.weight).toFixed(1)} ${input.unit === 'lb' ? 'lb' : 'kg'}.`,
+    url: new URL('/#clients', config.APP_URL).toString()
+  });
+  return reply.code(201).send(entry);
+});
+
+app.patch('/api/portal/weight-logs/:id', { preHandler: requireAuth }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = clientWeightLogSchema.parse(request.body);
+  const client = await portalClient(auth.sub);
+  if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+  const weightKg = input.unit === 'lb' ? input.weight * 0.45359237 : input.weight;
+  const [entry] = await sql`
+    UPDATE client_weight_logs SET weight_kg = ${weightKg.toFixed(3)}, weight_value = ${input.weight.toFixed(3)}, unit = ${input.unit}, measured_at = ${input.measuredAt ? new Date(input.measuredAt) : new Date()}, note = ${input.note || null}, updated_at = now()
+    WHERE id = ${id} AND client_id = ${client.id}
+    RETURNING id, weight_kg, weight_value, unit, measured_at, note
+  `;
+  if (!entry) return reply.code(404).send({ error: 'Registro no encontrado' });
+  return entry;
+});
+
+app.delete('/api/portal/weight-logs/:id', { preHandler: requireAuth }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const client = await portalClient(auth.sub);
+  if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+  const [entry] = await sql`DELETE FROM client_weight_logs WHERE id = ${id} AND client_id = ${client.id} RETURNING id`;
+  if (!entry) return reply.code(404).send({ error: 'Registro no encontrado' });
+  return { deleted: true };
 });
 
 // Informes que el cliente puede descargarse solo. Se calculan con su propio

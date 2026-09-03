@@ -3181,8 +3181,14 @@ function clientDetail(id) {
     if (summary) summary.insertAdjacentHTML('afterend', inbodyDetailSection(inbody.values));
   }
   if (client.inbodyReviews.length) document.getElementById('review-inbody').onclick = () => inbodyReview(client, client.inbodyReviews);
+  const balanceTarget = document.getElementById('client-balances');
+  if (balanceTarget) {
+    balanceTarget.insertAdjacentHTML('beforebegin', '<p class="eyebrow" style="margin-top:20px">PESO REGISTRADO POR EL CLIENTE</p><div id="client-weight-logs"><p class="empty">Cargando registros…</p></div>');
+    clientWeightLogsSection(document.getElementById('client-weight-logs'), client.id);
+  }
   balancesSection(document.getElementById('client-balances'), client);
   attendanceSection(document.getElementById('client-attendance'), client.id);
+  clientWeightLogsSection(document.getElementById('client-weight-logs'), client.id);
   conditionsSection(document.getElementById('client-conditions'), client);
   photosSection(document.getElementById('client-photos'), client);
   api(`/api/documents?clientId=${encodeURIComponent(client.id)}`).then(items => {
@@ -3548,7 +3554,7 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   });
 }
 
-const portalViewTitles = { 'portal-dashboard': 'Mi progreso', 'portal-routines': 'Mis rutinas', 'portal-calendar': 'Mi agenda', 'portal-billing': 'Facturación' };
+const portalViewTitles = { 'portal-dashboard': 'Mi progreso', 'portal-routines': 'Mis rutinas', 'portal-calendar': 'Mi agenda', 'portal-billing': 'Facturación', 'portal-reports': 'Mis informes' };
 
 // La rutina guarda una copia del ejercicio en JSON; el video vive en el
 // catálogo. catalogId es lo que une a los dos. Un ejercicio personalizado, o
@@ -3666,6 +3672,7 @@ const PORTAL_BANDA_MINUTOS = 30;
 
 let portalWeekStart = startOfWeek(today);
 let portalSelectedDay = dateKey(today);
+let portalWeightUnit = 'kg';
 
 function startOfWeek(fecha) {
   const inicio = new Date(fecha.getFullYear(), fecha.getMonth(), fecha.getDate(), 12);
@@ -3792,6 +3799,72 @@ function renderPortalCalendar(ownSessions) {
   });
 }
 
+const portalWeightValue = (entry, unit = portalWeightUnit) => {
+  const kg = Number(entry.weight_kg);
+  return Number.isFinite(kg) ? (unit === 'lb' ? kg * 2.20462262 : kg) : null;
+};
+const portalWeightLabel = (entry, unit = portalWeightUnit) => {
+  const value = portalWeightValue(entry, unit);
+  return value === null ? '—' : `${value.toFixed(1)} ${unit}`;
+};
+function portalWeightLineChart(entries) {
+  const points = entries.slice().sort((a, b) => new Date(a.measured_at) - new Date(b.measured_at));
+  if (points.length < 2) return `<p class="empty">Registra al menos dos pesos para ver tu evolución.</p>`;
+  const width = 640; const height = 190; const pad = 28;
+  const values = points.map(item => portalWeightValue(item));
+  const min = Math.min(...values); const max = Math.max(...values); const span = Math.max(0.1, max - min);
+  const x = index => pad + (index * (width - pad * 2) / Math.max(1, points.length - 1));
+  const y = value => height - pad - ((value - min) / span) * (height - pad * 2);
+  const line = points.map((item, index) => `${x(index).toFixed(1)},${y(portalWeightValue(item)).toFixed(1)}`).join(' ');
+  const dots = points.map((item, index) => `<circle cx="${x(index).toFixed(1)}" cy="${y(portalWeightValue(item)).toFixed(1)}" r="4" fill="#b86e8d"><title>${String(item.measured_at).slice(0, 10)} · ${portalWeightLabel(item)}</title></circle>`).join('');
+  const labels = points.map((item, index) => index === 0 || index === points.length - 1 ? `<text x="${x(index).toFixed(1)}" y="${height - 7}" text-anchor="middle">${String(item.measured_at).slice(5, 10)}</text>` : '').join('');
+  return `<svg class="portal-weight-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Evolución de peso en ${portalWeightUnit}"><line x1="${pad}" y1="${pad}" x2="${pad}" y2="${height - pad}"/><line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}"/><polyline points="${line}" fill="none" stroke="#b86e8d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>${dots}${labels}</svg>`;
+}
+function portalWeightModal() {
+  const box = document.createElement('div');
+  box.innerHTML = `<form id="portal-weight-form"><p class="eyebrow">SEGUIMIENTO PERSONAL</p><h2>Registrar peso</h2><p class="form-summary">Es voluntario. Puedes registrar tu peso cuando quieras.</p><div class="form-row"><label>Peso<input name="weight" type="number" min="1" max="1100" step="0.1" required placeholder="Ej. 72.5" /></label><label>Unidad<select name="unit"><option value="kg" ${portalWeightUnit === 'kg' ? 'selected' : ''}>Kilogramos (kg)</option><option value="lb" ${portalWeightUnit === 'lb' ? 'selected' : ''}>Libras (lb)</option></select></label></div><label>Fecha<input name="date" type="date" value="${dateKey(today)}" max="${dateKey(today)}" required /></label><label>Nota (opcional)<textarea name="note" rows="2" maxlength="300" placeholder="Ej. medición en ayunas"></textarea></label><button class="primary wide-button">Guardar peso</button></form>`;
+  openModal(box);
+  box.querySelector('#portal-weight-form').addEventListener('submit', async event => {
+    event.preventDefault(); const form = new FormData(event.target); const unit = String(form.get('unit')); const value = Number(form.get('weight'));
+    try {
+      event.target.classList.add('loading-state');
+      await api('/api/portal/weight-logs', { method: 'POST', body: { weight: value, unit, measuredAt: new Date(`${form.get('date')}T12:00:00-05:00`).toISOString(), note: String(form.get('note') || '').trim() || undefined } });
+      modal.close(); await loadPortalData(); portalNavigate('portal-reports'); toast('Peso registrado');
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+function portalAttendanceReport() {
+  const past = portalData.sessions.filter(item => new Date(item.starts_at) <= today);
+  const completed = past.filter(item => item.status === 'completed').length;
+  const cancelled = past.filter(item => item.status === 'cancelled').length;
+  const noShow = past.filter(item => item.status === 'no_show').length;
+  const pending = past.filter(item => item.status === 'scheduled').length;
+  const denominator = completed + noShow + cancelled;
+  const percent = denominator ? Math.round(completed / denominator * 100) : 0;
+  const rows = past.slice().sort((a, b) => new Date(b.starts_at) - new Date(a.starts_at)).slice(0, 30).map(item => `<tr><td>${new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeZone: 'America/Panama' }).format(new Date(item.starts_at))}</td><td>${new Intl.DateTimeFormat('es-PA', { timeStyle: 'short', timeZone: 'America/Panama' }).format(new Date(item.starts_at))}</td><td>${escapeHtml(item.routine_title || 'Entrenamiento')}</td><td><span class="payment-status ${item.status}">${item.status === 'completed' ? 'Asistió' : item.status === 'cancelled' ? 'Cancelada' : item.status === 'no_show' ? 'No asistió' : 'Pendiente'}</span></td></tr>`).join('');
+  return `<section class="portal-report-section"><div class="card-head"><div><h3>Asistencia y cancelaciones</h3><p>Historial de tus sesiones</p></div><span class="portal-report-period">${percent}% asistencia</span></div><div class="portal-report-stats"><article><strong>${completed}</strong><span>Asistencias</span></article><article><strong>${cancelled}</strong><span>Cancelaciones</span></article><article><strong>${noShow}</strong><span>No asistidas</span></article><article><strong>${pending}</strong><span>Pendientes</span></article></div><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Hora</th><th>Sesión</th><th>Estado</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">Todavía no hay sesiones registradas.</td></tr>'}</tbody></table></div></section>`;
+}
+function renderPortalReports() {
+  const informes = document.getElementById('portal-reports-list'); if (!informes) return;
+  const weights = Array.isArray(portalData.weightLogs) ? portalData.weightLogs : [];
+  const history = weights.slice().sort((a, b) => new Date(b.measured_at) - new Date(a.measured_at));
+  informes.innerHTML = `${portalAttendanceReport()}<section class="portal-report-section"><div class="card-head"><div><h3>Evolución de peso</h3><p>Registros personales, separados de tus InBody.</p></div><label class="portal-unit-select">Mostrar en<select id="portal-weight-unit"><option value="kg" ${portalWeightUnit === 'kg' ? 'selected' : ''}>kg</option><option value="lb" ${portalWeightUnit === 'lb' ? 'selected' : ''}>lb</option></select></label></div>${portalWeightLineChart(weights)}${history.length ? `<div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Origen</th><th></th></tr></thead><tbody>${history.slice(0, 20).map(item => `<tr><td>${String(item.measured_at).slice(0, 10)}</td><td>${portalWeightLabel(item)}</td><td>Registro personal</td><td><button type="button" class="secondary" data-delete-weight="${item.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no tienes registros de peso.</p>'}</section><section class="portal-report-downloads"><article class="card portal-report"><div><h3>Mi cumplimiento</h3><p>Descarga un PDF con tu avance.</p></div><button class="secondary" data-portal-report="compliance">Descargar PDF</button></article><article class="card portal-report"><div><h3>Estado de cuenta</h3><p>Lo facturado, pagado y pendiente.</p></div><button class="secondary" data-portal-report="statement">Descargar PDF</button></article></section>`;
+  document.getElementById('portal-weight-unit').onchange = event => { portalWeightUnit = event.target.value; renderPortalReports(); };
+  document.getElementById('portal-add-weight').onclick = portalWeightModal;
+  informes.querySelectorAll('[data-delete-weight]').forEach(button => button.onclick = async () => { if (!confirm('¿Eliminar este registro de peso?')) return; try { await api(`/api/portal/weight-logs/${button.dataset.deleteWeight}`, { method: 'DELETE' }); await loadPortalData(); toast('Registro eliminado'); } catch (error) { toast(error.message, true); } });
+  informes.querySelectorAll('[data-portal-report]').forEach(button => button.onclick = async () => {
+    const cual = button.dataset.portalReport; const ruta = cual === 'compliance' ? '/api/portal/reports/compliance.pdf' : '/api/portal/reports/account-statement.pdf'; const texto = button.textContent; button.disabled = true; button.textContent = 'Preparando…';
+    try { const response = await fetch(`${API_BASE}${ruta}`, { headers: { Authorization: `Bearer ${authToken}` } }); if (!response.ok) throw new Error('No se pudo generar el informe'); const url = URL.createObjectURL(await response.blob()); const link = document.createElement('a'); link.href = url; link.download = cual === 'compliance' ? 'mi-cumplimiento.pdf' : 'mi-estado-de-cuenta.pdf'; link.click(); URL.revokeObjectURL(url); } catch (error) { toast(error.message, true); } finally { button.disabled = false; button.textContent = texto; }
+  });
+}
+function clientWeightLogsSection(target, clientId) {
+  if (!target) return;
+  api(`/api/clients/${clientId}/weight-logs`).then(entries => {
+    const rows = entries.slice(0, 30).map(item => `<tr><td>${String(item.measured_at).slice(0, 10)}</td><td>${Number(item.weight_value).toFixed(1)} ${item.unit === 'lb' ? 'lb' : 'kg'}</td><td>Registro personal</td><td>${item.note ? escapeHtml(item.note) : '—'}</td></tr>`).join('');
+    target.innerHTML = entries.length ? `<div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Origen</th><th>Nota</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="empty">El cliente todavía no ha registrado su peso voluntariamente.</p>';
+  }).catch(error => { target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; });
+}
+
 function renderPortal() {
   const client = portalData.client; const activities = portalActivities(); const overall = activities.length ? Math.round(activities.reduce((sum, item) => sum + item.percent, 0) / activities.length) : 0;
   document.getElementById('portal-welcome').textContent = `Hola, ${client.full_name.split(' ')[0]}`; document.getElementById('portal-compliance').textContent = `${overall}%`;
@@ -3831,38 +3904,7 @@ function renderPortal() {
   if (credito > 0) tarjetas.push(`<article class="destacada"><span>A tu favor</span><strong>${money.format(credito)}</strong><small>se descuenta del próximo cobro</small></article>`);
   document.getElementById('portal-metrics').innerHTML = tarjetas.join('');
 
-  // Informes que el cliente se descarga solo, sin pedírselos a nadie.
-  const informes = document.getElementById('portal-reports-list');
-  if (informes) {
-    informes.innerHTML = `
-      <article class="card portal-report">
-        <div><h3>Mi cumplimiento</h3><p>Cómo has venido cumpliendo mes a mes en los últimos seis.</p></div>
-        <button class="secondary" data-portal-report="compliance">Descargar PDF</button>
-      </article>
-      <article class="card portal-report">
-        <div><h3>Estado de cuenta</h3><p>Lo facturado, lo pagado y lo pendiente de los últimos seis meses.</p></div>
-        <button class="secondary" data-portal-report="statement">Descargar PDF</button>
-      </article>`;
-    informes.querySelectorAll('[data-portal-report]').forEach(boton => {
-      boton.onclick = async () => {
-        const cual = boton.dataset.portalReport;
-        const ruta = cual === 'compliance' ? '/api/portal/reports/compliance.pdf' : '/api/portal/reports/account-statement.pdf';
-        const texto = boton.textContent;
-        boton.disabled = true; boton.textContent = 'Preparando…';
-        try {
-          const respuesta = await fetch(`${API_BASE}${ruta}`, { headers: { Authorization: `Bearer ${authToken}` } });
-          if (!respuesta.ok) throw new Error('No se pudo generar el informe');
-          const url = URL.createObjectURL(await respuesta.blob());
-          const enlace = document.createElement('a');
-          enlace.href = url;
-          enlace.download = cual === 'compliance' ? 'mi-cumplimiento.pdf' : 'mi-estado-de-cuenta.pdf';
-          enlace.click();
-          URL.revokeObjectURL(url);
-        } catch (error) { toast(error.message, true); }
-        finally { boton.disabled = false; boton.textContent = texto; }
-      };
-    });
-  }
+  renderPortalReports();
   const buckets = Array.from({ length: 6 }, (_, index) => { const date = new Date(today.getFullYear(), today.getMonth() - 5 + index, 1, 12); return { key: `${date.getFullYear()}-${date.getMonth()}`, date, values: [] }; });
   activities.forEach(item => buckets.find(bucket => bucket.key === `${item.date.getFullYear()}-${item.date.getMonth()}`)?.values.push(item.percent));
   document.getElementById('portal-chart').innerHTML = buckets.map(bucket => { const percent = bucket.values.length ? Math.round(bucket.values.reduce((sum, value) => sum + value, 0) / bucket.values.length) : 0; return `<div class="chart-column"><span>${percent}%</span><i style="height:${Math.max(4, percent)}%"></i><small>${monthLabel(bucket.date)}</small></div>`; }).join('');
@@ -3871,7 +3913,11 @@ function renderPortal() {
   const ownSessions = new Map(portalData.sessions.map(item => [item.id, portalSession(item)]));
   renderPortalCalendar(ownSessions);
   document.getElementById('portal-plan').innerHTML = `<span class="commercial-label ${client.billing_model === 'package' ? 'package-label' : ''}">${client.billing_model === 'package' ? 'Paquete' : 'Mensualidad'}</span><div><h3>${escapeHtml(client.plan_name || 'Plan personalizado')}</h3><p>${money.format(Number(client.standard_price))}${client.billing_model === 'monthly' ? ` · corte día ${client.billing_cutoff_day}` : ` · ${client.sessions_included || 0} sesiones`}</p></div>`;
-  document.getElementById('portal-invoices').innerHTML = portalData.invoices.length ? portalData.invoices.map(invoice => `<tr><td><b>${escapeHtml(invoice.concept)}</b>${invoice.invoice_number ? `<br><small>${escapeHtml(invoice.invoice_number)}</small>` : ''}</td><td>${invoice.issued_on || invoice.due_on}</td><td>${money.format(Number(invoice.amount))}</td><td><span class="payment-status ${invoice.status}">${invoice.status === 'confirmed' ? 'Pagada' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'}</span></td><td><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoice_number || invoice.id.slice(0, 8))}">Ver PDF</button></td></tr>`).join('') : '<tr><td colspan="5" class="empty">No hay facturas registradas.</td></tr>';
+  const pendingInvoices = portalData.invoices.filter(invoice => invoice.status === 'pending');
+  document.getElementById('portal-pending-payment').innerHTML = pendingInvoices.length ? `<div class="portal-payment-alert"><strong>Pago pendiente</strong><span>${pendingInvoices.length === 1 ? `Tienes 1 factura pendiente por ${money.format(Number(pendingInvoices[0].balance || pendingInvoices[0].amount))}.` : `Tienes ${pendingInvoices.length} facturas pendientes por ${money.format(pendingInvoices.reduce((sum, invoice) => sum + Number(invoice.balance || invoice.amount), 0))}.`}</span></div>` : '<div class="portal-payment-ok">No tienes pagos pendientes.</div>';
+  const invoicesSorted = portalData.invoices.slice().sort((a, b) => new Date(b.issued_on || b.due_on) - new Date(a.issued_on || a.due_on));
+  const invoiceDate = invoice => { const raw = invoice.issued_on || invoice.due_on; return raw ? new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeZone: 'America/Panama' }).format(new Date(`${String(raw).slice(0, 10)}T12:00:00-05:00`)) : '—'; };
+  document.getElementById('portal-invoices').innerHTML = invoicesSorted.length ? invoicesSorted.map(invoice => `<tr><td><b>${escapeHtml(invoice.concept)}</b>${invoice.invoice_number ? `<br><small>${escapeHtml(invoice.invoice_number)}</small>` : ''}</td><td>${invoiceDate(invoice)}</td><td>${money.format(Number(invoice.amount))}</td><td><span class="payment-status ${invoice.status}">${invoice.status === 'confirmed' ? 'Pagada' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'}</span></td><td><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoice_number || invoice.id.slice(0, 8))}">Ver PDF</button></td></tr>`).join('') : '<tr><td colspan="5" class="empty">No hay facturas registradas.</td></tr>';
   const portalCount = document.getElementById('portal-notification-count'); portalCount.textContent = portalData.notifications.length; portalCount.hidden = !portalData.notifications.length;
 }
 async function loadPortalData() {
