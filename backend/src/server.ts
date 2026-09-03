@@ -2182,10 +2182,40 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
     `;
   }
 
+  // Si el cliente cancela y no solicita reprogramación, la clase contratada
+  // se consume igual. Sólo se descuenta el saldo vigente para la fecha de la
+  // sesión; una cancelación reprogramada conserva la clase para su nueva cita.
+  let compensacion: { tipo: string; detalle: string } | null = null;
+  if (!reprogramada && !laCancelaEllaSola) {
+    const [pack] = await sql`
+      SELECT id, total_sessions, used_sessions
+      FROM session_packages
+      WHERE client_id = ${session.client_id} AND status = 'active'
+        AND used_sessions < total_sessions
+        AND (expires_on IS NULL OR expires_on >= (${session.starts_at}::timestamptz AT TIME ZONE 'America/Panama')::date)
+      ORDER BY expires_on ASC NULLS LAST, purchased_on
+      LIMIT 1
+      FOR UPDATE
+    `;
+    if (pack) {
+      const siguiente = Number(pack.used_sessions) + 1;
+      await sql`
+        UPDATE session_packages SET used_sessions = ${siguiente},
+          status = CASE WHEN ${siguiente} >= total_sessions THEN 'exhausted' ELSE 'active' END
+        WHERE id = ${pack.id}
+      `;
+      await sql`
+        UPDATE sessions SET package_id = ${pack.id}, package_debited = true,
+          debited_group_id = ${session.client_id}, updated_at = now()
+        WHERE id = ${id}
+      `;
+      compensacion = { tipo: 'debit', detalle: 'Una sesión descontada del plan contratado' };
+    }
+  }
+
   // Cuando cancela ella, el cliente queda a favor y hay que devolverle el
   // valor: otra clase, o menos dinero. Se resuelve aquí y no se deja para
   // luego, que es como se olvida.
-  let compensacion: { tipo: string; detalle: string } | null = null;
   if (laCancelaEllaSola && compensa !== 'none') {
     const [cliente] = await sql`
       SELECT c.id, c.standard_price, COALESCE(p.sessions_included, c.monthly_session_target, 0)::int AS incluidas
