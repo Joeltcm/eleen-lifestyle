@@ -2731,7 +2731,7 @@ async function applyInvoiceCoverage(id) {
   try { datos = await api(`/api/invoices/${id}/coverage`); }
   catch (error) { toast(error.message, true); return; }
 
-  const { invoice, candidates, applied, suggestedPeriod } = datos;
+  const { invoice, candidates, applied, suggestedPeriod, coverageStart } = datos;
   const box = document.createElement('div');
   const mes = String(suggestedPeriod).slice(0, 7);
   const yaCubierto = new Set(applied.map(a => a.client_id));
@@ -2798,7 +2798,11 @@ async function applyInvoiceCoverage(id) {
   const pintarCiclo = async () => {
     if (!pistaCiclo || !form.elements.period.value) return;
     try {
-      const ciclo = await api(`/api/billing/cycle?from=${form.elements.period.value}-01&cutoffDay=${corteDeReferencia}`);
+      // La vigencia nace en la fecha real del pago (no en el día 1 del mes
+      // elegido como referencia contable). Por ejemplo, un pago del 28/08
+      // con corte 28 cubre del 28/08 al 28/09.
+      const inicio = coverageStart || `${form.elements.period.value}-01`;
+      const ciclo = await api(`/api/billing/cycle?from=${inicio}&cutoffDay=${corteDeReferencia}`);
       pistaCiclo.textContent = `Cubre del ${ciclo.label.replace(' – ', ' al ')}, según el corte día ${corteDeReferencia}.`;
     } catch { pistaCiclo.textContent = ''; }
   };

@@ -2714,7 +2714,8 @@ function cierreDelCiclo(periodo: string, diaDeCorte: number): string {
 async function coberturaDeCobro(ownerId: string, invoiceId: string) {
   const [invoice] = await sql`
     SELECT i.id, i.client_id, i.concept, i.amount, i.due_on, i.billing_period, i.status,
-      i.source_system, c.full_name
+      i.source_system, i.issued_on, c.full_name,
+      COALESCE((SELECT min(ip.paid_on) FROM payment_allocations pa JOIN invoice_payments ip ON ip.id = pa.payment_id WHERE pa.invoice_id = i.id), i.issued_on, i.due_on) AS coverage_start
     FROM invoices i JOIN clients c ON c.id = i.client_id
     WHERE i.id = ${invoiceId} AND c.owner_id = ${ownerId}
   `;
@@ -2742,7 +2743,7 @@ async function coberturaDeCobro(ownerId: string, invoiceId: string) {
     ORDER BY c.full_name
   `;
   const periodoSugerido = mesCubiertoPorDefecto(invoice.billing_period || invoice.due_on);
-  return { invoice, candidates, applied, suggestedPeriod: periodoSugerido };
+  return { invoice, candidates, applied, suggestedPeriod: periodoSugerido, coverageStart: invoice.coverage_start };
 }
 
 // El período exacto que cubriría un mes elegido, para un corte dado. Lo usa la
@@ -2777,7 +2778,9 @@ app.post('/api/invoices/:id/coverage', { preHandler: requireStaff }, async (requ
   const id = z.string().uuid().parse((request.params as { id: string }).id);
   const input = coverageSchema.parse(request.body);
   const [invoice] = await sql`
-    SELECT i.id, i.client_id, i.amount FROM invoices i JOIN clients c ON c.id = i.client_id
+    SELECT i.id, i.client_id, i.amount,
+      COALESCE((SELECT min(ip.paid_on) FROM payment_allocations pa JOIN invoice_payments ip ON ip.id = pa.payment_id WHERE pa.invoice_id = i.id), i.issued_on, i.due_on) AS coverage_start
+    FROM invoices i JOIN clients c ON c.id = i.client_id
     WHERE i.id = ${id} AND c.owner_id = ${auth.sub} AND i.status <> 'void'
   `;
   if (!invoice) return reply.code(404).send({ error: 'Cobro no encontrado' });
@@ -2800,12 +2803,16 @@ app.post('/api/invoices/:id/coverage', { preHandler: requireStaff }, async (requ
 
       let packageId: string | null = null;
       if (entry.sessions > 0) {
-        const vence = venceMensualidadDesde(periodo);
+        // La referencia contable sigue siendo el mes elegido, pero la vigencia
+        // nace en la fecha real del pago. Así un pago del 28/08 con corte 28
+        // vence el 28/09, no el 01/10.
+        const inicioCobertura = invoice.coverage_start || periodo;
+        const vence = corteSiguiente(mediodiaEnPanama(inicioCobertura), Number(cliente.billing_cutoff_day) || 1).toISOString().slice(0, 10);
         const [pack] = await transaction`
           INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
           VALUES (${cliente.id},
-            ${'Mensualidad · ' + rangoDelCiclo(periodo, vence)},
-            ${entry.sessions}, ${entry.amount}, ${vence}::date, 'monthly', current_date, 'active')
+            ${'Mensualidad · ' + rangoDelCiclo(inicioCobertura, vence)},
+            ${entry.sessions}, ${entry.amount}, ${vence}::date, 'monthly', ${String(inicioCobertura).slice(0, 10)}::date, 'active')
           RETURNING id
         `;
         packageId = pack.id;
