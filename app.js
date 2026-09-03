@@ -36,6 +36,7 @@ let compliancePeriod = 'week';
 let billingMonth = String(today.getMonth() + 1);
 let billingYear = String(today.getFullYear());
 let billingSource = 'all';
+let billingReturnState = null;
 let billingVisibleInvoices = 100;
 let billingAnalytics = null;
 let billingAnalyticsLoadingYear = null;
@@ -749,6 +750,8 @@ function renderBilling() {
   document.getElementById('billing-month').value = billingMonth;
   document.getElementById('billing-month').disabled = billingYear === 'all';
   document.getElementById('billing-source').value = billingSource;
+  const billingBack = document.getElementById('billing-back-from-zoho');
+  if (billingBack) billingBack.hidden = billingSource !== 'zoho_invoice';
   const periodInvoices = billingPeriodInvoices();
   const visibleInvoices = periodInvoices.slice(0, billingVisibleInvoices);
   const billed = periodInvoices.filter(item => item.status !== 'void').reduce((sum, item) => sum + item.amount, 0);
@@ -3516,8 +3519,14 @@ document.getElementById('billing-current-period').addEventListener('click', () =
 });
 document.getElementById('billing-load-more').addEventListener('click', () => { billingVisibleInvoices += 100; renderBilling(); });
 document.getElementById('show-zoho-invoices').addEventListener('click', () => {
+  billingReturnState = { month: billingMonth, year: billingYear, source: billingSource };
   billingMonth = 'all'; billingYear = 'all'; billingSource = 'zoho_invoice'; resetBillingList(); renderBilling(); notifyBillingPeriodChange();
   document.getElementById('billing-invoices-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+document.getElementById('billing-back-from-zoho').addEventListener('click', () => {
+  const previous = billingReturnState || { month: String(today.getMonth() + 1), year: String(today.getFullYear()), source: 'all' };
+  billingMonth = previous.month; billingYear = previous.year; billingSource = previous.source;
+  billingReturnState = null; resetBillingList(); renderBilling(); notifyBillingPeriodChange();
 });
 document.getElementById('notification-button').addEventListener('click', () => notificationCenter(false));
 document.getElementById('today').textContent = new Intl.DateTimeFormat('es-PA', { weekday: 'long', day: 'numeric', month: 'long' }).format(today);

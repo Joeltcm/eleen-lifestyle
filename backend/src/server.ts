@@ -190,8 +190,8 @@ async function cobrarClasesYaDadas(
   `;
   await transaction`
     UPDATE session_packages
-    SET used_sessions = ${ids.length},
-      status = ${ids.length >= totalSessions ? 'exhausted' : 'active'}
+    SET used_sessions = used_sessions + ${ids.length},
+      status = CASE WHEN used_sessions + ${ids.length} >= total_sessions THEN 'exhausted' ELSE 'active' END
     WHERE id = ${packageId}
   `;
   return ids.length;
@@ -331,9 +331,9 @@ async function generateRecurringInvoices(ownerId?: string) {
       INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
       VALUES (${cobro.entrena},
         ${'Mensualidad · ' + rangoDelCiclo(
-          (() => { const fin = mediodiaEnPanama(cobro.due_on as Date); const ini = new Date(fin); ini.setUTCMonth(ini.getUTCMonth() - 1); return ini; })(),
-          cobro.due_on as Date)},
-        ${cobro.total_sessions}, ${cobro.amount}, ${cobro.due_on}::date, 'monthly', current_date,
+          mediodiaEnPanama(cobro.billing_period as Date),
+          mediodiaEnPanama(venceMensualidadDesde(cobro.billing_period as Date)))},
+        ${cobro.total_sessions}, ${cobro.amount}, ${venceMensualidadDesde(cobro.billing_period)}::date, 'monthly', current_date,
         -- Nace activo, y es la diferencia entre servir y no servir. Un saldo
         -- 'pending' no suma en las sesiones disponibles ni se descuenta al
         -- marcar la clase: el cliente entrenaba y su saldo no se movía. Se
@@ -348,7 +348,7 @@ async function generateRecurringInvoices(ownerId?: string) {
       RETURNING id
     `;
     await cobrarClasesYaDadas(sql, abierto.id as string, cobro.entrena as string,
-      String(cobro.due_on).slice(0, 10), Number(cobro.total_sessions));
+      venceMensualidadDesde(cobro.billing_period), Number(cobro.total_sessions));
   }
   const reposiciones = await abrirReposiciones(ownerId);
   const descuentos = await aplicarCreditos(invoices as unknown as CobroGenerado[]);
@@ -937,6 +937,12 @@ function proximoCorte(diaDeCorte: number) {
   return corte.toISOString().slice(0, 10);
 }
 
+// El día de corte determina cuándo se genera el cobro, no la duración del saldo.
+function venceMensualidadDesde(periodo: Date | string): string {
+  const inicio = mediodiaEnPanama(periodo);
+  return new Date(Date.UTC(inicio.getUTCFullYear(), inicio.getUTCMonth() + 1, inicio.getUTCDate())).toISOString().slice(0, 10);
+}
+
 const packageSchema = z.object({
   // Sin esto la factura se fechaba siempre hoy, así que un cobro creado en
   // agosto para cubrir septiembre quedaba registrado como de agosto y la
@@ -963,7 +969,7 @@ app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) =
   // nunca y se acumularían mes tras mes.
   const vence = input.expiresOn
     ? input.expiresOn
-    : esCobroMensual ? proximoCorte(Number(client.billing_cutoff_day) || 1) : null;
+    : esCobroMensual ? venceMensualidadDesde(input.dueOn || new Date()) : null;
   const etiqueta = esCobroMensual
     ? `Mensualidad · ${rangoDelCiclo(input.dueOn || new Date(), vence || new Date())}`
     : `Paquete ${input.totalSessions} sesiones`;
@@ -1058,6 +1064,10 @@ app.patch('/api/packages/:id', { preHandler: requireStaff }, async (request, rep
     WHERE id = ${id} AND client_id IN (SELECT id FROM clients WHERE owner_id = ${auth.sub})
     RETURNING *
   `;
+  if (pack && pack.kind === 'monthly' && pack.status === 'active' && tocaVencimiento) {
+    const restantes = Math.max(0, Number(pack.total_sessions) - Number(pack.used_sessions));
+    if (restantes) await cobrarClasesYaDadas(sql, pack.id as string, pack.client_id as string, String(pack.expires_on).slice(0, 10), restantes);
+  }
   return pack;
 });
 
@@ -2760,7 +2770,7 @@ app.post('/api/invoices/:id/coverage', { preHandler: requireStaff }, async (requ
 
       let packageId: string | null = null;
       if (entry.sessions > 0) {
-        const vence = cierreDelCiclo(periodo, Number(cliente.billing_cutoff_day) || 1);
+        const vence = venceMensualidadDesde(periodo);
         const [pack] = await transaction`
           INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
           VALUES (${cliente.id},
