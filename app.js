@@ -1,4 +1,4 @@
-const APP_VERSION = '143';
+const APP_VERSION = '144';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2758,7 +2758,7 @@ async function applyInvoiceCoverage(id) {
       <p class="eyebrow">${invoice.source_system === 'zoho_invoice' ? 'COBRO DE ZOHO' : 'COBRO LOCAL'}</p>
       <h2>Aplicar a mensualidades</h2>
       <p class="commercial-note">${escapeHtml(invoice.full_name)} · ${escapeHtml(invoice.concept)} · <b>${money.format(invoice.amount)}</b></p>
-      <label>Mes que cubre<input type="month" name="period" value="${mes}" required /></label>
+      <label>Mes que cubre<input type="month" name="period" value="${mes}" required /><small id="coverage-ciclo">&nbsp;</small></label>
       <div class="coverage-list">${filas || '<p class="empty">Nadie a quien aplicar este cobro.</p>'}</div>
       <p class="commercial-note" id="coverage-total"></p>
       ${aplicadas}
@@ -2787,6 +2787,21 @@ async function applyInvoiceCoverage(id) {
   form.addEventListener('input', totalizar);
   totalizar();
 
+  // El mes elegido no dice hasta cuándo cubre, y ahí estaba el malentendido:
+  // con corte el día 1, "octubre" son las clases del 1 de octubre al 1 de
+  // noviembre, no las de octubre a secas. Se enseña el período de verdad.
+  const pistaCiclo = document.getElementById('coverage-ciclo');
+  const corteDeReferencia = candidates.length ? Number(candidates[0].billing_cutoff_day) || 1 : 1;
+  const pintarCiclo = async () => {
+    if (!pistaCiclo || !form.elements.period.value) return;
+    try {
+      const ciclo = await api(`/api/billing/cycle?from=${form.elements.period.value}-01&cutoffDay=${corteDeReferencia}`);
+      pistaCiclo.textContent = `Cubre del ${ciclo.label.replace(' – ', ' al ')}, según el corte día ${corteDeReferencia}.`;
+    } catch { pistaCiclo.textContent = ''; }
+  };
+  form.elements.period.addEventListener('change', pintarCiclo);
+  pintarCiclo();
+
   form.querySelectorAll('[data-drop-coverage]').forEach(boton => {
     boton.onclick = async () => {
       if (!confirm('¿Quitar esta cobertura?\n\nSe lleva el saldo de sesiones si no se ha usado ninguna.')) return;
@@ -2812,7 +2827,7 @@ async function applyInvoiceCoverage(id) {
       const persona = candidates.find(c => c.id === e.clientId);
       return `${persona.full_name} · ${money.format(e.amount)} · ${e.sessions} sesiones`;
     }).join('\n');
-    if (!confirmarGuardado(`Aplicar este cobro a:\n${resumen}\n\nMes cubierto: ${form.elements.period.value}`)) return;
+    if (!confirmarGuardado(`Aplicar este cobro a:\n${resumen}\n\n${pistaCiclo?.textContent || `Mes cubierto: ${form.elements.period.value}`}`)) return;
     try {
       event.target.classList.add('loading-state');
       await api(`/api/invoices/${id}/coverage`, { method: 'POST', body: { billingPeriod: periodo, entries } });

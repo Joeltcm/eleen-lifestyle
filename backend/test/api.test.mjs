@@ -1251,6 +1251,60 @@ describe('el saldo se renueva aunque no haya pagado, pero se avisa', () => {
   });
 });
 
+describe('el período que se dice que cubre un cobro', () => {
+  // El caso de Sandy Asis: corte el día 1, renueva el 1 de septiembre y cubre
+  // hasta el 1 de octubre. La aplicación proponía "octubre", que es un solo día
+  // del período, y le ponía al saldo un vencimiento del mismo día en que
+  // empezaba.
+  let sandy, factura;
+  before(async () => {
+    const plan = await api.post('/api/plans', { name: 'Mensual corte día 1', billingModel: 'monthly', price: 150, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Sandy Asis', planId: plan.datos.id, cutoffDay: 1 });
+    sandy = c.datos.id;
+    const f = await api.post('/api/invoices', { clientId: sandy, concept: 'Mensualidad', amount: 150, dueOn: '2026-09-01' });
+    factura = f.datos.id;
+  });
+
+  test('un pago del 1 de septiembre cubre septiembre, no octubre', async () => {
+    const { datos } = await api.get(`/api/invoices/${factura}/coverage`);
+    assert.equal(String(datos.suggestedPeriod).slice(0, 7), '2026-09',
+      'el ciclo va del 1 sept al 1 oct: octubre es un solo día de él');
+  });
+
+  test('un corte a fin de mes sí cubre el mes siguiente', async () => {
+    // No se rompe el caso contrario: pagar el 28 de agosto cubre septiembre,
+    // porque ahí es donde cae la mayor parte del ciclo.
+    const c = await api.post('/api/clients', { fullName: 'Corte 28', billingModel: 'monthly', standardPrice: 175, cutoffDay: 28 });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: '2026-08-28' });
+    const { datos } = await api.get(`/api/invoices/${f.datos.id}/coverage`);
+    assert.equal(String(datos.suggestedPeriod).slice(0, 7), '2026-09');
+  });
+
+  test('el saldo no vence el mismo día que empieza', async () => {
+    const { datos } = await api.post(`/api/invoices/${factura}/coverage`, {
+      billingPeriod: '2026-09-01',
+      entries: [{ clientId: sandy, amount: 150, sessions: 8 }]
+    });
+    const saldo = datos.applied.find(a => String(a.client_id) === String(sandy));
+    assert.ok(saldo, 'se abrió el saldo');
+    const pack = (await api.get('/api/packages')).datos.find(p => p.client_id === sandy);
+    assert.equal(String(pack.expires_on).slice(0, 10), '2026-10-01',
+      'del 1 de septiembre al 1 de octubre, no al 1 de septiembre');
+  });
+
+  test('y la etiqueta dice el período, no un mes', async () => {
+    const pack = (await api.get('/api/packages')).datos.find(p => p.client_id === sandy);
+    assert.match(pack.label, /1 sept.*1 oct/,
+      'decir "octubre" cuando se cubre del 1 sept al 1 oct engaña');
+  });
+
+  test('el ciclo se puede consultar para cualquier corte', async () => {
+    const { estado, datos } = await api.get('/api/billing/cycle?from=2026-10-01&cutoffDay=1');
+    assert.equal(estado, 200);
+    assert.equal(datos.to, '2026-11-01', 'el corte que cierra es el siguiente, no el del mismo día');
+  });
+});
+
 describe('vencimiento de los paquetes', () => {
   let clientId;
   before(async () => {
@@ -1510,9 +1564,12 @@ describe('un pagador que cubre a varias personas', () => {
   before(async () => {
     const p = await api.post('/api/plans', { name: 'Mensualidad familiar', billingModel: 'monthly', price: 120, sessionsIncluded: 8 });
     plan = p.datos.id;
-    const a = await api.post('/api/clients', { fullName: 'El que paga', planId: plan, cutoffDay: 1 });
-    const b = await api.post('/api/clients', { fullName: 'La esposa', planId: plan, cutoffDay: 1 });
-    const c = await api.post('/api/clients', { fullName: 'El yerno', planId: plan, cutoffDay: 1 });
+    // Corte dentro de la ventana de generación, no el día 1: con el 1 fijo la
+    // prueba sólo pasaba los primeros días del mes y fallaba sola el resto.
+    const corte = new Date(Date.now() + 3 * 24 * 3600_000).getDate();
+    const a = await api.post('/api/clients', { fullName: 'El que paga', planId: plan, cutoffDay: corte });
+    const b = await api.post('/api/clients', { fullName: 'La esposa', planId: plan, cutoffDay: corte });
+    const c = await api.post('/api/clients', { fullName: 'El yerno', planId: plan, cutoffDay: corte });
     pagador = a.datos.id; esposa = b.datos.id; yerno = c.datos.id;
     await api.patch(`/api/clients/${esposa}`, { fullName: 'La esposa', billingResponsibleClientId: pagador });
     await api.patch(`/api/clients/${yerno}`, { fullName: 'El yerno', billingResponsibleClientId: pagador });

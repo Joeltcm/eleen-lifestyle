@@ -330,7 +330,9 @@ async function generateRecurringInvoices(ownerId?: string) {
     const [abierto] = await sql`
       INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
       VALUES (${cobro.entrena},
-        ${'Mensualidad ' + new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric', timeZone: 'America/Panama' }).format(mediodiaEnPanama(cobro.billing_period))},
+        ${'Mensualidad · ' + rangoDelCiclo(
+          (() => { const fin = mediodiaEnPanama(cobro.due_on as Date); const ini = new Date(fin); ini.setUTCMonth(ini.getUTCMonth() - 1); return ini; })(),
+          cobro.due_on as Date)},
         ${cobro.total_sessions}, ${cobro.amount}, ${cobro.due_on}::date, 'monthly', current_date,
         -- Nace activo, y es la diferencia entre servir y no servir. Un saldo
         -- 'pending' no suma en las sesiones disponibles ni se descuenta al
@@ -963,7 +965,7 @@ app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) =
     ? input.expiresOn
     : esCobroMensual ? proximoCorte(Number(client.billing_cutoff_day) || 1) : null;
   const etiqueta = esCobroMensual
-    ? `Mensualidad ${new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric', timeZone: 'America/Panama' }).format(new Date())}`
+    ? `Mensualidad · ${rangoDelCiclo(input.dueOn || new Date(), vence || new Date())}`
     : `Paquete ${input.totalSessions} sesiones`;
 
   const pack = await sql.begin(async transaction => {
@@ -2625,17 +2627,48 @@ app.delete('/api/invoices/:id', { preHandler: requireStaff }, async (request, re
 // normal es que el pago del 28 de agosto cubra septiembre. Es sólo la
 // propuesta: Eileen elige el mes en la pantalla y manda lo que elija.
 function mesCubiertoPorDefecto(dueOn: Date | string): string {
+  // El ciclo va del cobro al corte siguiente, así que casi siempre pisa dos
+  // meses. Se etiqueta con aquel donde cae la mayor parte: se mira el punto
+  // medio, quince días después del cobro.
+  //
+  // Suponer "el mes que viene" era cierto sólo para los cortes de fin de mes.
+  // Con corte el día 1, un pago del 1 de septiembre cubre septiembre —hasta el
+  // 1 de octubre—, y la aplicación proponía octubre.
   const dia = mediodiaEnPanama(dueOn);
-  return new Date(Date.UTC(dia.getUTCFullYear(), dia.getUTCMonth() + 1, 1)).toISOString().slice(0, 10);
+  const medio = new Date(dia);
+  medio.setUTCDate(medio.getUTCDate() + 15);
+  return new Date(Date.UTC(medio.getUTCFullYear(), medio.getUTCMonth(), 1)).toISOString().slice(0, 10);
+}
+
+// Del corte al corte siguiente. Es el período que de verdad cubre un cobro
+// mensual, y el que hay que enseñar: decir "octubre" cuando se cubre del 1 de
+// octubre al 1 de noviembre es cierto a medias, y con corte el día 1 no es
+// cierto en absoluto.
+function rangoDelCiclo(inicio: Date | string, fin: Date | string): string {
+  const formato = new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short', timeZone: 'America/Panama' });
+  return `${formato.format(mediodiaEnPanama(inicio))} – ${formato.format(mediodiaEnPanama(fin))}`;
+}
+
+// El corte que cierra el ciclo abierto en `inicio`: el del mismo mes si aún no
+// ha llegado, y si no el del siguiente.
+function corteSiguiente(inicio: Date, diaDeCorte: number): Date {
+  const enMes = (anio: number, mes: number) => {
+    const ultimo = new Date(Date.UTC(anio, mes + 1, 0)).getUTCDate();
+    return new Date(Date.UTC(anio, mes, Math.min(diaDeCorte || 1, ultimo), 12));
+  };
+  let corte = enMes(inicio.getUTCFullYear(), inicio.getUTCMonth());
+  if (corte <= inicio) corte = enMes(inicio.getUTCFullYear(), inicio.getUTCMonth() + 1);
+  return corte;
 }
 
 // El día en que se cierra el ciclo cubierto: el corte del cliente dentro del
 // mes que cubre. Sin esto el saldo no vencería nunca y las sesiones no dadas
 // se acumularían mes tras mes.
 function cierreDelCiclo(periodo: string, diaDeCorte: number): string {
-  const inicio = mediodiaEnPanama(periodo);
-  const ultimo = new Date(Date.UTC(inicio.getUTCFullYear(), inicio.getUTCMonth() + 1, 0)).getUTCDate();
-  return new Date(Date.UTC(inicio.getUTCFullYear(), inicio.getUTCMonth(), Math.min(diaDeCorte || 1, ultimo))).toISOString().slice(0, 10);
+  // El corte que viene DESPUÉS de que empiece el período. Antes se tomaba el
+  // corte del mismo mes sin más, y con corte el día 1 un ciclo que empezaba el
+  // 1 de octubre vencía el 1 de octubre: el saldo nacía muerto.
+  return corteSiguiente(mediodiaEnPanama(periodo), diaDeCorte).toISOString().slice(0, 10);
 }
 
 async function coberturaDeCobro(ownerId: string, invoiceId: string) {
@@ -2668,8 +2701,19 @@ async function coberturaDeCobro(ownerId: string, invoiceId: string) {
     WHERE cov.invoice_id = ${invoiceId}
     ORDER BY c.full_name
   `;
-  return { invoice, candidates, applied, suggestedPeriod: mesCubiertoPorDefecto(invoice.billing_period || invoice.due_on) };
+  const periodoSugerido = mesCubiertoPorDefecto(invoice.billing_period || invoice.due_on);
+  return { invoice, candidates, applied, suggestedPeriod: periodoSugerido };
 }
+
+// El período exacto que cubriría un mes elegido, para un corte dado. Lo usa la
+// pantalla de cobertura: enseñar "octubre" sin decir hasta cuándo es lo que
+// llevó a pensar que un pago del 1 de septiembre cubría octubre.
+app.get('/api/billing/cycle', { preHandler: requireStaff }, async request => {
+  const query = z.object({ from: z.string().date(), cutoffDay: z.coerce.number().int().min(1).max(31) }).parse(request.query);
+  const inicio = mediodiaEnPanama(query.from);
+  const fin = corteSiguiente(inicio, query.cutoffDay);
+  return { from: inicio.toISOString().slice(0, 10), to: fin.toISOString().slice(0, 10), label: rangoDelCiclo(inicio, fin) };
+});
 
 app.get('/api/invoices/:id/coverage', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
@@ -2720,7 +2764,7 @@ app.post('/api/invoices/:id/coverage', { preHandler: requireStaff }, async (requ
         const [pack] = await transaction`
           INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
           VALUES (${cliente.id},
-            ${'Mensualidad ' + new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric', timeZone: 'America/Panama' }).format(mediodiaEnPanama(periodo))},
+            ${'Mensualidad · ' + rangoDelCiclo(periodo, vence)},
             ${entry.sessions}, ${entry.amount}, ${vence}::date, 'monthly', current_date, 'active')
           RETURNING id
         `;
