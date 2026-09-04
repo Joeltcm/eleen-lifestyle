@@ -2116,7 +2116,7 @@ app.patch('/api/sessions/:id', { preHandler: requireStaff }, async (request, rep
   return updated;
 });
 
-const packagePauseSchema = z.object({ packageId: z.string().uuid().optional(), recurrenceId: z.string().uuid().optional(), reason: z.string().trim().max(300).optional() });
+const packagePauseSchema = z.object({ packageId: z.string().uuid().optional(), recurrenceId: z.string().uuid().optional(), startsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), endsOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), reason: z.string().trim().max(300).optional() });
 app.post('/api/clients/:id/package-pause', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const clientId = z.string().uuid().parse((request.params as { id: string }).id);
@@ -2126,6 +2126,10 @@ app.post('/api/clients/:id/package-pause', { preHandler: requireStaff }, async (
     if (!client) return { error: 'Cliente no encontrado', code: 404 };
     const [activePause] = await transaction`SELECT id FROM client_package_pauses WHERE client_id = ${clientId} AND status = 'active' LIMIT 1`;
     if (activePause) return { error: 'El paquete ya está en pausa', code: 409 };
+    const startsOn = input.startsOn || new Date().toISOString().slice(0, 10);
+    const todayPanama = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Panama' }).format(new Date());
+    if (startsOn > todayPanama) return { error: 'La fecha inicial de la pausa no puede ser futura', code: 400 };
+    if (input.endsOn && input.endsOn < startsOn) return { error: 'La fecha fin no puede ser anterior al inicio de la pausa', code: 400 };
     const [pack] = await transaction`SELECT id, total_sessions, used_sessions, expires_on FROM session_packages
       WHERE client_id = ${clientId} AND status = 'active' AND used_sessions < total_sessions
         AND (${input.packageId || null}::uuid IS NULL OR id = ${input.packageId || null})
@@ -2134,8 +2138,8 @@ app.post('/api/clients/:id/package-pause', { preHandler: requireStaff }, async (
     const [recurrence] = input.recurrenceId
       ? await transaction`SELECT id FROM session_recurrences WHERE id = ${input.recurrenceId} AND client_id = ${clientId} AND active FOR UPDATE`
       : await transaction`SELECT id FROM session_recurrences WHERE client_id = ${clientId} AND active ORDER BY created_at DESC LIMIT 1 FOR UPDATE`;
-    const [pause] = await transaction`INSERT INTO client_package_pauses (client_id, package_id, recurrence_id, carried_sessions, reason, created_by)
-      VALUES (${clientId}, ${pack.id}, ${recurrence?.id || null}, ${Number(pack.total_sessions) - Number(pack.used_sessions)}, ${input.reason || null}, ${auth.sub}) RETURNING *`;
+    const [pause] = await transaction`INSERT INTO client_package_pauses (client_id, package_id, recurrence_id, starts_on, ends_on, carried_sessions, reason, created_by)
+      VALUES (${clientId}, ${pack.id}, ${recurrence?.id || null}, ${startsOn}::date, ${input.endsOn || null}::date, ${Number(pack.total_sessions) - Number(pack.used_sessions)}, ${input.reason || null}, ${auth.sub}) RETURNING *`;
     await transaction`UPDATE clients SET status = 'paused', updated_at = now() WHERE id = ${clientId}`;
     await transaction`UPDATE memberships SET status = 'paused' WHERE client_id = ${clientId} AND status = 'active'`;
     await transaction`UPDATE sessions SET paused_hold = true, updated_at = now()
@@ -3611,7 +3615,7 @@ app.post('/api/push/subscriptions', { preHandler: requireAuth }, async (request,
 app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const [preference] = await sql`SELECT * FROM notification_preferences WHERE user_id = ${auth.sub}`;
-  const sessionHours = Number(preference?.session_reminder_hours || 24); const paymentDays = Number(preference?.payment_reminder_days || 3);
+  const sessionHours = Number(preference?.session_reminder_hours || 1); const paymentDays = Number(preference?.payment_reminder_days || 3);
   if (auth.role === 'client') {
     const [client] = await sql`SELECT * FROM clients WHERE portal_user_id = ${auth.sub}`;
     if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
@@ -3659,7 +3663,7 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
 
 type ReminderCandidate = {
   user_id: string;
-  kind: 'session' | 'payment' | 'pending';
+  kind: 'session' | 'payment' | 'pending' | 'pause';
   reference_id: string;
   role: AuthUser['role'];
   full_name: string;
@@ -3667,6 +3671,7 @@ type ReminderCandidate = {
   due_on?: string;
   amount?: number | string;
   concept?: string;
+  ends_on?: string;
 };
 
 // Enviar una notificación de prueba al propio usuario. Existe porque hasta
@@ -3715,7 +3720,7 @@ async function sendPushToUser(userId: string, payload: { title: string; body: st
 
 async function dispatchReminders() {
   if (!webPushReady) return;
-  const [sessionRows, paymentRows] = await Promise.all([
+  const [sessionRows, paymentRows, pauseRows] = await Promise.all([
     sql<ReminderCandidate[]>`
       SELECT u.id AS user_id, 'session' AS kind, s.id AS reference_id, u.role, c.full_name, s.starts_at
       FROM notification_preferences np
@@ -3745,6 +3750,20 @@ async function dispatchReminders() {
         AND NOT EXISTS (
           SELECT 1 FROM notification_deliveries nd
           WHERE nd.user_id = u.id AND nd.kind = 'payment' AND nd.reference_id = i.id
+      )
+    `,
+    sql<ReminderCandidate[]>`
+      SELECT u.id AS user_id, 'pause' AS kind, pp.id AS reference_id, u.role, c.full_name, pp.ends_on
+      FROM client_package_pauses pp
+      JOIN clients c ON c.id = pp.client_id
+      JOIN users u ON u.id = c.owner_id AND u.active = true AND u.role IN ('admin', 'trainer')
+      JOIN notification_preferences np ON np.user_id = u.id
+      WHERE pp.status = 'active' AND pp.ends_on = ((now() AT TIME ZONE 'America/Panama')::date + 2)
+        AND np.browser_enabled = true
+        AND EXISTS (SELECT 1 FROM push_subscriptions ps WHERE ps.user_id = u.id AND ps.active = true)
+        AND NOT EXISTS (
+          SELECT 1 FROM notification_deliveries nd
+          WHERE nd.user_id = u.id AND nd.kind = 'pause' AND nd.reference_id = pp.id
         )
     `
   ]);
@@ -3769,7 +3788,7 @@ async function dispatchReminders() {
       )
   `;
 
-  for (const reminder of [...pendingRows, ...sessionRows, ...paymentRows]) {
+  for (const reminder of [...pendingRows, ...sessionRows, ...paymentRows, ...pauseRows]) {
     const [reserved] = await sql`
       INSERT INTO notification_deliveries (user_id, kind, reference_id)
       VALUES (${reminder.user_id}, ${reminder.kind}, ${reminder.reference_id})
@@ -3789,10 +3808,16 @@ async function dispatchReminders() {
           body: `Programada para ${new Date(reminder.starts_at!).toLocaleString('es-PA', { timeZone: 'America/Panama' })}.`,
           url: new URL(isClient ? '/#portal-calendar' : '/#calendar', config.APP_URL).toString()
         }
-      : {
+      : reminder.kind === 'payment'
+      ? {
           title: isClient ? 'Recordatorio de pago' : `Pago de ${reminder.full_name}`,
           body: `${reminder.concept}: $${Number(reminder.amount).toFixed(2)} · vence ${reminder.due_on}.`,
           url: new URL(isClient ? '/#portal-billing' : '/#billing', config.APP_URL).toString()
+        }
+      : {
+          title: `Pausa por finalizar · ${reminder.full_name}`,
+          body: `La pausa del paquete termina el ${reminder.ends_on}. Revisa si debes reactivar su agenda.`,
+          url: new URL('/#clients', config.APP_URL).toString()
         };
     if (!(await sendPushToUser(reminder.user_id, payload))) {
       await sql`DELETE FROM notification_deliveries WHERE user_id = ${reminder.user_id} AND kind = ${reminder.kind} AND reference_id = ${reminder.reference_id}`;
