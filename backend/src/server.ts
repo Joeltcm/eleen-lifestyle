@@ -683,7 +683,11 @@ app.get('/api/clients', { preHandler: requireStaff }, async request => {
         FROM invoices i
         WHERE COALESCE(i.billed_for_client_id, i.client_id) = c.id AND i.status = 'pending'
       ), 0)::numeric(12,2) AS deuda_pendiente
+      ,pp.id AS active_pause_id, pp.starts_on AS pause_started_on, pp.reason AS pause_reason,
+      pp.package_id AS paused_package_id
     FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id
+      LEFT JOIN LATERAL (SELECT id, starts_on, reason, package_id FROM client_package_pauses
+        WHERE client_id = c.id AND status = 'active' LIMIT 1) pp ON true
     WHERE c.owner_id = ${auth.sub} ORDER BY c.full_name
   `;
 });
@@ -1534,6 +1538,7 @@ app.get('/api/availability', { preHandler: requireStaff }, async request => {
       COALESCE(max(((s.starts_at + make_interval(mins => s.duration_minutes)) AT TIME ZONE 'America/Panama')::time), '20:00'::time) AS cierra
     FROM sessions s JOIN clients c ON c.id = s.client_id
     WHERE c.owner_id = ${auth.sub} AND s.status <> 'cancelled'
+      AND NOT EXISTS (SELECT 1 FROM client_package_pauses pp WHERE pp.client_id = c.id AND pp.status = 'active')
       AND s.starts_at >= now() - interval '60 days'
   `;
   // Lo ocupado del rango, con su hora local ya resuelta: comparar instantes en
@@ -1544,6 +1549,7 @@ app.get('/api/availability', { preHandler: requireStaff }, async request => {
       s.duration_minutes, c.full_name
     FROM sessions s JOIN clients c ON c.id = s.client_id
     WHERE c.owner_id = ${auth.sub} AND s.status <> 'cancelled'
+      AND NOT EXISTS (SELECT 1 FROM client_package_pauses pp WHERE pp.client_id = c.id AND pp.status = 'active')
       AND (s.starts_at AT TIME ZONE 'America/Panama')::date BETWEEN ${query.from}::date AND ${query.to}::date
     ORDER BY s.starts_at
   `;
@@ -1901,7 +1907,8 @@ app.get('/api/session-recurrences', { preHandler: requireStaff }, async request 
   const auth = request.user as AuthUser;
   return sql`
     SELECT r.*, c.full_name, rt.title AS routine_title,
-      (SELECT count(*)::int FROM sessions s WHERE s.recurrence_id = r.id AND s.starts_at >= now() AND s.status = 'scheduled') AS proximas
+      (SELECT count(*)::int FROM sessions s WHERE s.recurrence_id = r.id AND s.starts_at >= now() AND s.status = 'scheduled' AND NOT s.paused_hold) AS proximas,
+      EXISTS (SELECT 1 FROM client_package_pauses pp WHERE pp.client_id = r.client_id AND pp.status = 'active') AS paused
     FROM session_recurrences r
     JOIN clients c ON c.id = r.client_id
     LEFT JOIN routines rt ON rt.id = r.routine_id
@@ -2109,6 +2116,103 @@ app.patch('/api/sessions/:id', { preHandler: requireStaff }, async (request, rep
   return updated;
 });
 
+const packagePauseSchema = z.object({ packageId: z.string().uuid().optional(), recurrenceId: z.string().uuid().optional(), reason: z.string().trim().max(300).optional() });
+app.post('/api/clients/:id/package-pause', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const clientId = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = packagePauseSchema.parse(request.body || {});
+  const result = await sql.begin(async transaction => {
+    const [client] = await transaction`SELECT id, status FROM clients WHERE id = ${clientId} AND owner_id = ${auth.sub} FOR UPDATE`;
+    if (!client) return { error: 'Cliente no encontrado', code: 404 };
+    const [activePause] = await transaction`SELECT id FROM client_package_pauses WHERE client_id = ${clientId} AND status = 'active' LIMIT 1`;
+    if (activePause) return { error: 'El paquete ya está en pausa', code: 409 };
+    const [pack] = await transaction`SELECT id, total_sessions, used_sessions, expires_on FROM session_packages
+      WHERE client_id = ${clientId} AND status = 'active' AND used_sessions < total_sessions
+        AND (${input.packageId || null}::uuid IS NULL OR id = ${input.packageId || null})
+      ORDER BY expires_on ASC NULLS LAST, purchased_on DESC LIMIT 1 FOR UPDATE`;
+    if (!pack) return { error: 'No hay un paquete activo con clases pendientes para pausar', code: 409 };
+    const [recurrence] = input.recurrenceId
+      ? await transaction`SELECT id FROM session_recurrences WHERE id = ${input.recurrenceId} AND client_id = ${clientId} AND active FOR UPDATE`
+      : await transaction`SELECT id FROM session_recurrences WHERE client_id = ${clientId} AND active ORDER BY created_at DESC LIMIT 1 FOR UPDATE`;
+    const [pause] = await transaction`INSERT INTO client_package_pauses (client_id, package_id, recurrence_id, carried_sessions, reason, created_by)
+      VALUES (${clientId}, ${pack.id}, ${recurrence?.id || null}, ${Number(pack.total_sessions) - Number(pack.used_sessions)}, ${input.reason || null}, ${auth.sub}) RETURNING *`;
+    await transaction`UPDATE clients SET status = 'paused', updated_at = now() WHERE id = ${clientId}`;
+    await transaction`UPDATE memberships SET status = 'paused' WHERE client_id = ${clientId} AND status = 'active'`;
+    await transaction`UPDATE sessions SET paused_hold = true, updated_at = now()
+      WHERE client_id = ${clientId} AND status = 'scheduled' AND starts_at >= now()`;
+    return { pause, package: pack };
+  });
+  if ('error' in result) return reply.code(result.code || 400).send({ error: result.error });
+  return reply.code(201).send(result);
+});
+
+app.post('/api/client-pauses/:id/resume', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const pauseId = z.string().uuid().parse((request.params as { id: string }).id);
+  const result = await sql.begin(async transaction => {
+    const [pause] = await transaction`SELECT pp.*, c.owner_id FROM client_package_pauses pp JOIN clients c ON c.id = pp.client_id
+      WHERE pp.id = ${pauseId} AND c.owner_id = ${auth.sub} AND pp.status = 'active' FOR UPDATE`;
+    if (!pause) return { error: 'Pausa no encontrada o ya reactivada', code: 404 };
+    const [client] = await transaction`SELECT id FROM clients WHERE id = ${pause.client_id} FOR UPDATE`;
+    const [updatedPause] = await transaction`UPDATE client_package_pauses SET status = 'resumed', resumed_on = current_date,
+      days_frozen = GREATEST(0, current_date - starts_on), resumed_by = ${auth.sub}, resumed_at = now() WHERE id = ${pauseId} RETURNING *`;
+    await transaction`UPDATE clients SET status = 'active', updated_at = now() WHERE id = ${client.id}`;
+    await transaction`UPDATE memberships SET status = 'active' WHERE client_id = ${client.id} AND status = 'paused'`;
+    if (pause.package_id) await transaction`UPDATE session_packages SET expires_on = CASE WHEN expires_on IS NULL THEN NULL ELSE expires_on + GREATEST(0, current_date - ${pause.starts_on}::date) END WHERE id = ${pause.package_id}`;
+    await transaction`UPDATE sessions SET paused_hold = false, updated_at = now() WHERE client_id = ${client.id} AND paused_hold = true AND starts_at >= now()`;
+    return { pause: updatedPause };
+  });
+  if ('error' in result) return reply.code(result.code || 400).send({ error: result.error });
+  await extenderRecurrencias(auth.sub, true);
+  return result;
+});
+
+// Editar una cancelación recalcula el efecto de saldo sin crear descuentos o
+// débitos duplicados. Las compensaciones ya aplicadas quedan protegidas.
+const cancellationEditSchema = z.object({ cancelledBy: z.enum(['client', 'trainer']), rescheduled: z.boolean(), resolution: z.enum(['discount', 'makeup', 'none', 'debit']).optional(), amount: z.coerce.number().positive().optional() });
+app.patch('/api/sessions/:id/cancellation', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = cancellationEditSchema.parse(request.body); const resolution = input.resolution || (input.cancelledBy === 'client' && !input.rescheduled ? 'debit' : 'none');
+  if (input.rescheduled && resolution !== 'none') return reply.code(400).send({ error: 'Una sesión reprogramada no puede descontar ni generar compensación.' });
+  if (input.cancelledBy === 'client' && !input.rescheduled && !['debit', 'none'].includes(resolution)) return reply.code(400).send({ error: 'Para una cancelación del cliente solo se permite descontar la clase o dejarla sin efecto.' });
+  if (input.cancelledBy === 'trainer' && resolution === 'debit') return reply.code(400).send({ error: 'Una cancelación de la entrenadora no puede descontar una clase del cliente.' });
+  const result = await sql.begin(async transaction => {
+    const [session] = await transaction`SELECT s.*, c.owner_id FROM sessions s JOIN clients c ON c.id = s.client_id WHERE s.id = ${id} AND c.owner_id = ${auth.sub} FOR UPDATE`;
+    if (!session || session.status !== 'cancelled') return { error: 'La sesión no está cancelada', code: 409 };
+    if (session.cancellation_makeup_package_id) return { error: 'Esta compensación ya creó un paquete de reposición; edítala manualmente para no duplicar clases.', code: 409 };
+    if (session.package_debited && session.package_id) {
+      await transaction`UPDATE session_packages SET used_sessions = GREATEST(0, used_sessions - 1), status = CASE WHEN GREATEST(0, used_sessions - 1) >= total_sessions THEN 'exhausted' ELSE 'active' END WHERE id = ${session.package_id}`;
+      await transaction`UPDATE sessions SET package_id = NULL, package_debited = false, debited_group_id = NULL WHERE id = ${id}`;
+    }
+    if (session.cancellation_resolution === 'discount') {
+      const [credit] = await transaction`SELECT applied_invoice_id FROM billing_credits WHERE session_id = ${id} ORDER BY created_at DESC LIMIT 1`;
+      if (credit?.applied_invoice_id) return { error: 'El descuento ya fue aplicado a una factura; no se puede revertir automáticamente.', code: 409 };
+      await transaction`DELETE FROM billing_credits WHERE session_id = ${id} AND applied_invoice_id IS NULL`;
+    }
+    if (input.cancelledBy === 'client' && !input.rescheduled && resolution === 'debit') {
+      const [pack] = await transaction`SELECT id, total_sessions, used_sessions FROM session_packages WHERE client_id = ${session.client_id} AND status = 'active' AND used_sessions < total_sessions AND (expires_on IS NULL OR expires_on >= (${session.starts_at}::timestamptz AT TIME ZONE 'America/Panama')::date) ORDER BY expires_on ASC NULLS LAST, purchased_on LIMIT 1 FOR UPDATE`;
+      if (pack) { const used = Number(pack.used_sessions) + 1; await transaction`UPDATE session_packages SET used_sessions = ${used}, status = CASE WHEN ${used} >= total_sessions THEN 'exhausted' ELSE 'active' END WHERE id = ${pack.id}`; await transaction`UPDATE sessions SET package_id = ${pack.id}, package_debited = true, debited_group_id = ${session.client_id} WHERE id = ${id}`; }
+    }
+    if (input.cancelledBy === 'trainer' && resolution === 'discount') {
+      const [client] = await transaction`SELECT c.standard_price, COALESCE(p.sessions_included, c.monthly_session_target, 0)::int AS included FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id WHERE c.id = ${session.client_id}`;
+      const amount = input.amount || (Number(client?.included) ? Number(client.standard_price) / Number(client.included) : 0);
+      if (amount > 0) await transaction`INSERT INTO billing_credits (client_id, session_id, concept, amount) VALUES (${session.client_id}, ${id}, 'Clase cancelada por la entrenadora', ${Math.round(amount * 100) / 100})`;
+    }
+    if (input.cancelledBy === 'trainer' && resolution === 'makeup') {
+      const [existing] = await transaction`SELECT id FROM session_packages WHERE client_id = ${session.client_id} AND kind = 'makeup' AND status = 'active' AND makeup_for_period IS NULL ORDER BY created_at DESC LIMIT 1`;
+      let makeupId = existing?.id;
+      if (makeupId) await transaction`UPDATE session_packages SET total_sessions = total_sessions + 1 WHERE id = ${makeupId}`;
+      else { const [created] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status) VALUES (${session.client_id}, 'Reposición · clases canceladas por la entrenadora', 1, 0, NULL, 'makeup', current_date, 'active') RETURNING id`; makeupId = created.id; }
+      await transaction`UPDATE sessions SET cancellation_makeup_package_id = ${makeupId} WHERE id = ${id}`;
+    }
+    const [updated] = await transaction`UPDATE sessions SET cancellation_kind = ${input.rescheduled ? 'rescheduled' : 'not_rescheduled'}, cancelled_by = ${input.cancelledBy}, cancellation_resolution = ${resolution}, cancellation_edited_at = now(), updated_at = now() WHERE id = ${id} RETURNING *`;
+    await transaction`INSERT INTO session_cancellation_edits (session_id, editor_user_id, previous_cancelled_by, previous_cancellation_kind, previous_resolution, new_cancelled_by, new_cancellation_kind, new_resolution) VALUES (${id}, ${auth.sub}, ${session.cancelled_by || null}, ${session.cancellation_kind || null}, ${session.cancellation_resolution || null}, ${input.cancelledBy}, ${input.rescheduled ? 'rescheduled' : 'not_rescheduled'}, ${resolution})`;
+    return { session: updated };
+  });
+  if ('error' in result) return reply.code(result.code || 400).send({ error: result.error });
+  return result;
+});
+
 // Quitar de la agenda una sesión cancelada. Cancelar no borra: la sesión se
 // queda en el listado marcada como "Cancelada" y sigue sumando en el contador
 // de canceladas del expediente. Para una que se agendó por error —o de prueba—
@@ -2161,10 +2265,11 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
   const compensa = consulta.resolution === 'discount' ? 'discount'
     : consulta.resolution === 'none' ? 'none' : 'makeup';
 
-  const [session] = await sql`
+    const [session] = await sql`
     UPDATE sessions s SET status = 'cancelled',
       cancellation_kind = ${reprogramada ? 'rescheduled' : 'not_rescheduled'},
-      cancelled_by = ${laCancelaEllaSola ? 'trainer' : 'client'}, updated_at = now()
+      cancelled_by = ${laCancelaEllaSola ? 'trainer' : 'client'},
+      cancellation_resolution = ${laCancelaEllaSola ? compensa : (reprogramada ? 'none' : 'debit')}, updated_at = now()
     FROM clients c WHERE s.id = ${id} AND c.id = s.client_id AND c.owner_id = ${auth.sub} AND s.status <> 'cancelled'
     RETURNING s.*
   `;
@@ -2246,11 +2351,14 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
       `;
       if (existente) {
         await sql`UPDATE session_packages SET total_sessions = total_sessions + 1 WHERE id = ${existente.id}`;
+        await sql`UPDATE sessions SET cancellation_makeup_package_id = ${existente.id} WHERE id = ${id}`;
       } else {
-        await sql`
+        const [creado] = await sql`
           INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
           VALUES (${session.client_id}, 'Reposición · clases canceladas por la entrenadora', 1, 0, NULL, 'makeup', current_date, 'active')
+          RETURNING id
         `;
+        await sql`UPDATE sessions SET cancellation_makeup_package_id = ${creado.id} WHERE id = ${id}`;
       }
       compensacion = { tipo: 'makeup', detalle: 'Una clase por reponer, sin fecha límite' };
     }
