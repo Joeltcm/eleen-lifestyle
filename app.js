@@ -1,4 +1,4 @@
-const APP_VERSION = '147';
+const APP_VERSION = '148';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -409,10 +409,16 @@ const calendarPeriodLabel = ({ start, end }) => {
   return `${new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short' }).format(start)} – ${new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short', year: 'numeric' }).format(last)}`;
 };
 const sessionsThisWeek = () => { const start = mondayFor(today); const end = new Date(start); end.setDate(start.getDate() + 7); return data.sessions.filter(session => { const date = new Date(`${session.date}T12:00:00`); return date >= start && date < end; }); };
-const sessionStateLabel = session => session.pausedHold ? 'Reservado (En Pausa)' : session.status === 'completed' ? 'Realizada' : session.status === 'no_show' ? 'No cumplió' : session.status === 'cancelled' ? 'Cancelada' : 'Programada';
+// "En pausa" es del cliente, no de la sesión. La verdad la lleva el estado del
+// cliente —lo mismo que muestra la vista de Clientes—, no la bandera por sesión
+// paused_hold, que puede no haber alcanzado a una sesión suelta. Sólo aplica a
+// sesiones aún por delante: una clase ya dada conserva su "Realizada".
+const sesionEnPausa = session => session.status === 'scheduled'
+  && (session.pausedHold || (data.clients || []).some(c => c.id === session.clientId && c.statusRaw === 'paused'));
+const sessionStateLabel = session => sesionEnPausa(session) ? 'Reservado (En Pausa)' : session.status === 'completed' ? 'Realizada' : session.status === 'no_show' ? 'No cumplió' : session.status === 'cancelled' ? 'Cancelada' : 'Programada';
 // La clase visual: una sesión congelada por pausa manda sobre su status, para
 // que no tome prestado el verde de "programada" en el calendario.
-const estadoSesion = session => session.pausedHold ? 'pausa' : session.status;
+const estadoSesion = session => sesionEnPausa(session) ? 'pausa' : session.status;
 // El resultado se elige, no se deduce de una casilla. Con la casilla, quitar
 // una marca puesta por error dejaba la sesión como incumplida —y le bajaba el
 // cumplimiento al cliente por una clase que ni siquiera había llegado—. Los
@@ -609,7 +615,7 @@ function renderCalendar() {
     grid.innerHTML = names.map((name, index) => {
       const date = addDays(range.start, index); const key = dateKey(date);
       const sessions = visibleSessions.filter(session => session.date === key);
-      return `<button type="button" class="day-col ${key === dateKey(today) ? 'today' : ''} ${key === dateKey(calendarCursor) ? 'selected' : ''}" data-calendar-date="${key}"><span class="day-name">${name}</span><span class="day-num">${date.getDate()}</span>${sessions.map(session => `<span class="session-chip ${estadoSesion(session)} ${sesionAMover === session.id ? 'moviendo' : ''}" data-mover-sesion="${session.id}" draggable="${session.status === 'scheduled' && !session.pausedHold}"><b>${session.time}</b> ${session.pausedHold ? '⏸ ' : ''}${session.client.split(' ')[0]}</span>`).join('')}</button>`;
+      return `<button type="button" class="day-col ${key === dateKey(today) ? 'today' : ''} ${key === dateKey(calendarCursor) ? 'selected' : ''}" data-calendar-date="${key}"><span class="day-name">${name}</span><span class="day-num">${date.getDate()}</span>${sessions.map(session => `<span class="session-chip ${estadoSesion(session)} ${sesionAMover === session.id ? 'moviendo' : ''}" data-mover-sesion="${session.id}" draggable="${session.status === 'scheduled' && !sesionEnPausa(session)}"><b>${session.time}</b> ${sesionEnPausa(session) ? '⏸ ' : ''}${session.client.split(' ')[0]}</span>`).join('')}</button>`;
     }).join('');
     requestAnimationFrame(() => {
       const selected = grid.querySelector('.selected');
@@ -625,7 +631,7 @@ function renderCalendar() {
     grid.innerHTML = `${names.map(name => `<span class="month-weekday">${name}</span>`).join('')}${Array.from({ length: cells }, (_, index) => {
       const date = addDays(gridStart, index); const key = dateKey(date);
       const sessions = data.sessions.filter(session => session.date === key).sort((a, b) => a.time.localeCompare(b.time));
-      return `<button type="button" class="month-day ${date.getMonth() !== calendarCursor.getMonth() ? 'outside' : ''} ${key === dateKey(today) ? 'today' : ''}" data-calendar-date="${key}"><span class="month-day-number">${date.getDate()}</span><span class="month-events">${sessions.slice(0, 2).map(session => `<span class="month-event ${estadoSesion(session)}"><i></i><b>${session.time}</b> ${session.pausedHold ? '⏸ ' : ''}${session.client.split(' ')[0]}</span>`).join('')}${sessions.length > 2 ? `<small>+${sessions.length - 2} más</small>` : ''}</span></button>`;
+      return `<button type="button" class="month-day ${date.getMonth() !== calendarCursor.getMonth() ? 'outside' : ''} ${key === dateKey(today) ? 'today' : ''}" data-calendar-date="${key}"><span class="month-day-number">${date.getDate()}</span><span class="month-events">${sessions.slice(0, 2).map(session => `<span class="month-event ${estadoSesion(session)}"><i></i><b>${session.time}</b> ${sesionEnPausa(session) ? '⏸ ' : ''}${session.client.split(' ')[0]}</span>`).join('')}${sessions.length > 2 ? `<small>+${sessions.length - 2} más</small>` : ''}</span></button>`;
     }).join('')}`;
   }
   // Después de las ramas: cada una reescribe grid.className entero, así que
