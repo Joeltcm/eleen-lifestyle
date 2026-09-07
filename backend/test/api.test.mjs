@@ -465,6 +465,66 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
   });
 });
 
+describe('confirmar una mensualidad abre sola su cobertura', () => {
+  const hoy = new Date().toISOString().slice(0, 10);
+  let planId;
+  before(async () => {
+    const plan = await api.post('/api/plans', { name: 'Mensual autocobertura', billingModel: 'monthly', price: 120, sessionsIncluded: 8 });
+    planId = plan.datos.id;
+  });
+
+  test('al confirmar el pago se abre el saldo mensual con las sesiones del plan, y lo informa', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Paga y entrena', planId, cutoffDay: 15 });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad manual', amount: 120, dueOn: hoy });
+    assert.equal((await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id).length, 0, 'sin pagar no hay saldo');
+
+    const { datos } = await api.post(`/api/invoices/${f.datos.id}/confirm`, { method: 'Efectivo', paidOn: hoy });
+    assert.ok(Array.isArray(datos.coberturaAutomatica) && datos.coberturaAutomatica.length === 1, 'devuelve lo abierto para avisar a la entrenadora');
+    assert.equal(datos.coberturaAutomatica[0].sessions, 8);
+
+    const saldos = (await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly');
+    assert.equal(saldos.length, 1, 'el pago abre el saldo mensual sin un segundo paso');
+    assert.equal(Number(saldos[0].total_sessions), 8);
+  });
+
+  test('no duplica el saldo si la generación ya lo había abierto', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Ya tenía saldo', planId, cutoffDay: new Date(Date.now() + 3 * 24 * 3600_000).getDate() });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad manual', amount: 120, dueOn: hoy });
+    // La generación abre el saldo sin dejar fila en invoice_coverage.
+    await api.post('/api/billing/recurring/generate', {});
+    assert.equal((await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly').length, 1, 'la generación ya lo abrió');
+
+    const { datos } = await api.post(`/api/invoices/${f.datos.id}/confirm`, { method: 'Efectivo', paidOn: hoy });
+    assert.equal(datos.coberturaAutomatica.length, 0, 'no vuelve a abrir lo que ya está abierto');
+    assert.equal((await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly').length, 1, 'sigue habiendo un solo saldo');
+  });
+
+  test('un cobro que no es mensualidad no abre saldo mensual', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Paga por sesiones', billingModel: 'single', standardPrice: 25, cutoffDay: 15 });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Clase suelta', amount: 25, dueOn: hoy });
+    const { datos } = await api.post(`/api/invoices/${f.datos.id}/confirm`, { method: 'Efectivo', paidOn: hoy });
+    assert.equal(datos.coberturaAutomatica.length, 0, 'un cobro que no es mensualidad no dispara la apertura');
+    assert.equal((await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly').length, 0, 'y no crea un saldo mensual');
+  });
+
+  test('confirmar un paquete avisa que se activó, y no reavisa al reconfirmar', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Compra paquete', billingModel: 'package', standardPrice: 200, cutoffDay: 15 });
+    const p = await api.post('/api/packages', { clientId: c.datos.id, totalSessions: 10, amount: 200, kind: 'package' });
+    // El paquete nace dormido: sus sesiones no cuentan hasta confirmar el pago.
+    assert.equal((await api.get('/api/packages')).datos.find(x => x.id === p.datos.id).status, 'pending');
+
+    const primero = await api.post(`/api/invoices/${p.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: hoy });
+    assert.ok(primero.datos.paqueteActivado, 'avisa que el paquete se activó');
+    assert.equal(primero.datos.paqueteActivado.kind, 'package');
+    assert.equal(primero.datos.paqueteActivado.sessions, 10);
+    assert.equal((await api.get('/api/packages')).datos.find(x => x.id === p.datos.id).status, 'active', 'y de verdad queda activo');
+
+    // Editar el pago ya registrado no vuelve a "activar" ni a avisar.
+    const otra = await api.patch(`/api/invoices/${p.datos.invoice_id}/payment`, { method: 'Yappy', paidOn: hoy });
+    assert.equal(otra.datos.paqueteActivado, null, 'no reavisa sobre un paquete que ya estaba activo');
+  });
+});
+
 describe('editar una sesión de un horario indefinido', () => {
   let clientId, otro, sesion;
   before(async () => {

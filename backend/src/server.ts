@@ -2944,6 +2944,65 @@ const coverageSchema = z.object({
   })).min(1)
 });
 
+// Abre el saldo mensual de cada entrada y anota la cobertura del cobro. Lo
+// comparten el botón "Aplicar a mensualidades" y la apertura automática al
+// confirmar el pago de una mensualidad, para que los dos abran el saldo con la
+// misma regla y no se separen con el tiempo.
+async function abrirCobertura(
+  transaction: TransactionSql,
+  ownerId: string,
+  invoice: { id: string; client_id: string; coverage_start: string | Date | null },
+  periodo: string,
+  entries: { clientId: string; amount: number; sessions: number }[]
+): Promise<{ abiertos: { clientId: string; fullName: string; sessions: number; packageId: string | null }[] } | { error: string; code: number }> {
+  const abiertos: { clientId: string; fullName: string; sessions: number; packageId: string | null }[] = [];
+  for (const entry of entries) {
+    const [cliente] = await transaction`
+      SELECT c.id, c.full_name, c.billing_cutoff_day
+      FROM clients c
+      WHERE c.id = ${entry.clientId} AND c.owner_id = ${ownerId}
+        AND (c.id = ${invoice.client_id} OR c.billing_responsible_client_id = ${invoice.client_id})
+    `;
+    // Sólo el titular del cobro y su gente: cubrir a un tercero desde aquí
+    // sería mover dinero de un expediente a otro sin dejar rastro.
+    if (!cliente) return { error: 'Esa persona no depende de quien paga este cobro', code: 400 };
+
+    let packageId: string | null = null;
+    if (entry.sessions > 0) {
+      // La referencia contable sigue siendo el mes elegido, pero la vigencia
+      // nace en la fecha real del pago. Así un pago del 28/08 con corte 28
+      // vence el 28/09, no el 01/10.
+      const inicioCobertura = invoice.coverage_start || periodo;
+      const vence = corteSiguiente(mediodiaEnPanama(inicioCobertura), Number(cliente.billing_cutoff_day) || 1).toISOString().slice(0, 10);
+      const [pack] = await transaction`
+        INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
+        VALUES (${cliente.id},
+          ${'Mensualidad · ' + rangoDelCiclo(inicioCobertura, vence)},
+          ${entry.sessions}, ${entry.amount}, ${vence}::date, 'monthly', ${String(inicioCobertura).slice(0, 10)}::date, 'active')
+        RETURNING id
+      `;
+      packageId = pack.id;
+      await cobrarClasesYaDadas(transaction, pack.id, cliente.id, vence, entry.sessions);
+    }
+    // El índice único de (cliente, período) es lo que hace inofensivo pulsar
+    // dos veces: la segunda no abre otro saldo, la deja como estaba.
+    const [cov] = await transaction`
+      INSERT INTO invoice_coverage (invoice_id, client_id, package_id, amount, billing_period)
+      VALUES (${invoice.id}, ${cliente.id}, ${packageId}, ${entry.amount}, ${periodo}::date)
+      ON CONFLICT (client_id, billing_period) DO NOTHING
+      RETURNING id
+    `;
+    if (!cov) {
+      // Ya estaba cubierta. El saldo que se acaba de abrir sobra y se deshace:
+      // dejarlo suelto le regalaría las clases por partida doble.
+      if (packageId) await transaction`DELETE FROM session_packages WHERE id = ${packageId}`;
+      continue;
+    }
+    abiertos.push({ clientId: cliente.id, fullName: cliente.full_name as string, sessions: entry.sessions, packageId });
+  }
+  return { abiertos };
+}
+
 app.post('/api/invoices/:id/coverage', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
@@ -2959,54 +3018,8 @@ app.post('/api/invoices/:id/coverage', { preHandler: requireStaff }, async (requ
   // la generación, y un día suelto la haría fallar por un día de diferencia.
   const periodo = input.billingPeriod.slice(0, 8) + '01';
 
-  const resultado = await sql.begin(async transaction => {
-    const abiertos = [];
-    for (const entry of input.entries) {
-      const [cliente] = await transaction`
-        SELECT c.id, c.full_name, c.billing_cutoff_day
-        FROM clients c
-        WHERE c.id = ${entry.clientId} AND c.owner_id = ${auth.sub}
-          AND (c.id = ${invoice.client_id} OR c.billing_responsible_client_id = ${invoice.client_id})
-      `;
-      // Sólo el titular del cobro y su gente: cubrir a un tercero desde aquí
-      // sería mover dinero de un expediente a otro sin dejar rastro.
-      if (!cliente) return { error: 'Esa persona no depende de quien paga este cobro', code: 400 };
-
-      let packageId: string | null = null;
-      if (entry.sessions > 0) {
-        // La referencia contable sigue siendo el mes elegido, pero la vigencia
-        // nace en la fecha real del pago. Así un pago del 28/08 con corte 28
-        // vence el 28/09, no el 01/10.
-        const inicioCobertura = invoice.coverage_start || periodo;
-        const vence = corteSiguiente(mediodiaEnPanama(inicioCobertura), Number(cliente.billing_cutoff_day) || 1).toISOString().slice(0, 10);
-        const [pack] = await transaction`
-          INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
-          VALUES (${cliente.id},
-            ${'Mensualidad · ' + rangoDelCiclo(inicioCobertura, vence)},
-            ${entry.sessions}, ${entry.amount}, ${vence}::date, 'monthly', ${String(inicioCobertura).slice(0, 10)}::date, 'active')
-          RETURNING id
-        `;
-        packageId = pack.id;
-        await cobrarClasesYaDadas(transaction, pack.id, cliente.id, vence, entry.sessions);
-      }
-      // El índice único de (cliente, período) es lo que hace inofensivo pulsar
-      // dos veces: la segunda no abre otro saldo, actualiza el mismo.
-      const [cov] = await transaction`
-        INSERT INTO invoice_coverage (invoice_id, client_id, package_id, amount, billing_period)
-        VALUES (${id}, ${cliente.id}, ${packageId}, ${entry.amount}, ${periodo}::date)
-        ON CONFLICT (client_id, billing_period) DO NOTHING
-        RETURNING id
-      `;
-      if (!cov) {
-        // Ya estaba cubierta. El saldo que se acaba de abrir sobra y se
-        // deshace: dejarlo suelto le regalaría las clases por partida doble.
-        if (packageId) await transaction`DELETE FROM session_packages WHERE id = ${packageId}`;
-        continue;
-      }
-      abiertos.push({ clientId: cliente.id, fullName: cliente.full_name, sessions: entry.sessions, packageId });
-    }
-    return { abiertos };
-  });
+  const resultado = await sql.begin(async transaction =>
+    abrirCobertura(transaction, auth.sub, { id: invoice.id, client_id: invoice.client_id, coverage_start: invoice.coverage_start }, periodo, input.entries));
   if ('error' in resultado) return reply.code(resultado.code || 400).send({ error: resultado.error });
   return reply.code(201).send({ applied: resultado.abiertos, ...(await coberturaDeCobro(auth.sub, id)) });
 });
@@ -3113,6 +3126,16 @@ app.delete('/api/invoices/:id/permanent', { preHandler: requireStaff }, async (r
 const paymentSchema = z.object({ method: z.enum(['Efectivo', 'Yappy', 'Transferencia bancaria', 'Tarjeta', 'Otro']), reference: z.string().max(160).optional(), paidOn: z.string().date() });
 async function saveNativeInvoicePayment(ownerId: string, id: string, input: z.infer<typeof paymentSchema>) {
   return sql.begin(async transaction => {
+    // El estado antes de cobrar: la apertura automática del saldo mensual sólo
+    // corre cuando el cobro pasa de pendiente a pagado, no al editar un pago
+    // que ya estaba registrado (ahí ella ya pudo haber ajustado la cobertura).
+    const [previo] = await transaction`
+      SELECT i.status, i.package_id, i.billing_period, i.due_on, c.billing_model
+      FROM invoices i JOIN clients c ON c.id = i.client_id
+      WHERE i.id = ${id} AND c.owner_id = ${ownerId} AND i.source_system IS DISTINCT FROM 'zoho_invoice'
+      FOR UPDATE OF i
+    `;
+    if (!previo) return null;
     const [invoice] = await transaction`
       UPDATE invoices i SET status = 'confirmed', payment_method = ${input.method}, payment_reference = ${input.reference || null},
         confirmed_at = ${`${input.paidOn}T12:00:00-05:00`}, balance = 0
@@ -3128,15 +3151,59 @@ async function saveNativeInvoicePayment(ownerId: string, id: string, input: z.in
       RETURNING *
     `;
     await transaction`INSERT INTO payment_allocations (payment_id, invoice_id, amount) VALUES (${payment.id}, ${invoice.id}, ${invoice.amount}) ON CONFLICT (payment_id, invoice_id) DO UPDATE SET amount = EXCLUDED.amount`;
-    if (invoice.package_id) await transaction`UPDATE session_packages SET status = 'active' WHERE id = ${invoice.package_id} AND status = 'pending'`;
-    return { invoice, payment };
+    // Un paquete ligado nace dormido y el pago lo despierta. Se devuelve lo que
+    // de verdad se activó —sólo si estaba pendiente, no al reconfirmar— para
+    // avisar a la entrenadora de que sus sesiones ya están disponibles.
+    let paqueteActivado: { kind: string; sessions: number } | null = null;
+    if (invoice.package_id) {
+      const [activado] = await transaction`
+        UPDATE session_packages SET status = 'active' WHERE id = ${invoice.package_id} AND status = 'pending'
+        RETURNING kind, total_sessions`;
+      if (activado) paqueteActivado = { kind: activado.kind as string, sessions: Number(activado.total_sessions) };
+    }
+
+    // Confirmar el pago de una mensualidad abre solo el saldo del ciclo, para
+    // el titular y su gente, con las sesiones del plan de cada uno: el paso que
+    // antes había que dar aparte en "Aplicar a mensualidades". Sólo mensualidad
+    // (cliente mensual y cobro sin paquete por sesiones ligado). Idempotente por
+    // el índice (cliente, período), así que no duplica lo ya cubierto. Se
+    // devuelve lo abierto para avisar a la entrenadora, que puede ajustarlo.
+    let coberturaAutomatica: { clientId: string; fullName: string; sessions: number; packageId: string | null }[] = [];
+    if (previo.status === 'pending' && previo.billing_model === 'monthly' && !previo.package_id) {
+      const periodo = String(mesCubiertoPorDefecto(previo.billing_period || previo.due_on)).slice(0, 8) + '01';
+      const candidatos = await transaction`
+        SELECT c.id,
+          COALESCE(p.price, c.standard_price, 0) AS suggested_amount,
+          COALESCE(p.sessions_included, c.monthly_session_target, 0)::integer AS suggested_sessions
+        FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id
+        WHERE c.owner_id = ${ownerId}
+          AND (c.id = ${invoice.client_id} OR c.billing_responsible_client_id = ${invoice.client_id})
+          -- Ni a quien ya tiene el saldo del ciclo: la generación recurrente
+          -- abre el saldo mensual sin dejar fila en invoice_coverage, así que
+          -- el índice (cliente, período) no lo frenaría y saldría doble. Se
+          -- usa el mismo guard que la generación: un paquete mensual vigente.
+          AND NOT EXISTS (
+            SELECT 1 FROM session_packages sp
+            WHERE sp.client_id = c.id AND sp.kind = 'monthly' AND sp.status = 'active'
+              AND sp.expires_on IS NOT NULL AND sp.expires_on >= ${input.paidOn}::date
+          )
+      `;
+      const entries = candidatos
+        .filter(fila => Number(fila.suggested_sessions) > 0)
+        .map(fila => ({ clientId: fila.id as string, amount: Number(fila.suggested_amount), sessions: Number(fila.suggested_sessions) }));
+      if (entries.length) {
+        const res = await abrirCobertura(transaction, ownerId, { id: invoice.id, client_id: invoice.client_id, coverage_start: input.paidOn }, periodo, entries);
+        if (!('error' in res)) coberturaAutomatica = res.abiertos;
+      }
+    }
+    return { invoice, payment, coberturaAutomatica, paqueteActivado };
   });
 }
 app.post('/api/invoices/:id/confirm', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = paymentSchema.parse(request.body);
   const result = await saveNativeInvoicePayment(auth.sub, id, input);
   if (!result) return reply.code(404).send({ error: 'Cobro local no encontrado' });
-  return result.invoice;
+  return { ...result.invoice, coberturaAutomatica: result.coberturaAutomatica, paqueteActivado: result.paqueteActivado };
 });
 app.patch('/api/invoices/:id/payment', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = paymentSchema.parse(request.body);

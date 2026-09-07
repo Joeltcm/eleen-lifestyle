@@ -1,4 +1,4 @@
-const APP_VERSION = '151';
+const APP_VERSION = '152';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2739,8 +2739,24 @@ function confirmInvoice(id, editing = false) {
     if (!confirmarGuardado(`${editing ? 'Cambiar el pago' : 'Marcar como pagado'}\n${form.get('method')} · ${form.get('paidOn')}`)) return;
     try {
       event.target.classList.add('loading-state');
-      await api(`/api/invoices/${id}${editing ? '/payment' : '/confirm'}`, { method: editing ? 'PATCH' : 'POST', body: { method: form.get('method'), reference: form.get('reference') || undefined, paidOn: form.get('paidOn') } });
-      await loadData(); renderAll(); modal.close(); navigate('billing'); toast('Pago confirmado');
+      const respuesta = await api(`/api/invoices/${id}${editing ? '/payment' : '/confirm'}`, { method: editing ? 'PATCH' : 'POST', body: { method: form.get('method'), reference: form.get('reference') || undefined, paidOn: form.get('paidOn') } });
+      const coberturaAbierta = respuesta?.coberturaAutomatica || [];
+      const paqueteActivado = respuesta?.paqueteActivado || null;
+      await loadData(); renderAll(); modal.close(); navigate('billing');
+      if (coberturaAbierta.length) {
+        // Se abrió sola la mensualidad: se le dice a quién y con cuántas
+        // sesiones, y se abre la pantalla de cobertura para que revise y
+        // ajuste o quite si algo no cuadra.
+        const detalle = coberturaAbierta.map(c => `${c.fullName}${c.sessions ? ` (${c.sessions})` : ''}`).join(', ');
+        toast(`Pago confirmado · saldo mensual abierto para ${detalle}. Revisa o ajusta abajo.`);
+        applyInvoiceCoverage(id);
+      } else if (paqueteActivado && paqueteActivado.sessions) {
+        // El paquete ligado ya estaba y el pago lo despertó: se avisa que sus
+        // sesiones quedaron disponibles.
+        toast(`Pago confirmado · ${paqueteActivado.kind === 'monthly' ? 'mensualidad activada' : `paquete de ${paqueteActivado.sessions} sesiones activado`}${paqueteActivado.kind === 'monthly' ? ` (${paqueteActivado.sessions} sesiones)` : ''}.`);
+      } else {
+        toast('Pago confirmado');
+      }
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
