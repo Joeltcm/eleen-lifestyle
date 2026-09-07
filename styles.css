@@ -418,3 +418,12 @@ details.session-row .google-session-state{display:block;padding-top:10px}
    pero el cobro no está saldado y eso se dice donde se mira. */
 .portal-metrics article.con-aviso{border-color:#e6d2c1}
 .portal-metrics .aviso-pago{display:block;margin-top:7px;padding-top:7px;border-top:1px solid var(--line);color:#8a6652;font-weight:600}
+
+/* Cliente en pausa: la sesión sigue reservada pero congelada. Neutro cálido
+   con una trama tenue que dice "en espera", distinto del verde de programada
+   y del rojo de cancelada. Un solo color en toda la app vía estadoSesion(). */
+.session-chip.pausa{background:#efece5;color:#6f6857;border-left:0;background-image:repeating-linear-gradient(135deg,transparent 0 5px,#0000000a 5px 10px)}
+.month-event.pausa{background:#e9e5db;color:#6f6857}
+.month-event.pausa i{background:#b0a389}
+.session-state.pausa{background:#ece6da;color:#7a6c50}
+.day-session.pausa{background:#f6f3ec;border-left-color:#c4b79b}
