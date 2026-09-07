@@ -1,4 +1,4 @@
-const APP_VERSION = '149';
+const APP_VERSION = '150';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -449,7 +449,7 @@ function renderDashboard() {
   }).join('') : '<p class="empty">Aún no hay evaluaciones InBody.</p>';
   const todaySessions = data.sessions.filter(session => session.date === dateKey(today)).sort((a, b) => a.time.localeCompare(b.time));
   document.getElementById('today-sessions').innerHTML = todaySessions.length ? todaySessions.map(session => `<div class="agenda-item"><span class="agenda-time">${session.time}</span><div><b>${escapeHtml(session.client)}</b><span>${escapeHtml(session.routine)} · ${escapeHtml(session.mode.toLowerCase())}</span></div><span class="session-state ${estadoSesion(session)}">${sessionStateLabel(session)}</span></div>`).join('') : '<p class="empty">No hay sesiones para hoy.</p>';
-  const noInbody = data.clients.filter(client => !client.inbody).map(client => `<div class="alert-item"><b>${escapeHtml(client.name)}</b><span>Sin evaluación InBody registrada.</span></div>`).join('');
+  const noInbody = data.clients.filter(client => !client.inbody && client.statusRaw === 'active').map(client => `<div class="alert-item"><b>${escapeHtml(client.name)}</b><span>Sin evaluación InBody registrada.</span></div>`).join('');
   document.getElementById('alerts').innerHTML = `${noInbody || '<div class="alert-item"><b>Todo al día</b><span>No hay alertas de seguimiento.</span></div>'}<div class="alert-item"><b>${data.invoices.filter(item => item.status === 'pending').length} cobro pendiente</b><span>Revisa pagos y comprobantes.</span></div>`;
   document.getElementById('compliance-list').innerHTML = data.compliance.clients.length ? data.compliance.clients.map(client => `<div class="compliance-row"><span class="initials">${escapeHtml(initials(client.name))}</span><div><b>${escapeHtml(client.name)}</b><small>${client.completed} de ${client.activities} actividades con avance${client.late ? ` · ${client.late} fuera de fecha` : ''}${client.missed ? ` · ${client.missed} sin hacer` : ''}${avanceDelMes(client.clientId)}</small><span class="compliance-track"><i style="width:${client.compliancePercent}%"></i></span></div><strong>${client.compliancePercent}%</strong></div>`).join('') : '<p class="empty">Aún no hay entrenamientos vencidos en este período.</p>';
   const notificationCount = document.getElementById('notification-count'); notificationCount.textContent = data.notifications.length; notificationCount.hidden = !data.notifications.length;
