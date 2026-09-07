@@ -1,4 +1,4 @@
-const APP_VERSION = '148';
+const APP_VERSION = '149';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -683,7 +683,7 @@ function renderCalendar() {
         </summary>
         ${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}
         ${session.status === 'cancelled'
-          ? `<div class="session-management"><button type="button" class="secondary" data-edit-cancellation="${session.id}">Editar cancelación</button><button type="button" class="secondary" data-purge-session="${session.id}">Quitar de la agenda</button></div>`
+          ? `<div class="session-management"><button type="button" class="secondary" data-reactivar-sesion="${session.id}">Reactivar</button><button type="button" class="secondary" data-edit-cancellation="${session.id}">Editar cancelación</button><button type="button" class="secondary" data-purge-session="${session.id}">Quitar de la agenda</button></div>`
           : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button><button type="button" class="secondary" data-cancel-session="${session.id}">Cancelar</button><button type="button" class="secondary" data-purge-session="${session.id}">Eliminar</button>${sessionComplianceForm(session)}</div>`}
       </details>`).join('')
     : '<p class="empty">No hay clases este día.</p>';
@@ -3465,6 +3465,18 @@ document.addEventListener('click', event => {
   if (event.target.dataset.editInvoice) editInvoice(event.target.dataset.editInvoice);
   if (event.target.dataset.applyCoverage) applyInvoiceCoverage(event.target.dataset.applyCoverage);
   if (event.target.dataset.colocarReposicion) colocarReposicion(data.clients.find(c => c.id === event.target.dataset.colocarReposicion));
+  if (event.target.dataset.reactivarSesion) {
+    const sesion = data.sessions.find(item => item.id === event.target.dataset.reactivarSesion);
+    const reprogramada = sesion?.cancellationKind === 'rescheduled';
+    const aviso = reprogramada
+      ? `Esta cancelación de ${sesion?.client} está marcada como reprogramada.\n\nReactivarla podría dejar dos clases si ya creaste la de reemplazo. Si no la creaste, primero edita la cancelación a «No, perdió la clase».`
+      : `¿Reactivar la clase de ${sesion?.client} del ${sesion?.date} a las ${sesion?.time}?\n\nVuelve a estar programada y se deshace la cancelación: se devuelve la clase al paquete o se retira el crédito pendiente.`;
+    if (confirm(aviso)) {
+      api(`/api/sessions/${event.target.dataset.reactivarSesion}/reactivate`, { method: 'POST' })
+        .then(async () => { await loadData(); renderAll(); toast('Clase reactivada'); })
+        .catch(error => toast(error.message, true));
+    }
+  }
   if (event.target.dataset.purgeSession) {
     const sesion = data.sessions.find(item => item.id === event.target.dataset.purgeSession);
     const cancelada = sesion?.status === 'cancelled';

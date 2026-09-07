@@ -2221,6 +2221,61 @@ app.patch('/api/sessions/:id/cancellation', { preHandler: requireStaff }, async 
   return result;
 });
 
+// Reactivar una sesión cancelada por equivocación: la devuelve a 'programada' y
+// deshace lo que la cancelación había hecho —el descuento del paquete, el
+// crédito pendiente o la clase de reposición—. Sin esto, la única salida a un
+// clic mal dado era borrarla y volver a agendarla a mano, que no repone el
+// consumo del saldo.
+//
+// No se toca una cancelación marcada como reprogramada: si ya se creó la clase
+// de reemplazo, reactivar ésta dejaría dos, y desde aquí no hay forma de saber
+// si esa otra existe. En ese caso primero se edita la cancelación a "no se
+// reprograma" y luego se reactiva, que es una decisión que toma la persona.
+app.post('/api/sessions/:id/reactivate', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const result = await sql.begin(async transaction => {
+    const [session] = await transaction`SELECT s.* FROM sessions s JOIN clients c ON c.id = s.client_id WHERE s.id = ${id} AND c.owner_id = ${auth.sub} FOR UPDATE`;
+    if (!session || session.status !== 'cancelled') return { error: 'La sesión no está cancelada', code: 409 };
+    if (session.cancellation_kind === 'rescheduled') return { error: 'Esta cancelación está marcada como reprogramada; reactivarla podría dejar dos clases. Si no llegaste a crear la clase de reemplazo, edítala primero a «No, perdió la clase» y luego reactívala.', code: 409 };
+    // Devolver la clase que se había descontado del saldo.
+    if (session.package_debited && session.package_id) {
+      await transaction`UPDATE session_packages SET used_sessions = GREATEST(0, used_sessions - 1), status = CASE WHEN GREATEST(0, used_sessions - 1) >= total_sessions THEN 'exhausted' ELSE 'active' END WHERE id = ${session.package_id}`;
+    }
+    // Quitar el crédito pendiente, salvo que ya se aplicara a una factura: eso
+    // ya movió un cobro y no se puede deshacer solo desde aquí.
+    if (session.cancellation_resolution === 'discount') {
+      const [credit] = await transaction`SELECT applied_invoice_id FROM billing_credits WHERE session_id = ${id} ORDER BY created_at DESC LIMIT 1`;
+      if (credit?.applied_invoice_id) return { error: 'El descuento de esta cancelación ya se aplicó a una factura; no se puede reactivar automáticamente.', code: 409 };
+      await transaction`DELETE FROM billing_credits WHERE session_id = ${id} AND applied_invoice_id IS NULL`;
+    }
+    // Deshacer la clase de reposición. Si ya se usó, quitarla descuadraría el
+    // saldo: se avisa y no se reactiva.
+    if (session.cancellation_makeup_package_id) {
+      const [makeup] = await transaction`SELECT id, total_sessions, used_sessions FROM session_packages WHERE id = ${session.cancellation_makeup_package_id} FOR UPDATE`;
+      if (makeup) {
+        if (Number(makeup.used_sessions) >= Number(makeup.total_sessions)) return { error: 'La clase de reposición que generó esta cancelación ya se usó; edítala manualmente para no descuadrar el saldo.', code: 409 };
+        if (Number(makeup.total_sessions) <= 1 && Number(makeup.used_sessions) === 0) await transaction`DELETE FROM session_packages WHERE id = ${makeup.id}`;
+        else await transaction`UPDATE session_packages SET total_sessions = GREATEST(0, total_sessions - 1), status = 'active' WHERE id = ${makeup.id}`;
+      }
+    }
+    // Si quedó una reprogramación pendiente anotada, se retira con la cancelación.
+    await transaction`DELETE FROM session_reschedules WHERE session_id = ${id} AND origin = 'cancelled'`;
+    const [updated] = await transaction`
+      UPDATE sessions SET status = 'scheduled', cancellation_kind = NULL, cancelled_by = NULL,
+        cancellation_resolution = NULL, cancellation_makeup_package_id = NULL, cancellation_edited_at = NULL,
+        package_id = NULL, package_debited = false, debited_group_id = NULL, updated_at = now()
+      WHERE id = ${id} RETURNING *`;
+    return { session: updated };
+  });
+  if ('error' in result) return reply.code(result.code || 400).send({ error: result.error });
+  // El evento en Google no se borró al cancelar, sólo se repintó de rojo como
+  // "CANCELADA": esto lo devuelve a su forma normal reusando el mismo evento.
+  try { await syncSessionToGoogle(auth.sub, id); }
+  catch (error) { app.log.warn({ err: error, sessionId: id }, 'Session reactivated but Google Calendar sync failed'); }
+  return { reactivated: true, session: result.session };
+});
+
 // Quitar de la agenda una sesión cancelada. Cancelar no borra: la sesión se
 // queda en el listado marcada como "Cancelada" y sigue sumando en el contador
 // de canceladas del expediente. Para una que se agendó por error —o de prueba—

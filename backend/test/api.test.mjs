@@ -555,6 +555,56 @@ describe('el resultado de una sesión se dice, no se deduce', () => {
   });
 });
 
+describe('una clase cancelada por equivocación se puede reactivar', () => {
+  let clientId, packageId;
+  before(async () => {
+    const plan = await api.post('/api/plans', { name: 'Mensual para reactivar', billingModel: 'monthly', price: 120, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Cancelé sin querer', planId: plan.datos.id, cutoffDay: 1 });
+    clientId = c.datos.id;
+    const p = await api.post('/api/packages', { clientId, totalSessions: 8, amount: 120, kind: 'monthly' });
+    packageId = p.datos.id;
+    await api.post(`/api/invoices/${p.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-01' });
+  });
+
+  const nuevaClase = async () => {
+    const manana = new Date(Date.now() + 24 * 3600_000).toISOString();
+    const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [manana], durationMinutes: 60, mode: 'Presencial' });
+    return lote.datos.sesiones[0];
+  };
+  const saldoUsado = async () => Number((await api.get('/api/packages')).datos.find(p => p.id === packageId).used_sessions);
+
+  test('reactivar la devuelve a programada y le regresa la clase al saldo', async () => {
+    const sesion = await nuevaClase();
+    // El cliente cancela sin reprogramar: la clase se descuenta del paquete.
+    await api.delete(`/api/sessions/${sesion.id}?rescheduled=false`);
+    assert.equal(await saldoUsado(), 1, 'cancelar sin reprogramar descuenta la clase');
+
+    const { estado, datos } = await api.post(`/api/sessions/${sesion.id}/reactivate`);
+    assert.equal(estado, 200);
+    assert.equal(datos.session.status, 'scheduled', 'vuelve a estar programada');
+    assert.equal(await saldoUsado(), 0, 'y le devuelve la clase al saldo');
+
+    const enAgenda = (await api.get('/api/sessions')).datos.find(x => x.id === sesion.id);
+    assert.equal(enAgenda.cancellation_resolution, null, 'no quedan rastros de la cancelación');
+    assert.equal(enAgenda.package_debited, false);
+  });
+
+  test('sólo se reactiva una sesión cancelada', async () => {
+    const sesion = await nuevaClase();
+    const { estado } = await api.post(`/api/sessions/${sesion.id}/reactivate`);
+    assert.equal(estado, 409, 'una clase que sigue en pie no se reactiva');
+  });
+
+  test('una cancelación marcada como reprogramada no se reactiva de un clic', async () => {
+    const sesion = await nuevaClase();
+    await api.delete(`/api/sessions/${sesion.id}?rescheduled=true`);
+    const { estado } = await api.post(`/api/sessions/${sesion.id}/reactivate`);
+    assert.equal(estado, 409, 'reactivar una reprogramada podría dejar dos clases');
+    const sigue = (await api.get('/api/sessions')).datos.find(x => x.id === sesion.id);
+    assert.equal(sigue.status, 'cancelled', 'se queda cancelada hasta que se edite a mano');
+  });
+});
+
 describe('rellenar los días que le falten a un horario fijo', () => {
   test('vuelve a poner el día que se borró a mano', async () => {
     const c = await api.post('/api/clients', { fullName: 'Horario con hueco', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });

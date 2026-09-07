@@ -425,6 +425,12 @@ details.session-row .google-session-state{display:block;padding-top:10px}
 .session-chip.pausa{background:#efece5;color:#6f6857;border-left:0;background-image:repeating-linear-gradient(135deg,transparent 0 5px,#0000000a 5px 10px)}
 .month-event.pausa{background:#e9e5db;color:#6f6857}
 .month-event.pausa i{background:#b0a389}
+.session-chip.cancelled{background:#f6e2dd;color:#a3503d;text-decoration:line-through;opacity:.9}
+.session-state.cancelled{background:#f6e0da;color:#a3503d}
+.month-event.cancelled{background:#f4ddd7;color:#a3503d;text-decoration:line-through}
+.month-event.cancelled i{background:#d0806c}
+.day-session.cancelled{border-left-color:#d98a76}
+.day-session.cancelled div b{text-decoration:line-through;color:#a3503d}
 .session-state.pausa{background:#ece6da;color:#7a6c50}
 .day-session.pausa{background:#f6f3ec;border-left-color:#c4b79b}
 
