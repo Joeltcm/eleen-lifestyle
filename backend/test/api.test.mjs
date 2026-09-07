@@ -1305,6 +1305,35 @@ describe('el período que se dice que cubre un cobro', () => {
   });
 });
 
+describe('pausar la mensualidad', () => {
+  let clientId;
+  before(async () => {
+    const plan = await api.post('/api/plans', { name: 'Mensual pausable', billingModel: 'monthly', price: 175, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Se va de viaje', planId: plan.datos.id, cutoffDay: 28 });
+    clientId = c.datos.id;
+    const vence = new Date(Date.now() + 25 * 24 * 3600_000).toISOString().slice(0, 10);
+    const pk = await api.post('/api/packages', { clientId, totalSessions: 8, amount: 175, kind: 'monthly', expiresOn: vence });
+    await api.post(`/api/invoices/${pk.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: new Date().toISOString().slice(0, 10) });
+    // Una sesión futura, que la pausa debe congelar.
+    const enTresDias = new Date(Date.now() + 3 * 24 * 3600_000).toISOString();
+    await api.post('/api/sessions', { clientId, startsAt: enTresDias, durationMinutes: 60, mode: 'Presencial' });
+  });
+
+  test('pausar sin fecha usa hoy y no falla por huso horario', async () => {
+    // El valor por defecto se calculaba en UTC; de madrugada eso marcaba
+    // mañana y la comparación contra el hoy de Panamá devolvía 400.
+    const { estado } = await api.post(`/api/clients/${clientId}/package-pause`, { reason: 'Viaje' });
+    assert.equal(estado, 201, 'pausar hoy no puede leerse como fecha futura');
+  });
+
+  test('deja al cliente en pausa y congela sus sesiones futuras', async () => {
+    const c = (await api.get('/api/clients')).datos.find(x => x.id === clientId);
+    assert.equal(c.status, 'paused');
+    const congeladas = (await api.get('/api/sessions')).datos.filter(s => s.client_id === clientId && s.paused_hold);
+    assert.equal(congeladas.length, 1, 'la sesión futura queda reservada en pausa');
+  });
+});
+
 describe('vencimiento de los paquetes', () => {
   let clientId;
   before(async () => {

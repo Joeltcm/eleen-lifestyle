@@ -427,3 +427,12 @@ details.session-row .google-session-state{display:block;padding-top:10px}
 .month-event.pausa i{background:#b0a389}
 .session-state.pausa{background:#ece6da;color:#7a6c50}
 .day-session.pausa{background:#f6f3ec;border-left-color:#c4b79b}
+
+/* A 375 px la fila de acciones del encabezado (hasta cinco botones: Finanzas,
+   Gastos, Registro, Registrar cobros, + Crear cobro) no cabía en una línea y
+   empujaba la página ~138 px de ancho. Que envuelva y ocupe el ancho completo. */
+@media(max-width:560px){
+  .section-heading{flex-wrap:wrap;gap:12px}
+  .section-heading>div{flex-wrap:wrap;width:100%}
+  .section-heading>div button{flex:1 1 auto}
+}

@@ -2126,8 +2126,12 @@ app.post('/api/clients/:id/package-pause', { preHandler: requireStaff }, async (
     if (!client) return { error: 'Cliente no encontrado', code: 404 };
     const [activePause] = await transaction`SELECT id FROM client_package_pauses WHERE client_id = ${clientId} AND status = 'active' LIMIT 1`;
     if (activePause) return { error: 'El paquete ya está en pausa', code: 409 };
-    const startsOn = input.startsOn || new Date().toISOString().slice(0, 10);
+    // "Hoy" en Panamá, no en UTC. El valor por defecto salía de toISOString()
+    // —hora UTC—, y de madrugada eso ya marca el día siguiente: comparado
+    // contra el hoy de Panamá, la pausa "de hoy" se leía como futura y el
+    // endpoint fallaba con 400 sin que nadie hubiera puesto una fecha futura.
     const todayPanama = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Panama' }).format(new Date());
+    const startsOn = input.startsOn || todayPanama;
     if (startsOn > todayPanama) return { error: 'La fecha inicial de la pausa no puede ser futura', code: 400 };
     if (input.endsOn && input.endsOn < startsOn) return { error: 'La fecha fin no puede ser anterior al inicio de la pausa', code: 400 };
     const [pack] = await transaction`SELECT id, total_sessions, used_sessions, expires_on FROM session_packages
