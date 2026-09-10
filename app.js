@@ -1,4 +1,4 @@
-const APP_VERSION = '157';
+const APP_VERSION = '158';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2465,6 +2465,11 @@ function expensesManager(desde = null, hasta = null, mount = null) {
   const rango = { desde: desde || primeroDelAnio, hasta: hasta || dateKey(today) };
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">FINANZAS</p><h2>Gastos</h2>
+    <div class="metrics billing-metrics" id="gasto-metrics"><article><span>Gasto del año</span><strong>—</strong></article><article><span>Gasto del negocio</span><strong>—</strong></article><article><span>Gasto personal</span><strong>—</strong></article><article><span>Mayor categoría</span><strong>—</strong></article></div>
+    <div class="billing-insights">
+      <article class="card billing-trend-card"><div class="card-head"><div><h3>Gastos durante el año</h3><p id="gasto-chart-summary">Evolución mensual en USD</p></div><span class="insight-year" id="gasto-chart-year"></span></div><div class="billing-line-chart" id="gasto-line-chart" aria-live="polite"><p class="empty">Calculando tendencia anual…</p></div></article>
+      <article class="card top-payers-card"><div class="card-head"><div><h3>Categorías con más gasto</h3><p id="gasto-rank-summary">Durante el año</p></div></div><div class="top-payers-list" id="gasto-rank-list"><p class="empty">Calculando ranking…</p></div></article>
+    </div>
     <div class="form-row"><label>Desde<input type="date" id="gasto-desde" value="${rango.desde}" /></label><label>Hasta<input type="date" id="gasto-hasta" value="${rango.hasta}" /></label></div>
     <div class="catalog-toolbar"><button class="secondary" id="gasto-nuevo">+ Registrar gasto</button><button class="secondary" id="gasto-categorias">Categorías</button></div>
     <div id="gasto-lista"><p class="empty">Cargando gastos…</p></div>`;
@@ -2476,6 +2481,53 @@ function expensesManager(desde = null, hasta = null, mount = null) {
   document.getElementById('gasto-nuevo').onclick = () => expenseEditor(null, rango);
   document.getElementById('gasto-categorias').onclick = () => expenseCategories(rango);
   renderExpenses(rango);
+  renderExpenseInsights();
+}
+
+// El mismo tratamiento visual que Cobros, pero para el gasto: KPIs del año, la
+// tendencia mensual y el ranking de categorías que más gastan. Los datos salen
+// del resumen de finanzas del año (timeline de gasto + gasto por categoría), así
+// que no hace falta un endpoint nuevo. El gráfico es del año en curso, igual que
+// la tendencia de facturación, no del rango de la lista de abajo.
+function renderExpenseInsights() {
+  const chartEl = document.getElementById('gasto-line-chart');
+  const rankEl = document.getElementById('gasto-rank-list');
+  const metricsEl = document.getElementById('gasto-metrics');
+  if (!chartEl?.isConnected) return;
+  const anio = today.getFullYear();
+  const yearTag = document.getElementById('gasto-chart-year'); if (yearTag) yearTag.textContent = anio;
+  api('/api/finance/summary?rango=anio').then(datos => {
+    if (!chartEl.isConnected) return;
+    const valores = Array(12).fill(0);
+    (datos.timeline || []).forEach(mes => { const idx = Number(String(mes.month).slice(5, 7)) - 1; if (idx >= 0 && idx < 12) valores[idx] += Number(mes.expense || 0); });
+    const totalAnio = valores.reduce((suma, valor) => suma + valor, 0);
+    const maxValue = Math.max(...valores, 1);
+    const left = 54; const top = 18; const plotWidth = 650; const plotHeight = 176;
+    const points = valores.map((value, index) => ({ x: left + (index * plotWidth / 11), y: top + plotHeight - (value / maxValue * plotHeight), value }));
+    const line = points.map(point => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(' ');
+    const area = `${left},${top + plotHeight} ${line} ${left + plotWidth},${top + plotHeight}`;
+    const monthNames = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+    const compactMoney = value => new Intl.NumberFormat('es-PA', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1 }).format(value);
+    const grid = [0, .5, 1].map(ratio => {
+      const y = top + plotHeight - ratio * plotHeight;
+      return `<g><line x1="${left}" y1="${y}" x2="${left + plotWidth}" y2="${y}" /><text x="${left - 8}" y="${y + 4}" text-anchor="end">${compactMoney(maxValue * ratio)}</text></g>`;
+    }).join('');
+    const labels = monthNames.map((name, index) => `<text x="${points[index].x}" y="${top + plotHeight + 27}" text-anchor="middle">${name}</text>`).join('');
+    const dots = points.map((point, index) => `<circle cx="${point.x}" cy="${point.y}" r="4"><title>${monthNames[index]}: ${money.format(point.value)}</title></circle>`).join('');
+    chartEl.innerHTML = `<svg viewBox="0 0 720 235" role="img" aria-label="Gasto mensual de ${anio}"><g class="billing-chart-grid">${grid}${labels}</g><polygon class="billing-chart-area" points="${area}"/><polyline class="billing-chart-line" points="${line}"/>${dots}</svg>`;
+    const resumen = document.getElementById('gasto-chart-summary'); if (resumen) resumen.textContent = `${money.format(totalAnio)} en gastos durante ${anio}`;
+    const t = datos.totales || {};
+    const cats = (datos.categorias || []).slice().sort((a, b) => Number(b.total || 0) - Number(a.total || 0));
+    const mayor = cats[0];
+    if (metricsEl) metricsEl.innerHTML = `<article><span>Gasto del año</span><strong>${money.format(Number(t.gastos || 0))}</strong></article><article><span>Gasto del negocio</span><strong>${money.format(Number(t.gastosNegocio || 0))}</strong></article><article><span>Gasto personal</span><strong>${money.format(Number(t.gastosPersonal || 0))}</strong></article><article><span>Mayor categoría</span><strong>${mayor ? money.format(Number(mayor.total || 0)) : '—'}</strong>${mayor ? `<small>${escapeHtml(mayor.categoria)}</small>` : ''}</article>`;
+    const topCats = cats.slice(0, 6);
+    const topAmount = Math.max(...topCats.map(c => Number(c.total || 0)), 1);
+    if (rankEl) rankEl.innerHTML = topCats.length ? topCats.map((c, index) => `<div class="top-payer"><span class="top-payer-rank">${index + 1}</span><div class="top-payer-person"><b>${escapeHtml(c.categoria)}</b><small>${c.cantidad} gasto${Number(c.cantidad) === 1 ? '' : 's'}${c.ambito ? '' : ' · sin clasificar'}</small><i><span style="width:${Math.max(4, Number(c.total || 0) / topAmount * 100)}%"></span></i></div><strong>${money.format(Number(c.total || 0))}</strong></div>`).join('') : '<p class="empty">Sin gastos registrados este año.</p>';
+  }).catch(error => {
+    if (!chartEl.isConnected) return;
+    chartEl.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
+    if (rankEl) rankEl.innerHTML = '<p class="empty">No se pudo cargar el ranking.</p>';
+  });
 }
 
 function renderExpenses(rango) {
