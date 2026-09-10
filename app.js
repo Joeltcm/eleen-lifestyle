@@ -1,4 +1,4 @@
-const APP_VERSION = '160';
+const APP_VERSION = '161';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2986,6 +2986,11 @@ function applyInvoicePackage(id) {
   form.addEventListener('submit', async event => {
     event.preventDefault(); const datos = new FormData(event.target);
     const sesiones = Number(datos.get('sessions'));
+    // Evitar duplicar: si el cliente ya tiene un paquete vivo, avisar antes de
+    // abrir otro. El caso típico es un paquete que quedó pendiente y en vez de
+    // marcarlo pagado desde "Editar" se aplica otro cobro, dejando dos saldos.
+    const vivo = (data.packages || []).find(p => p.clientId === invoice.clientId && p.status !== 'expired' && p.kind === 'package');
+    if (vivo && !confirm(`${invoice.client} ya tiene un paquete (${remainingSessions(vivo)} disponibles, ${vivo.status === 'pending' ? 'pendiente de pago' : 'activo'}).\n\nAbrir otro dejaría dos saldos. Si solo querías marcar el existente como pagado, cancela y usa Paquetes → Editar → Cobro: Pagado.\n\n¿Abrir un paquete nuevo de todas formas?`)) return;
     if (!confirmarGuardado(`Abrir un paquete de ${sesiones} clases para ${invoice.client}\nVálido hasta ${datos.get('expiresOn')}`)) return;
     try {
       event.target.classList.add('loading-state');
