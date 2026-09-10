@@ -431,6 +431,14 @@ details.session-row .google-session-state{display:block;padding-top:10px}
 .month-event.cancelled i{background:#d0806c}
 .day-session.cancelled{border-left-color:#d98a76}
 .day-session.cancelled div b{text-decoration:line-through;color:#a3503d}
+.subtabs{display:flex;gap:3px;padding:4px;border-radius:12px;background:#f5eff2;margin:0 0 22px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.subtabs::-webkit-scrollbar{display:none}
+.subtab{flex:1 0 auto;min-width:88px;border:0;border-radius:9px;padding:10px 14px;background:transparent;color:var(--muted);font:600 12px 'DM Sans';cursor:pointer;white-space:nowrap}
+.subtab.active{background:#fff;color:#8f5770;box-shadow:0 3px 10px #5a3e4a12}
+.subpanel{display:none}
+.subpanel.active{display:block}
+.subpanel-toolbar{display:flex;gap:9px;justify-content:flex-end;flex-wrap:wrap;margin-bottom:16px}
+@media(max-width:600px){.subtab{min-width:0;padding:9px 12px;font-size:11px}.subpanel-toolbar{margin-bottom:14px}.subpanel-toolbar button{flex:1 1 auto}}
 .session-state.pausa{background:#ece6da;color:#7a6c50}
 .day-session.pausa{background:#f6f3ec;border-left-color:#c4b79b}
 

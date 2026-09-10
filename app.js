@@ -1,4 +1,4 @@
-const APP_VERSION = '156';
+const APP_VERSION = '157';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2398,7 +2398,7 @@ function financeChartSvg(timeline) {
     <div class="chart-leyenda"><span><i style="background:#8fb89c"></i>Ingresos</span><span><i style="background:#dca78f"></i>Gastos</span></div>`;
 }
 
-function financeDashboard(rango = 'meses:12') {
+function financeDashboard(rango = 'meses:12', mount = null) {
   const anio = new Date().getFullYear();
   const opciones = [
     ['meses:6', 'Últimos 6 meses'], ['meses:12', 'Últimos 12 meses'], ['meses:24', 'Últimos 24 meses'],
@@ -2410,11 +2410,12 @@ function financeDashboard(rango = 'meses:12') {
   box.innerHTML = `<p class="eyebrow">FINANZAS</p><h2>Ingresos y gastos</h2>
     <label>Período<select id="fin-meses">${opciones.map(([valor, texto]) => `<option value="${valor}"${valor === rango ? ' selected' : ''}>${texto}</option>`).join('')}</select></label>
     <div id="fin-cuerpo"><p class="empty">Calculando…</p></div>`;
-  openModal(box, true);
-  document.getElementById('fin-meses').onchange = event => financeDashboard(event.target.value);
+  const destino = mount || document.getElementById('finanzas-mount');
+  if (destino) destino.replaceChildren(box); else openModal(box, true);
+  document.getElementById('fin-meses').onchange = event => financeDashboard(event.target.value, destino);
   api(`/api/finance/summary?${consulta}`).then(datos => {
     const target = document.getElementById('fin-cuerpo');
-    if (!target?.isConnected || !modal.open) return;
+    if (!target?.isConnected) return;
     const t = datos.totales;
     const filas = datos.timeline.filter(m => m.income || m.expense).reverse().map(mes => `<tr>
       <td>${attendanceMonthLabel(mes.month)}</td><td>${money.format(mes.income)}</td><td>${money.format(mes.expense)}</td>
@@ -2456,7 +2457,7 @@ function financeDashboard(rango = 'meses:12') {
 
 // Gastos: la otra mitad de las finanzas. En lista y no en tabla, por el
 // teléfono.
-function expensesManager(desde = null, hasta = null) {
+function expensesManager(desde = null, hasta = null, mount = null) {
   // Desde enero y no desde el primero del mes: con el historial importado de
   // Zoho, abrir en el mes en curso mostraba "no hay gastos" aunque hubiera
   // cientos registrados. El año entero cabe de sobra en el tope de la consulta.
@@ -2467,8 +2468,9 @@ function expensesManager(desde = null, hasta = null) {
     <div class="form-row"><label>Desde<input type="date" id="gasto-desde" value="${rango.desde}" /></label><label>Hasta<input type="date" id="gasto-hasta" value="${rango.hasta}" /></label></div>
     <div class="catalog-toolbar"><button class="secondary" id="gasto-nuevo">+ Registrar gasto</button><button class="secondary" id="gasto-categorias">Categorías</button></div>
     <div id="gasto-lista"><p class="empty">Cargando gastos…</p></div>`;
-  openModal(box, true);
-  const recargar = () => expensesManager(document.getElementById('gasto-desde').value, document.getElementById('gasto-hasta').value);
+  const destino = mount || document.getElementById('gastos-mount');
+  if (destino) destino.replaceChildren(box); else openModal(box, true);
+  const recargar = () => expensesManager(document.getElementById('gasto-desde').value, document.getElementById('gasto-hasta').value, destino);
   document.getElementById('gasto-desde').onchange = recargar;
   document.getElementById('gasto-hasta').onchange = recargar;
   document.getElementById('gasto-nuevo').onclick = () => expenseEditor(null, rango);
@@ -2479,7 +2481,7 @@ function expensesManager(desde = null, hasta = null) {
 function renderExpenses(rango) {
   const target = document.getElementById('gasto-lista');
   api(`/api/expenses?from=${rango.desde}&to=${rango.hasta}`).then(gastos => {
-    if (!target?.isConnected || !modal.open) return;
+    if (!target?.isConnected) return;
     const total = gastos.reduce((suma, gasto) => suma + Number(gasto.amount), 0);
     const porCategoria = new Map();
     gastos.forEach(gasto => {
@@ -2567,7 +2569,7 @@ async function expenseCategories(rango) {
     <p class="section-note">Eliminar una categoría no borra sus gastos: quedan sin clasificar.</p>
     <button class="secondary wide-button" id="volver-gastos">Volver a gastos</button>`;
   openModal(box, true);
-  document.getElementById('volver-gastos').onclick = () => expensesManager(rango.desde, rango.hasta);
+  document.getElementById('volver-gastos').onclick = () => { modal.close(); expensesManager(rango.desde, rango.hasta); };
   document.getElementById('categoria-form').addEventListener('submit', async event => {
     event.preventDefault();
     try { await api('/api/expense-categories', { method: 'POST', body: { name: new FormData(event.target).get('name').trim() } }); toast('Categoría creada'); expenseCategories(rango); }
@@ -3423,6 +3425,19 @@ document.querySelectorAll('.nav-link').forEach(link => link.addEventListener('cl
 document.querySelectorAll('[data-view-go]').forEach(button => button.addEventListener('click', event => {
   event.preventDefault(); navigate(button.dataset.viewGo);
 }));
+// Sub-pestañas del área financiera: Cobros / Finanzas / Planes / Paquetes / Gastos.
+// Cada dataset en su propia pantalla, para no amontonar todo en una sola página
+// —sobre todo en el teléfono—. Finanzas y Gastos se pintan al abrir su pestaña.
+function activarSubtab(nombre) {
+  document.querySelectorAll('#billing .subtab').forEach(boton => boton.classList.toggle('active', boton.dataset.subtab === nombre));
+  document.querySelectorAll('#billing .subpanel').forEach(panel => panel.classList.toggle('active', panel.id === `subpanel-${nombre}`));
+  if (nombre === 'finanzas') financeDashboard();
+  if (nombre === 'gastos') expensesManager();
+}
+document.getElementById('billing-subtabs')?.addEventListener('click', event => {
+  const boton = event.target.closest('[data-subtab]');
+  if (boton) activarSubtab(boton.dataset.subtab);
+});
 // Arrastrar, en pantalla grande. Es el mismo gesto que en Google y termina en
 // el mismo diálogo que el de tocar: una sola forma de confirmar.
 document.addEventListener('dragstart', event => {
