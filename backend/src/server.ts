@@ -3023,6 +3023,17 @@ app.post('/api/invoices/:id/coverage', { preHandler: requireStaff }, async (requ
   // la generación, y un día suelto la haría fallar por un día de diferencia.
   const periodo = input.billingPeriod.slice(0, 8) + '01';
 
+  // Zoho sólo cubre septiembre. Es el puente de la migración: los pagos que
+  // entraron en agosto (que viven en Zoho) cubren la mensualidad de septiembre,
+  // y de ahí en adelante Zoho es sólo consulta. Octubre y los meses que siguen
+  // se cobran por la vía normal de la app —el cobro se emite en el corte y se
+  // confirma con el pago recibido aquí—. Cubrir octubre con un pago de Zoho
+  // dejaría ese mes "ya cubierto" y la generación no lo emitiría: la clienta se
+  // quedaría sin cobrar. Por eso se corta de plano.
+  if (invoice.source_system === 'zoho_invoice' && periodo > '2026-09-01') {
+    return reply.code(400).send({ error: 'Los cobros de Zoho solo cubren hasta septiembre 2026. Para octubre en adelante, el cobro se emite y se confirma con el pago recibido en la app.' });
+  }
+
   const resultado = await sql.begin(async transaction => {
     const abierta = await abrirCobertura(transaction, auth.sub, { id: invoice.id, client_id: invoice.client_id, coverage_start: invoice.coverage_start }, periodo, input.entries);
     // Aplicar una mensualidad a un cobro de Zoho pendiente lo salda también, igual
