@@ -3369,8 +3369,11 @@ app.get('/api/finance/summary', { preHandler: requireStaff }, async request => {
       SELECT to_char(date_trunc('month', e.spent_on), 'YYYY-MM') AS month,
         COALESCE(sum(e.amount), 0)::numeric AS total, count(*)::int AS cantidad,
         COALESCE(sum(e.amount) FILTER (WHERE c.ambito = 'negocio'), 0)::numeric AS negocio,
-        COALESCE(sum(e.amount) FILTER (WHERE c.ambito = 'personal'), 0)::numeric AS personal,
-        COALESCE(sum(e.amount) FILTER (WHERE c.ambito IS NULL), 0)::numeric AS sin_clasificar
+        -- Todo lo que no es negocio es personal, incluido lo que no tiene ámbito
+        -- ni categoría: la regla es que solo los operativos son del negocio, y no
+        -- existe un estado intermedio "sin clasificar".
+        COALESCE(sum(e.amount) FILTER (WHERE c.ambito IS DISTINCT FROM 'negocio'), 0)::numeric AS personal,
+        0::numeric AS sin_clasificar
       FROM expenses e LEFT JOIN expense_categories c ON c.id = e.category_id
       WHERE e.owner_id = ${auth.sub} AND e.spent_on >= ${inicio}::date
         AND (${fin}::date IS NULL OR e.spent_on <= ${fin}::date)
@@ -3466,7 +3469,7 @@ app.post('/api/expense-categories', { preHandler: requireStaff }, async (request
   const input = expenseCategorySchema.parse(request.body);
   const [categoria] = await sql`
     INSERT INTO expense_categories (owner_id, name, ambito, description)
-    VALUES (${auth.sub}, ${input.name}, ${input.ambito ?? null}, ${input.description || null})
+    VALUES (${auth.sub}, ${input.name}, ${input.ambito ?? 'personal'}, ${input.description || null})
     ON CONFLICT (owner_id, name) DO NOTHING RETURNING *
   `;
   if (!categoria) return reply.code(409).send({ error: 'Ya existe una categoría con ese nombre' });

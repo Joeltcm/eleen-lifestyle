@@ -159,34 +159,40 @@ describe('agenda por lotes', () => {
 });
 
 describe('gastos y ámbito', () => {
-  test('las categorías nacen sin ámbito y se pueden clasificar', async () => {
+  test('las categorías nacen personal y se pueden marcar como negocio', async () => {
+    // Regla de Eileen: negocio = operativos; todo lo demás, personal. Así que una
+    // categoría nueva nace personal y sólo se marca negocio la que sea operativa.
     const creada = await api.post('/api/expense-categories', { name: 'Gasolina' });
     assert.equal(creada.estado, 201);
-    assert.equal(creada.datos.ambito, null, 'clasificarla es decisión de la entrenadora');
+    assert.equal(creada.datos.ambito, 'personal', 'lo que no es operativo es personal');
 
     const marcada = await api.patch(`/api/expense-categories/${creada.datos.id}`, { ambito: 'negocio' });
     assert.equal(marcada.datos.ambito, 'negocio');
 
-    const desmarcada = await api.patch(`/api/expense-categories/${creada.datos.id}`, { ambito: null });
-    assert.equal(desmarcada.datos.ambito, null, 'debe poder volver a sin clasificar');
+    const devuelta = await api.patch(`/api/expense-categories/${creada.datos.id}`, { ambito: 'personal' });
+    assert.equal(devuelta.datos.ambito, 'personal', 'debe poder volver a personal');
   });
 
-  test('el margen del negocio no se anuncia con gasto sin clasificar', async () => {
+  test('sólo lo operativo cuenta como negocio; lo demás es personal y el margen se calcula', async () => {
     // Hace falta un ingreso cobrado: sin ingresos el margen es nulo de todas
-    // formas y la prueba pasaría sin comprobar nada. Lo descubrió una prueba
-    // de mutación —se rompió el código a propósito y esto no se enteró—.
+    // formas y la prueba pasaría sin comprobar nada.
     const pagador = await api.post('/api/clients', { fullName: 'Ingreso Prueba', billingModel: 'monthly', standardPrice: 200, cutoffDay: 1 });
     const cobro = await api.post('/api/invoices', { clientId: pagador.datos.id, concept: 'Mensualidad', amount: 200, dueOn: '2026-08-05' });
     await api.post(`/api/invoices/${cobro.datos.id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-05' });
 
-    const cat = await api.post('/api/expense-categories', { name: 'Sin clasificar aún' });
-    await api.post('/api/expenses', { description: 'Compra', amount: 50, spentOn: '2026-08-10', categoryId: cat.datos.id });
+    // Una categoría nueva (personal por defecto) con un gasto: no es operativo.
+    const personal = await api.post('/api/expense-categories', { name: 'Compra personal' });
+    await api.post('/api/expenses', { description: 'Compra', amount: 50, spentOn: '2026-08-10', categoryId: personal.datos.id });
+    // Y un gasto operativo marcado como negocio.
+    const operativo = await api.post('/api/expense-categories', { name: 'Operativo', ambito: 'negocio' });
+    await api.post('/api/expenses', { description: 'Combustible', amount: 30, spentOn: '2026-08-11', categoryId: operativo.datos.id });
 
     const { datos } = await api.get('/api/finance/summary?rango=todo');
     assert.ok(datos.totales.ingresos > 0, 'debe haber ingresos para que el margen signifique algo');
-    assert.ok(datos.totales.gastosSinClasificar > 0, 'debe haber gasto sin clasificar');
-    assert.equal(datos.totales.margenNegocio, null,
-      'con gasto sin clasificar el margen sería un 100% falso');
+    assert.equal(datos.totales.gastosSinClasificar, 0, 'ya no existe "sin clasificar": todo es negocio o personal');
+    assert.ok(datos.totales.gastosPersonal >= 50, 'el gasto no operativo cuenta como personal');
+    assert.ok(datos.totales.gastosNegocio >= 30, 'sólo lo operativo cuenta como negocio');
+    assert.ok(typeof datos.totales.margenNegocio === 'number', 'sin "sin clasificar", el margen se calcula');
   });
 
   test('el rango "todo" no revienta con datos reales', async () => {
