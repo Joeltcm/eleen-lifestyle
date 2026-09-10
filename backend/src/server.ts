@@ -3621,6 +3621,12 @@ async function complianceRows(ownerId: string, period: z.infer<typeof reportPeri
       -- incumplidas con 0%. Si se movieron a otro día, la que cuenta es la
       -- nueva sesión y penalizar ambas sería cobrar dos veces lo mismo.
       WHERE c.owner_id = ${ownerId} AND s.starts_at >= ${start} AND s.starts_at <= now()
+        -- Una clase sin marcar con el paquete en pausa está congelada: ni se dio
+        -- ni se perdió. No debe contar como 0% ni bajarle el cumplimiento. Se
+        -- excluye tanto la marcada con paused_hold como cualquier sesión sin
+        -- resolver de un cliente actualmente en pausa. Las ya resueltas
+        -- (completadas, no asistió) sí cuentan.
+        AND NOT (s.status = 'scheduled' AND (COALESCE(s.paused_hold, false) OR c.status = 'paused'))
         -- Las canceladas entran sólo si nadie las reprogramó Y las canceló el
         -- cliente. Una clase que canceló la entrenadora no es un incumplimiento
         -- de él: se le repone o se le descuenta, pero no se le apunta.
@@ -3877,7 +3883,9 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
     WHERE c.owner_id = ${auth.sub} AND s.status = 'scheduled'
       -- Una sesión con el paquete en pausa está congelada: no se dio ni se
       -- perdió, así que no hay nada que marcar y no debe pedir confirmación.
-      AND NOT COALESCE(s.paused_hold, false)
+      -- Se excluye tanto la marcada (paused_hold) como cualquiera de un cliente
+      -- actualmente en pausa, por si quedó sin la marca.
+      AND NOT COALESCE(s.paused_hold, false) AND c.status <> 'paused'
       AND s.starts_at + make_interval(mins => s.duration_minutes) <= now()
       AND s.starts_at >= now() - interval '7 days'
     ORDER BY s.starts_at DESC
