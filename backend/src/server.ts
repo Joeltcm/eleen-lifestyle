@@ -3013,7 +3013,7 @@ app.post('/api/invoices/:id/coverage', { preHandler: requireStaff }, async (requ
   const id = z.string().uuid().parse((request.params as { id: string }).id);
   const input = coverageSchema.parse(request.body);
   const [invoice] = await sql`
-    SELECT i.id, i.client_id, i.amount,
+    SELECT i.id, i.client_id, i.amount, i.status, i.source_system,
       COALESCE((SELECT min(ip.paid_on) FROM payment_allocations pa JOIN invoice_payments ip ON ip.id = pa.payment_id WHERE pa.invoice_id = i.id), i.issued_on, i.due_on) AS coverage_start
     FROM invoices i JOIN clients c ON c.id = i.client_id
     WHERE i.id = ${id} AND c.owner_id = ${auth.sub} AND i.status <> 'void'
@@ -3023,8 +3023,13 @@ app.post('/api/invoices/:id/coverage', { preHandler: requireStaff }, async (requ
   // la generación, y un día suelto la haría fallar por un día de diferencia.
   const periodo = input.billingPeriod.slice(0, 8) + '01';
 
-  const resultado = await sql.begin(async transaction =>
-    abrirCobertura(transaction, auth.sub, { id: invoice.id, client_id: invoice.client_id, coverage_start: invoice.coverage_start }, periodo, input.entries));
+  const resultado = await sql.begin(async transaction => {
+    const abierta = await abrirCobertura(transaction, auth.sub, { id: invoice.id, client_id: invoice.client_id, coverage_start: invoice.coverage_start }, periodo, input.entries);
+    // Aplicar una mensualidad a un cobro de Zoho pendiente lo salda también, igual
+    // que en paquetes: cierra la deuda congelada de la migración sin paso extra.
+    if (!('error' in abierta)) await saldarCobroZohoPendiente(transaction, { id: invoice.id as string, source_system: invoice.source_system as string | null, status: invoice.status as string, coverage_start: invoice.coverage_start as string | Date | null });
+    return abierta;
+  });
   if ('error' in resultado) return reply.code(resultado.code || 400).send({ error: resultado.error });
   return reply.code(201).send({ applied: resultado.abiertos, ...(await coberturaDeCobro(auth.sub, id)) });
 });
@@ -3060,6 +3065,23 @@ app.delete('/api/invoices/:id/coverage/:coverageId', { preHandler: requireStaff 
   return resultado;
 });
 
+// Zoho ya no sincroniza: un cobro suyo que se pagó DESPUÉS de la migración quedó
+// congelado en 'pendiente', y un cobro de Zoho no tiene "Confirmar pago" (mientras
+// vivió Zoho, sobre eso mandaba Zoho). Aplicarlo a un paquete o mensualidad es la
+// señal de que el dinero entró, así que se salda aquí mismo —transparente para la
+// entrenadora, sin un paso extra—. Sólo cobros de Zoho pendientes; los locales
+// tienen su propio "Confirmar pago". No toca el ingreso en finanzas: ese ya vino
+// con la migración (invoice_payments), y aquí sólo se cierra la deuda.
+async function saldarCobroZohoPendiente(transaction: TransactionSql, invoice: { id: string; source_system: string | null; status: string; coverage_start: string | Date | null }) {
+  if (invoice.source_system !== 'zoho_invoice' || invoice.status !== 'pending') return false;
+  await transaction`
+    UPDATE invoices SET status = 'confirmed', balance = 0,
+      confirmed_at = COALESCE(confirmed_at, ${`${String(invoice.coverage_start).slice(0, 10)}T12:00:00-05:00`}::timestamptz)
+    WHERE id = ${invoice.id}
+  `;
+  return true;
+}
+
 // Aplicar un cobro ya pagado a un paquete de clases. La cobertura mensual abre
 // saldos de mensualidad; esto abre uno de tipo 'package' —N clases con su propia
 // validez— sin emitir una factura nueva, para el caso de un pago que entró por
@@ -3081,7 +3103,7 @@ app.post('/api/invoices/:id/package', { preHandler: requireStaff }, async (reque
   const input = packageFromInvoiceSchema.parse(request.body);
   const resultado = await sql.begin(async transaction => {
     const [invoice] = await transaction`
-      SELECT i.id, i.client_id, i.amount, i.package_id, i.status,
+      SELECT i.id, i.client_id, i.amount, i.package_id, i.status, i.source_system,
         COALESCE((SELECT min(ip.paid_on) FROM payment_allocations pa JOIN invoice_payments ip ON ip.id = pa.payment_id WHERE pa.invoice_id = i.id), i.issued_on, i.due_on) AS coverage_start
       FROM invoices i JOIN clients c ON c.id = i.client_id
       WHERE i.id = ${id} AND c.owner_id = ${auth.sub} AND i.status <> 'void'
@@ -3103,7 +3125,8 @@ app.post('/api/invoices/:id/package', { preHandler: requireStaff }, async (reque
       RETURNING id, total_sessions, expires_on
     `;
     await transaction`UPDATE invoices SET package_id = ${pack.id} WHERE id = ${id}`;
-    return { package: pack };
+    const saldado = await saldarCobroZohoPendiente(transaction, { id: invoice.id as string, source_system: invoice.source_system as string | null, status: invoice.status as string, coverage_start: invoice.coverage_start as string | Date | null });
+    return { package: pack, saldado };
   });
   if ('error' in resultado) return reply.code(resultado.code || 400).send({ error: resultado.error });
   return reply.code(201).send(resultado);

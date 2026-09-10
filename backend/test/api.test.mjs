@@ -545,6 +545,10 @@ describe('aplicar un cobro ya pagado a un paquete de clases', () => {
     assert.equal(saldos.length, 1, 'abre el saldo del paquete');
     assert.equal(saldos[0].status, 'active', 'y queda disponible al momento');
     assert.equal((await api.get('/api/invoices')).datos.length, antes, 'no cobra nada nuevo: el ingreso sigue siendo el del cobro');
+    // Un cobro local NO se salda solo al aplicar: eso es sólo para los de Zoho
+    // congelados de la migración. El local tiene su propio "Confirmar pago".
+    assert.equal(datos.saldado, false, 'un cobro local no se marca pagado al aplicar el paquete');
+    assert.equal((await api.get('/api/invoices')).datos.find(x => x.id === facturaId).status, 'pending', 'sigue pendiente hasta confirmar el pago');
   });
 
   test('no se puede aplicar dos veces al mismo cobro', async () => {

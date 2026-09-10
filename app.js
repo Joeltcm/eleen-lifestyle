@@ -1,4 +1,4 @@
-const APP_VERSION = '154';
+const APP_VERSION = '155';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2934,9 +2934,9 @@ function applyInvoicePackage(id) {
     if (!confirmarGuardado(`Abrir un paquete de ${sesiones} clases para ${invoice.client}\nVálido hasta ${datos.get('expiresOn')}`)) return;
     try {
       event.target.classList.add('loading-state');
-      await api(`/api/invoices/${id}/package`, { method: 'POST', body: { totalSessions: sesiones, expiresOn: datos.get('expiresOn') } });
+      const resp = await api(`/api/invoices/${id}/package`, { method: 'POST', body: { totalSessions: sesiones, expiresOn: datos.get('expiresOn') } });
       await loadData(); renderAll(); modal.close();
-      toast(`Paquete de ${sesiones} clases abierto para ${invoice.client}`);
+      toast(`Paquete de ${sesiones} clases abierto para ${invoice.client}${resp?.saldado ? ' · cobro marcado como pagado' : ''}`);
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
