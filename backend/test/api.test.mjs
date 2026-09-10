@@ -471,6 +471,22 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
   });
 });
 
+describe('marcar un saldo pendiente como pagado a mano', () => {
+  test('markPaid activa un paquete pendiente sin crear un cobro nuevo', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Pagó por fuera', billingModel: 'package', standardPrice: 200, cutoffDay: 15 });
+    const p = await api.post('/api/packages', { clientId: c.datos.id, totalSessions: 10, amount: 200, kind: 'package' });
+    assert.equal((await api.get('/api/packages')).datos.find(x => x.id === p.datos.id).status, 'pending', 'nace pendiente');
+    const facturasAntes = (await api.get('/api/invoices')).datos.length;
+
+    const marcado = await api.patch(`/api/packages/${p.datos.id}`, { markPaid: true });
+    assert.equal(marcado.datos.status, 'active', 'marcarlo pagado lo activa');
+    assert.equal((await api.get('/api/invoices')).datos.length, facturasAntes, 'no crea un cobro nuevo');
+
+    const devuelto = await api.patch(`/api/packages/${p.datos.id}`, { markPaid: false });
+    assert.equal(devuelto.datos.status, 'pending', 'y se puede devolver a pendiente');
+  });
+});
+
 describe('confirmar una mensualidad abre sola su cobertura', () => {
   const hoy = new Date().toISOString().slice(0, 10);
   let planId;

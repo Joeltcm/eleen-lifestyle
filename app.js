@@ -1,4 +1,4 @@
-const APP_VERSION = '159';
+const APP_VERSION = '160';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2658,6 +2658,7 @@ function packageEditor(pack) {
         <label>Sesiones usadas<input name="usedSessions" type="number" min="0" max="400" required value="${pack.used}" /></label>
       </div>
       <label>Vence<input name="expiresOn" type="date" value="${dateOnly(pack.expiresOn)}" /><small>Vacío = sin vencimiento.</small></label>
+      <label>Cobro<select name="markPaid"><option value="paid"${pack.status !== 'pending' ? ' selected' : ''}>Pagado</option><option value="pending"${pack.status === 'pending' ? ' selected' : ''}>Pendiente de pago</option></select><small>Márcalo pagado si el dinero ya entró por otro cobro (p. ej. Zoho). No genera un cobro nuevo.</small></label>
       <button class="primary wide-button">Guardar cambios</button>
     </form>`;
   openModal(box);
@@ -2672,7 +2673,7 @@ function packageEditor(pack) {
     try {
       event.target.classList.add('loading-state');
       await api(`/api/packages/${pack.id}`, { method: 'PATCH', body: {
-        label: values.get('label'), totalSessions: total, usedSessions: usadas, expiresOn: values.get('expiresOn') || null
+        label: values.get('label'), totalSessions: total, usedSessions: usadas, expiresOn: values.get('expiresOn') || null, markPaid: values.get('markPaid') === 'paid'
       } });
       await loadData(); renderAll(); modal.close(); toast('Saldo actualizado');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }

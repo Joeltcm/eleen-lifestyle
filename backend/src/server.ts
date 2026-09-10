@@ -1032,7 +1032,12 @@ const editPackageSchema = z.object({
   totalSessions: z.coerce.number().int().min(1).max(400).optional(),
   usedSessions: z.coerce.number().int().min(0).max(400).optional(),
   expiresOn: z.union([z.literal(''), z.null(), z.string().date()]).optional()
-    .transform(value => (value === '' || value === undefined ? null : value))
+    .transform(value => (value === '' || value === undefined ? null : value)),
+  // Marcar un saldo pendiente como pagado a mano: para cuando el dinero entró
+  // por fuera (p. ej. un cobro de Zoho) y el saldo se quedó 'pending' sin forma
+  // de activarlo. El ingreso ya está registrado en su cobro; esto sólo despierta
+  // las sesiones. false lo devuelve a pendiente.
+  markPaid: z.boolean().optional()
 });
 app.patch('/api/packages/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
@@ -1063,7 +1068,10 @@ app.patch('/api/packages/:id', { preHandler: requireStaff }, async (request, rep
       -- Los ::int no son decorativos: sin ellos postgres.js manda los
       -- parámetros sin tipo y la comparación se hace como texto, donde '8'
       -- es mayor que '12'. Un saldo con 8 de 12 usadas se quedaba agotado.
-      status = CASE WHEN status = 'pending' THEN 'pending'
+      status = CASE
+                    WHEN ${input.markPaid === true} THEN (CASE WHEN ${usadas}::int >= ${total}::int THEN 'exhausted' ELSE 'active' END)
+                    WHEN ${input.markPaid === false} THEN 'pending'
+                    WHEN status = 'pending' THEN 'pending'
                     WHEN ${usadas}::int >= ${total}::int THEN 'exhausted' ELSE 'active' END
     WHERE id = ${id} AND client_id IN (SELECT id FROM clients WHERE owner_id = ${auth.sub})
     RETURNING *
