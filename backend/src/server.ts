@@ -3841,7 +3841,7 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
   if (auth.role === 'client') {
     const [client] = await sql`SELECT * FROM clients WHERE portal_user_id = ${auth.sub}`;
     if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
-    const sessions = await sql`SELECT starts_at, duration_minutes FROM sessions WHERE client_id = ${client.id} AND status = 'scheduled' AND starts_at BETWEEN now() AND now() + ${`${sessionHours} hours`}::interval ORDER BY starts_at`;
+    const sessions = await sql`SELECT starts_at, duration_minutes FROM sessions WHERE client_id = ${client.id} AND status = 'scheduled' AND NOT COALESCE(paused_hold, false) AND starts_at BETWEEN now() AND now() + ${`${sessionHours} hours`}::interval ORDER BY starts_at`;
     const invoices = await sql`SELECT due_on, amount, concept FROM invoices WHERE client_id = ${client.id} AND status = 'pending' AND due_on <= current_date + (${paymentDays})::integer ORDER BY due_on`;
     return [
       ...sessions.map(session => ({ type: 'session', title: 'Próximo entrenamiento', body: `Tienes una sesión el ${new Date(session.starts_at).toLocaleString('es-PA', { timeZone: 'America/Panama' })}.`, scheduledFor: session.starts_at })),
@@ -3850,7 +3850,7 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
   }
   const sessions = await sql`
     SELECT s.starts_at, c.full_name FROM sessions s JOIN clients c ON c.id = s.client_id
-    WHERE c.owner_id = ${auth.sub} AND s.status = 'scheduled' AND s.starts_at BETWEEN now() AND now() + ${`${sessionHours} hours`}::interval ORDER BY s.starts_at
+    WHERE c.owner_id = ${auth.sub} AND s.status = 'scheduled' AND NOT COALESCE(s.paused_hold, false) AND s.starts_at BETWEEN now() AND now() + ${`${sessionHours} hours`}::interval ORDER BY s.starts_at
   `;
   const invoices = await sql`
     SELECT i.due_on, i.amount, i.concept, c.full_name FROM invoices i JOIN clients c ON c.id = i.client_id
@@ -3867,6 +3867,9 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
     SELECT s.id, s.starts_at, s.duration_minutes, c.full_name
     FROM sessions s JOIN clients c ON c.id = s.client_id
     WHERE c.owner_id = ${auth.sub} AND s.status = 'scheduled'
+      -- Una sesión con el paquete en pausa está congelada: no se dio ni se
+      -- perdió, así que no hay nada que marcar y no debe pedir confirmación.
+      AND NOT COALESCE(s.paused_hold, false)
       AND s.starts_at + make_interval(mins => s.duration_minutes) <= now()
       AND s.starts_at >= now() - interval '7 days'
     ORDER BY s.starts_at DESC
@@ -3950,7 +3953,7 @@ async function dispatchReminders() {
       JOIN clients c ON (u.role = 'client' AND c.portal_user_id = u.id)
         OR (u.role IN ('admin', 'trainer') AND c.owner_id = u.id)
       JOIN sessions s ON s.client_id = c.id
-      WHERE np.browser_enabled = true AND s.status = 'scheduled'
+      WHERE np.browser_enabled = true AND s.status = 'scheduled' AND NOT COALESCE(s.paused_hold, false)
         AND s.starts_at BETWEEN now() AND now() + make_interval(hours => np.session_reminder_hours)
         AND EXISTS (SELECT 1 FROM push_subscriptions ps WHERE ps.user_id = u.id AND ps.active = true)
         AND NOT EXISTS (
