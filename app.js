@@ -1,4 +1,4 @@
-const APP_VERSION = '161';
+const APP_VERSION = '162';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -3594,8 +3594,6 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'recurrences') recurrenceManager();
   if (actionButton?.dataset.action === 'working-hours') workingHoursEditor();
   if (actionButton?.dataset.action === 'pending-collections') pendingCollections();
-  if (actionButton?.dataset.action === 'expenses') expensesManager();
-  if (actionButton?.dataset.action === 'finance') financeDashboard();
   if (actionButton?.dataset.action === 'audit-log') auditLog();
   if (actionButton?.dataset.action === 'compliance-report') complianceReport();
   if (actionButton?.dataset.action === 'new-plan') planEditor();
