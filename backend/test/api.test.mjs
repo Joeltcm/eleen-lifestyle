@@ -1448,8 +1448,8 @@ describe('el período que se dice que cubre un cobro', () => {
 
   test('y la etiqueta dice el período, no un mes', async () => {
     const pack = (await api.get('/api/packages')).datos.find(p => p.client_id === sandy);
-    assert.match(pack.label, /1 sept.*1 oct/,
-      'decir "octubre" cuando se cubre del 1 sept al 1 oct engaña');
+    assert.match(pack.label, /\d{2}-09-2026.*\d{2}-10-2026/,
+      'decir "octubre" cuando se cubre del 1 sept al 1 oct engaña; el período va en dd-mm-yyyy');
   });
 
   test('el ciclo se puede consultar para cualquier corte', async () => {

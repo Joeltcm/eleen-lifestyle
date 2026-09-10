@@ -2861,8 +2861,13 @@ function mesCubiertoPorDefecto(dueOn: Date | string): string {
 // octubre al 1 de noviembre es cierto a medias, y con corte el día 1 no es
 // cierto en absoluto.
 function rangoDelCiclo(inicio: Date | string, fin: Date | string): string {
-  const formato = new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short', timeZone: 'America/Panama' });
-  return `${formato.format(mediodiaEnPanama(inicio))} – ${formato.format(mediodiaEnPanama(fin))}`;
+  // dd-mm-yyyy para mostrar, consistente con el resto de la aplicación.
+  const formato = (fecha: Date | string) => {
+    const [y, m, d] = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Panama', year: 'numeric', month: '2-digit', day: '2-digit' })
+      .format(mediodiaEnPanama(fecha)).split('-');
+    return `${d}-${m}-${y}`;
+  };
+  return `${formato(inicio)} – ${formato(fin)}`;
 }
 
 // El corte que cierra el ciclo abierto en `inicio`: el del mismo mes si aún no
