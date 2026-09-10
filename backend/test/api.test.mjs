@@ -525,6 +525,40 @@ describe('confirmar una mensualidad abre sola su cobertura', () => {
   });
 });
 
+describe('aplicar un cobro ya pagado a un paquete de clases', () => {
+  const hoy = new Date().toISOString().slice(0, 10);
+  const enDias = n => new Date(Date.now() + n * 24 * 3600_000).toISOString().slice(0, 10);
+  let clienteId, facturaId;
+  before(async () => {
+    const c = await api.post('/api/clients', { fullName: 'Compró un paquete suelto', billingModel: 'package', standardPrice: 200, cutoffDay: 15 });
+    clienteId = c.datos.id;
+    const f = await api.post('/api/invoices', { clientId: clienteId, concept: 'Paquete 10 clases', amount: 200, dueOn: hoy });
+    facturaId = f.datos.id;
+  });
+
+  test('abre un saldo de paquete ligado al cobro, sin emitir factura nueva', async () => {
+    const antes = (await api.get('/api/invoices')).datos.length;
+    const { estado, datos } = await api.post(`/api/invoices/${facturaId}/package`, { totalSessions: 10, expiresOn: enDias(21) });
+    assert.equal(estado, 201);
+    assert.equal(Number(datos.package.total_sessions), 10);
+    const saldos = (await api.get('/api/packages')).datos.filter(p => p.client_id === clienteId && p.kind === 'package');
+    assert.equal(saldos.length, 1, 'abre el saldo del paquete');
+    assert.equal(saldos[0].status, 'active', 'y queda disponible al momento');
+    assert.equal((await api.get('/api/invoices')).datos.length, antes, 'no cobra nada nuevo: el ingreso sigue siendo el del cobro');
+  });
+
+  test('no se puede aplicar dos veces al mismo cobro', async () => {
+    const { estado } = await api.post(`/api/invoices/${facturaId}/package`, { totalSessions: 5, expiresOn: enDias(21) });
+    assert.equal(estado, 409, 'el cobro ya tiene su paquete');
+  });
+
+  test('rechaza una validez de más de 6 semanas', async () => {
+    const f = await api.post('/api/invoices', { clientId: clienteId, concept: 'Otro paquete', amount: 100, dueOn: hoy });
+    const { estado } = await api.post(`/api/invoices/${f.datos.id}/package`, { totalSessions: 8, expiresOn: enDias(60) });
+    assert.equal(estado, 400, 'un paquete no puede durar más de 6 semanas');
+  });
+});
+
 describe('editar una sesión de un horario indefinido', () => {
   let clientId, otro, sesion;
   before(async () => {

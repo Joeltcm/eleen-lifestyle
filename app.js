@@ -1,4 +1,4 @@
-const APP_VERSION = '152';
+const APP_VERSION = '153';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -782,7 +782,7 @@ function renderBilling() {
   document.getElementById('active-packages').textContent = data.packages.filter(pack => pack.status === 'confirmed' && remainingSessions(pack) > 0).length;
   document.getElementById('billing-pending').textContent = money.format(pending);
   document.getElementById('plan-grid').innerHTML = data.plans.length ? data.plans.map(plan => `<article class="plan-card ${plan.active ? '' : 'inactive'}"><div><span class="commercial-label ${plan.billingModel === 'package' ? 'package-label' : ''}${plan.billingModel === 'single' ? ' single-label' : ''}">${modalidadPlan(plan.billingModel)}</span><h4>${escapeHtml(plan.name)}</h4><p>${escapeHtml(plan.description || (plan.billingModel === 'package' ? `${plan.sessionsIncluded} sesiones · ${plan.validityDays} días` : plan.billingModel === 'single' ? 'Se cobra por sesión' : `${plan.sessionsIncluded} sesiones / mes`))}</p></div><div class="plan-price"><strong>${money.format(plan.price)}</strong><small>${plan.active ? 'Disponible' : 'Inactivo'}</small></div><button class="text-button" data-edit-plan="${plan.id}">Editar</button></article>`).join('') : '<p class="empty">Crea el primer plan para asignarlo a tus clientes.</p>';
-  document.getElementById('invoice-table').innerHTML = visibleInvoices.length ? visibleInvoices.map(invoice => { const label = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'; const concept = invoice.invoiceNumber ? `<small>${invoice.source === 'zoho_invoice' ? 'Zoho' : 'Eileen'} · ${escapeHtml(invoice.invoiceNumber)}</small><br>${escapeHtml(invoice.concept)}` : escapeHtml(invoice.concept); const local = invoice.source !== 'zoho_invoice'; return `<tr><td data-label="Cliente"><b>${escapeHtml(invoice.client)}</b></td><td data-label="Concepto">${concept}</td><td data-label="Vence">${invoice.due}</td><td data-label="Método">${invoice.method === 'pending' ? '—' : escapeHtml(invoice.method)}</td><td data-label="Monto">${money.format(invoice.amount)}${invoice.status === 'pending' && invoice.balance !== invoice.amount ? `<br><small>Saldo ${money.format(invoice.balance)}</small>` : ''}</td><td data-label="Estado"><span class="payment-status ${invoice.status}">${label}</span></td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoiceNumber || invoice.id.slice(0, 8))}">Ver PDF</button>${invoice.status !== 'void' ? `<button class="secondary session-use" data-apply-coverage="${invoice.id}">Aplicar a mensualidades</button>` : ''}${invoice.status === 'pending' && local ? `<button class="secondary session-use" data-confirm-invoice="${invoice.id}">Confirmar pago</button><button class="secondary session-use" data-edit-invoice="${invoice.id}">Editar</button><button class="secondary session-use" data-delete-invoice="${invoice.id}">Anular</button><button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar</button>` : ''}${invoice.status === 'void' && local ? `<button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar definitivamente</button>` : ''}${invoice.status === 'confirmed' && local ? `<button class="secondary session-use" data-edit-payment="${invoice.id}">Editar pago</button><button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar definitivamente</button>` : ''}</div></td></tr>`; }).join('') : '<tr><td colspan="7" class="empty">No hay facturas con estos filtros.</td></tr>';
+  document.getElementById('invoice-table').innerHTML = visibleInvoices.length ? visibleInvoices.map(invoice => { const label = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'; const concept = invoice.invoiceNumber ? `<small>${invoice.source === 'zoho_invoice' ? 'Zoho' : 'Eileen'} · ${escapeHtml(invoice.invoiceNumber)}</small><br>${escapeHtml(invoice.concept)}` : escapeHtml(invoice.concept); const local = invoice.source !== 'zoho_invoice'; return `<tr><td data-label="Cliente"><b>${escapeHtml(invoice.client)}</b></td><td data-label="Concepto">${concept}</td><td data-label="Vence">${invoice.due}</td><td data-label="Método">${invoice.method === 'pending' ? '—' : escapeHtml(invoice.method)}</td><td data-label="Monto">${money.format(invoice.amount)}${invoice.status === 'pending' && invoice.balance !== invoice.amount ? `<br><small>Saldo ${money.format(invoice.balance)}</small>` : ''}</td><td data-label="Estado"><span class="payment-status ${invoice.status}">${label}</span></td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoiceNumber || invoice.id.slice(0, 8))}">Ver PDF</button>${invoice.status !== 'void' ? `<button class="secondary session-use" data-apply-coverage="${invoice.id}">Aplicar a mensualidades</button><button class="secondary session-use" data-apply-package="${invoice.id}">Aplicar a paquete</button>` : ''}${invoice.status === 'pending' && local ? `<button class="secondary session-use" data-confirm-invoice="${invoice.id}">Confirmar pago</button><button class="secondary session-use" data-edit-invoice="${invoice.id}">Editar</button><button class="secondary session-use" data-delete-invoice="${invoice.id}">Anular</button><button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar</button>` : ''}${invoice.status === 'void' && local ? `<button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar definitivamente</button>` : ''}${invoice.status === 'confirmed' && local ? `<button class="secondary session-use" data-edit-payment="${invoice.id}">Editar pago</button><button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar definitivamente</button>` : ''}</div></td></tr>`; }).join('') : '<tr><td colspan="7" class="empty">No hay facturas con estos filtros.</td></tr>';
   const loadMore = document.getElementById('billing-load-more'); loadMore.hidden = visibleInvoices.length >= periodInvoices.length; loadMore.textContent = `Mostrar más facturas (${periodInvoices.length - visibleInvoices.length} restantes)`;
   document.getElementById('package-table').innerHTML = data.packages.length ? data.packages.map(pack => {
     const remaining = remainingSessions(pack);
@@ -2885,6 +2885,62 @@ async function applyInvoiceCoverage(id) {
   });
 }
 
+// Aplicar un cobro ya pagado a un paquete de clases: abre un saldo de N sesiones
+// ligado a ese cobro, sin emitir factura nueva. Un paquete no dura más de 6
+// semanas desde el pago; si se pasa del mes, se avisa pero se deja seguir.
+function applyInvoicePackage(id) {
+  const invoice = data.invoices.find(item => item.id === id); if (!invoice) return;
+  const fmt = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const inicio = new Date(`${(invoice.paidOn || invoice.issued || invoice.due || dateKey(today))}T12:00:00`);
+  const avisoDesde = new Date(inicio); avisoDesde.setMonth(avisoDesde.getMonth() + 1);
+  const tope = new Date(inicio); tope.setDate(tope.getDate() + 42);
+
+  const box = document.createElement('div');
+  box.innerHTML = `
+    <form id="package-form">
+      <p class="eyebrow">${invoice.source === 'zoho_invoice' ? 'COBRO DE ZOHO' : 'COBRO LOCAL'}</p>
+      <h2>Aplicar a paquete de clases</h2>
+      <p class="commercial-note">${escapeHtml(invoice.client)} · ${escapeHtml(invoice.concept)} · <b>${money.format(invoice.amount)}</b></p>
+      <label>Clases del paquete<input type="number" name="sessions" min="1" step="1" value="" required /></label>
+      <label>Válido hasta<input type="date" name="expiresOn" value="${fmt(avisoDesde)}" min="${fmt(inicio)}" max="${fmt(tope)}" required /></label>
+      <p class="commercial-note" id="package-note">Un paquete no puede durar más de 6 semanas desde el pago.</p>
+      <button class="primary wide-button">Abrir paquete</button>
+    </form>`;
+  openModal(box);
+
+  const form = document.getElementById('package-form');
+  const nota = document.getElementById('package-note');
+  const revisar = () => {
+    const valor = form.elements.expiresOn.value;
+    const boton = form.querySelector('button');
+    if (!valor) { nota.textContent = 'Un paquete no puede durar más de 6 semanas desde el pago.'; nota.classList.remove('coverage-warn'); boton.disabled = false; return; }
+    const expira = new Date(`${valor}T12:00:00`);
+    if (expira > tope) {
+      nota.textContent = 'Se pasa de las 6 semanas: acorta la fecha, un paquete no puede durar más que eso.';
+      nota.classList.add('coverage-warn'); boton.disabled = true;
+    } else if (expira > avisoDesde) {
+      nota.textContent = 'Ojo: pasa del mes. Se permite hasta 6 semanas, pero revisa que sea intencional.';
+      nota.classList.add('coverage-warn'); boton.disabled = false;
+    } else {
+      nota.textContent = 'Dentro del mes. Correcto.';
+      nota.classList.remove('coverage-warn'); boton.disabled = false;
+    }
+  };
+  form.addEventListener('input', revisar); revisar();
+
+  form.addEventListener('submit', async event => {
+    event.preventDefault(); const datos = new FormData(event.target);
+    const sesiones = Number(datos.get('sessions'));
+    if (!confirmarGuardado(`Abrir un paquete de ${sesiones} clases para ${invoice.client}\nVálido hasta ${datos.get('expiresOn')}`)) return;
+    try {
+      event.target.classList.add('loading-state');
+      await api(`/api/invoices/${id}/package`, { method: 'POST', body: { totalSessions: sesiones, expiresOn: datos.get('expiresOn') } });
+      await loadData(); renderAll(); modal.close();
+      toast(`Paquete de ${sesiones} clases abierto para ${invoice.client}`);
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+
 function editInvoice(id) {
   const invoice = data.invoices.find(item => item.id === id); if (!invoice) return;
   const box = document.createElement('div');
@@ -3482,6 +3538,7 @@ document.addEventListener('click', event => {
   if (event.target.dataset.editPayment) confirmInvoice(event.target.dataset.editPayment, true);
   if (event.target.dataset.editInvoice) editInvoice(event.target.dataset.editInvoice);
   if (event.target.dataset.applyCoverage) applyInvoiceCoverage(event.target.dataset.applyCoverage);
+  if (event.target.dataset.applyPackage) applyInvoicePackage(event.target.dataset.applyPackage);
   if (event.target.dataset.colocarReposicion) colocarReposicion(data.clients.find(c => c.id === event.target.dataset.colocarReposicion));
   if (event.target.dataset.reactivarSesion) {
     const sesion = data.sessions.find(item => item.id === event.target.dataset.reactivarSesion);

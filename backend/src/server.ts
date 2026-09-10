@@ -3055,6 +3055,55 @@ app.delete('/api/invoices/:id/coverage/:coverageId', { preHandler: requireStaff 
   return resultado;
 });
 
+// Aplicar un cobro ya pagado a un paquete de clases. La cobertura mensual abre
+// saldos de mensualidad; esto abre uno de tipo 'package' —N clases con su propia
+// validez— sin emitir una factura nueva, para el caso de un pago que entró por
+// Zoho o a mano y que no es una mensualidad. Se liga por invoice.package_id: así
+// no se cobra de nuevo (el ingreso sigue siendo el del cobro) y no se puede
+// aplicar dos veces al mismo cobro.
+//
+// Regla de validez: un paquete no dura más de 6 semanas desde el pago; el
+// frontend avisa si se pasa del mes, y aquí se corta de plano lo que pase de las
+// 6 semanas, que es lo que no debe ocurrir de ninguna manera.
+const SEIS_SEMANAS_DIAS = 42;
+const packageFromInvoiceSchema = z.object({
+  totalSessions: z.coerce.number().int().positive(),
+  expiresOn: z.string().date()
+});
+app.post('/api/invoices/:id/package', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = packageFromInvoiceSchema.parse(request.body);
+  const resultado = await sql.begin(async transaction => {
+    const [invoice] = await transaction`
+      SELECT i.id, i.client_id, i.amount, i.package_id, i.status,
+        COALESCE((SELECT min(ip.paid_on) FROM payment_allocations pa JOIN invoice_payments ip ON ip.id = pa.payment_id WHERE pa.invoice_id = i.id), i.issued_on, i.due_on) AS coverage_start
+      FROM invoices i JOIN clients c ON c.id = i.client_id
+      WHERE i.id = ${id} AND c.owner_id = ${auth.sub} AND i.status <> 'void'
+      FOR UPDATE OF i
+    `;
+    if (!invoice) return { error: 'Cobro no encontrado', code: 404 };
+    if (invoice.package_id) return { error: 'Este cobro ya tiene un paquete ligado.', code: 409 };
+    // Las clases del paquete cuelgan del día del pago: es cuando el cliente lo
+    // compró, y desde ahí corre su validez.
+    const inicio = mediodiaEnPanama(invoice.coverage_start || new Date());
+    const expira = mediodiaEnPanama(input.expiresOn);
+    if (expira < inicio) return { error: 'La validez no puede ser anterior a la fecha del pago.', code: 400 };
+    const tope = new Date(inicio); tope.setDate(tope.getDate() + SEIS_SEMANAS_DIAS);
+    if (expira > tope) return { error: 'Un paquete de clases no puede durar más de 6 semanas desde el pago.', code: 400 };
+    const [pack] = await transaction`
+      INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
+      VALUES (${invoice.client_id}, ${`Paquete ${input.totalSessions} sesiones`}, ${input.totalSessions}, ${invoice.amount},
+        ${input.expiresOn}::date, 'package', ${String(invoice.coverage_start).slice(0, 10)}::date, 'active')
+      RETURNING id, total_sessions, expires_on
+    `;
+    await transaction`UPDATE invoices SET package_id = ${pack.id} WHERE id = ${id}`;
+    return { package: pack };
+  });
+  if ('error' in resultado) return reply.code(resultado.code || 400).send({ error: resultado.error });
+  return reply.code(201).send(resultado);
+});
+
 // Borrado definitivo, para cobros que nunca debieron existir: pruebas,
 // duplicados por error. Anular deja constancia de una transacción real; un
 // cobro de prueba no lo es y no tiene por qué ensuciar la contabilidad para
