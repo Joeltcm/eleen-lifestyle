@@ -1,4 +1,4 @@
-const APP_VERSION = '162';
+const APP_VERSION = '163';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -3179,33 +3179,87 @@ function complianceChartSvg(timeline) {
   return `<svg viewBox="0 0 ${ancho} ${alto}" class="compliance-chart" role="img" aria-label="Cumplimiento mes a mes">${rejilla}${lineas}${puntos}</svg>`;
 }
 
-function complianceReport(client = null, months = 6) {
+// Informe de asistencia: 1 a 4 clientes (o todos), por rango de fechas propio o
+// por el ciclo de facturación vigente de cada cliente. Comparativa + mes a mes.
+const pctColor = p => p === null ? 'neutral' : p >= 90 ? 'good' : p >= 70 ? 'neutral' : 'bad';
+const pctChip = p => p === null ? '<span class="delta neutral">sin actividad</span>' : `<span class="delta ${pctColor(p)}">${p}%</span>`;
+function complianceReport(client = null) {
+  const seleccion = client ? [{ id: client.id, name: client.name }] : [];
+  const ordenados = (data.clients || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+  const hoy = dateKey(today);
+  const hace30 = dateKey(new Date(Date.now() - 30 * 24 * 3600_000));
   const box = document.createElement('div');
-  box.innerHTML = `<p class="eyebrow">INFORME DE CUMPLIMIENTO</p><h2>${client ? escapeHtml(client.name) : 'Todos los clientes'}</h2>
-    <label>Meses a comparar<select id="report-months">${[3, 6, 12, 24].map(n => `<option value="${n}"${n === months ? ' selected' : ''}>Últimos ${n} meses</option>`).join('')}</select></label>
-    <div id="report-body"><p class="empty">Calculando…</p></div>`;
+  box.innerHTML = `<p class="eyebrow">INFORME DE ASISTENCIA</p><h2>Asistencia de clientes</h2>
+    <div class="report-clients">
+      <label class="checkbox-line"><input type="checkbox" id="report-all" ${seleccion.length ? '' : 'checked'} /> Todos los clientes activos</label>
+      <div id="report-picker" ${seleccion.length ? '' : 'hidden'}>
+        <div id="report-chips" class="report-chips"></div>
+        <label>Agregar cliente (máx. 4)<select id="report-add"><option value="">— elegir —</option>${ordenados.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('')}</select></label>
+      </div>
+    </div>
+    <label>Período<select id="report-mode"><option value="cycle">Ciclo actual de cada cliente (por corte)</option><option value="range">Rango de fechas</option></select></label>
+    <div id="report-range" class="form-row" hidden><label>Desde<input type="date" id="report-from" value="${hace30}" max="${hoy}" /></label><label>Hasta<input type="date" id="report-to" value="${hoy}" max="${hoy}" /></label></div>
+    <button class="primary wide-button" id="report-run">Generar informe</button>
+    <div id="report-body"></div>`;
   openModal(box, true);
-  document.getElementById('report-months').onchange = event => complianceReport(client, Number(event.target.value));
-  renderComplianceReport(client, months);
+
+  const chips = document.getElementById('report-chips');
+  const add = document.getElementById('report-add');
+  const pintarChips = () => {
+    chips.innerHTML = seleccion.map(c => `<span class="report-chip">${escapeHtml(c.name)}<button type="button" data-quitar="${c.id}" aria-label="Quitar">×</button></span>`).join('');
+    chips.querySelectorAll('[data-quitar]').forEach(b => b.onclick = () => { const i = seleccion.findIndex(s => s.id === b.dataset.quitar); if (i >= 0) seleccion.splice(i, 1); pintarChips(); });
+    add.disabled = seleccion.length >= 4;
+  };
+  pintarChips();
+  add.onchange = () => {
+    const c = ordenados.find(x => x.id === add.value);
+    if (c && seleccion.length < 4 && !seleccion.some(s => s.id === c.id)) { seleccion.push({ id: c.id, name: c.name }); pintarChips(); }
+    add.value = '';
+  };
+  document.getElementById('report-all').onchange = event => { document.getElementById('report-picker').hidden = event.target.checked; };
+  document.getElementById('report-mode').onchange = event => { document.getElementById('report-range').hidden = event.target.value !== 'range'; };
+  document.getElementById('report-run').onclick = () => renderComplianceReport(seleccion);
+  if (seleccion.length) renderComplianceReport(seleccion);
 }
 
-function renderComplianceReport(client, months) {
+let ultimoInformeAsistencia = null;
+function renderComplianceReport(seleccion) {
   const target = document.getElementById('report-body');
-  const query = `months=${months}${client ? `&clientId=${encodeURIComponent(client.id)}` : ''}`;
-  api(`/api/compliance/monthly?${query}`).then(informe => {
+  const todos = document.getElementById('report-all').checked;
+  const mode = document.getElementById('report-mode').value;
+  if (!todos && !seleccion.length) { target.innerHTML = '<p class="empty">Elige al menos un cliente o marca "Todos".</p>'; return; }
+  const params = new URLSearchParams({ mode });
+  if (!todos) params.set('clientIds', seleccion.map(s => s.id).join(','));
+  if (mode === 'range') { params.set('from', document.getElementById('report-from').value); params.set('to', document.getElementById('report-to').value); }
+  target.innerHTML = '<p class="empty">Calculando…</p>';
+  api(`/api/compliance/report?${params.toString()}`).then(informe => {
     if (!target?.isConnected || !modal.open) return;
-    const filas = informe.timeline.map(mes => `<tr><td>${attendanceMonthLabel(mes.month)}</td><td>${mes.activities || '—'}</td><td>${mes.completed || '—'}</td><td>${mes.late || '—'}</td><td>${mes.missed || '—'}</td><td>${mes.compliancePercent === null ? '<span class="delta neutral">sin actividad</span>' : `<span class="delta ${mes.compliancePercent >= 90 ? 'good' : mes.compliancePercent >= 70 ? 'neutral' : 'bad'}">${mes.compliancePercent}%</span>`}</td></tr>`).join('');
-    target.innerHTML = `<div class="metrics" style="grid-template-columns:repeat(2,1fr)">
-        <article><span>Promedio</span><strong>${informe.promedio === null ? '—' : `${informe.promedio}%`}</strong></article>
-        <article><span>Actividades</span><strong>${informe.totalActividades}</strong></article>
-        <article><span>Fuera de fecha</span><strong>${informe.totalTardias}</strong></article>
-        <article><span>Sin hacer</span><strong>${informe.totalIncumplidas}</strong></article></div>
-      ${complianceChartSvg(informe.timeline)}
-      <div class="table-wrap"><table><thead><tr><th>Mes</th><th>Act.</th><th>Cumpl.</th><th>Tarde</th><th>Sin hacer</th><th>%</th></tr></thead><tbody>${filas}</tbody></table></div>
-      <button class="primary wide-button" id="report-pdf">Ver PDF para enviar</button>
-      <p class="section-note">El PDF trae la gráfica y el detalle mes a mes con la marca de Eileen Lifestyle. Desde ahí lo descargas y lo compartes por WhatsApp o correo.</p>`;
-    document.getElementById('report-pdf').onclick = () => previewProtectedPdf(`/api/compliance/report.pdf?${query}`, `Cumplimiento · ${client ? client.name : 'Todos los clientes'}`, `cumplimiento-${client ? client.name.replace(/\s+/g, '-').toLowerCase() : 'todos'}.pdf`);
+    ultimoInformeAsistencia = informe;
+    const comparativa = informe.clients.map(c => `<tr><td data-label="Cliente"><b>${escapeHtml(c.name)}</b><br><small>${fechaCorta(c.from)} – ${fechaCorta(c.to)}</small></td><td data-label="%">${pctChip(c.compliancePercent)}</td><td data-label="Act.">${c.activities}</td><td data-label="Cumpl.">${c.completed}</td><td data-label="Tarde">${c.late}</td><td data-label="Sin hacer">${c.missed}</td></tr>`).join('');
+    const detalle = informe.clients.map(c => {
+      const filas = c.monthly.length ? c.monthly.map(m => `<tr><td>${attendanceMonthLabel(m.month)}</td><td>${m.activities || '—'}</td><td>${m.completed || '—'}</td><td>${m.late || '—'}</td><td>${m.missed || '—'}</td><td>${pctChip(m.compliancePercent)}</td></tr>`).join('') : '<tr><td colspan="6" class="empty">Sin actividad en el período.</td></tr>';
+      return `<div class="report-client-detail"><h3>${escapeHtml(c.name)}</h3>${c.monthly.length ? complianceChartSvg(c.monthly) : ''}<div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Mes</th><th>Act.</th><th>Cumpl.</th><th>Tarde</th><th>Sin hacer</th><th>%</th></tr></thead><tbody>${filas}</tbody></table></div></div>`;
+    }).join('');
+    target.innerHTML = `<p class="eyebrow" style="margin-top:8px">COMPARATIVA ${informe.mode === 'cycle' ? '· CICLO ACTUAL' : '· RANGO'}</p>
+      <div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Cliente</th><th>%</th><th>Act.</th><th>Cumpl.</th><th>Tarde</th><th>Sin hacer</th></tr></thead><tbody>${comparativa}</tbody></table></div>
+      <button class="secondary wide-button" id="report-csv" style="margin-top:12px">Exportar CSV ↓</button>
+      <p class="eyebrow" style="margin-top:22px">DETALLE MES A MES</p>${detalle}
+      <p class="section-note">Cumplir tarde cuenta 100% (se marca "fuera de fecha"); solo lo que nunca se hizo cuenta 0%. Las sesiones de un cliente en pausa no cuentan.</p>`;
+    document.getElementById('report-csv').onclick = () => exportarInformeCsv();
   }).catch(error => { if (target?.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; });
+}
+function exportarInformeCsv() {
+  if (!ultimoInformeAsistencia) return;
+  const esc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const lineas = [['Cliente', 'Desde', 'Hasta', 'Mes', 'Actividades', 'Completadas', 'Fuera de fecha', 'Sin hacer', '% cumplimiento']];
+  for (const c of ultimoInformeAsistencia.clients) {
+    lineas.push([c.name, c.from, c.to, 'TOTAL', c.activities, c.completed, c.late, c.missed, c.compliancePercent ?? '']);
+    for (const m of c.monthly) lineas.push([c.name, c.from, c.to, m.month, m.activities, m.completed, m.late, m.missed, m.compliancePercent ?? '']);
+  }
+  const csv = '﻿' + lineas.map(f => f.map(esc).join(',')).join('\r\n');
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  const a = document.createElement('a'); a.href = url; a.download = `asistencia-${dateKey(today)}.csv`; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
 function attendanceSection(target, clientId) {

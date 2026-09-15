@@ -3766,6 +3766,66 @@ app.get('/api/compliance/monthly', { preHandler: requireStaff }, async (request,
   };
 });
 
+// Informe de asistencia flexible: 1 a 4 clientes (o todos), por rango de fechas
+// propio o por el ciclo de facturación vigente de cada cliente. Devuelve una
+// comparativa (un resumen por cliente) y el detalle mes a mes de cada uno.
+type FilaCumplimiento = { client_id: unknown; occurred_at: unknown; completion_percent: unknown; late: unknown; status: unknown };
+function resumenCumplimiento(filas: FilaCumplimiento[]) {
+  let activities = 0, completed = 0, late = 0, missed = 0, suma = 0;
+  for (const f of filas) {
+    activities += 1; suma += Number(f.completion_percent);
+    if (Number(f.completion_percent) > 0) completed += 1;
+    if (f.late) late += 1;
+    if (f.status === 'missed') missed += 1;
+  }
+  return { activities, completed, late, missed, compliancePercent: activities ? Math.round(suma / activities) : null };
+}
+function cumplimientoPorMes(filas: FilaCumplimiento[]) {
+  const meses = new Map<string, FilaCumplimiento[]>();
+  for (const f of filas) {
+    const d = new Date(f.occurred_at as string);
+    const clave = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+    if (!meses.has(clave)) meses.set(clave, []);
+    meses.get(clave)!.push(f);
+  }
+  return [...meses.entries()].sort((a, b) => a[0] < b[0] ? -1 : 1).map(([month, fs]) => ({ month, ...resumenCumplimiento(fs) }));
+}
+const reportRangeSchema = z.object({
+  clientIds: z.string().trim().optional(),
+  mode: z.enum(['range', 'cycle']).default('range'),
+  from: z.string().date().optional(),
+  to: z.string().date().optional()
+});
+app.get('/api/compliance/report', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const q = reportRangeSchema.parse(request.query);
+  const ids = (q.clientIds || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (ids.length > 4) return reply.code(400).send({ error: 'Máximo 4 clientes por informe' });
+  for (const id of ids) if (!z.string().uuid().safeParse(id).success) return reply.code(400).send({ error: 'Cliente inválido' });
+  const hoy = diaEnPanama(new Date());
+  if (q.mode === 'range') {
+    if (!q.from || !q.to) return reply.code(400).send({ error: 'Indica la fecha desde y hasta' });
+    if (q.from > q.to) return reply.code(400).send({ error: 'La fecha inicial no puede ser mayor que la final' });
+  }
+  const clientes = ids.length
+    ? await sql`SELECT id, full_name, billing_cutoff_day, inicio_ciclo(billing_cutoff_day)::text AS ciclo_inicio FROM clients WHERE owner_id = ${auth.sub} AND id = ANY(${ids}) ORDER BY full_name`
+    : await sql`SELECT id, full_name, billing_cutoff_day, inicio_ciclo(billing_cutoff_day)::text AS ciclo_inicio FROM clients WHERE owner_id = ${auth.sub} AND status = 'active' ORDER BY full_name`;
+  if (!clientes.length) return reply.code(404).send({ error: 'No hay clientes para el informe' });
+  const ventana = new Map<string, { start: string; end: string }>();
+  for (const c of clientes) {
+    if (q.mode === 'cycle') ventana.set(c.id as string, { start: String(c.ciclo_inicio).slice(0, 10), end: hoy });
+    else ventana.set(c.id as string, { start: q.from!, end: (q.to! > hoy ? hoy : q.to!) });
+  }
+  const desde = [...ventana.values()].reduce((min, w) => (w.start < min ? w.start : min), hoy);
+  const filas = await complianceRows(auth.sub, 'year', undefined, `${desde}T00:00:00`) as unknown as (FilaCumplimiento & { full_name: unknown })[];
+  const porCliente = clientes.map(c => {
+    const w = ventana.get(c.id as string)!;
+    const suyas = filas.filter(f => f.client_id === c.id && diaEnPanama(f.occurred_at as string) >= w.start && diaEnPanama(f.occurred_at as string) <= w.end);
+    return { clientId: c.id, name: c.full_name, from: w.start, to: w.end, ...resumenCumplimiento(suyas), monthly: cumplimientoPorMes(suyas) };
+  });
+  return { mode: q.mode, generatedAt: hoy, clients: porCliente };
+});
+
 app.get('/api/compliance/report.pdf', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const query = monthlyReportSchema.parse(request.query);

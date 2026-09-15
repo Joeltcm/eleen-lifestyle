@@ -471,6 +471,29 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
   });
 });
 
+describe('informe de asistencia flexible', () => {
+  test('comparativa + detalle por cliente, modos rango y ciclo, tope de 4', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Asistencia Flexible', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+    const ayer = new Date(Date.now() - 24 * 3600_000).toISOString();
+    const lote = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: [ayer], durationMinutes: 60, mode: 'Presencial' });
+    await api.patch(`/api/sessions/${lote.datos.sesiones[0].id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+
+    const desde = new Date(Date.now() - 7 * 24 * 3600_000).toISOString().slice(0, 10);
+    const hasta = new Date().toISOString().slice(0, 10);
+    const rango = await api.get(`/api/compliance/report?mode=range&clientIds=${c.datos.id}&from=${desde}&to=${hasta}`);
+    assert.equal(rango.estado, 200);
+    assert.equal(rango.datos.clients.length, 1);
+    assert.ok(rango.datos.clients[0].activities >= 1, 'cuenta la sesión completada en el rango');
+    assert.ok(Array.isArray(rango.datos.clients[0].monthly), 'trae el detalle mes a mes');
+
+    const ciclo = await api.get(`/api/compliance/report?mode=cycle&clientIds=${c.datos.id}`);
+    assert.equal(ciclo.estado, 200, 'el modo por ciclo también responde');
+
+    const cinco = await api.get('/api/compliance/report?mode=cycle&clientIds=a,b,c,d,e');
+    assert.equal(cinco.estado, 400, 'no permite más de 4 clientes');
+  });
+});
+
 describe('marcar un saldo pendiente como pagado a mano', () => {
   test('markPaid activa un paquete pendiente sin crear un cobro nuevo', async () => {
     const c = await api.post('/api/clients', { fullName: 'Pagó por fuera', billingModel: 'package', standardPrice: 200, cutoffDay: 15 });
