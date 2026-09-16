@@ -320,7 +320,10 @@ async function generateRecurringInvoices(ownerId?: string) {
         AND NOT EXISTS (
           SELECT 1 FROM session_packages sp
           WHERE sp.client_id = COALESCE(i.billed_for_client_id, i.client_id) AND sp.kind = 'monthly'
-            AND sp.expires_on IS NOT NULL AND sp.expires_on >= i.due_on
+            -- Estricto (>): un saldo del ciclo anterior que vence justo el día de
+            -- corte (expires_on = due_on) no debe bloquear el saldo del ciclo
+            -- nuevo. Sólo bloquea uno que se extiende más allá del corte.
+            AND sp.expires_on IS NOT NULL AND sp.expires_on > i.due_on
         )
     ) q
     WHERE q.total_sessions > 0
@@ -3315,7 +3318,10 @@ async function saveNativeInvoicePayment(ownerId: string, id: string, input: z.in
           AND NOT EXISTS (
             SELECT 1 FROM session_packages sp
             WHERE sp.client_id = c.id AND sp.kind = 'monthly' AND sp.status = 'active'
-              AND sp.expires_on IS NOT NULL AND sp.expires_on >= ${input.paidOn}::date
+              -- Estricto (>): un saldo que vence justo el día del pago (fin del
+              -- ciclo anterior) no bloquea el del ciclo nuevo. Mismo criterio que
+              -- la generación y la asignación de plan.
+              AND sp.expires_on IS NOT NULL AND sp.expires_on > ${input.paidOn}::date
           )
       `;
       const entries = candidatos
