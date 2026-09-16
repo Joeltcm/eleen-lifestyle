@@ -790,6 +790,31 @@ app.patch('/api/clients/:id/plan', { preHandler: requireStaff }, async (request,
         WHERE NOT EXISTS (SELECT 1 FROM memberships WHERE client_id = ${id} AND status = 'active')
       `;
       await transaction`UPDATE memberships SET amount = ${plan.price}, renewal_day = ${input.cutoffDay}, status = 'active' WHERE client_id = ${id} AND status = 'active'`;
+      // Abrir el saldo del ciclo actual al asignar la mensualidad, para no
+      // depender de "Generar cobros pendientes". Sólo si el plan trae sesiones y
+      // no hay ya un saldo mensual vigente (mismo criterio anti-duplicado que la
+      // generación y que el confirmar el pago). El cobro del ciclo lo sigue
+      // emitiendo la generación —el índice de facturas evita duplicarlo—; esto
+      // sólo adelanta el saldo para poder descontar clases desde ya. Nace activo
+      // igual que en la generación (la mensualidad se paga por adelantado), y se
+      // descuentan las clases ya dadas del ciclo.
+      if (plan.sessions_included) {
+        const [ciclo] = await transaction`SELECT inicio_ciclo(${input.cutoffDay})::text AS inicio`;
+        const inicio = String(ciclo.inicio).slice(0, 10);
+        const vence = corteSiguiente(mediodiaEnPanama(inicio), input.cutoffDay).toISOString().slice(0, 10);
+        const [existe] = await transaction`
+          SELECT 1 FROM session_packages
+          WHERE client_id = ${id} AND kind = 'monthly' AND status = 'active'
+            AND expires_on IS NOT NULL AND expires_on >= current_date
+          LIMIT 1`;
+        if (!existe) {
+          const [saldo] = await transaction`
+            INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
+            VALUES (${id}, ${'Mensualidad · ' + rangoDelCiclo(inicio, vence)}, ${plan.sessions_included}, ${plan.price}, ${vence}::date, 'monthly', ${inicio}::date, 'active')
+            RETURNING id`;
+          await cobrarClasesYaDadas(transaction, saldo.id as string, id, vence, Number(plan.sessions_included));
+        }
+      }
     } else {
       await transaction`UPDATE memberships SET status = 'paused' WHERE client_id = ${id} AND status = 'active'`;
       // Las sesiones individuales no abren saldo ni cobro por adelantado: no

@@ -494,6 +494,23 @@ describe('informe de asistencia flexible', () => {
   });
 });
 
+describe('asignar un plan mensual abre el saldo del ciclo', () => {
+  test('al asignar la mensualidad se abre el saldo activo con las sesiones del plan, sin duplicar', async () => {
+    const plan = await api.post('/api/plans', { name: 'Mensual saldo al asignar', billingModel: 'monthly', price: 480, sessionsIncluded: 12 });
+    const c = await api.post('/api/clients', { fullName: 'Nuevo mensual', billingModel: 'single', standardPrice: 25, cutoffDay: 15 });
+    assert.equal((await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id).length, 0, 'arranca sin saldo');
+
+    await api.patch(`/api/clients/${c.datos.id}/plan`, { planId: plan.datos.id, cutoffDay: 15 });
+    const saldos = (await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly');
+    assert.equal(saldos.length, 1, 'abre el saldo del ciclo al asignar la mensualidad');
+    assert.equal(saldos[0].status, 'active', 'nace activo para poder descontar clases');
+    assert.equal(Number(saldos[0].total_sessions), 12, 'con las sesiones del plan');
+
+    await api.patch(`/api/clients/${c.datos.id}/plan`, { planId: plan.datos.id, cutoffDay: 15 });
+    assert.equal((await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly').length, 1, 'reasignar no duplica el saldo');
+  });
+});
+
 describe('marcar un saldo pendiente como pagado a mano', () => {
   test('markPaid activa un paquete pendiente sin crear un cobro nuevo', async () => {
     const c = await api.post('/api/clients', { fullName: 'Pagó por fuera', billingModel: 'package', standardPrice: 200, cutoffDay: 15 });
