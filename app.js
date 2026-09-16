@@ -1,4 +1,4 @@
-const APP_VERSION = '165';
+const APP_VERSION = '166';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -916,7 +916,14 @@ function editClient(client) {
   document.getElementById('edit-client-form').addEventListener('submit', async event => {
     event.preventDefault(); const values = new FormData(event.target);
     const planElegido = values.get('planId') || '';
-    const cambiaDePlan = planElegido && planElegido !== (client.planId || '');
+    // Se llama a /plan si cambió el plan, o si es mensualidad y no tiene un saldo
+    // vigente hacia adelante (para abrirle el del ciclo aunque el plan sea el
+    // mismo). Un saldo que vence justo hoy no cuenta como vigente. Así re-guardar
+    // el expediente abre el saldo, sin resetear el precio a quien ya lo tiene.
+    const planElegidoObj = data.plans.find(p => p.id === planElegido);
+    const hoyClave = dateKey(today);
+    const tieneSaldoVigente = data.packages.some(pk => pk.clientId === client.id && pk.kind === 'monthly' && pk.status === 'confirmed' && pk.expiresOn && dateOnly(pk.expiresOn) > hoyClave);
+    const cambiaDePlan = planElegido && (planElegido !== (client.planId || '') || (planElegidoObj?.billingModel === 'monthly' && !tieneSaldoVigente));
     const datos = Object.fromEntries(values);
     // El plan no va en el PATCH general: tiene su propio endpoint porque
     // cambiarlo arrastra precio, membresía, saldo de sesiones y meta de
