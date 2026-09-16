@@ -802,10 +802,14 @@ app.patch('/api/clients/:id/plan', { preHandler: requireStaff }, async (request,
         const [ciclo] = await transaction`SELECT inicio_ciclo(${input.cutoffDay})::text AS inicio`;
         const inicio = String(ciclo.inicio).slice(0, 10);
         const vence = corteSiguiente(mediodiaEnPanama(inicio), input.cutoffDay).toISOString().slice(0, 10);
+        // Se compara contra el INICIO del ciclo nuevo, no contra hoy: un saldo
+        // del ciclo anterior que vence justo el día de corte (expires_on = inicio)
+        // no debe bloquear el del ciclo nuevo. Sólo bloquea uno que se extienda
+        // más allá del inicio (o sea, que ya cubra este ciclo).
         const [existe] = await transaction`
           SELECT 1 FROM session_packages
           WHERE client_id = ${id} AND kind = 'monthly' AND status = 'active'
-            AND expires_on IS NOT NULL AND expires_on >= current_date
+            AND expires_on IS NOT NULL AND expires_on > ${inicio}::date
           LIMIT 1`;
         if (!existe) {
           const [saldo] = await transaction`
