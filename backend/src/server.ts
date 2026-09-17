@@ -715,7 +715,7 @@ app.post('/api/clients', { preHandler: requireStaff }, async (request, reply) =>
       }
       await transaction`INSERT INTO memberships (client_id, amount, renewal_day) VALUES (${client.id}, ${standardPrice}, ${input.cutoffDay})`;
     } else if (packageSessions) {
-      const expiresOn = selectedPlan?.validity_days ? new Date(Date.now() + Number(selectedPlan.validity_days) * 86400000).toISOString().slice(0, 10) : null;
+      const expiresOn = vencePaqueteDesde(new Date());
       const [pack] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on) VALUES (${client.id}, ${selectedPlan?.name || `Paquete ${packageSessions} sesiones`}, ${packageSessions}, ${standardPrice}, ${expiresOn}) RETURNING id`;
       await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${client.id}, ${pack.id}, 'Paquete de sesiones', ${standardPrice}, current_date)`;
     }
@@ -835,7 +835,7 @@ app.patch('/api/clients/:id/plan', { preHandler: requireStaff }, async (request,
       }
       const [existingPackage] = await transaction`SELECT id FROM session_packages WHERE client_id = ${id} AND status IN ('pending', 'active') AND label = ${plan.name} ORDER BY created_at DESC LIMIT 1`;
       if (!existingPackage) {
-        const expiresOn = plan.validity_days ? new Date(Date.now() + Number(plan.validity_days) * 86400000).toISOString().slice(0, 10) : null;
+        const expiresOn = vencePaqueteDesde(new Date());
         const [createdPackage] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on) VALUES (${id}, ${plan.name}, ${plan.sessions_included}, ${plan.price}, ${expiresOn}) RETURNING id`;
         await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${id}, ${createdPackage.id}, ${plan.name}, ${plan.price}, current_date)`;
       }
@@ -979,6 +979,17 @@ function venceMensualidadDesde(periodo: Date | string): string {
   return new Date(Date.UTC(inicio.getUTCFullYear(), inicio.getUTCMonth() + 1, inicio.getUTCDate())).toISOString().slice(0, 10);
 }
 
+// Un paquete de clases vive 6 semanas (42 días) desde el pago: ese es el tope de
+// uso, hasta donde se pueden seguir descontando clases si aún quedan. A las 4
+// semanas (28 días) sólo se marca "renovación pendiente" —no corta el uso—; el
+// corte anticipado (perder clases) pasa sólo cuando la entrenadora renueva.
+const DIAS_USO_PAQUETE = 42;
+const DIAS_RENOVACION_PAQUETE = 28;
+function vencePaqueteDesde(fecha: Date | string): string {
+  const inicio = mediodiaEnPanama(fecha);
+  return new Date(Date.UTC(inicio.getUTCFullYear(), inicio.getUTCMonth(), inicio.getUTCDate() + DIAS_USO_PAQUETE)).toISOString().slice(0, 10);
+}
+
 const packageSchema = z.object({
   // Sin esto la factura se fechaba siempre hoy, así que un cobro creado en
   // agosto para cubrir septiembre quedaba registrado como de agosto y la
@@ -995,7 +1006,12 @@ app.get('/api/packages', { preHandler: requireStaff }, async request => {
     SELECT p.*, c.full_name,
       oi.invoice_number AS origin_invoice_number, oi.concept AS origin_concept,
       oi.source_system AS origin_source, oi.status AS origin_status,
-      COALESCE(oi.confirmed_at::date, oi.issued_on, oi.due_on) AS origin_date
+      COALESCE(oi.confirmed_at::date, oi.issued_on, oi.due_on) AS origin_date,
+      -- Paquete de clases pasado el mes (4 semanas) pero aún dentro del tope de
+      -- uso: toca renovarlo, sin cortar el uso todavía.
+      (p.kind = 'package' AND p.status = 'active' AND p.purchased_on IS NOT NULL
+        AND p.purchased_on + ${DIAS_RENOVACION_PAQUETE}::int <= current_date) AS renovacion_pendiente,
+      (p.expires_on IS NOT NULL AND p.expires_on < current_date AND p.used_sessions < p.total_sessions) AS vencido_con_saldo
     FROM session_packages p JOIN clients c ON c.id = p.client_id
     LEFT JOIN invoices oi ON oi.id = p.origin_invoice_id
     WHERE c.owner_id = ${auth.sub} ORDER BY p.created_at DESC`;
@@ -1010,15 +1026,18 @@ app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) =
   // Una mensualidad vence en el próximo corte del cliente: es lo que delimita
   // el período que acaba de pagar. Sin vencimiento, sus sesiones no caducarían
   // nunca y se acumularían mes tras mes.
+  // El paquete de clases vence a las 6 semanas del pago (tope de uso). La
+  // mensualidad, en el próximo corte. Sin vencimiento, las sesiones no
+  // caducarían nunca y se acumularían.
   const vence = input.expiresOn
     ? input.expiresOn
-    : esCobroMensual ? venceMensualidadDesde(input.dueOn || new Date()) : null;
+    : esCobroMensual ? venceMensualidadDesde(input.dueOn || new Date()) : vencePaqueteDesde(input.dueOn || new Date());
   const etiqueta = esCobroMensual
     ? `Mensualidad · ${rangoDelCiclo(input.dueOn || new Date(), vence || new Date())}`
     : `Paquete ${input.totalSessions} sesiones`;
 
   const pack = await sql.begin(async transaction => {
-    const [created] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind) VALUES (${input.clientId}, ${etiqueta}, ${input.totalSessions}, ${input.amount}, ${vence}, ${input.kind}) RETURNING *`;
+    const [created] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on) VALUES (${input.clientId}, ${etiqueta}, ${input.totalSessions}, ${input.amount}, ${vence}, ${input.kind}, COALESCE(${input.dueOn}::date, current_date)) RETURNING *`;
     const [invoice] = await transaction`
       INSERT INTO invoices (client_id, package_id, concept, amount, due_on, issued_on, billing_period)
       VALUES (${input.clientId}, ${created.id}, ${concepto}, ${input.amount},
@@ -1123,6 +1142,68 @@ app.patch('/api/packages/:id', { preHandler: requireStaff }, async (request, rep
   return pack;
 });
 
+// Renovar un paquete de clases, por decisión de la entrenadora. Abre uno nuevo
+// de 6 semanas con su cobro ya pagado (método y fecha los indica ella en el
+// modal). El viejo se cierra: si quedaban clases, ella elige perderlas —la
+// palanca para renovar "al mes" y negociar— o arrastrarlas al nuevo.
+const renewPackageSchema = z.object({
+  method: z.string().trim().min(1).max(40),
+  paidOn: z.string().date(),
+  reference: z.string().trim().max(120).optional().nullable(),
+  carryover: z.boolean().default(false),
+  totalSessions: z.coerce.number().int().min(1).max(400).optional(),
+  amount: z.coerce.number().min(0).optional()
+});
+app.post('/api/packages/:id/renew', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = renewPackageSchema.parse(request.body);
+  const resultado = await sql.begin(async transaction => {
+    const [viejo] = await transaction`
+      SELECT sp.id, sp.client_id, sp.total_sessions, sp.used_sessions, sp.amount, sp.label, sp.kind
+      FROM session_packages sp JOIN clients c ON c.id = sp.client_id
+      WHERE sp.id = ${id} AND c.owner_id = ${auth.sub} AND sp.kind = 'package'
+      FOR UPDATE OF sp
+    `;
+    if (!viejo) return null;
+    // Lo que le quedaba sin tomar. Se arrastra sólo si ella lo decidió; si no,
+    // se pierde (la regla de "renovar al mes aunque pierda clases").
+    const restantes = Math.max(0, Number(viejo.total_sessions) - Number(viejo.used_sessions));
+    const arrastradas = input.carryover ? restantes : 0;
+    const contratadas = input.totalSessions ?? Number(viejo.total_sessions);
+    const nuevasSesiones = contratadas + arrastradas;
+    const monto = input.amount ?? Number(viejo.amount);
+    const vence = vencePaqueteDesde(input.paidOn);
+
+    // El viejo se cierra: se marca vencido para que sus clases dejen de contar.
+    await transaction`UPDATE session_packages SET status = 'expired' WHERE id = ${viejo.id}`;
+
+    const [nuevo] = await transaction`
+      INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
+      VALUES (${viejo.client_id}, ${`Paquete ${nuevasSesiones} sesiones`}, ${nuevasSesiones}, ${monto}, ${vence}::date, 'package', ${input.paidOn}::date, 'active')
+      RETURNING *
+    `;
+    // El cobro nace ya pagado: la entrenadora indicó método y fecha al renovar.
+    const [invoice] = await transaction`
+      INSERT INTO invoices (client_id, package_id, concept, amount, due_on, issued_on, status, payment_method, payment_reference, confirmed_at, balance)
+      VALUES (${viejo.client_id}, ${nuevo.id}, 'Renovación de paquete', ${monto}, ${input.paidOn}::date, current_date, 'confirmed', ${input.method}, ${input.reference || null}, ${`${input.paidOn}T12:00:00-05:00`}, 0)
+      RETURNING *
+    `;
+    const externalId = `eileen-payment:${invoice.id}`;
+    const [payment] = await transaction`
+      INSERT INTO invoice_payments (client_id, source_system, external_id, payment_number, amount, paid_on, method, reference)
+      VALUES (${viejo.client_id}, 'eileen', ${externalId}, ${invoice.invoice_number || null}, ${monto}, ${input.paidOn}, ${input.method}, ${input.reference || null})
+      ON CONFLICT (source_system, external_id) DO UPDATE SET amount = EXCLUDED.amount, paid_on = EXCLUDED.paid_on, method = EXCLUDED.method, reference = EXCLUDED.reference, updated_at = now()
+      RETURNING *
+    `;
+    await transaction`INSERT INTO payment_allocations (payment_id, invoice_id, amount) VALUES (${payment.id}, ${invoice.id}, ${monto}) ON CONFLICT (payment_id, invoice_id) DO UPDATE SET amount = EXCLUDED.amount`;
+    await transaction`UPDATE session_packages SET origin_invoice_id = ${invoice.id} WHERE id = ${nuevo.id}`;
+    return { package: nuevo, sessions: nuevasSesiones, expiresOn: vence, perdidas: input.carryover ? 0 : restantes, arrastradas };
+  });
+  if (!resultado) return reply.code(404).send({ error: 'Paquete no encontrado' });
+  return reply.code(201).send(resultado);
+});
+
 app.get('/api/clients/:clientId/balances', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const clientId = z.string().uuid().parse((request.params as { clientId: string }).clientId);
@@ -1131,6 +1212,8 @@ app.get('/api/clients/:clientId/balances', { preHandler: requireStaff }, async (
     SELECT sp.id, sp.label, sp.kind, sp.total_sessions, sp.used_sessions, sp.amount, sp.status, sp.purchased_on, sp.expires_on,
       (sp.total_sessions - sp.used_sessions) AS remaining,
       (sp.expires_on IS NOT NULL AND sp.expires_on < current_date AND sp.used_sessions < sp.total_sessions) AS vencido_con_saldo,
+      (sp.kind = 'package' AND sp.status = 'active' AND sp.purchased_on IS NOT NULL
+        AND sp.purchased_on + ${DIAS_RENOVACION_PAQUETE}::int <= current_date) AS renovacion_pendiente,
       sp.origin_invoice_id,
       oi.invoice_number AS origin_invoice_number, oi.concept AS origin_concept, oi.source_system AS origin_source,
       COALESCE(oi.confirmed_at::date, oi.issued_on, oi.due_on) AS origin_date
@@ -4906,6 +4989,20 @@ const primeraExtension = setTimeout(() => extenderRecurrencias().catch(error => 
 const extensionRecurrencias = setInterval(() => extenderRecurrencias().catch(error => app.log.error(error)), 6 * 60 * 60_000);
 primeraExtension.unref();
 extensionRecurrencias.unref();
+// Un paquete de clases vive 6 semanas. Pasado el tope, lo que no se tomó se
+// pierde: se marca 'expired' para que esas clases dejen de contar en el saldo
+// (agendar ya las excluía por fecha; esto alinea el número que se ve). Sólo
+// paquetes —la mensualidad tiene su propio ciclo—. Corre al arrancar y a diario.
+async function expirarPaquetesVencidos() {
+  await sql`
+    UPDATE session_packages SET status = 'expired'
+    WHERE kind = 'package' AND status = 'active'
+      AND expires_on IS NOT NULL AND expires_on < current_date`;
+}
+const primeraExpiracion = setTimeout(() => expirarPaquetesVencidos().catch(error => app.log.error(error)), 25_000);
+const expiracionPaquetes = setInterval(() => expirarPaquetesVencidos().catch(error => app.log.error(error)), 24 * 60 * 60_000);
+primeraExpiracion.unref();
+expiracionPaquetes.unref();
 firstReminderRun.unref();
 reminderInterval.unref();
 firstBillingRun.unref();

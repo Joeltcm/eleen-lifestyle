@@ -1596,10 +1596,12 @@ describe('vencimiento de los paquetes', () => {
     assert.equal(String(datos.expires_on).slice(0, 10), '2026-12-31');
   });
 
-  test('sin fecha, el saldo no caduca', async () => {
+  test('sin fecha, vence a las 6 semanas del pago', async () => {
     const { datos } = await api.post('/api/packages', { clientId, totalSessions: 10, amount: 300, kind: 'package' });
-    assert.equal(datos.expires_on, null,
-      'la interfaz decía "un mes después" y el servidor guardaba sin vencimiento: ahora la propone y la deja a la vista');
+    const compra = new Date(String(datos.purchased_on).slice(0, 10) + 'T12:00:00Z');
+    const esperado = new Date(compra.getTime() + 42 * 86400000).toISOString().slice(0, 10);
+    assert.equal(String(datos.expires_on).slice(0, 10), esperado,
+      'el paquete de clases vive 6 semanas (42 días) desde el pago: lo que no se tome se pierde');
   });
 
   test('un paquete sin vencer no impone cuota mensual de cumplimiento', async () => {
@@ -1607,6 +1609,54 @@ describe('vencimiento de los paquetes', () => {
     const conCuota = datos.timeline.filter(m => m.basis === 'package');
     assert.equal(conCuota.length, 0,
       'sin plazo no hay ritmo pactado: repartir las clases entre meses le exigiría algo que nadie acordó');
+  });
+});
+
+describe('renovar un paquete de clases', () => {
+  async function paqueteConClasesSueltas(usadas) {
+    const c = await api.post('/api/clients', { fullName: 'Renueva paquete', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+    const p = await api.post('/api/packages', { clientId: c.datos.id, totalSessions: 10, amount: 300, kind: 'package' });
+    await api.post(`/api/invoices/${p.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-09-01' });
+    if (usadas) await api.patch(`/api/packages/${p.datos.id}`, { usedSessions: usadas });
+    return { clienteId: c.datos.id, paqueteId: p.datos.id };
+  }
+
+  test('renovar y perder: el nuevo nace con lo contratado y el viejo se cierra', async () => {
+    const { clienteId, paqueteId } = await paqueteConClasesSueltas(3); // le quedaban 7
+    const { estado, datos } = await api.post(`/api/packages/${paqueteId}/renew`, {
+      method: 'Yappy', paidOn: '2026-09-17', carryover: false
+    });
+    assert.equal(estado, 201);
+    assert.equal(datos.sessions, 10, 'empieza limpio con las 10 contratadas');
+    assert.equal(datos.perdidas, 7, 'las 7 que le quedaban se pierden');
+
+    const cliente = (await api.get('/api/clients')).datos.find(x => x.id === clienteId);
+    assert.equal(Number(cliente.available_sessions), 10, 'sólo cuentan las del paquete nuevo; las 7 viejas no');
+    const paquetes = (await api.get('/api/packages')).datos.filter(p => p.client_id === clienteId);
+    const viejo = paquetes.find(p => p.id === paqueteId);
+    assert.equal(viejo.status, 'expired', 'el paquete viejo queda cerrado');
+    // El cobro de la renovación queda registrado y pagado.
+    const cobro = (await api.get('/api/invoices')).datos.find(i => i.package_id === datos.package.id);
+    assert.ok(cobro && cobro.status === 'confirmed', 'la renovación deja su cobro pagado');
+  });
+
+  test('renovar y arrastrar: las clases que le quedaban se suman al nuevo', async () => {
+    const { clienteId, paqueteId } = await paqueteConClasesSueltas(3); // le quedaban 7
+    const { datos } = await api.post(`/api/packages/${paqueteId}/renew`, {
+      method: 'Efectivo', paidOn: '2026-09-17', carryover: true
+    });
+    assert.equal(datos.sessions, 17, 'las 7 que le quedaban se suman a las 10 nuevas');
+    assert.equal(datos.perdidas, 0, 'no se pierde nada cuando se arrastran');
+    const cliente = (await api.get('/api/clients')).datos.find(x => x.id === clienteId);
+    assert.equal(Number(cliente.available_sessions), 17);
+  });
+
+  test('el nuevo paquete vence a las 6 semanas del pago', async () => {
+    const { paqueteId } = await paqueteConClasesSueltas(0);
+    const { datos } = await api.post(`/api/packages/${paqueteId}/renew`, {
+      method: 'Efectivo', paidOn: '2026-09-10', carryover: false
+    });
+    assert.equal(datos.expiresOn, '2026-10-22', '2026-09-10 + 42 días');
   });
 });
 

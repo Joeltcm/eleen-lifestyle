@@ -1,4 +1,4 @@
-const APP_VERSION = '167';
+const APP_VERSION = '168';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -246,7 +246,7 @@ async function loadData() {
     return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), reprogramaciones: Number(client.reprogramaciones_ciclo || 0), canceladas: Number(client.canceladas_ciclo || 0), canceladasPorElla: Number(client.canceladas_por_ella_ciclo || 0), creditoPendiente: Number(client.credito_pendiente || 0), deudaPendiente: Number(client.deuda_pendiente || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), pauseId: client.active_pause_id || null, pauseStartedOn: client.pause_started_on || null, pauseReason: client.pause_reason || '', status: { active: 'Activo', paused: 'En pausa', inactive: 'Inactivo' }[client.status] || 'Inactivo', statusRaw: client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
   });
   data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, concept: item.concept, amount: Number(item.amount), balance: item.source_system ? Number(item.balance) : item.status === 'pending' ? Number(item.amount) : 0, due: dateOnly(item.due_on), issued: dateOnly(item.issued_on || item.due_on), paidOn: item.confirmed_at ? String(item.confirmed_at).slice(0, 10) : '', method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '', coverageStart: item.coverage_start ? dateOnly(item.coverage_start) : '' }));
-  data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, kind: item.kind, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), expiresOn: item.expires_on || '', status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired', originInvoiceId: item.origin_invoice_id || null, originNumber: item.origin_invoice_number || '', originConcept: item.origin_concept || '', originSource: item.origin_source || '', originStatus: item.origin_status || '', originDate: item.origin_date ? dateOnly(item.origin_date) : '' }));
+  data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, kind: item.kind, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), expiresOn: item.expires_on || '', status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired', originInvoiceId: item.origin_invoice_id || null, originNumber: item.origin_invoice_number || '', originConcept: item.origin_concept || '', originSource: item.origin_source || '', originStatus: item.origin_status || '', originDate: item.origin_date ? dateOnly(item.origin_date) : '', renovacionPendiente: item.renovacion_pendiente || false, vencidoConSaldo: item.vencido_con_saldo || false }));
   data.sessions = sessions.map(sessionFromApi);
   data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: (item.assigned_client_ids || []).length, assignedClientIds: item.assigned_client_ids || [], sessions: item.sessions_per_week, dueOn: item.due_on || null, exercises: item.exercises || [] }));
   data.plans = plans.map(item => ({ id: item.id, name: item.name, description: item.description || '', billingModel: item.billing_model, price: Number(item.price), sessionsIncluded: Number(item.sessions_included || 0), validityDays: Number(item.validity_days || 0), active: item.active }));
@@ -789,7 +789,16 @@ function renderBilling() {
     const state = pack.status === 'pending' ? 'Pendiente de pago' : remaining ? 'Activo' : 'Agotado';
     const borrable = Number(pack.used) === 0
       ? `<button class="secondary session-use" data-borrar-paquete="${pack.id}">Eliminar</button>` : '';
-    return `<tr><td data-label="Cliente"><b>${escapeHtml(pack.client)}</b></td><td data-label="Paquete">${escapeHtml(pack.label)}${pack.originInvoiceId ? `<br><small class="pack-origin">Salió del cobro ${escapeHtml(pack.originSource === 'zoho_invoice' ? 'Zoho ' : '')}${escapeHtml(pack.originNumber || pack.originConcept || 'sin número')}${pack.originDate ? ` · ${fechaCorta(pack.originDate)}` : ''}</small>` : ''}</td><td data-label="Compradas">${pack.total}</td><td data-label="Usadas">${pack.used}</td><td data-label="Disponibles"><strong class="session-balance">${remaining}</strong></td><td data-label="Estado"><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span><br><small>${pack.expiresOn ? `vence ${fechaCorta(pack.expiresOn)}` : 'sin vencimiento'}</small></td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-editar-paquete="${pack.id}">Editar</button>${borrable}</div><small>${pack.status === 'confirmed' && remaining ? 'Descuento automático' : '—'}</small></td></tr>`;
+    // La renovación es sólo para paquetes de clases (la mensualidad se renueva
+    // sola al cobrar). Se ofrece mientras el paquete esté vivo o recién vencido.
+    const renovable = pack.kind === 'package' && pack.status !== 'pending'
+      ? `<button class="secondary session-use" data-renovar-paquete="${pack.id}">Renovar</button>` : '';
+    const aviso = pack.vencidoConSaldo
+      ? `<br><small class="pack-vencido">Vencido · ${remaining} ${remaining === 1 ? 'clase perdida' : 'clases perdidas'}</small>`
+      : pack.renovacionPendiente
+        ? '<br><small class="pack-renovar">Renovación pendiente</small>'
+        : '';
+    return `<tr><td data-label="Cliente"><b>${escapeHtml(pack.client)}</b></td><td data-label="Paquete">${escapeHtml(pack.label)}${pack.originInvoiceId ? `<br><small class="pack-origin">Salió del cobro ${escapeHtml(pack.originSource === 'zoho_invoice' ? 'Zoho ' : '')}${escapeHtml(pack.originNumber || pack.originConcept || 'sin número')}${pack.originDate ? ` · ${fechaCorta(pack.originDate)}` : ''}</small>` : ''}</td><td data-label="Compradas">${pack.total}</td><td data-label="Usadas">${pack.used}</td><td data-label="Disponibles"><strong class="session-balance">${remaining}</strong></td><td data-label="Estado"><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span><br><small>${pack.expiresOn ? `vence ${fechaCorta(pack.expiresOn)}` : 'sin vencimiento'}</small>${aviso}</td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-editar-paquete="${pack.id}">Editar</button>${renovable}${borrable}</div><small>${pack.status === 'confirmed' && remaining ? 'Descuento automático' : '—'}</small></td></tr>`;
   }).join('') : '<tr><td colspan="7" class="empty">Aún no hay paquetes de sesiones.</td></tr>';
   void ensureBillingAnalytics();
 }
@@ -2687,6 +2696,48 @@ function packageEditor(pack) {
   });
 }
 
+// Renovar un paquete de clases: por decisión de la entrenadora, abre uno nuevo
+// de 6 semanas con su cobro (ella indica método y fecha en el modal). Si al
+// cliente le quedaban clases, decide si las pierde —para renovar "al mes" y
+// negociar— o si se las arrastra al nuevo.
+function renovarPaquete(pack) {
+  const restantes = remainingSessions(pack);
+  const box = document.createElement('div');
+  box.innerHTML = `<p class="eyebrow">CONTROL DE PAQUETES</p><h2>Renovar paquete</h2>
+    <p class="form-summary">${escapeHtml(pack.client)} · ${escapeHtml(pack.label)}</p>
+    ${restantes > 0 ? `<p class="form-summary">Le quedan <b>${restantes}</b> ${restantes === 1 ? 'clase' : 'clases'} sin tomar.</p>` : ''}
+    <form id="renovar-form">
+      <div class="form-row">
+        <label>Sesiones contratadas<input name="totalSessions" type="number" min="1" max="400" required value="${pack.total}" /></label>
+        <label>Monto<input name="amount" type="number" min="0" step="0.01" required value="${pack.amount}" /></label>
+      </div>
+      <div class="form-row">
+        <label>Fecha de pago<input name="paidOn" type="date" required value="${dateKey(today)}" /></label>
+        <label>Método de pago<select name="method" required><option>Efectivo</option><option>Yappy</option><option>Transferencia bancaria</option><option>Tarjeta</option><option>Otro</option></select></label>
+      </div>
+      <label>Referencia o comprobante<input name="reference" placeholder="Opcional" /></label>
+      ${restantes > 0 ? `<label>Clases que le quedan (${restantes})<select name="carryover"><option value="perder" selected>Perder — empieza limpio</option><option value="arrastrar">Arrastrar — se suman al nuevo</option></select><small>Renovar al mes perdiendo clases es tu palanca para negociar.</small></label>` : ''}
+      <button class="primary wide-button">Renovar y cobrar</button>
+    </form>`;
+  openModal(box);
+  document.getElementById('renovar-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    const carryover = form.get('carryover') === 'arrastrar';
+    if (!confirmarGuardado(`Renovar el paquete de ${pack.client}\n${form.get('method')} · ${form.get('paidOn')}${restantes > 0 ? `\nClases que le quedan: ${carryover ? 'se arrastran al nuevo' : 'se pierden'}` : ''}`)) return;
+    try {
+      event.target.classList.add('loading-state');
+      const r = await api(`/api/packages/${pack.id}/renew`, { method: 'POST', body: {
+        method: form.get('method'), reference: form.get('reference') || undefined, paidOn: form.get('paidOn'),
+        totalSessions: Number(form.get('totalSessions')), amount: Number(form.get('amount')), carryover
+      } });
+      await loadData(); renderAll(); modal.close();
+      const perdidas = Number(r?.perdidas) || 0;
+      toast(`Paquete renovado · ${r?.sessions} clases, vence ${fechaCorta(r?.expiresOn)}${perdidas ? ` · ${perdidas} ${perdidas === 1 ? 'clase perdida' : 'clases perdidas'}` : ''}.`);
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+
 // Bitácora: qué se ha borrado, quién y cuándo. Una bitácora que nadie puede
 // leer no sirve de nada, así que se mira desde la propia aplicación y no
 // entrando a la base.
@@ -2806,12 +2857,11 @@ function confirmInvoice(id, editing = false) {
       const paqueteActivado = respuesta?.paqueteActivado || null;
       await loadData(); renderAll(); modal.close(); navigate('billing');
       if (coberturaAbierta.length) {
-        // Se abrió sola la mensualidad: se le dice a quién y con cuántas
-        // sesiones, y se abre la pantalla de cobertura para que revise y
-        // ajuste o quite si algo no cuadra.
+        // Se renovó sola la mensualidad del titular y su gente. Ya no se abre el
+        // editor cada vez: para clientela fija es fricción de más. El botón
+        // "Aplicar a mensualidades" sigue ahí por si hay que ajustar algo.
         const detalle = coberturaAbierta.map(c => `${c.fullName}${c.sessions ? ` (${c.sessions})` : ''}`).join(', ');
-        toast(`Pago confirmado · saldo mensual abierto para ${detalle}. Revisa o ajusta abajo.`);
-        applyInvoiceCoverage(id);
+        toast(`Mensualidad renovada · ${detalle}. Sesiones cargadas.`);
       } else if (paqueteActivado && paqueteActivado.sessions) {
         // El paquete ligado ya estaba y el pago lo despertó: se avisa que sus
         // sesiones quedaron disponibles.
@@ -3115,14 +3165,20 @@ function balancesSection(target, client) {
       return `<article class="balance-item${vencido ? ' expired' : ''}">
         <div><b>${escapeHtml(saldo.label)}</b><small>${saldo.kind === 'monthly' ? 'Mensualidad' : 'Paquete'} · ${saldo.used_sessions} de ${saldo.total_sessions} usadas${saldo.expires_on ? ` · ${vencido ? 'venció' : 'vence'} ${fechaCorta(saldo.expires_on)}` : ' · sin vencimiento'}</small>
           ${saldo.origin_invoice_id ? `<small class="pack-origin">Salió del cobro ${escapeHtml(saldo.origin_source === 'zoho_invoice' ? 'Zoho ' : '')}${escapeHtml(saldo.origin_invoice_number || saldo.origin_concept || 'sin número')}${saldo.origin_date ? ` · ${fechaCorta(saldo.origin_date)}` : ''}</small>` : ''}
+          ${saldo.renovacion_pendiente ? '<small class="pack-renovar">Renovación pendiente</small>' : ''}
           ${vencido ? `<small class="balance-warning">${restantes} sesión${restantes === 1 ? '' : 'es'} sin dar · cuenta como incumplimiento</small>` : ''}</div>
         <span class="session-balance">${restantes}</span>
+        ${saldo.kind === 'package' && saldo.status !== 'pending' ? `<button class="secondary session-use" data-renovar="${saldo.id}">Renovar</button>` : ''}
         ${saldo.expires_on ? `<button class="secondary session-use" data-reschedule="${saldo.id}">Reprogramar</button>` : ''}
         ${Number(saldo.used_sessions) === 0 ? `<button class="secondary session-use" data-borrar-paquete="${saldo.id}">Eliminar</button>` : ''}
       </article>`;
     }).join('')}</div>` : '<p class="empty">Este cliente no tiene saldos de sesiones.</p>'}`;
     target.querySelectorAll('[data-reschedule]').forEach(button => {
       button.onclick = () => reschedulePackage(saldos.find(saldo => saldo.id === button.dataset.reschedule), client);
+    });
+    target.querySelectorAll('[data-renovar]').forEach(button => {
+      const saldo = saldos.find(s => s.id === button.dataset.renovar);
+      button.onclick = () => renovarPaquete({ id: saldo.id, client: client.name, label: saldo.label, total: Number(saldo.total_sessions), used: Number(saldo.used_sessions), amount: Number(saldo.amount), kind: saldo.kind });
     });
   }).catch(error => { if (target.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; });
 }
@@ -3668,6 +3724,10 @@ document.addEventListener('click', event => {
   if (event.target.dataset.editarPaquete) {
     const pack = data.packages.find(item => item.id === event.target.dataset.editarPaquete);
     if (pack) packageEditor(pack);
+  }
+  if (event.target.dataset.renovarPaquete) {
+    const pack = data.packages.find(item => item.id === event.target.dataset.renovarPaquete);
+    if (pack) renovarPaquete(pack);
   }
   if (event.target.dataset.client) clientDetail(event.target.dataset.client);
   if (event.target.dataset.editClient) editClient(data.clients.find(client => client.id === event.target.dataset.editClient));
