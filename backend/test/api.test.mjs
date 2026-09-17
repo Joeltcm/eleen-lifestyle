@@ -460,6 +460,34 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
       'una clase de hace tres meses no sale del saldo de este mes');
   });
 
+  test('cubrir a quien ya tiene saldo del plan no lo duplica: lo reusa y lo enlaza', async () => {
+    // El caso Ricardo: al asignarle el plan mensual ya se le abrió su saldo del
+    // ciclo. Cuando ese mismo cobro de grupo se reparte con "Aplicar a
+    // mensualidades", su línea no debe abrirle un segundo saldo; debe reusar el
+    // que ya tiene y dejarlo marcado con de qué cobro salió.
+    const plan = await api.post('/api/plans', { name: 'Mensual titular grupo', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
+    const c = await api.post('/api/clients', { fullName: 'Titular con saldo previo', cutoffDay: 1 });
+    // Asignar el plan abre el saldo del ciclo (como en el expediente de Ricardo).
+    await api.patch(`/api/clients/${c.datos.id}/plan`, { planId: plan.datos.id, cutoffDay: 1 });
+    const antes = (await api.get('/api/packages')).datos
+      .filter(p => p.client_id === c.datos.id && p.kind === 'monthly' && p.status === 'active');
+    assert.equal(antes.length, 1, 'el plan ya le abrió su único saldo del ciclo');
+    assert.ok(!antes[0].origin_invoice_id, 'todavía sin cobro de origen');
+
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad grupo', amount: 175, dueOn: new Date().toISOString().slice(0, 10) });
+    const mesEnCurso = new Date().toISOString().slice(0, 8) + '01';
+    await api.post(`/api/invoices/${f.datos.id}/coverage`, {
+      billingPeriod: mesEnCurso,
+      entries: [{ clientId: c.datos.id, amount: 175, sessions: 12 }]
+    });
+
+    const despues = (await api.get('/api/packages')).datos
+      .filter(p => p.client_id === c.datos.id && p.kind === 'monthly' && p.status === 'active');
+    assert.equal(despues.length, 1, 'sigue habiendo un solo saldo, no dos');
+    assert.equal(despues[0].id, antes[0].id, 'es el mismo saldo del plan, reusado');
+    assert.equal(despues[0].origin_invoice_id, f.datos.id, 'ahora sí lleva de qué cobro salió');
+  });
+
   test('quitar la cobertura se lleva el saldo que nadie usó', async () => {
     const { datos } = await api.get(`/api/invoices/${factura}/coverage`);
     const suya = datos.applied.find(a => a.client_id === beatris);

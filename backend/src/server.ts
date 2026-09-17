@@ -3030,21 +3030,41 @@ async function abrirCobertura(
     if (!cliente) return { error: 'Esa persona no depende de quien paga este cobro', code: 400 };
 
     let packageId: string | null = null;
+    let creado = false;
     if (entry.sessions > 0) {
       // La referencia contable sigue siendo el mes elegido, pero la vigencia
       // nace en la fecha real del pago. Así un pago del 28/08 con corte 28
       // vence el 28/09, no el 01/10.
       const inicioCobertura = invoice.coverage_start || periodo;
       const vence = corteSiguiente(mediodiaEnPanama(inicioCobertura), Number(cliente.billing_cutoff_day) || 1).toISOString().slice(0, 10);
-      const [pack] = await transaction`
-        INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, origin_invoice_id, status)
-        VALUES (${cliente.id},
-          ${'Mensualidad · ' + rangoDelCiclo(inicioCobertura, vence)},
-          ${entry.sessions}, ${entry.amount}, ${vence}::date, 'monthly', ${String(inicioCobertura).slice(0, 10)}::date, ${invoice.id}, 'active')
-        RETURNING id
+      // Si esta persona ya tiene un saldo mensual vigente del ciclo (abierto al
+      // asignar el plan o por la generación), no se abre otro: se reusa y se le
+      // enlaza este cobro. Así el cobro de grupo no le duplica el saldo al
+      // titular que ya lo tenía por su plan.
+      const [vigente] = await transaction`
+        SELECT id FROM session_packages
+        WHERE client_id = ${cliente.id} AND kind = 'monthly' AND status = 'active'
+          AND expires_on IS NOT NULL AND expires_on > ${String(inicioCobertura).slice(0, 10)}::date
+        ORDER BY expires_on DESC LIMIT 1
       `;
-      packageId = pack.id;
-      await cobrarClasesYaDadas(transaction, pack.id, cliente.id, vence, entry.sessions);
+      if (vigente) {
+        packageId = vigente.id;
+        await transaction`
+          UPDATE session_packages SET origin_invoice_id = COALESCE(origin_invoice_id, ${invoice.id})
+          WHERE id = ${vigente.id}
+        `;
+      } else {
+        const [pack] = await transaction`
+          INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, origin_invoice_id, status)
+          VALUES (${cliente.id},
+            ${'Mensualidad · ' + rangoDelCiclo(inicioCobertura, vence)},
+            ${entry.sessions}, ${entry.amount}, ${vence}::date, 'monthly', ${String(inicioCobertura).slice(0, 10)}::date, ${invoice.id}, 'active')
+          RETURNING id
+        `;
+        packageId = pack.id;
+        creado = true;
+        await cobrarClasesYaDadas(transaction, pack.id, cliente.id, vence, entry.sessions);
+      }
     }
     // El índice único de (cliente, período) es lo que hace inofensivo pulsar
     // dos veces: la segunda no abre otro saldo, la deja como estaba.
@@ -3055,9 +3075,10 @@ async function abrirCobertura(
       RETURNING id
     `;
     if (!cov) {
-      // Ya estaba cubierta. El saldo que se acaba de abrir sobra y se deshace:
-      // dejarlo suelto le regalaría las clases por partida doble.
-      if (packageId) await transaction`DELETE FROM session_packages WHERE id = ${packageId}`;
+      // Ya estaba cubierta. Sólo se deshace el saldo si lo acabamos de crear en
+      // esta pasada; un saldo reusado (el del plan) no se toca, borrarlo sería
+      // quitarle las clases a quien ya las tenía.
+      if (packageId && creado) await transaction`DELETE FROM session_packages WHERE id = ${packageId}`;
       continue;
     }
     abiertos.push({ clientId: cliente.id, fullName: cliente.full_name as string, sessions: entry.sessions, packageId });
