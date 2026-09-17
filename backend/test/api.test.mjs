@@ -494,6 +494,18 @@ describe('informe de asistencia flexible', () => {
   });
 });
 
+describe('el saldo dice de qué cobro salió', () => {
+  test('POST /api/packages enlaza el saldo con su cobro, visible en Paquetes y en el expediente', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Origen del saldo', billingModel: 'package', standardPrice: 200, cutoffDay: 15 });
+    const p = await api.post('/api/packages', { clientId: c.datos.id, totalSessions: 10, amount: 200, kind: 'package' });
+    const saldo = (await api.get('/api/packages')).datos.find(x => x.id === p.datos.id);
+    assert.equal(saldo.origin_invoice_id, p.datos.invoice_id, 'el saldo apunta a su cobro');
+    const balances = await api.get(`/api/clients/${c.datos.id}/balances`);
+    const b = balances.datos.find(x => x.id === p.datos.id);
+    assert.equal(b.origin_invoice_id, p.datos.invoice_id, 'y el expediente muestra el mismo origen');
+  });
+});
+
 describe('asignar un plan mensual abre el saldo del ciclo', () => {
   test('al asignar la mensualidad se abre el saldo activo con las sesiones del plan, sin duplicar', async () => {
     const plan = await api.post('/api/plans', { name: 'Mensual saldo al asignar', billingModel: 'monthly', price: 480, sessionsIncluded: 12 });

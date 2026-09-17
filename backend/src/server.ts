@@ -289,7 +289,7 @@ async function generateRecurringInvoices(ownerId?: string) {
   const pendientes = await sql`
     SELECT DISTINCT ON (entrena) * FROM (
       SELECT COALESCE(i.billed_for_client_id, i.client_id) AS entrena,
-        i.due_on, i.amount,
+        i.id AS invoice_id, i.due_on, i.amount,
         COALESCE(i.billing_period, date_trunc('month', i.due_on)::date) AS billing_period,
         -- Las sesiones salen del último saldo del cliente y, si aún no tiene
         -- ninguno, del plan que se le asignó. Antes sólo miraba el saldo
@@ -331,7 +331,7 @@ async function generateRecurringInvoices(ownerId?: string) {
   `;
   for (const cobro of pendientes) {
     const [abierto] = await sql`
-      INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
+      INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, origin_invoice_id, status)
       VALUES (${cobro.entrena},
         ${'Mensualidad · ' + rangoDelCiclo(
           mediodiaEnPanama(cobro.billing_period as Date),
@@ -347,7 +347,7 @@ async function generateRecurringInvoices(ownerId?: string) {
         -- La mensualidad se paga por adelantado y el cobro ya está emitido:
         -- las clases del ciclo son suyas. Si no lo fueran, el cumplimiento
         -- mediría mal a quien sí entrenó, que es peor que cobrar tarde.
-        'active')
+        ${cobro.invoice_id}, 'active')
       RETURNING id
     `;
     await cobrarClasesYaDadas(sql, abierto.id as string, cobro.entrena as string,
@@ -991,7 +991,14 @@ const packageSchema = z.object({
 });
 app.get('/api/packages', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
-  return sql`SELECT p.*, c.full_name FROM session_packages p JOIN clients c ON c.id = p.client_id WHERE c.owner_id = ${auth.sub} ORDER BY p.created_at DESC`;
+  return sql`
+    SELECT p.*, c.full_name,
+      oi.invoice_number AS origin_invoice_number, oi.concept AS origin_concept,
+      oi.source_system AS origin_source, oi.status AS origin_status,
+      COALESCE(oi.confirmed_at::date, oi.issued_on, oi.due_on) AS origin_date
+    FROM session_packages p JOIN clients c ON c.id = p.client_id
+    LEFT JOIN invoices oi ON oi.id = p.origin_invoice_id
+    WHERE c.owner_id = ${auth.sub} ORDER BY p.created_at DESC`;
 });
 app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = packageSchema.parse(request.body);
@@ -1023,6 +1030,7 @@ app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) =
           THEN date_trunc('month', COALESCE(${input.dueOn}::date, current_date))::date
           ELSE NULL END)
       RETURNING id`;
+    await transaction`UPDATE session_packages SET origin_invoice_id = ${invoice.id} WHERE id = ${created.id}`;
     return { ...created, invoice_id: invoice.id };
   });
   // Una mensualidad con sesiones también asienta precio y membresía: es un
@@ -1120,12 +1128,16 @@ app.get('/api/clients/:clientId/balances', { preHandler: requireStaff }, async (
   const clientId = z.string().uuid().parse((request.params as { clientId: string }).clientId);
   if (!(await ownedClient(clientId, auth.sub))) return reply.code(404).send({ error: 'Cliente no encontrado' });
   return sql`
-    SELECT id, label, kind, total_sessions, used_sessions, amount, status, purchased_on, expires_on,
-      (total_sessions - used_sessions) AS remaining,
-      (expires_on IS NOT NULL AND expires_on < current_date AND used_sessions < total_sessions) AS vencido_con_saldo
-    FROM session_packages
-    WHERE client_id = ${clientId} AND status <> 'cancelled'
-    ORDER BY purchased_on DESC, created_at DESC
+    SELECT sp.id, sp.label, sp.kind, sp.total_sessions, sp.used_sessions, sp.amount, sp.status, sp.purchased_on, sp.expires_on,
+      (sp.total_sessions - sp.used_sessions) AS remaining,
+      (sp.expires_on IS NOT NULL AND sp.expires_on < current_date AND sp.used_sessions < sp.total_sessions) AS vencido_con_saldo,
+      sp.origin_invoice_id,
+      oi.invoice_number AS origin_invoice_number, oi.concept AS origin_concept, oi.source_system AS origin_source,
+      COALESCE(oi.confirmed_at::date, oi.issued_on, oi.due_on) AS origin_date
+    FROM session_packages sp
+    LEFT JOIN invoices oi ON oi.id = sp.origin_invoice_id
+    WHERE sp.client_id = ${clientId} AND sp.status <> 'cancelled'
+    ORDER BY sp.purchased_on DESC, sp.created_at DESC
   `;
 });
 
@@ -3025,10 +3037,10 @@ async function abrirCobertura(
       const inicioCobertura = invoice.coverage_start || periodo;
       const vence = corteSiguiente(mediodiaEnPanama(inicioCobertura), Number(cliente.billing_cutoff_day) || 1).toISOString().slice(0, 10);
       const [pack] = await transaction`
-        INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
+        INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, origin_invoice_id, status)
         VALUES (${cliente.id},
           ${'Mensualidad · ' + rangoDelCiclo(inicioCobertura, vence)},
-          ${entry.sessions}, ${entry.amount}, ${vence}::date, 'monthly', ${String(inicioCobertura).slice(0, 10)}::date, 'active')
+          ${entry.sessions}, ${entry.amount}, ${vence}::date, 'monthly', ${String(inicioCobertura).slice(0, 10)}::date, ${invoice.id}, 'active')
         RETURNING id
       `;
       packageId = pack.id;
@@ -3175,9 +3187,9 @@ app.post('/api/invoices/:id/package', { preHandler: requireStaff }, async (reque
     const tope = new Date(inicio); tope.setDate(tope.getDate() + SEIS_SEMANAS_DIAS);
     if (expira > tope) return { error: 'Un paquete de clases no puede durar más de 6 semanas desde el pago.', code: 400 };
     const [pack] = await transaction`
-      INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
+      INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, origin_invoice_id, status)
       VALUES (${invoice.client_id}, ${`Paquete ${input.totalSessions} sesiones`}, ${input.totalSessions}, ${invoice.amount},
-        ${input.expiresOn}::date, 'package', ${String(invoice.coverage_start).slice(0, 10)}::date, 'active')
+        ${input.expiresOn}::date, 'package', ${String(invoice.coverage_start).slice(0, 10)}::date, ${id}, 'active')
       RETURNING id, total_sessions, expires_on
     `;
     await transaction`UPDATE invoices SET package_id = ${pack.id} WHERE id = ${id}`;

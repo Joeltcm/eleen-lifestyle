@@ -445,6 +445,7 @@ details.session-row .google-session-state{display:block;padding-top:10px}
 .report-chip button{border:0;background:#d9c3d6;color:#5a3f5e;width:18px;height:18px;border-radius:50%;cursor:pointer;font:700 13px/1 'DM Sans'}
 .report-client-detail{margin-top:16px}
 .report-client-detail h3{font:600 16px Fraunces;margin:0 0 8px}
+.pack-origin{display:block;color:#9b8b95;font-size:10px;margin-top:2px}
 .session-state.pausa{background:#ece6da;color:#7a6c50}
 .day-session.pausa{background:#f6f3ec;border-left-color:#c4b79b}
 
