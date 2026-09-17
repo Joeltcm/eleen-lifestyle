@@ -3027,6 +3027,30 @@ function cierreDelCiclo(periodo: string, diaDeCorte: number): string {
   return corteSiguiente(mediodiaEnPanama(periodo), diaDeCorte).toISOString().slice(0, 10);
 }
 
+// El corte que cierra el ciclo en curso en `inicio`: el del mismo mes si ya
+// pasó (o es hoy), y si no el del mes anterior. Es el gemelo de corteSiguiente.
+function corteAnterior(inicio: Date, diaDeCorte: number): Date {
+  const enMes = (anio: number, mes: number) => {
+    const ultimo = new Date(Date.UTC(anio, mes + 1, 0)).getUTCDate();
+    return new Date(Date.UTC(anio, mes, Math.min(diaDeCorte || 1, ultimo), 12));
+  };
+  let corte = enMes(inicio.getUTCFullYear(), inicio.getUTCMonth());
+  if (corte > inicio) corte = enMes(inicio.getUTCFullYear(), inicio.getUTCMonth() - 1);
+  return corte;
+}
+
+// El ciclo mensual que CONTIENE la fecha de referencia, anclado al día de corte
+// del cliente. El pago NO mueve las fechas: un pago del 17 con corte 15 cae en
+// el ciclo 15→15, no 17→17. El corte manda —está en la configuración del
+// cliente— y el pago sólo lo salda. Devuelve inicio (corte anterior) y vence
+// (corte siguiente).
+function cicloDelCorte(referencia: string | Date, diaDeCorte: number): { inicio: string; vence: string } {
+  const ref = mediodiaEnPanama(referencia);
+  const inicio = corteAnterior(ref, diaDeCorte);
+  const vence = corteSiguiente(ref, diaDeCorte);
+  return { inicio: inicio.toISOString().slice(0, 10), vence: vence.toISOString().slice(0, 10) };
+}
+
 async function coberturaDeCobro(ownerId: string, invoiceId: string) {
   const [invoice] = await sql`
     SELECT i.id, i.client_id, i.concept, i.amount, i.due_on, i.billing_period, i.status,
@@ -3047,6 +3071,9 @@ async function coberturaDeCobro(ownerId: string, invoiceId: string) {
     LEFT JOIN service_plans p ON p.id = c.plan_id
     WHERE c.owner_id = ${ownerId}
       AND (c.id = ${invoice.client_id} OR c.billing_responsible_client_id = ${invoice.client_id})
+      -- Sólo mensuales: un cliente de clase suelta no se cubre con mensualidad
+      -- aunque lo pague un titular mensual.
+      AND c.billing_model = 'monthly'
     ORDER BY (c.id = ${invoice.client_id}) DESC, c.full_name
   `;
   const applied = await sql`
@@ -3103,7 +3130,7 @@ async function abrirCobertura(
   const abiertos: { clientId: string; fullName: string; sessions: number; packageId: string | null }[] = [];
   for (const entry of entries) {
     const [cliente] = await transaction`
-      SELECT c.id, c.full_name, c.billing_cutoff_day
+      SELECT c.id, c.full_name, c.billing_cutoff_day, c.billing_model
       FROM clients c
       WHERE c.id = ${entry.clientId} AND c.owner_id = ${ownerId}
         AND (c.id = ${invoice.client_id} OR c.billing_responsible_client_id = ${invoice.client_id})
@@ -3111,15 +3138,22 @@ async function abrirCobertura(
     // Sólo el titular del cobro y su gente: cubrir a un tercero desde aquí
     // sería mover dinero de un expediente a otro sin dejar rastro.
     if (!cliente) return { error: 'Esa persona no depende de quien paga este cobro', code: 400 };
+    // Salvaguarda: un cliente que no es mensual NUNCA recibe saldo de
+    // mensualidad, aunque lo cubra un pagador mensual. Las clases sueltas no
+    // salen de una bolsa —la entrenadora cobra cada clase aparte y el
+    // cumplimiento se marca a mano—, así que abrirles una mensualidad las
+    // convertiría en algo que no son. Se salta sin dejar rastro.
+    if (cliente.billing_model !== 'monthly') continue;
 
     let packageId: string | null = null;
     let creado = false;
     if (entry.sessions > 0) {
-      // La referencia contable sigue siendo el mes elegido, pero la vigencia
-      // nace en la fecha real del pago. Así un pago del 28/08 con corte 28
-      // vence el 28/09, no el 01/10.
-      const inicioCobertura = invoice.coverage_start || periodo;
-      const vence = corteSiguiente(mediodiaEnPanama(inicioCobertura), Number(cliente.billing_cutoff_day) || 1).toISOString().slice(0, 10);
+      // El ciclo se ancla al día de corte del cliente, no a la fecha del pago:
+      // un pago del 17 con corte 15 cae en el ciclo 15→15, no 17→17. Se toma la
+      // fecha real del pago para saber en qué ciclo cae, y el corte fija las
+      // fronteras.
+      const referencia = invoice.coverage_start || periodo;
+      const { inicio: inicioCiclo, vence } = cicloDelCorte(referencia, Number(cliente.billing_cutoff_day) || 1);
       // Si esta persona ya tiene un saldo mensual vigente del ciclo (abierto al
       // asignar el plan o por la generación), no se abre otro: se reusa y se le
       // enlaza este cobro. Así el cobro de grupo no le duplica el saldo al
@@ -3127,7 +3161,7 @@ async function abrirCobertura(
       const [vigente] = await transaction`
         SELECT id FROM session_packages
         WHERE client_id = ${cliente.id} AND kind = 'monthly' AND status = 'active'
-          AND expires_on IS NOT NULL AND expires_on > ${String(inicioCobertura).slice(0, 10)}::date
+          AND expires_on IS NOT NULL AND expires_on > ${inicioCiclo}::date
         ORDER BY expires_on DESC LIMIT 1
       `;
       if (vigente) {
@@ -3140,8 +3174,8 @@ async function abrirCobertura(
         const [pack] = await transaction`
           INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, origin_invoice_id, status)
           VALUES (${cliente.id},
-            ${'Mensualidad · ' + rangoDelCiclo(inicioCobertura, vence)},
-            ${entry.sessions}, ${entry.amount}, ${vence}::date, 'monthly', ${String(inicioCobertura).slice(0, 10)}::date, ${invoice.id}, 'active')
+            ${'Mensualidad · ' + rangoDelCiclo(inicioCiclo, vence)},
+            ${entry.sessions}, ${entry.amount}, ${vence}::date, 'monthly', ${inicioCiclo}::date, ${invoice.id}, 'active')
           RETURNING id
         `;
         packageId = pack.id;
@@ -3427,6 +3461,8 @@ async function saveNativeInvoicePayment(ownerId: string, id: string, input: z.in
         FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id
         WHERE c.owner_id = ${ownerId}
           AND (c.id = ${invoice.client_id} OR c.billing_responsible_client_id = ${invoice.client_id})
+          -- Sólo mensuales: un dependiente de clase suelta no recibe mensualidad.
+          AND c.billing_model = 'monthly'
           -- Ni a quien ya tiene el saldo del ciclo: la generación recurrente
           -- abre el saldo mensual sin dejar fila en invoice_coverage, así que
           -- el índice (cliente, período) no lo frenaría y saldría doble. Se
@@ -4078,8 +4114,14 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
     WHERE c.owner_id = ${auth.sub} AND s.status = 'scheduled' AND NOT COALESCE(s.paused_hold, false) AND s.starts_at BETWEEN now() AND now() + ${`${sessionHours} hours`}::interval ORDER BY s.starts_at
   `;
   const invoices = await sql`
-    SELECT i.due_on, i.amount, i.concept, c.full_name FROM invoices i JOIN clients c ON c.id = i.client_id
-    WHERE c.owner_id = ${auth.sub} AND i.status = 'pending' AND i.due_on <= current_date + (${paymentDays})::integer ORDER BY i.due_on
+    SELECT i.due_on, i.amount, i.concept, c.full_name,
+      (i.due_on < current_date) AS atrasada,
+      (current_date - i.due_on) AS dias_atraso
+    FROM invoices i JOIN clients c ON c.id = i.client_id
+    WHERE c.owner_id = ${auth.sub} AND i.status = 'pending'
+      -- Un cliente en pausa no debe generar aviso de pago: no está entrenando.
+      AND c.status <> 'paused'
+      AND i.due_on <= current_date + (${paymentDays})::integer ORDER BY i.due_on
   `;
   // Clases cuya hora ya pasó y siguen sin resolverse. Una sesión que se quedó
   // en 'programada' después de su hora no dice nada: ni que se dio, ni que se
@@ -4109,7 +4151,12 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
       scheduledFor: session.starts_at
     })),
     ...sessions.map(session => ({ type: 'session', title: `Sesión con ${session.full_name}`, body: new Date(session.starts_at).toLocaleString('es-PA', { timeZone: 'America/Panama' }), scheduledFor: session.starts_at })),
-    ...invoices.map(invoice => ({ type: 'payment', title: `Pago de ${invoice.full_name}`, body: `${invoice.concept}: $${Number(invoice.amount).toFixed(2)} · vence ${invoice.due_on}.`, scheduledFor: invoice.due_on }))
+    // El pago atrasado se separa del recordatorio: es un aviso, no un bloqueo.
+    // Las clases siguen —hay clientes que pagan unos días tarde por temas
+    // personales—, pero la entrenadora ve que ese cobro ya venció.
+    ...invoices.map(invoice => invoice.atrasada
+      ? ({ type: 'overdue', title: `Pago atrasado: ${invoice.full_name}`, body: `${invoice.concept}: $${Number(invoice.amount).toFixed(2)} · venció ${invoice.due_on}${Number(invoice.dias_atraso) > 0 ? ` (${invoice.dias_atraso} día${Number(invoice.dias_atraso) === 1 ? '' : 's'})` : ''}. Las clases siguen; sólo falta el pago.`, scheduledFor: invoice.due_on })
+      : ({ type: 'payment', title: `Pago de ${invoice.full_name}`, body: `${invoice.concept}: $${Number(invoice.amount).toFixed(2)} · vence ${invoice.due_on}.`, scheduledFor: invoice.due_on }))
   ];
 });
 

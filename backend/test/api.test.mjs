@@ -488,6 +488,35 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     assert.equal(despues[0].origin_invoice_id, f.datos.id, 'ahora sí lleva de qué cobro salió');
   });
 
+  test('un cliente de clase suelta no recibe mensualidad aunque lo cubra un pagador mensual', async () => {
+    const pagador = await api.post('/api/clients', { fullName: 'Paga por la familia', billingModel: 'monthly', standardPrice: 200, cutoffDay: 1 });
+    const suelto = await api.post('/api/clients', { fullName: 'Depende pero es suelto', billingModel: 'single', standardPrice: 25, cutoffDay: 1, billingResponsibleClientId: pagador.datos.id });
+    const f = await api.post('/api/invoices', { clientId: pagador.datos.id, concept: 'Mensualidad', amount: 200, dueOn: '2026-09-17' });
+    await api.post(`/api/invoices/${f.datos.id}/coverage`, {
+      billingPeriod: '2026-09-01',
+      entries: [
+        { clientId: pagador.datos.id, amount: 175, sessions: 12 },
+        { clientId: suelto.datos.id, amount: 25, sessions: 8 }
+      ]
+    });
+    const paquetes = (await api.get('/api/packages')).datos;
+    assert.ok(!paquetes.some(p => p.client_id === suelto.datos.id && p.kind === 'monthly'),
+      'al de clase suelta no se le abre bolsa de mensualidad, aunque venga en las entradas');
+    assert.ok(paquetes.some(p => p.client_id === pagador.datos.id && p.kind === 'monthly'),
+      'al titular mensual sí');
+  });
+
+  test('el ciclo se ancla al día de corte del cliente, no al día del pago', async () => {
+    const plan = await api.post('/api/plans', { name: 'Mensual corte 15', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
+    const c = await api.post('/api/clients', { fullName: 'Corte 15 paga 17', planId: plan.datos.id, cutoffDay: 15 });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: '2026-09-30' });
+    await api.post(`/api/invoices/${f.datos.id}/confirm`, { method: 'Efectivo', paidOn: '2026-09-17' });
+    const saldo = (await api.get('/api/packages')).datos.find(p => p.client_id === c.datos.id && p.kind === 'monthly');
+    assert.ok(saldo, 'el pago abre el saldo del ciclo');
+    assert.equal(String(saldo.expires_on).slice(0, 10), '2026-10-15', 'vence el 15 (corte configurado), no el 17 (día de pago)');
+    assert.match(saldo.label, /15-09-2026 – 15-10-2026/, 'la etiqueta muestra el ciclo del corte, no la fecha de pago');
+  });
+
   test('quitar la cobertura se lleva el saldo que nadie usó', async () => {
     const { datos } = await api.get(`/api/invoices/${factura}/coverage`);
     const suya = datos.applied.find(a => a.client_id === beatris);
@@ -1657,6 +1686,17 @@ describe('renovar un paquete de clases', () => {
       method: 'Efectivo', paidOn: '2026-09-10', carryover: false
     });
     assert.equal(datos.expiresOn, '2026-10-22', '2026-09-10 + 42 días');
+  });
+});
+
+describe('alerta de pago atrasado', () => {
+  test('un cobro vencido y sin pagar sale como alerta clara, sin bloquear clases', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Paga unos días tarde', billingModel: 'monthly', standardPrice: 175, cutoffDay: 1 });
+    await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: '2026-09-01' });
+    const { datos } = await api.get('/api/notifications');
+    const alerta = datos.find(n => n.type === 'overdue' && n.title.includes('Paga unos días tarde'));
+    assert.ok(alerta, 'el cobro vencido aparece como alerta de pago atrasado');
+    assert.match(alerta.body, /Las clases siguen/, 'deja explícito que no se bloquean las clases');
   });
 });
 
