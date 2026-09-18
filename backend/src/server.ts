@@ -602,6 +602,15 @@ app.patch('/api/plans/:id', { preHandler: requireStaff }, async (request, reply)
     WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *
   `;
   if (!plan) return reply.code(404).send({ error: 'Plan no encontrado' });
+  // Propagar el precio a los clientes que ya tienen este plan. Sin esto, editar
+  // el plan cambiaba el catálogo pero dejaba a cada expediente con el precio de
+  // cuando se le asignó: dos cifras distintas que nadie mantiene sincronizadas.
+  await sql`UPDATE clients SET standard_price = ${input.price}, updated_at = now() WHERE plan_id = ${id} AND owner_id = ${auth.sub}`;
+  await sql`
+    UPDATE memberships m SET amount = ${input.price}
+    FROM clients c
+    WHERE m.client_id = c.id AND c.plan_id = ${id} AND c.owner_id = ${auth.sub} AND m.status = 'active'
+  `;
   return plan;
 });
 

@@ -1700,6 +1700,18 @@ describe('alerta de pago atrasado', () => {
   });
 });
 
+describe('editar un plan propaga el precio', () => {
+  test('cambiar el precio del plan actualiza el expediente de sus clientes', async () => {
+    const plan = await api.post('/api/plans', { name: 'Propaga precio', billingModel: 'monthly', price: 30, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Toma el precio del plan', planId: plan.datos.id, cutoffDay: 1 });
+    const antes = (await api.get('/api/clients')).datos.find(x => x.id === c.datos.id);
+    assert.equal(Number(antes.standard_price), 30, 'nace con el precio de asignación');
+    await api.patch(`/api/plans/${plan.datos.id}`, { name: 'Propaga precio', billingModel: 'monthly', price: 35, sessionsIncluded: 8, active: true });
+    const despues = (await api.get('/api/clients')).datos.find(x => x.id === c.datos.id);
+    assert.equal(Number(despues.standard_price), 35, 'al editar el plan, el expediente toma el precio nuevo');
+  });
+});
+
 describe('pasar a clase suelta desde el editor de plan', () => {
   test('model single sin plan deja al cliente en clase suelta, sin bolsa', async () => {
     const plan = await api.post('/api/plans', { name: 'Mensual a suelta', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
