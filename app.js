@@ -1,4 +1,4 @@
-const APP_VERSION = '173';
+const APP_VERSION = '174';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2923,16 +2923,37 @@ async function applyInvoiceCoverage(id) {
   const mes = String(suggestedPeriod).slice(0, 7);
   const yaCubierto = new Set(applied.map(a => a.client_id));
 
+  // Los montos se prellenan repartiendo el total del cobro (menos lo ya
+  // aplicado) proporcional al precio de plan de cada quien, para que sumen
+  // exacto en vez de sobrar. Las sesiones salen del plan. Todo sigue editable.
+  const repartibles = candidates.filter(p => !yaCubierto.has(p.id) && p.status === 'active');
+  const disponibleTotal = Math.max(0, Number(invoice.amount) - applied.reduce((s, a) => s + Number(a.amount || 0), 0));
+  const baseSuma = repartibles.reduce((s, p) => s + (Number(p.suggested_amount) || 0), 0);
+  const montoPrefill = {};
+  if (baseSuma > 0 && disponibleTotal > 0) {
+    let acumulado = 0;
+    repartibles.forEach((p, i) => {
+      if (i < repartibles.length - 1) {
+        const v = Math.round((Number(p.suggested_amount) || 0) / baseSuma * disponibleTotal * 100) / 100;
+        montoPrefill[p.id] = v; acumulado += v;
+      } else {
+        // El último toma el remanente para que la suma dé exacta al centavo.
+        montoPrefill[p.id] = Math.round((disponibleTotal - acumulado) * 100) / 100;
+      }
+    });
+  }
+
   const filas = candidates.map(persona => {
     const cubierta = yaCubierto.has(persona.id);
     const inactiva = persona.status !== 'active';
+    const monto = montoPrefill[persona.id] ?? (Number(persona.suggested_amount) || 0);
     return `
       <div class="coverage-row${cubierta ? ' coverage-row-done' : ''}">
         <label class="coverage-pick">
           <input type="checkbox" name="pick" value="${persona.id}" ${cubierta || inactiva ? 'disabled' : 'checked'} />
           <span><b>${escapeHtml(persona.full_name)}</b><small>${escapeHtml(persona.plan_name || 'Sin plan comercial')}${inactiva ? ' · inactivo' : ''}</small></span>
         </label>
-        <label>Monto<input type="number" min="0" step="0.01" name="amount-${persona.id}" value="${Number(persona.suggested_amount) || 0}" ${cubierta ? 'disabled' : ''} /></label>
+        <label>Monto<input type="number" min="0" step="0.01" name="amount-${persona.id}" value="${monto}" ${cubierta ? 'disabled' : ''} /></label>
         <label>Sesiones<input type="number" min="0" step="1" name="sessions-${persona.id}" value="${Number(persona.suggested_sessions) || 0}" ${cubierta ? 'disabled' : ''} /></label>
       </div>`;
   }).join('');
