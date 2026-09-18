@@ -1278,6 +1278,34 @@ app.post('/api/maintenance/fix-cycles', { preHandler: requireStaff }, async requ
   return { corregidos, noMensuales };
 });
 
+// Diagnóstico temporal: estado real de saldos y coberturas de una familia, para
+// entender por qué una cobertura no abre. Sólo lectura, acotado al dueño.
+app.get('/api/debug/coverage', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const name = String((request.query as { name?: string }).name || '').trim();
+  const clientes = await sql`
+    SELECT id, full_name, billing_model, billing_responsible_client_id, billing_cutoff_day, standard_price, status
+    FROM clients WHERE owner_id = ${auth.sub} AND full_name ILIKE ${'%' + name + '%'}
+    ORDER BY full_name`;
+  const saldos = await sql`
+    SELECT sp.client_id, c.full_name, sp.kind, sp.status, sp.total_sessions, sp.used_sessions,
+      sp.expires_on, sp.purchased_on, sp.origin_invoice_id, sp.label
+    FROM session_packages sp JOIN clients c ON c.id = sp.client_id
+    WHERE c.owner_id = ${auth.sub} AND c.full_name ILIKE ${'%' + name + '%'}
+    ORDER BY c.full_name, sp.purchased_on DESC`;
+  const coberturas = await sql`
+    SELECT cov.client_id, c.full_name, cov.invoice_id, cov.package_id, cov.amount, cov.billing_period,
+      i.concept, i.amount AS invoice_amount, i.status AS invoice_status,
+      COALESCE(oi.confirmed_at::date, i.issued_on, i.due_on) AS invoice_date
+    FROM invoice_coverage cov
+    JOIN clients c ON c.id = cov.client_id
+    JOIN invoices i ON i.id = cov.invoice_id
+    LEFT JOIN invoices oi ON oi.id = cov.invoice_id
+    WHERE c.owner_id = ${auth.sub} AND c.full_name ILIKE ${'%' + name + '%'}
+    ORDER BY c.full_name, cov.billing_period DESC`;
+  return { clientes, saldos, coberturas };
+});
+
 app.get('/api/clients/:clientId/balances', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const clientId = z.string().uuid().parse((request.params as { clientId: string }).clientId);
