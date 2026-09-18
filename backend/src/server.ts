@@ -772,10 +772,29 @@ app.delete('/api/clients/:id', { preHandler: requireStaff }, async (request, rep
   return { deleted: true, client };
 });
 
-const clientPlanSchema = z.object({ planId: z.string().uuid(), cutoffDay: z.coerce.number().int().min(1).max(31) });
+// planId elige un plan existente; model 'single' pasa al cliente a clase suelta
+// directo, sin necesidad de crear un plan de sesión suelta.
+const clientPlanSchema = z.object({
+  planId: z.string().uuid().optional(),
+  model: z.enum(['single']).optional(),
+  cutoffDay: z.coerce.number().int().min(1).max(31)
+}).refine(v => v.planId || v.model, { message: 'Falta el plan o el modelo' });
 app.patch('/api/clients/:id/plan', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = clientPlanSchema.parse(request.body);
   const result = await sql.begin(async transaction => {
+    // Clase suelta directa: se cobra por sesión, sin bolsa ni mensualidad. Se
+    // limpia la meta mensual y se pausa la membresía; conserva cumplimiento.
+    if (input.model === 'single' && !input.planId) {
+      const [client] = await transaction`
+        UPDATE clients SET billing_model = 'single', plan_id = NULL, monthly_session_target = NULL,
+          billing_cutoff_day = ${input.cutoffDay}, updated_at = now()
+        WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *
+      `;
+      if (!client) return null;
+      await transaction`UPDATE memberships SET status = 'paused' WHERE client_id = ${id} AND status = 'active'`;
+      return client;
+    }
+    if (!input.planId) return null;
     const [plan] = await transaction`SELECT * FROM service_plans WHERE id = ${input.planId} AND owner_id = ${auth.sub} AND active = true`;
     if (!plan) return null;
     const [client] = await transaction`
