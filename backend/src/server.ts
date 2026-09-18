@@ -3236,6 +3236,11 @@ async function abrirCobertura(
         SELECT id FROM session_packages
         WHERE client_id = ${cliente.id} AND kind = 'monthly' AND status = 'active'
           AND expires_on IS NOT NULL AND expires_on > ${inicioCiclo}::date
+          -- No se reusa el saldo de OTRO cobro (p. ej. unas clases que la persona
+          -- pagó aparte): ése es suyo y este cobro de grupo debe abrir su
+          -- mensualidad familiar en paralelo. Sólo se reusa el del plan o la
+          -- generación (sin origen) o el de este mismo cobro.
+          AND (origin_invoice_id IS NULL OR origin_invoice_id = ${invoice.id})
         ORDER BY expires_on DESC LIMIT 1
       `;
       if (vigente) {
@@ -3548,6 +3553,10 @@ async function saveNativeInvoicePayment(ownerId: string, id: string, input: z.in
               -- ciclo anterior) no bloquea el del ciclo nuevo. Mismo criterio que
               -- la generación y la asignación de plan.
               AND sp.expires_on IS NOT NULL AND sp.expires_on > ${input.paidOn}::date
+              -- Sólo cuenta como "ya cubierto" el saldo del plan/generación (sin
+              -- origen) o el de este mismo cobro; el saldo de OTRO cobro (unas
+              -- clases pagadas aparte) no bloquea su mensualidad familiar.
+              AND (sp.origin_invoice_id IS NULL OR sp.origin_invoice_id = ${invoice.id})
           )
       `;
       const entries = candidatos

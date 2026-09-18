@@ -517,6 +517,26 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     assert.match(saldo.label, /15-09-2026 – 15-10-2026/, 'la etiqueta muestra el ciclo del corte, no la fecha de pago');
   });
 
+  test('la mensualidad familiar se abre aunque el dependiente tenga clases extra pagadas aparte', async () => {
+    const pagador = await api.post('/api/clients', { fullName: 'Paga por el grupo', billingModel: 'monthly', standardPrice: 900, cutoffDay: 15 });
+    const dep = await api.post('/api/clients', { fullName: 'Dependiente con extra', billingModel: 'monthly', standardPrice: 240, cutoffDay: 15 });
+    await api.patch(`/api/clients/${dep.datos.id}`, { fullName: 'Dependiente con extra', billingResponsibleClientId: pagador.datos.id, cutoffDay: 15 });
+    // Clases que el dependiente pagó por su cuenta: un saldo mensual con su
+    // propio cobro (origen distinto). Se confirma para que quede activo.
+    const extra = await api.post('/api/packages', { clientId: dep.datos.id, totalSessions: 4, amount: 120, kind: 'monthly', dueOn: '2026-09-17' });
+    await api.post(`/api/invoices/${extra.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-09-17' });
+    // El cobro de grupo del pagador cubre la mensualidad familiar del dependiente.
+    const f = await api.post('/api/invoices', { clientId: pagador.datos.id, concept: 'Mensualidad', amount: 900, dueOn: '2026-09-17' });
+    await api.post(`/api/invoices/${f.datos.id}/coverage`, {
+      billingPeriod: '2026-09-01',
+      entries: [{ clientId: dep.datos.id, amount: 240, sessions: 8 }]
+    });
+    const activos = (await api.get('/api/packages')).datos.filter(p => p.client_id === dep.datos.id && p.kind === 'monthly' && p.status === 'active');
+    assert.equal(activos.length, 2, 'quedan dos saldos: las clases extra y la mensualidad familiar');
+    const cliente = (await api.get('/api/clients')).datos.find(x => x.id === dep.datos.id);
+    assert.equal(Number(cliente.available_sessions), 12, '4 extra + 8 de la mensualidad familiar');
+  });
+
   test('quitar la cobertura se lleva el saldo que nadie usó', async () => {
     const { datos } = await api.get(`/api/invoices/${factura}/coverage`);
     const suya = datos.applied.find(a => a.client_id === beatris);
