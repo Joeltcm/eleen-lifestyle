@@ -3271,10 +3271,28 @@ async function abrirCobertura(
       RETURNING id
     `;
     if (!cov) {
-      // Ya estaba cubierta. Sólo se deshace el saldo si lo acabamos de crear en
-      // esta pasada; un saldo reusado (el del plan) no se toca, borrarlo sería
-      // quitarle las clases a quien ya las tenía.
-      if (packageId && creado) await transaction`DELETE FROM session_packages WHERE id = ${packageId}`;
+      // Ya hay una cobertura de (cliente, período). Puede ser de tres formas:
+      const [otra] = await transaction`
+        SELECT id, invoice_id, package_id FROM invoice_coverage
+        WHERE client_id = ${cliente.id} AND billing_period = ${periodo}::date
+      `;
+      const [vivo] = otra?.package_id
+        ? await transaction`SELECT id FROM session_packages WHERE id = ${otra.package_id} AND status <> 'cancelled'`
+        : [];
+      if (otra && String(otra.invoice_id) === String(invoice.id)) {
+        // (a) De ESTE mismo cobro: es un reintento. Si su saldo sigue vivo, el
+        // que acabamos de abrir sobra y se deshace. Si el saldo se había perdido
+        // (cobertura huérfana), se re-enlaza el nuevo para no dejarla sin saldo.
+        if (vivo) {
+          if (packageId && creado) await transaction`DELETE FROM session_packages WHERE id = ${packageId}`;
+          continue;
+        }
+        await transaction`UPDATE invoice_coverage SET package_id = ${packageId} WHERE id = ${otra.id}`;
+      }
+      // (b) De OTRO cobro (unas clases que pagó aparte): su mensualidad familiar
+      // es un saldo legítimo en paralelo y se conserva; el índice sólo impide
+      // registrar una segunda cobertura del período, no abrir el saldo.
+      abiertos.push({ clientId: cliente.id, fullName: cliente.full_name as string, sessions: entry.sessions, packageId });
       continue;
     }
     abiertos.push({ clientId: cliente.id, fullName: cliente.full_name as string, sessions: entry.sessions, packageId });
