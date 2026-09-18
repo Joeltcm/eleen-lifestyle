@@ -1204,6 +1204,46 @@ app.post('/api/packages/:id/renew', { preHandler: requireStaff }, async (request
   return reply.code(201).send(resultado);
 });
 
+// Reparación de una sola vez: saldos mensuales con el ciclo degenerado (rango de
+// un solo día) que dejó un cálculo de corte viejo. Recalcula cada uno al día de
+// corte configurado de SU cliente, con su etiqueta. Sólo toca fechas y estado
+// —no borra nada— y sólo a clientes mensuales; los saldos mensuales que quedaron
+// en un cliente que ya NO es mensual (clase suelta) se listan aparte para que la
+// entrenadora los borre a mano. Idempotente: un ciclo ya sano (>= 20 días) no se
+// vuelve a tocar.
+app.post('/api/maintenance/fix-cycles', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const filas = await sql`
+    SELECT sp.id, sp.label, sp.purchased_on, sp.expires_on, sp.total_sessions, sp.used_sessions,
+      c.full_name, c.billing_model, c.billing_cutoff_day
+    FROM session_packages sp JOIN clients c ON c.id = sp.client_id
+    WHERE c.owner_id = ${auth.sub} AND sp.kind = 'monthly' AND sp.status <> 'cancelled'
+      AND sp.purchased_on IS NOT NULL AND sp.expires_on IS NOT NULL
+      AND sp.expires_on - sp.purchased_on < 20
+  `;
+  const corregidos: { cliente: string; antes: string; despues: string; vence: string }[] = [];
+  const noMensuales: { cliente: string; label: string; id: string }[] = [];
+  for (const f of filas) {
+    // Un saldo mensual en un cliente que ya no es mensual no se arregla: sobra.
+    // Se reporta para que ella lo borre tras pasarlo a clase suelta.
+    if (f.billing_model !== 'monthly') {
+      noMensuales.push({ cliente: f.full_name as string, label: f.label as string, id: f.id as string });
+      continue;
+    }
+    const cutoff = Number(f.billing_cutoff_day) || 1;
+    const { inicio, vence } = cicloDelCorte(f.purchased_on as Date, cutoff);
+    const nuevaEtiqueta = 'Mensualidad · ' + rangoDelCiclo(inicio, vence);
+    const nuevoEstado = Number(f.used_sessions) >= Number(f.total_sessions) ? 'exhausted' : 'active';
+    await sql`
+      UPDATE session_packages
+      SET expires_on = ${vence}::date, label = ${nuevaEtiqueta}, status = ${nuevoEstado}
+      WHERE id = ${f.id}
+    `;
+    corregidos.push({ cliente: f.full_name as string, antes: f.label as string, despues: nuevaEtiqueta, vence });
+  }
+  return { corregidos, noMensuales };
+});
+
 app.get('/api/clients/:clientId/balances', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const clientId = z.string().uuid().parse((request.params as { clientId: string }).clientId);

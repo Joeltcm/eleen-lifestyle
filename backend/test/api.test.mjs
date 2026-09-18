@@ -1700,6 +1700,47 @@ describe('alerta de pago atrasado', () => {
   });
 });
 
+describe('reparar ciclos mensuales degenerados', () => {
+  test('recalcula el saldo de un solo día al corte configurado de su cliente', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Ciclo roto corte 15', billingModel: 'monthly', standardPrice: 175, cutoffDay: 15 });
+    const p = await api.post('/api/packages', { clientId: c.datos.id, totalSessions: 12, amount: 175, kind: 'monthly', dueOn: '2026-09-17' });
+    // Simular el ciclo degenerado que dejó el cálculo de corte viejo: vence el
+    // mismo día en que empieza.
+    await api.patch(`/api/packages/${p.datos.id}`, { expiresOn: '2026-09-17' });
+    const { estado, datos } = await api.post('/api/maintenance/fix-cycles', {});
+    assert.equal(estado, 200);
+    const arreglado = datos.corregidos.find(x => x.cliente === 'Ciclo roto corte 15');
+    assert.ok(arreglado, 'lo corrige');
+    assert.equal(arreglado.vence, '2026-10-15', 'lo lleva al corte 15 del mes siguiente');
+    const saldo = (await api.get('/api/packages')).datos.find(x => x.id === p.datos.id);
+    assert.equal(String(saldo.expires_on).slice(0, 10), '2026-10-15');
+    assert.match(saldo.label, /15-09-2026 – 15-10-2026/, 'la etiqueta queda con el ciclo del corte');
+  });
+
+  test('un saldo mensual en un cliente de clase suelta se reporta, no se arregla', async () => {
+    // Crear el saldo mensual (queda como el residuo del bug) y DESPUÉS pasar al
+    // cliente a clase suelta, como hará la entrenadora.
+    const single = await api.post('/api/plans', { name: 'Suelta reparación', billingModel: 'single', price: 25 });
+    const c = await api.post('/api/clients', { fullName: 'Suelto con saldo viejo', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+    const p = await api.post('/api/packages', { clientId: c.datos.id, totalSessions: 4, amount: 100, kind: 'monthly', dueOn: '2026-09-17' });
+    await api.patch(`/api/packages/${p.datos.id}`, { expiresOn: '2026-09-17' });
+    await api.patch(`/api/clients/${c.datos.id}/plan`, { planId: single.datos.id, cutoffDay: 1 });
+    const { datos } = await api.post('/api/maintenance/fix-cycles', {});
+    assert.ok(datos.noMensuales.some(x => x.id === p.datos.id), 'se reporta como saldo de no-mensual para borrar');
+    assert.ok(!datos.corregidos.some(x => x.cliente === 'Suelto con saldo viejo'), 'no se le toca la fecha');
+  });
+
+  test('un ciclo ya sano no se vuelve a tocar (idempotente)', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Ciclo sano', billingModel: 'monthly', standardPrice: 175, cutoffDay: 1 });
+    const p = await api.post('/api/packages', { clientId: c.datos.id, totalSessions: 12, amount: 175, kind: 'monthly', dueOn: '2026-09-01' });
+    const antes = (await api.get('/api/packages')).datos.find(x => x.id === p.datos.id);
+    const { datos } = await api.post('/api/maintenance/fix-cycles', {});
+    assert.ok(!datos.corregidos.some(x => x.cliente === 'Ciclo sano'), 'no aparece entre los corregidos');
+    const despues = (await api.get('/api/packages')).datos.find(x => x.id === p.datos.id);
+    assert.equal(String(despues.expires_on).slice(0, 10), String(antes.expires_on).slice(0, 10), 'su vencimiento no cambia');
+  });
+});
+
 describe('saldos de sesiones', () => {
   let clienteId;
   let saldoId;

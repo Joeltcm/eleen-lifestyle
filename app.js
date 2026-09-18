@@ -1,4 +1,4 @@
-const APP_VERSION = '169';
+const APP_VERSION = '170';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2738,6 +2738,28 @@ function renovarPaquete(pack) {
   });
 }
 
+// Reparación de una sola vez de los saldos mensuales con ciclo de un solo día
+// (residuo de un cálculo de corte viejo). Los recalcula al día de corte
+// configurado de cada cliente. Idempotente: correrlo de nuevo no hace daño.
+async function repararCiclos() {
+  if (!confirm('Reparar las fechas de los saldos mensuales con ciclo de un solo día.\n\nCada uno se recalcula al día de corte configurado de su cliente. No borra nada y puedes correrlo las veces que quieras.')) return;
+  try {
+    const r = await api('/api/maintenance/fix-cycles', { method: 'POST', body: {} });
+    await loadData(); renderAll();
+    const corregidos = r?.corregidos || [];
+    const noMensuales = r?.noMensuales || [];
+    const box = document.createElement('div');
+    box.innerHTML = `<p class="eyebrow">MANTENIMIENTO</p><h2>Fechas de ciclo</h2>
+      <p class="form-summary">${corregidos.length} saldo${corregidos.length === 1 ? '' : 's'} corregido${corregidos.length === 1 ? '' : 's'} al corte de su cliente.</p>
+      ${corregidos.length ? `<div class="balance-list">${corregidos.map(c => `<article class="balance-item"><div><b>${escapeHtml(c.cliente)}</b><small>${escapeHtml(c.despues)} · vence ${fechaCorta(c.vence)}</small></div></article>`).join('')}</div>` : '<p class="empty">No había ciclos que reparar.</p>'}
+      ${noMensuales.length ? `<p class="form-summary" style="margin-top:14px">Saldos de mensualidad en clientes que ya no son mensuales. Bórralos a mano (Editar → Usadas 0 → Eliminar):</p><div class="balance-list">${noMensuales.map(c => `<article class="balance-item expired"><div><b>${escapeHtml(c.cliente)}</b><small>${escapeHtml(c.label)}</small></div></article>`).join('')}</div>` : ''}
+      <button class="primary wide-button" id="cerrar-reparacion">Entendido</button>`;
+    openModal(box);
+    document.getElementById('cerrar-reparacion').onclick = () => modal.close();
+    toast(`Reparadas ${corregidos.length}${noMensuales.length ? ` · ${noMensuales.length} por revisar` : ''}`);
+  } catch (error) { toast(error.message, true); }
+}
+
 // Bitácora: qué se ha borrado, quién y cuándo. Una bitácora que nadie puede
 // leer no sirve de nada, así que se mira desde la propia aplicación y no
 // entrando a la base.
@@ -3718,6 +3740,7 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'export-compliance') exportCompliance();
   if (actionButton?.dataset.action === 'account-statement') financialReportDialog('account-statement');
   if (actionButton?.dataset.action === 'accounts-receivable') financialReportDialog('accounts-receivable');
+  if (actionButton?.dataset.action === 'fix-cycles') repararCiclos();
   if (invoicePdfButton) previewProtectedPdf(`/api/invoices/${invoicePdfButton.dataset.invoicePdf}/pdf`, `Comprobante ${invoicePdfButton.dataset.invoiceNumber}`, `comprobante-${invoicePdfButton.dataset.invoiceNumber}.pdf`);
   if (editSessionButton) editSessionSchedule(data.sessions.find(session => session.id === editSessionButton.dataset.editSession));
   if (event.target.dataset.editPlan) planEditor(data.plans.find(plan => plan.id === event.target.dataset.editPlan));
