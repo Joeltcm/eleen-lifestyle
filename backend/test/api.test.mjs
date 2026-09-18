@@ -1705,11 +1705,12 @@ describe('pasar a clase suelta desde el editor de plan', () => {
     const plan = await api.post('/api/plans', { name: 'Mensual a suelta', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
     const c = await api.post('/api/clients', { fullName: 'Pasa a suelta', planId: plan.datos.id, cutoffDay: 1 });
     // Antes de cambiar, tenía su saldo mensual del plan.
-    const { estado, datos } = await api.patch(`/api/clients/${c.datos.id}/plan`, { model: 'single', cutoffDay: 1 });
+    const { estado, datos } = await api.patch(`/api/clients/${c.datos.id}/plan`, { model: 'single', cutoffDay: 1, referencePrice: 22.5 });
     assert.equal(estado, 200);
     assert.equal(datos.billing_model, 'single', 'queda en clase suelta');
     assert.equal(datos.plan_id, null, 'sin plan');
     assert.equal(datos.monthly_session_target, null, 'sin meta mensual');
+    assert.equal(Number(datos.standard_price), 22.5, 'toma el precio de referencia');
     // No se le abre ninguna mensualidad nueva al pasar a suelta.
     const cliente = (await api.get('/api/clients')).datos.find(x => x.id === c.datos.id);
     assert.equal(cliente.billing_model, 'single');

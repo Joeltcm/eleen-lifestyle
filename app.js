@@ -1,4 +1,4 @@
-const APP_VERSION = '171';
+const APP_VERSION = '172';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1016,13 +1016,18 @@ function clientPlanEditor(client) {
   // "Clase suelta" no necesita un plan creado: pasa al cliente a modelo suelta
   // directo (se cobra por sesión, sin bolsa ni mensualidad).
   const sueltaSel = client.billingModel === 'single' && !client.planId ? ' selected' : '';
-  box.innerHTML = `<form id="client-plan-form"><p class="eyebrow">CONDICIONES COMERCIALES</p><h2>Plan y día de corte</h2><p class="form-summary">${escapeHtml(client.name)}</p><label>Plan<select name="planId" required>${availablePlans.map(plan => `<option value="${plan.id}" ${plan.id === client.planId ? 'selected' : ''}>${escapeHtml(plan.name)} · ${money.format(plan.price)}</option>`).join('')}<option value="__single__"${sueltaSel}>Clase suelta · se cobra por sesión</option></select></label><label>Día de corte<input name="cutoffDay" type="number" min="1" max="31" value="${client.cutoffDay}" required /><small>Para meses cortos, el recordatorio se ajusta al último día disponible.</small></label><button class="primary wide-button">Guardar condiciones</button></form>`;
+  box.innerHTML = `<form id="client-plan-form"><p class="eyebrow">CONDICIONES COMERCIALES</p><h2>Plan y día de corte</h2><p class="form-summary">${escapeHtml(client.name)}</p><label>Plan<select name="planId" required>${availablePlans.map(plan => `<option value="${plan.id}" ${plan.id === client.planId ? 'selected' : ''}>${escapeHtml(plan.name)} · ${money.format(plan.price)}</option>`).join('')}<option value="__single__"${sueltaSel}>Clase suelta · se cobra por sesión</option></select></label><label id="ref-price-label"${sueltaSel ? '' : ' hidden'}>Precio de referencia (USD)<input name="referencePrice" type="number" min="0" step="0.01" value="${sueltaSel ? client.plan : ''}" /><small>Prellena cada cobro; lo editas al cobrar (montos variables, cobros de grupo por separado). Déjalo en 0 si siempre varía.</small></label><label>Día de corte<input name="cutoffDay" type="number" min="1" max="31" value="${client.cutoffDay}" required /><small>Para meses cortos, el recordatorio se ajusta al último día disponible.</small></label><button class="primary wide-button">Guardar condiciones</button></form>`;
   openModal(box);
+  // El precio de referencia sólo aplica a clase suelta: aparece al elegirla.
+  const planSelect = box.querySelector('[name="planId"]');
+  const refLabel = box.querySelector('#ref-price-label');
+  const toggleRef = () => { const suelta = planSelect.value === '__single__'; refLabel.hidden = !suelta; refLabel.querySelector('input').disabled = !suelta; };
+  planSelect.addEventListener('change', toggleRef); toggleRef();
   document.getElementById('client-plan-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target);
     const eleccion = form.get('planId');
     const body = eleccion === '__single__'
-      ? { model: 'single', cutoffDay: Number(form.get('cutoffDay')) }
+      ? { model: 'single', cutoffDay: Number(form.get('cutoffDay')), referencePrice: Number(form.get('referencePrice')) || 0 }
       : { planId: eleccion, cutoffDay: Number(form.get('cutoffDay')) };
     try { event.target.classList.add('loading-state'); await api(`/api/clients/${client.id}/plan`, { method: 'PATCH', body }); await loadData(); renderAll(); modal.close(); toast('Plan del cliente actualizado'); }
     catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }

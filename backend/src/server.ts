@@ -777,6 +777,9 @@ app.delete('/api/clients/:id', { preHandler: requireStaff }, async (request, rep
 const clientPlanSchema = z.object({
   planId: z.string().uuid().optional(),
   model: z.enum(['single']).optional(),
+  // Precio de referencia para clase suelta: prellena el cobro, pero cada cobro
+  // se puede editar (montos variables, cobros de grupo por separado).
+  referencePrice: z.coerce.number().min(0).optional(),
   cutoffDay: z.coerce.number().int().min(1).max(31)
 }).refine(v => v.planId || v.model, { message: 'Falta el plan o el modelo' });
 app.patch('/api/clients/:id/plan', { preHandler: requireStaff }, async (request, reply) => {
@@ -787,6 +790,9 @@ app.patch('/api/clients/:id/plan', { preHandler: requireStaff }, async (request,
     if (input.model === 'single' && !input.planId) {
       const [client] = await transaction`
         UPDATE clients SET billing_model = 'single', plan_id = NULL, monthly_session_target = NULL,
+          -- El precio de referencia sólo se toca si viene en la petición; si no,
+          -- se respeta el que tenía.
+          standard_price = COALESCE(${input.referencePrice ?? null}::numeric, standard_price),
           billing_cutoff_day = ${input.cutoffDay}, updated_at = now()
         WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *
       `;
