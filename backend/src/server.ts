@@ -2072,6 +2072,27 @@ app.post('/api/session-recurrences/extend', { preHandler: requireStaff }, async 
   return { creadas, fallidas, saltados: await diasSaltados(auth.sub) };
 });
 
+// Reconciliar la agenda con los horarios fijos: borra las sesiones futuras
+// sueltas (sin horario fijo, aún programadas) que caen justo en el mismo día de
+// semana y hora de un horario fijo activo —las que se montaron encima y crean el
+// duplicado— y luego rellena los huecos con las del horario. No toca las ligadas
+// al horario, las ya dadas/canceladas, ni las sueltas de otra hora.
+app.post('/api/maintenance/reconciliar-agenda', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const borradas = await sql`
+    DELETE FROM sessions s
+    USING session_recurrences r
+    WHERE s.recurrence_id IS NULL AND s.status = 'scheduled' AND s.starts_at > now()
+      AND r.client_id = s.client_id AND r.active = true
+      AND s.client_id IN (SELECT id FROM clients WHERE owner_id = ${auth.sub})
+      AND (extract(dow FROM (s.starts_at AT TIME ZONE 'America/Panama'))::int) = ANY(r.weekdays::int[])
+      AND (s.starts_at AT TIME ZONE 'America/Panama')::time = r.time_of_day
+    RETURNING s.id
+  `;
+  const { creadas } = await extenderRecurrencias(auth.sub, true);
+  return { borradas: borradas.length, creadas };
+});
+
 // Por qué un día de un horario fijo sigue vacío después de rellenar.
 //
 // Un día puede quedarse sin sesión por dos motivos legítimos, y desde fuera se
