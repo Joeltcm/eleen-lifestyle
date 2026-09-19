@@ -3854,6 +3854,26 @@ app.get('/api/compliance/by-month', { preHandler: requireStaff }, async request 
   return { month, clients };
 });
 
+// Diagnóstico temporal: horarios fijos y sesiones próximas de un cliente, para
+// entender un duplicado en la agenda. Sólo lectura, acotado al dueño. A quitar.
+app.get('/api/debug/agenda', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const name = String((request.query as { name?: string }).name || '').trim();
+  const recurrencias = await sql`
+    SELECT r.id, c.full_name, r.weekdays, r.time_of_day, r.duration_minutes, r.active,
+      r.starts_on, r.ends_on, r.stopped_reason, r.created_at
+    FROM session_recurrences r JOIN clients c ON c.id = r.client_id
+    WHERE c.owner_id = ${auth.sub} AND c.full_name ILIKE ${'%' + name + '%'}
+    ORDER BY c.full_name, r.created_at`;
+  const sesiones = await sql`
+    SELECT c.full_name, s.id, s.starts_at, s.status, s.recurrence_id, s.recurrence_on, s.duration_minutes
+    FROM sessions s JOIN clients c ON c.id = s.client_id
+    WHERE c.owner_id = ${auth.sub} AND c.full_name ILIKE ${'%' + name + '%'}
+      AND s.starts_at >= now() - interval '3 days' AND s.starts_at <= now() + interval '14 days'
+    ORDER BY c.full_name, s.starts_at`;
+  return { recurrencias, sesiones };
+});
+
 // ── Gastos ────────────────────────────────────────────────────────────────
 // La otra mitad de las finanzas. Hasta ahora la aplicación sólo sabía de
 // ingresos, así que no había con qué comparar.
