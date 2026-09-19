@@ -2093,6 +2093,26 @@ app.post('/api/maintenance/reconciliar-agenda', { preHandler: requireStaff }, as
   return { borradas: borradas.length, creadas };
 });
 
+// Cerrar como pagadas las facturas de Zoho viejas que quedaron pendientes tras
+// la migración (se cobraron en Zoho en su momento). Sólo Zoho, pendientes y
+// vencidas hace más de 60 días —las recientes no se tocan—. No crea ingresos: el
+// dinero ya se registró en Zoho; sólo cierra el estado para que no aparezcan en
+// avisos ni en cuentas por cobrar.
+app.post('/api/maintenance/cerrar-zoho-viejas', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const cerradas = await sql`
+    UPDATE invoices i SET status = 'confirmed', balance = 0,
+      confirmed_at = COALESCE(i.confirmed_at, now()),
+      payment_reference = COALESCE(i.payment_reference, 'Cerrada por migración Zoho')
+    FROM clients c
+    WHERE c.id = i.client_id AND c.owner_id = ${auth.sub}
+      AND i.source_system = 'zoho_invoice' AND i.status = 'pending'
+      AND i.due_on < current_date - interval '60 days'
+    RETURNING i.id
+  `;
+  return { cerradas: cerradas.length };
+});
+
 // Por qué un día de un horario fijo sigue vacío después de rellenar.
 //
 // Un día puede quedarse sin sesión por dos motivos legítimos, y desde fuera se
@@ -4334,7 +4354,7 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
     const [client] = await sql`SELECT * FROM clients WHERE portal_user_id = ${auth.sub}`;
     if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
     const sessions = await sql`SELECT starts_at, duration_minutes FROM sessions WHERE client_id = ${client.id} AND status = 'scheduled' AND NOT COALESCE(paused_hold, false) AND starts_at BETWEEN now() AND now() + ${`${sessionHours} hours`}::interval ORDER BY starts_at`;
-    const invoices = await sql`SELECT due_on, amount, concept FROM invoices WHERE client_id = ${client.id} AND status = 'pending' AND due_on <= current_date + (${paymentDays})::integer ORDER BY due_on`;
+    const invoices = await sql`SELECT due_on, amount, concept FROM invoices WHERE client_id = ${client.id} AND status = 'pending' AND source_system IS DISTINCT FROM 'zoho_invoice' AND due_on <= current_date + (${paymentDays})::integer ORDER BY due_on`;
     return [
       ...sessions.map(session => ({ type: 'session', title: 'Próximo entrenamiento', body: `Tienes una sesión el ${new Date(session.starts_at).toLocaleString('es-PA', { timeZone: 'America/Panama' })}.`, scheduledFor: session.starts_at })),
       ...invoices.map(invoice => ({ type: 'payment', title: 'Recordatorio de pago', body: `${invoice.concept}: $${Number(invoice.amount).toFixed(2)} · vence ${invoice.due_on}.`, scheduledFor: invoice.due_on }))
@@ -4352,6 +4372,9 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
     WHERE c.owner_id = ${auth.sub} AND i.status = 'pending'
       -- Un cliente en pausa no debe generar aviso de pago: no está entrenando.
       AND c.status <> 'paused'
+      -- Las facturas de Zoho son sólo consulta de la migración: no se cobran por
+      -- la app, así que no deben generar avisos de pago.
+      AND i.source_system IS DISTINCT FROM 'zoho_invoice'
       AND i.due_on <= current_date + (${paymentDays})::integer ORDER BY i.due_on
   `;
   // Clases cuya hora ya pasó y siguen sin resolverse. Una sesión que se quedó
