@@ -291,16 +291,16 @@ async function generateRecurringInvoices(ownerId?: string) {
       SELECT COALESCE(i.billed_for_client_id, i.client_id) AS entrena,
         i.id AS invoice_id, i.due_on, i.amount,
         COALESCE(i.billing_period, date_trunc('month', i.due_on)::date) AS billing_period,
-        -- Las sesiones salen del último saldo del cliente y, si aún no tiene
-        -- ninguno, del plan que se le asignó. Antes sólo miraba el saldo
-        -- previo, así que quien nunca tuvo uno no lo tenía nunca: había que
-        -- crearle el primero a mano, y las sesiones declaradas en el plan no
-        -- servían para nada hasta entonces.
+        -- Las sesiones de la renovación salen de lo configurado en el perfil del
+        -- cliente ("Sesiones esperadas al mes"): ajustarlo ahí manda de un mes al
+        -- siguiente. Si no está puesto, del plan asignado; y de último, del
+        -- saldo previo (para quien no tenga ni target ni plan).
         COALESCE(
+          c.monthly_session_target,
+          pl.sessions_included,
           (SELECT sp.total_sessions FROM session_packages sp
             WHERE sp.client_id = COALESCE(i.billed_for_client_id, i.client_id) AND sp.kind = 'monthly'
-            ORDER BY sp.purchased_on DESC, sp.created_at DESC LIMIT 1),
-          pl.sessions_included
+            ORDER BY sp.purchased_on DESC, sp.created_at DESC LIMIT 1)
         ) AS total_sessions
       FROM invoices i
       JOIN clients c ON c.id = COALESCE(i.billed_for_client_id, i.client_id)
@@ -3143,7 +3143,7 @@ async function coberturaDeCobro(ownerId: string, invoiceId: string) {
   const candidates = await sql`
     SELECT c.id, c.full_name, c.status, c.billing_cutoff_day,
       COALESCE(p.price, c.standard_price, 0) AS suggested_amount,
-      COALESCE(p.sessions_included, c.monthly_session_target, 0)::integer AS suggested_sessions,
+      COALESCE(c.monthly_session_target, p.sessions_included, 0)::integer AS suggested_sessions,
       p.name AS plan_name
     FROM clients c
     LEFT JOIN service_plans p ON p.id = c.plan_id
@@ -3558,7 +3558,7 @@ async function saveNativeInvoicePayment(ownerId: string, id: string, input: z.in
       const candidatos = await transaction`
         SELECT c.id,
           COALESCE(p.price, c.standard_price, 0) AS suggested_amount,
-          COALESCE(p.sessions_included, c.monthly_session_target, 0)::integer AS suggested_sessions
+          COALESCE(c.monthly_session_target, p.sessions_included, 0)::integer AS suggested_sessions
         FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id
         WHERE c.owner_id = ${ownerId}
           AND (c.id = ${invoice.client_id} OR c.billing_responsible_client_id = ${invoice.client_id})

@@ -539,6 +539,18 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     assert.equal(Number(cliente.available_sessions), 12, '4 extra + 8 de la mensualidad familiar');
   });
 
+  test('la renovación usa las sesiones del perfil (Sesiones esperadas al mes), no del plan', async () => {
+    const plan = await api.post('/api/plans', { name: 'Mensual base 8', billingModel: 'monthly', price: 175, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Ajusta sesiones en perfil', planId: plan.datos.id, cutoffDay: 1 });
+    // La entrenadora ajusta en el perfil: ahora toma 10 clases al mes.
+    await api.patch(`/api/clients/${c.datos.id}`, { fullName: 'Ajusta sesiones en perfil', monthlySessionTarget: 10, cutoffDay: 1 });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: '2026-09-30' });
+    await api.post(`/api/invoices/${f.datos.id}/confirm`, { method: 'Efectivo', paidOn: '2026-09-10' });
+    const saldo = (await api.get('/api/packages')).datos.find(p => p.client_id === c.datos.id && p.kind === 'monthly' && p.status === 'active');
+    assert.ok(saldo, 'se abrió el saldo al confirmar');
+    assert.equal(Number(saldo.total_sessions), 10, 'toma las 10 del perfil, no las 8 del plan');
+  });
+
   test('quitar la cobertura se lleva el saldo que nadie usó', async () => {
     const { datos } = await api.get(`/api/invoices/${factura}/coverage`);
     const suya = datos.applied.find(a => a.client_id === beatris);
