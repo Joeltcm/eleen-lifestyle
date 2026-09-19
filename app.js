@@ -1,4 +1,4 @@
-const APP_VERSION = '176';
+const APP_VERSION = '177';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -3376,8 +3376,9 @@ function attendanceSection(target, clientId) {
     const basis = report.timeline.at(-1)?.basis;
     const note = basis === 'client' ? `Meta pactada en la ficha del cliente: ${report.monthlySessionTarget} sesiones al mes. Se edita en “Editar contacto”.`
       : basis === 'package' ? `Meta derivada del paquete contratado (${escapeHtml(report.timeline.at(-1).packageLabel || 'sin nombre')}), repartido entre los meses que cubre.`
+      : basis === 'agenda' ? `La meta se mide contra su agenda de horarios fijos: ${report.agendaSessionsPerWeek} clase${report.agendaSessionsPerWeek === 1 ? '' : 's'} por semana.`
       : basis === 'routine' ? `Sin vencimiento en el paquete, la meta usa la cadencia de la rutina activa: ${report.sessionsPerWeek} por semana.`
-      : 'Sin meta pactada, ni paquete con vencimiento, ni rutina activa. Fija las sesiones esperadas al mes en “Editar contacto” para medir el cumplimiento.';
+      : 'Sin meta pactada, ni paquete con vencimiento, ni horario fijo, ni rutina activa. Fija las sesiones esperadas al mes en “Editar contacto”, o dale un horario fijo, para medir el cumplimiento.';
     target.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Mes</th><th>Cumplidas</th><th>Cumplimiento</th><th>Faltas</th><th>Canceladas</th></tr></thead><tbody>${rows}</tbody></table></div><p class="section-note">${escapeHtml(note)}</p>`;
   }).catch(error => { if (target.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; });
 }

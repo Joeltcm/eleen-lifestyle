@@ -1804,6 +1804,20 @@ describe('reparar ciclos mensuales degenerados', () => {
   });
 });
 
+describe('cumplimiento contra la agenda (clase suelta con horario fijo)', () => {
+  test('la meta mensual sale de los horarios fijos cuando no hay mensualidad ni paquete', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Suelta con horario fijo', billingModel: 'single', standardPrice: 25, cutoffDay: 1 });
+    // Horario fijo de 3 días por semana (lun, mié, vie).
+    await api.post('/api/session-recurrences', { clientId: c.datos.id, weekdays: [1, 3, 5], timeOfDay: '08:00' });
+    const { estado, datos } = await api.get(`/api/clients/${c.datos.id}/attendance?months=1`);
+    assert.equal(estado, 200);
+    assert.equal(datos.agendaSessionsPerWeek, 3, '3 clases por semana según la agenda');
+    const mes = datos.timeline.at(-1);
+    assert.equal(mes.basis, 'agenda', 'la meta se mide contra la agenda, no queda "sin referencia"');
+    assert.ok(mes.expected >= 12 && mes.expected <= 14, '~3 por semana escalado al mes');
+  });
+});
+
 describe('saldos de sesiones', () => {
   let clienteId;
   let saldoId;

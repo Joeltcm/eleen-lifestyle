@@ -4896,7 +4896,7 @@ app.get('/api/clients/:clientId/attendance', { preHandler: requireStaff }, async
   const client = await ownedClient(clientId, auth.sub);
   if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
 
-  const [monthly, packages, cadence] = await Promise.all([
+  const [monthly, packages, cadence, agendaCadence] = await Promise.all([
     sql`
       SELECT to_char(date_trunc('month', starts_at), 'YYYY-MM') AS month,
              count(*)::int AS booked,
@@ -4918,12 +4918,23 @@ app.get('/api/clients/:clientId/attendance', { preHandler: requireStaff }, async
       FROM routine_assignments a JOIN routines r ON r.id = a.routine_id
       WHERE a.client_id = ${clientId} AND a.active = true
       ORDER BY a.starts_on DESC LIMIT 1
+    `,
+    sql`
+      -- Clases por semana según la agenda de horarios fijos: la suma de días de
+      -- cada recurrencia activa. Es la cadencia real pactada para los clientes
+      -- que no llevan mensualidad ni paquete (p. ej. clase suelta con horario
+      -- fijo), y sirve para medir su cumplimiento contra su propia agenda.
+      SELECT COALESCE(SUM(array_length(weekdays, 1)), 0)::int AS por_semana
+      FROM session_recurrences
+      WHERE client_id = ${clientId} AND active = true
+        AND (ends_on IS NULL OR ends_on >= current_date)
     `
   ]);
 
   const byMonth = new Map(monthly.map(row => [row.month as string, row]));
   const packageRows = packages as unknown as Array<{ id: string; label: string; total_sessions: number; used_sessions: number; status: string; purchased_on: string; expires_on: string | null }>;
   const sessionsPerWeek = Number(cadence[0]?.sessions_per_week) || null;
+  const agendaSessionsPerWeek = Number(agendaCadence[0]?.por_semana) || null;
 
   // Precedencia de la meta mensual:
   //   1. La pactada en la ficha del cliente, si la hay. Manda sobre todo
@@ -4949,6 +4960,12 @@ app.get('/api/clients/:clientId/attendance', { preHandler: requireStaff }, async
       const to = new Date(`${covering.expires_on}T00:00:00Z`);
       const span = Math.max(1, (to.getUTCFullYear() - from.getUTCFullYear()) * 12 + (to.getUTCMonth() - from.getUTCMonth()) + 1);
       return { expected: Math.round(covering.total_sessions / span), basis: 'package' as const, packageLabel: covering.label };
+    }
+    // La agenda de horarios fijos: la cadencia real pactada. Va antes que la
+    // rutina porque es cuándo entrena de verdad, no la cadencia nominal del plan.
+    if (agendaSessionsPerWeek) {
+      const daysInMonth = monthEnd.getUTCDate();
+      return { expected: Math.round(agendaSessionsPerWeek * (daysInMonth / 7)), basis: 'agenda' as const, packageLabel: null };
     }
     if (sessionsPerWeek) {
       const daysInMonth = monthEnd.getUTCDate();
@@ -4984,7 +5001,7 @@ app.get('/api/clients/:clientId/attendance', { preHandler: requireStaff }, async
     };
   });
 
-  return { timeline, packages: packageRows, sessionsPerWeek, billingModel: client.billing_model, monthlySessionTarget: clientTarget };
+  return { timeline, packages: packageRows, sessionsPerWeek, agendaSessionsPerWeek, billingModel: client.billing_model, monthlySessionTarget: clientTarget };
 });
 
 const conditionSchema = z.object({
