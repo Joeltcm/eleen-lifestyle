@@ -1,4 +1,4 @@
-const APP_VERSION = '174';
+const APP_VERSION = '175';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -32,6 +32,7 @@ if (authToken && !localStorage.getItem(authKey)) {
 let currentUser = null;
 let data = { clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, notifications: [], googleCalendar: { configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } } };
 let portalData = null;
+let mostrarHistorialPaquetes = false;
 let compliancePeriod = 'week';
 let billingMonth = String(today.getMonth() + 1);
 let billingYear = String(today.getFullYear());
@@ -784,7 +785,12 @@ function renderBilling() {
   document.getElementById('plan-grid').innerHTML = data.plans.length ? data.plans.map(plan => `<article class="plan-card ${plan.active ? '' : 'inactive'}"><div><span class="commercial-label ${plan.billingModel === 'package' ? 'package-label' : ''}${plan.billingModel === 'single' ? ' single-label' : ''}">${modalidadPlan(plan.billingModel)}</span><h4>${escapeHtml(plan.name)}</h4><p>${escapeHtml(plan.description || (plan.billingModel === 'package' ? `${plan.sessionsIncluded} sesiones · ${plan.validityDays} días` : plan.billingModel === 'single' ? 'Se cobra por sesión' : `${plan.sessionsIncluded} sesiones / mes`))}</p></div><div class="plan-price"><strong>${money.format(plan.price)}</strong><small>${plan.active ? 'Disponible' : 'Inactivo'}</small></div><button class="text-button" data-edit-plan="${plan.id}">Editar</button></article>`).join('') : '<p class="empty">Crea el primer plan para asignarlo a tus clientes.</p>';
   document.getElementById('invoice-table').innerHTML = visibleInvoices.length ? visibleInvoices.map(invoice => { const label = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'; const concept = invoice.invoiceNumber ? `<small>${invoice.source === 'zoho_invoice' ? 'Zoho' : 'Eileen'} · ${escapeHtml(invoice.invoiceNumber)}</small><br>${escapeHtml(invoice.concept)}` : escapeHtml(invoice.concept); const local = invoice.source !== 'zoho_invoice'; const esSuelta = (data.clients.find(c => c.id === invoice.clientId) || {}).billingModel === 'single'; return `<tr><td data-label="Cliente"><b>${escapeHtml(invoice.client)}</b></td><td data-label="Concepto">${concept}</td><td data-label="Vence">${fechaCorta(invoice.due)}</td><td data-label="Método">${invoice.method === 'pending' ? '—' : escapeHtml(invoice.method)}</td><td data-label="Monto">${money.format(invoice.amount)}${invoice.status === 'pending' && invoice.balance !== invoice.amount ? `<br><small>Saldo ${money.format(invoice.balance)}</small>` : ''}</td><td data-label="Estado"><span class="payment-status ${invoice.status}">${label}</span></td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoiceNumber || invoice.id.slice(0, 8))}">Ver PDF</button>${invoice.status !== 'void' && !esSuelta ? `<button class="secondary session-use" data-apply-coverage="${invoice.id}">Aplicar a mensualidades</button><button class="secondary session-use" data-apply-package="${invoice.id}">Aplicar a paquete</button>` : ''}${invoice.status === 'pending' && local ? `<button class="secondary session-use" data-confirm-invoice="${invoice.id}">Confirmar pago</button><button class="secondary session-use" data-edit-invoice="${invoice.id}">Editar</button><button class="secondary session-use" data-delete-invoice="${invoice.id}">Anular</button><button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar</button>` : ''}${invoice.status === 'void' && local ? `<button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar definitivamente</button>` : ''}${invoice.status === 'confirmed' && local ? `<button class="secondary session-use" data-edit-payment="${invoice.id}">Editar pago</button><button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar definitivamente</button>` : ''}</div></td></tr>`; }).join('') : '<tr><td colspan="7" class="empty">No hay facturas con estos filtros.</td></tr>';
   const loadMore = document.getElementById('billing-load-more'); loadMore.hidden = visibleInvoices.length >= periodInvoices.length; loadMore.textContent = `Mostrar más facturas (${periodInvoices.length - visibleInvoices.length} restantes)`;
-  document.getElementById('package-table').innerHTML = data.packages.length ? data.packages.map(pack => {
+  // Por defecto sólo los saldos vigentes (con sesiones disponibles o pendientes
+  // de pago). Los agotados y vencidos sin saldo son historial y se muestran con
+  // "Ver historial", para que la lista no crezca sin fin con clientela fija.
+  const paqueteVigente = pack => pack.status === 'pending' || remainingSessions(pack) > 0;
+  const visiblesPaquetes = mostrarHistorialPaquetes ? data.packages : data.packages.filter(paqueteVigente);
+  document.getElementById('package-table').innerHTML = visiblesPaquetes.length ? visiblesPaquetes.map(pack => {
     const remaining = remainingSessions(pack);
     const state = pack.status === 'pending' ? 'Pendiente de pago' : remaining ? 'Activo' : 'Agotado';
     const borrable = Number(pack.used) === 0
@@ -799,7 +805,7 @@ function renderBilling() {
         ? '<br><small class="pack-renovar">Renovación pendiente</small>'
         : '';
     return `<tr><td data-label="Cliente"><b>${escapeHtml(pack.client)}</b></td><td data-label="Paquete">${escapeHtml(pack.label)}${pack.originInvoiceId ? `<br><small class="pack-origin">Salió del cobro ${escapeHtml(pack.originSource === 'zoho_invoice' ? 'Zoho ' : '')}${escapeHtml(pack.originNumber || pack.originConcept || 'sin número')}${pack.originDate ? ` · ${fechaCorta(pack.originDate)}` : ''}</small>` : ''}</td><td data-label="Compradas">${pack.total}</td><td data-label="Usadas">${pack.used}</td><td data-label="Disponibles"><strong class="session-balance">${remaining}</strong></td><td data-label="Estado"><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span><br><small>${pack.expiresOn ? `vence ${fechaCorta(pack.expiresOn)}` : 'sin vencimiento'}</small>${aviso}</td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-editar-paquete="${pack.id}">Editar</button>${renovable}${borrable}</div><small>${pack.status === 'confirmed' && remaining ? 'Descuento automático' : '—'}</small></td></tr>`;
-  }).join('') : '<tr><td colspan="7" class="empty">Aún no hay paquetes de sesiones.</td></tr>';
+  }).join('') : `<tr><td colspan="7" class="empty">${data.packages.length ? 'No hay saldos vigentes. Usa “Ver historial” para ver los agotados y vencidos.' : 'Aún no hay paquetes de sesiones.'}</td></tr>`;
   void ensureBillingAnalytics();
 }
 function renderAll() { renderDashboard(); renderClients(); renderGoogleCalendar(); renderCalendar(); renderRoutines(); renderBilling(); }
@@ -2750,28 +2756,6 @@ function renovarPaquete(pack) {
   });
 }
 
-// Reparación de una sola vez de los saldos mensuales con ciclo de un solo día
-// (residuo de un cálculo de corte viejo). Los recalcula al día de corte
-// configurado de cada cliente. Idempotente: correrlo de nuevo no hace daño.
-async function repararCiclos() {
-  if (!confirm('Reparar las fechas de los saldos mensuales con ciclo de un solo día.\n\nCada uno se recalcula al día de corte configurado de su cliente. No borra nada y puedes correrlo las veces que quieras.')) return;
-  try {
-    const r = await api('/api/maintenance/fix-cycles', { method: 'POST', body: {} });
-    await loadData(); renderAll();
-    const corregidos = r?.corregidos || [];
-    const noMensuales = r?.noMensuales || [];
-    const box = document.createElement('div');
-    box.innerHTML = `<p class="eyebrow">MANTENIMIENTO</p><h2>Fechas de ciclo</h2>
-      <p class="form-summary">${corregidos.length} saldo${corregidos.length === 1 ? '' : 's'} corregido${corregidos.length === 1 ? '' : 's'} al corte de su cliente.</p>
-      ${corregidos.length ? `<div class="balance-list">${corregidos.map(c => `<article class="balance-item"><div><b>${escapeHtml(c.cliente)}</b><small>${escapeHtml(c.despues)} · vence ${fechaCorta(c.vence)}</small></div></article>`).join('')}</div>` : '<p class="empty">No había ciclos que reparar.</p>'}
-      ${noMensuales.length ? `<p class="form-summary" style="margin-top:14px">Saldos de mensualidad en clientes que ya no son mensuales. Bórralos a mano (Editar → Usadas 0 → Eliminar):</p><div class="balance-list">${noMensuales.map(c => `<article class="balance-item expired"><div><b>${escapeHtml(c.cliente)}</b><small>${escapeHtml(c.label)}</small></div></article>`).join('')}</div>` : ''}
-      <button class="primary wide-button" id="cerrar-reparacion">Entendido</button>`;
-    openModal(box);
-    document.getElementById('cerrar-reparacion').onclick = () => modal.close();
-    toast(`Reparadas ${corregidos.length}${noMensuales.length ? ` · ${noMensuales.length} por revisar` : ''}`);
-  } catch (error) { toast(error.message, true); }
-}
-
 // Bitácora: qué se ha borrado, quién y cuándo. Una bitácora que nadie puede
 // leer no sirve de nada, así que se mira desde la propia aplicación y no
 // entrando a la base.
@@ -3773,7 +3757,12 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'export-compliance') exportCompliance();
   if (actionButton?.dataset.action === 'account-statement') financialReportDialog('account-statement');
   if (actionButton?.dataset.action === 'accounts-receivable') financialReportDialog('accounts-receivable');
-  if (actionButton?.dataset.action === 'fix-cycles') repararCiclos();
+  if (actionButton?.dataset.action === 'toggle-package-history') {
+    mostrarHistorialPaquetes = !mostrarHistorialPaquetes;
+    const boton = document.getElementById('toggle-package-history');
+    if (boton) boton.textContent = mostrarHistorialPaquetes ? 'Ver solo vigentes' : 'Ver historial';
+    renderBilling();
+  }
   if (invoicePdfButton) previewProtectedPdf(`/api/invoices/${invoicePdfButton.dataset.invoicePdf}/pdf`, `Comprobante ${invoicePdfButton.dataset.invoiceNumber}`, `comprobante-${invoicePdfButton.dataset.invoiceNumber}.pdf`);
   if (editSessionButton) editSessionSchedule(data.sessions.find(session => session.id === editSessionButton.dataset.editSession));
   if (event.target.dataset.editPlan) planEditor(data.plans.find(plan => plan.id === event.target.dataset.editPlan));
