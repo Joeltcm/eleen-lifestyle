@@ -3828,6 +3828,32 @@ app.get('/api/finance/monthly.pdf', { preHandler: requireStaff }, async (request
   return sendPdf(reply, await monthlyFinancePdf(d, catName), `informe-${d.month}.pdf`);
 });
 
+// Cumplimiento por cliente de un mes: para cada cliente con clases en el mes,
+// cuántas cumplió y su porcentaje. Misma definición que el resto del sistema
+// (canceladas por él y no repuestas cuentan como incumplidas; las que canceló
+// la entrenadora o están en pausa no cuentan).
+app.get('/api/compliance/by-month', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const { month } = z.object({ month: z.string().regex(/^\d{4}-\d{2}$/) }).parse(request.query);
+  const from = `${month}-01`;
+  const to = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).toISOString().slice(0, 10);
+  const clients = await sql`
+    SELECT c.id AS client_id, c.full_name AS name,
+      count(*)::int AS total,
+      count(*) FILTER (WHERE s.status = 'completed')::int AS completadas,
+      COALESCE(round(avg(COALESCE(CASE WHEN s.status = 'cancelled' THEN 0 ELSE s.completion_percent END, 0))), 0)::int AS percent
+    FROM sessions s JOIN clients c ON c.id = s.client_id
+    WHERE c.owner_id = ${auth.sub}
+      AND s.starts_at >= ${from}::date AND s.starts_at < (${to}::date + interval '1 day')
+      AND s.starts_at <= now()
+      AND NOT (s.status = 'scheduled' AND (COALESCE(s.paused_hold, false) OR c.status = 'paused'))
+      AND (s.status <> 'cancelled'
+        OR (s.cancellation_kind = 'not_rescheduled' AND COALESCE(s.cancelled_by, 'client') = 'client'))
+    GROUP BY 1, 2
+  `;
+  return { month, clients };
+});
+
 // ── Gastos ────────────────────────────────────────────────────────────────
 // La otra mitad de las finanzas. Hasta ahora la aplicación sólo sabía de
 // ingresos, así que no había con qué comparar.

@@ -1647,6 +1647,22 @@ describe('pausar la mensualidad', () => {
   });
 });
 
+describe('cumplimiento por cliente de un mes (Control de paquetes)', () => {
+  test('cuenta cumplidas y calcula el porcentaje del mes', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Cumple por mes', billingModel: 'single', standardPrice: 25, cutoffDay: 1 });
+    const lote = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: ['2026-09-05T14:00:00Z', '2026-09-12T14:00:00Z'], durationMinutes: 60, mode: 'Presencial' });
+    await api.patch(`/api/sessions/${lote.datos.sesiones[0].id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    await api.patch(`/api/sessions/${lote.datos.sesiones[1].id}/compliance`, { outcome: 'no_show', completionPercent: 0 });
+    const { estado, datos } = await api.get('/api/compliance/by-month?month=2026-09');
+    assert.equal(estado, 200);
+    const fila = datos.clients.find(x => x.client_id === c.datos.id);
+    assert.ok(fila, 'aparece el cliente con clases en el mes');
+    assert.equal(Number(fila.total), 2, '2 clases resueltas');
+    assert.equal(Number(fila.completadas), 1, '1 cumplida');
+    assert.equal(Number(fila.percent), 50, 'promedio (100 + 0) / 2');
+  });
+});
+
 describe('informe mensual (cobros, gastos, finanzas)', () => {
   test('resume ingresos y gastos del mes y filtra por categoría', async () => {
     const c = await api.post('/api/clients', { fullName: 'Informe cliente', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });

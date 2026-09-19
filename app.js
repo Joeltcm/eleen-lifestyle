@@ -1,4 +1,4 @@
-const APP_VERSION = '178';
+const APP_VERSION = '179';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -33,6 +33,25 @@ let currentUser = null;
 let data = { clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, notifications: [], googleCalendar: { configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } } };
 let portalData = null;
 let mostrarHistorialPaquetes = false;
+let paquetesMes = '';
+let cumplimientoPorCliente = {};
+async function cargarCumplimientoPaquetes() {
+  if (!paquetesMes) { cumplimientoPorCliente = {}; renderBilling(); return; }
+  try {
+    const r = await api(`/api/compliance/by-month?month=${paquetesMes}`);
+    cumplimientoPorCliente = {};
+    (r.clients || []).forEach(c => { cumplimientoPorCliente[c.client_id] = c; });
+  } catch { cumplimientoPorCliente = {}; }
+  renderBilling();
+}
+function cumplimientoCelda(clientId) {
+  if (!paquetesMes) return '<small class="pack-origin">Elige un mes</small>';
+  const c = cumplimientoPorCliente[clientId];
+  if (!c || !Number(c.total)) return '<small class="pack-origin">Sin clases</small>';
+  const pct = Number(c.percent);
+  const color = pct >= 80 ? '#3f7d54' : pct >= 50 ? '#8a5a12' : '#8f3d2e';
+  return `<strong style="color:${color}">${pct}%</strong><br><small class="pack-origin">${c.completadas}/${c.total} clases</small>`;
+}
 let compliancePeriod = 'week';
 let billingMonth = String(today.getMonth() + 1);
 let billingYear = String(today.getFullYear());
@@ -247,7 +266,7 @@ async function loadData() {
     return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), reprogramaciones: Number(client.reprogramaciones_ciclo || 0), canceladas: Number(client.canceladas_ciclo || 0), canceladasPorElla: Number(client.canceladas_por_ella_ciclo || 0), creditoPendiente: Number(client.credito_pendiente || 0), deudaPendiente: Number(client.deuda_pendiente || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), pauseId: client.active_pause_id || null, pauseStartedOn: client.pause_started_on || null, pauseReason: client.pause_reason || '', status: { active: 'Activo', paused: 'En pausa', inactive: 'Inactivo' }[client.status] || 'Inactivo', statusRaw: client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
   });
   data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, concept: item.concept, amount: Number(item.amount), balance: item.source_system ? Number(item.balance) : item.status === 'pending' ? Number(item.amount) : 0, due: dateOnly(item.due_on), issued: dateOnly(item.issued_on || item.due_on), paidOn: item.confirmed_at ? String(item.confirmed_at).slice(0, 10) : '', method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '', coverageStart: item.coverage_start ? dateOnly(item.coverage_start) : '' }));
-  data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, kind: item.kind, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), expiresOn: item.expires_on || '', status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired', originInvoiceId: item.origin_invoice_id || null, originNumber: item.origin_invoice_number || '', originConcept: item.origin_concept || '', originSource: item.origin_source || '', originStatus: item.origin_status || '', originDate: item.origin_date ? dateOnly(item.origin_date) : '', renovacionPendiente: item.renovacion_pendiente || false, vencidoConSaldo: item.vencido_con_saldo || false }));
+  data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, kind: item.kind, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), expiresOn: item.expires_on || '', status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired', originInvoiceId: item.origin_invoice_id || null, originNumber: item.origin_invoice_number || '', originConcept: item.origin_concept || '', originSource: item.origin_source || '', originStatus: item.origin_status || '', originDate: item.origin_date ? dateOnly(item.origin_date) : '', renovacionPendiente: item.renovacion_pendiente || false, vencidoConSaldo: item.vencido_con_saldo || false, purchasedOn: item.purchased_on ? dateOnly(item.purchased_on) : '' }));
   data.sessions = sessions.map(sessionFromApi);
   data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: (item.assigned_client_ids || []).length, assignedClientIds: item.assigned_client_ids || [], sessions: item.sessions_per_week, dueOn: item.due_on || null, exercises: item.exercises || [] }));
   data.plans = plans.map(item => ({ id: item.id, name: item.name, description: item.description || '', billingModel: item.billing_model, price: Number(item.price), sessionsIncluded: Number(item.sessions_included || 0), validityDays: Number(item.validity_days || 0), active: item.active }));
@@ -789,7 +808,16 @@ function renderBilling() {
   // de pago). Los agotados y vencidos sin saldo son historial y se muestran con
   // "Ver historial", para que la lista no crezca sin fin con clientela fija.
   const paqueteVigente = pack => pack.status === 'pending' || remainingSessions(pack) > 0;
-  const visiblesPaquetes = mostrarHistorialPaquetes ? data.packages : data.packages.filter(paqueteVigente);
+  // Filtro por mes: saldos cuyo ciclo toca el mes elegido (comprado antes del
+  // fin del mes y aún vigente al inicio). Sin mes, no filtra.
+  const finMes = paquetesMes ? new Date(Date.UTC(Number(paquetesMes.slice(0, 4)), Number(paquetesMes.slice(5, 7)), 0)).toISOString().slice(0, 10) : '';
+  const saldoEnMes = pack => {
+    if (!paquetesMes) return true;
+    const compra = pack.purchasedOn || '';
+    const vence = pack.expiresOn ? dateOnly(pack.expiresOn) : '';
+    return (!compra || compra <= finMes) && (!vence || vence >= `${paquetesMes}-01`);
+  };
+  const visiblesPaquetes = data.packages.filter(pack => (mostrarHistorialPaquetes || paqueteVigente(pack)) && saldoEnMes(pack));
   document.getElementById('package-table').innerHTML = visiblesPaquetes.length ? visiblesPaquetes.map(pack => {
     const remaining = remainingSessions(pack);
     const state = pack.status === 'pending' ? 'Pendiente de pago' : remaining ? 'Activo' : 'Agotado';
@@ -804,8 +832,8 @@ function renderBilling() {
       : pack.renovacionPendiente
         ? '<br><small class="pack-renovar">Renovación pendiente</small>'
         : '';
-    return `<tr><td data-label="Cliente"><b>${escapeHtml(pack.client)}</b></td><td data-label="Paquete">${escapeHtml(pack.label)}${pack.originInvoiceId ? `<br><small class="pack-origin">Salió del cobro ${escapeHtml(pack.originSource === 'zoho_invoice' ? 'Zoho ' : '')}${escapeHtml(pack.originNumber || pack.originConcept || 'sin número')}${pack.originDate ? ` · ${fechaCorta(pack.originDate)}` : ''}</small>` : ''}</td><td data-label="Compradas">${pack.total}</td><td data-label="Usadas">${pack.used}</td><td data-label="Disponibles"><strong class="session-balance">${remaining}</strong></td><td data-label="Estado"><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span><br><small>${pack.expiresOn ? `vence ${fechaCorta(pack.expiresOn)}` : 'sin vencimiento'}</small>${aviso}</td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-editar-paquete="${pack.id}">Editar</button>${renovable}${borrable}</div><small>${pack.status === 'confirmed' && remaining ? 'Descuento automático' : '—'}</small></td></tr>`;
-  }).join('') : `<tr><td colspan="7" class="empty">${data.packages.length ? 'No hay saldos vigentes. Usa “Ver historial” para ver los agotados y vencidos.' : 'Aún no hay paquetes de sesiones.'}</td></tr>`;
+    return `<tr><td data-label="Cliente"><b>${escapeHtml(pack.client)}</b></td><td data-label="Paquete">${escapeHtml(pack.label)}${pack.originInvoiceId ? `<br><small class="pack-origin">Salió del cobro ${escapeHtml(pack.originSource === 'zoho_invoice' ? 'Zoho ' : '')}${escapeHtml(pack.originNumber || pack.originConcept || 'sin número')}${pack.originDate ? ` · ${fechaCorta(pack.originDate)}` : ''}</small>` : ''}</td><td data-label="Compradas">${pack.total}</td><td data-label="Usadas">${pack.used}</td><td data-label="Disponibles"><strong class="session-balance">${remaining}</strong></td><td data-label="Estado"><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span><br><small>${pack.expiresOn ? `vence ${fechaCorta(pack.expiresOn)}` : 'sin vencimiento'}</small>${aviso}</td><td data-label="Cumplimiento">${cumplimientoCelda(pack.clientId)}</td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-editar-paquete="${pack.id}">Editar</button>${renovable}${borrable}</div><small>${pack.status === 'confirmed' && remaining ? 'Descuento automático' : '—'}</small></td></tr>`;
+  }).join('') : `<tr><td colspan="8" class="empty">${data.packages.length ? 'No hay saldos con estos filtros. Cambia el mes o usa “Ver historial”.' : 'Aún no hay paquetes de sesiones.'}</td></tr>`;
   void ensureBillingAnalytics();
 }
 function renderAll() { renderDashboard(); renderClients(); renderGoogleCalendar(); renderCalendar(); renderRoutines(); renderBilling(); }
@@ -3947,6 +3975,7 @@ const resetBillingList = () => { billingVisibleInvoices = 100; };
 document.getElementById('billing-month').addEventListener('change', event => { billingMonth = event.target.value; resetBillingList(); renderBilling(); notifyBillingPeriodChange(); });
 document.getElementById('billing-year').addEventListener('change', event => { billingYear = event.target.value; if (billingYear === 'all') billingMonth = 'all'; resetBillingList(); renderBilling(); notifyBillingPeriodChange(); });
 document.getElementById('billing-source').addEventListener('change', event => { billingSource = event.target.value; resetBillingList(); renderBilling(); });
+document.getElementById('package-month')?.addEventListener('change', event => { paquetesMes = event.target.value; cargarCumplimientoPaquetes(); });
 document.getElementById('billing-current-period').addEventListener('click', () => {
   billingMonth = String(today.getMonth() + 1); billingYear = String(today.getFullYear()); billingSource = 'all'; resetBillingList(); renderBilling(); notifyBillingPeriodChange();
 });
