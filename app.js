@@ -1,4 +1,4 @@
-const APP_VERSION = '177';
+const APP_VERSION = '178';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -862,6 +862,63 @@ function listaPorCobrar() {
         <span class="gasto-monto">${money.format(factura.balance || factura.amount)}</span>
       </article>`;
     }).join('')}</div>`;
+}
+
+// Informe mensual: cobros, gastos y resumen de un mes, filtrable por categoría
+// de gasto, para ver en pantalla y descargar en CSV (Excel) o PDF (imprimir).
+function renderInforme(d) {
+  const r = d.resumen;
+  const metric = (label, val) => `<article><span>${label}</span><strong>${money.format(Number(val) || 0)}</strong></article>`;
+  const filaCobro = c => `<tr><td>${fechaCorta(dateOnly(c.fecha))}</td><td>${escapeHtml(c.cliente || '')}</td><td>${escapeHtml(c.concepto || '')}</td><td>${escapeHtml(c.metodo || '')}</td><td>${money.format(Number(c.monto))}</td></tr>`;
+  const filaGasto = g => `<tr><td>${fechaCorta(dateOnly(g.fecha))}</td><td>${escapeHtml(g.descripcion || '')}</td><td>${escapeHtml(g.categoria || '')}</td><td>${g.ambito === 'negocio' ? 'Negocio' : 'Personal'}</td><td>${money.format(Number(g.monto))}</td></tr>`;
+  const cobros = d.cobros.length ? `<div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Fecha</th><th>Cliente</th><th>Concepto</th><th>Método</th><th>Monto</th></tr></thead><tbody>${d.cobros.map(filaCobro).join('')}</tbody></table></div>` : '<p class="empty">Sin cobros este mes.</p>';
+  const gastos = d.gastos.length ? `<div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Fecha</th><th>Descripción</th><th>Categoría</th><th>Ámbito</th><th>Monto</th></tr></thead><tbody>${d.gastos.map(filaGasto).join('')}</tbody></table></div>` : '<p class="empty">Sin gastos este mes.</p>';
+  return `<div class="metrics" style="grid-template-columns:repeat(3,1fr)">${metric('Ingresos', r.ingresos)}${metric('Gastos', r.gastos)}${metric('Margen', r.margen)}</div>
+    <p class="eyebrow" style="margin-top:18px">COBROS RECIBIDOS · ${d.cobros.length}</p>${cobros}
+    <p class="eyebrow" style="margin-top:18px">GASTOS · ${d.gastos.length} · Negocio ${money.format(Number(r.negocio) || 0)} · Personal ${money.format(Number(r.personal) || 0)}</p>${gastos}`;
+}
+async function descargarInforme(formato, box) {
+  const mes = box.querySelector('#informe-mes').value;
+  const cat = box.querySelector('#informe-cat').value;
+  if (!mes) return;
+  const url = `${API_BASE}/api/finance/monthly.${formato}?month=${mes}${cat ? `&categoryId=${cat}` : ''}`;
+  try {
+    const resp = await fetch(url, { headers: { Authorization: `Bearer ${authToken}` } });
+    if (!resp.ok) throw new Error('No se pudo generar el informe');
+    const blobUrl = URL.createObjectURL(await resp.blob());
+    const link = document.createElement('a'); link.href = blobUrl; link.download = `informe-${mes}.${formato}`; link.click();
+    URL.revokeObjectURL(blobUrl);
+  } catch (error) { toast(error.message, true); }
+}
+async function informeMensual() {
+  const box = document.createElement('div');
+  const mesActual = dateKey(today).slice(0, 7);
+  box.innerHTML = `<p class="eyebrow">FINANZAS</p><h2>Informe mensual</h2>
+    <div class="form-row">
+      <label>Mes<input type="month" id="informe-mes" value="${mesActual}" /></label>
+      <label>Categoría de gasto<select id="informe-cat"><option value="">Todas</option></select></label>
+    </div>
+    <div id="informe-body"><p class="empty">Cargando…</p></div>
+    <div class="detail-actions"><button type="button" class="secondary" id="informe-csv">Descargar CSV</button><button type="button" class="secondary" id="informe-pdf">Descargar PDF</button></div>`;
+  openModal(box, true);
+  api('/api/expense-categories').then(cats => {
+    const sel = box.querySelector('#informe-cat');
+    (cats || []).filter(c => !c.archived).forEach(c => sel.add(new Option(c.name, c.id)));
+  }).catch(() => {});
+  const cargar = async () => {
+    const mes = box.querySelector('#informe-mes').value;
+    const cat = box.querySelector('#informe-cat').value;
+    const body = box.querySelector('#informe-body');
+    if (!mes) { body.innerHTML = '<p class="empty">Elige un mes.</p>'; return; }
+    body.innerHTML = '<p class="empty">Cargando…</p>';
+    try { body.innerHTML = renderInforme(await api(`/api/finance/monthly?month=${mes}${cat ? `&categoryId=${cat}` : ''}`)); }
+    catch (error) { body.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; }
+  };
+  box.querySelector('#informe-mes').addEventListener('change', cargar);
+  box.querySelector('#informe-cat').addEventListener('change', cargar);
+  box.querySelector('#informe-csv').onclick = () => descargarInforme('csv', box);
+  box.querySelector('#informe-pdf').onclick = () => descargarInforme('pdf', box);
+  cargar();
 }
 
 function financialReportDialog(kind) {
@@ -3756,6 +3813,7 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'compliance-report') complianceReport();
   if (actionButton?.dataset.action === 'new-plan') planEditor();
   if (actionButton?.dataset.action === 'export-compliance') exportCompliance();
+  if (actionButton?.dataset.action === 'informe-mensual') informeMensual();
   if (actionButton?.dataset.action === 'account-statement') financialReportDialog('account-statement');
   if (actionButton?.dataset.action === 'accounts-receivable') financialReportDialog('accounts-receivable');
   if (actionButton?.dataset.action === 'toggle-package-history') {

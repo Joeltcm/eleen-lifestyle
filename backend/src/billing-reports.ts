@@ -190,6 +190,42 @@ export function accountsReceivablePdf(rows: PdfRecord[], asOf: string) {
   });
 }
 
+export function monthlyFinancePdf(data: PdfRecord, categoryName: string | null) {
+  return pdfBuffer(document => {
+    const mesLabel = new Intl.DateTimeFormat('es-PA', { month: 'long', year: 'numeric', timeZone: 'America/Panama' })
+      .format(new Date(`${data.month}-15T12:00:00Z`));
+    brandHeader(document, 'Informe mensual', `${mesLabel.charAt(0).toUpperCase() + mesLabel.slice(1)}${categoryName ? ` · Categoría: ${categoryName}` : ''} · Importes en USD`);
+    summaryBoxes(document, [
+      { label: 'Ingresos', value: money(data.resumen.ingresos) },
+      { label: 'Gastos', value: money(data.resumen.gastos) },
+      { label: 'Margen', value: money(data.resumen.margen) }
+    ]);
+    document.font('Helvetica-Bold').fontSize(11).fillColor(colors.ink).text('Cobros recibidos', 42, document.y);
+    document.y += 6;
+    if (data.cobros.length) {
+      table(document, [
+        { label: 'Fecha', key: 'fecha', width: 70, format: date },
+        { label: 'Cliente', key: 'cliente', width: 170 },
+        { label: 'Concepto', key: 'concepto', width: 150 },
+        { label: 'Método', key: 'metodo', width: 70 },
+        { label: 'Monto', key: 'monto', width: 53, align: 'right', format: money }
+      ], data.cobros, 'Informe mensual · cobros');
+    } else document.font('Helvetica').fontSize(9).fillColor(colors.muted).text('Sin cobros en el mes.', 42, document.y);
+    document.moveDown(1.6);
+    document.font('Helvetica-Bold').fontSize(11).fillColor(colors.ink).text('Gastos', 42, document.y);
+    document.y += 6;
+    if (data.gastos.length) {
+      table(document, [
+        { label: 'Fecha', key: 'fecha', width: 70, format: date },
+        { label: 'Descripción', key: 'descripcion', width: 180 },
+        { label: 'Categoría', key: 'categoria', width: 130 },
+        { label: 'Ámbito', key: 'ambito', width: 80, format: (v: unknown) => v === 'negocio' ? 'Negocio' : 'Personal' },
+        { label: 'Monto', key: 'monto', width: 53, align: 'right', format: money }
+      ], data.gastos, 'Informe mensual · gastos');
+    } else document.font('Helvetica').fontSize(9).fillColor(colors.muted).text('Sin gastos en el mes.', 42, document.y);
+  });
+}
+
 // Gráfica lineal de cumplimiento mes a mes. Se dibuja con primitivas de pdfkit
 // en vez de incrustar una imagen: pesa nada, se imprime nítida a cualquier
 // tamaño y no mete una dependencia sólo para esto.

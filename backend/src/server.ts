@@ -13,7 +13,7 @@ import { extractInBodyDocument, extractInBodyImage, inbodyAnalysisReady, inbodyA
 import { registerZohoRoutes } from './zoho-routes.js';
 import { cancelSessionInGoogle, registerGoogleCalendarRoutes, removeSessionFromGoogle, syncSessionToGoogle } from './google-calendar.js';
 import { routineSuggestionsReady, suggestRoutine } from './routine-suggestions.js';
-import { accountStatementPdf, accountsReceivablePdf, compliancePdf, invoicePdf } from './billing-reports.js';
+import { accountStatementPdf, accountsReceivablePdf, compliancePdf, invoicePdf, monthlyFinancePdf } from './billing-reports.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
 const app = Fastify({ logger: true, trustProxy: true });
@@ -3747,6 +3747,85 @@ app.get('/api/finance/summary', { preHandler: requireStaff }, async request => {
       promedioMensualNeto: conActividad.length ? Number(((totalIngresos - totalGastos) / conActividad.length).toFixed(2)) : 0
     }
   };
+});
+
+// Informe mensual: cobros, gastos y resumen de un mes, con filtro opcional por
+// categoría de gasto. Se ve en pantalla y se descarga en CSV (Excel) o PDF.
+const informeMensualSchema = z.object({
+  month: z.string().regex(/^\d{4}-\d{2}$/, 'Mes inválido'),
+  categoryId: z.string().uuid().optional()
+});
+async function monthlyFinanceData(ownerId: string, month: string, categoryId?: string) {
+  const from = `${month}-01`;
+  const to = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).toISOString().slice(0, 10);
+  const [cobros, gastos, porCategoria] = await Promise.all([
+    sql`
+      SELECT p.paid_on AS fecha, c.full_name AS cliente, p.method AS metodo, p.reference AS referencia,
+        p.amount::numeric AS monto,
+        (SELECT i.concept FROM payment_allocations pa JOIN invoices i ON i.id = pa.invoice_id
+          WHERE pa.payment_id = p.id ORDER BY pa.amount DESC LIMIT 1) AS concepto
+      FROM invoice_payments p JOIN clients c ON c.id = p.client_id
+      WHERE c.owner_id = ${ownerId} AND p.paid_on >= ${from}::date AND p.paid_on <= ${to}::date
+      ORDER BY p.paid_on
+    `,
+    sql`
+      SELECT e.spent_on AS fecha, e.description AS descripcion, e.payment_method AS metodo,
+        e.amount::numeric AS monto, COALESCE(cat.name, 'Sin categoría') AS categoria, cat.ambito
+      FROM expenses e LEFT JOIN expense_categories cat ON cat.id = e.category_id
+      WHERE e.owner_id = ${ownerId} AND e.spent_on >= ${from}::date AND e.spent_on <= ${to}::date
+        AND (${categoryId || null}::uuid IS NULL OR e.category_id = ${categoryId || null}::uuid)
+      ORDER BY e.spent_on
+    `,
+    sql`
+      SELECT COALESCE(cat.name, 'Sin categoría') AS categoria, cat.ambito,
+        sum(e.amount)::numeric AS total, count(*)::int AS cantidad
+      FROM expenses e LEFT JOIN expense_categories cat ON cat.id = e.category_id
+      WHERE e.owner_id = ${ownerId} AND e.spent_on >= ${from}::date AND e.spent_on <= ${to}::date
+        AND (${categoryId || null}::uuid IS NULL OR e.category_id = ${categoryId || null}::uuid)
+      GROUP BY 1, 2 ORDER BY total DESC
+    `
+  ]);
+  const ingresos = cobros.reduce((s, r) => s + Number(r.monto), 0);
+  const totalGastos = gastos.reduce((s, r) => s + Number(r.monto), 0);
+  const negocio = gastos.filter(r => r.ambito === 'negocio').reduce((s, r) => s + Number(r.monto), 0);
+  return {
+    month, from, to, cobros, gastos, porCategoria,
+    resumen: { ingresos, gastos: totalGastos, negocio, personal: totalGastos - negocio, margen: ingresos - totalGastos }
+  };
+}
+app.get('/api/finance/monthly', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser; const q = informeMensualSchema.parse(request.query);
+  return monthlyFinanceData(auth.sub, q.month, q.categoryId);
+});
+app.get('/api/finance/monthly.csv', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const q = informeMensualSchema.parse(request.query);
+  const d = await monthlyFinanceData(auth.sub, q.month, q.categoryId);
+  const lines: string[] = [];
+  lines.push(['Informe mensual', d.month].map(csvCell).join(','));
+  lines.push('');
+  lines.push('Resumen');
+  lines.push(['Ingresos', d.resumen.ingresos.toFixed(2)].map(csvCell).join(','));
+  lines.push(['Gastos', d.resumen.gastos.toFixed(2)].map(csvCell).join(','));
+  lines.push(['  del negocio', d.resumen.negocio.toFixed(2)].map(csvCell).join(','));
+  lines.push(['  personal', d.resumen.personal.toFixed(2)].map(csvCell).join(','));
+  lines.push(['Margen', d.resumen.margen.toFixed(2)].map(csvCell).join(','));
+  lines.push('');
+  lines.push('Cobros recibidos');
+  lines.push(['Fecha', 'Cliente', 'Concepto', 'Método', 'Monto USD'].map(csvCell).join(','));
+  d.cobros.forEach(r => lines.push([csvDate(r.fecha), r.cliente, r.concepto, r.metodo, Number(r.monto).toFixed(2)].map(csvCell).join(',')));
+  lines.push('');
+  lines.push('Gastos');
+  lines.push(['Fecha', 'Descripción', 'Categoría', 'Ámbito', 'Método', 'Monto USD'].map(csvCell).join(','));
+  d.gastos.forEach(r => lines.push([csvDate(r.fecha), r.descripcion, r.categoria, r.ambito === 'negocio' ? 'Negocio' : 'Personal', r.metodo, Number(r.monto).toFixed(2)].map(csvCell).join(',')));
+  reply.header('Content-Type', 'text/csv; charset=utf-8');
+  reply.header('Content-Disposition', `attachment; filename="informe-${d.month}.csv"`);
+  return `﻿${lines.join('\n')}`;
+});
+app.get('/api/finance/monthly.pdf', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const q = informeMensualSchema.parse(request.query);
+  const d = await monthlyFinanceData(auth.sub, q.month, q.categoryId);
+  const catName = q.categoryId ? (d.porCategoria[0]?.categoria as string ?? null) : null;
+  return sendPdf(reply, await monthlyFinancePdf(d, catName), `informe-${d.month}.pdf`);
 });
 
 // ── Gastos ────────────────────────────────────────────────────────────────

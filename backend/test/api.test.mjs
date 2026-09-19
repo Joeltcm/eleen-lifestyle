@@ -1647,6 +1647,34 @@ describe('pausar la mensualidad', () => {
   });
 });
 
+describe('informe mensual (cobros, gastos, finanzas)', () => {
+  test('resume ingresos y gastos del mes y filtra por categoría', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Informe cliente', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 100, dueOn: '2026-09-05' });
+    await api.post(`/api/invoices/${f.datos.id}/confirm`, { method: 'Efectivo', paidOn: '2026-09-10' });
+    const cat = await api.post('/api/expense-categories', { name: 'Combustible informe', ambito: 'negocio' });
+    await api.post('/api/expenses', { categoryId: cat.datos.id, description: 'Gasolina', amount: 40, spentOn: '2026-09-12', paymentMethod: 'Efectivo' });
+    const otra = await api.post('/api/expense-categories', { name: 'Comida informe', ambito: 'personal' });
+    await api.post('/api/expenses', { categoryId: otra.datos.id, description: 'Almuerzo', amount: 15, spentOn: '2026-09-14', paymentMethod: 'Efectivo' });
+
+    // La BD de tests es compartida, así que no se asumen totales globales: se
+    // verifica que lo propio aparezca y que el filtro por categoría acote.
+    const { estado, datos } = await api.get('/api/finance/monthly?month=2026-09');
+    assert.equal(estado, 200);
+    assert.ok(datos.cobros.some(x => x.cliente === 'Informe cliente' && Number(x.monto) === 100), 'el cobro del mes aparece');
+    assert.ok(datos.gastos.some(x => x.descripcion === 'Gasolina'), 'el gasto del negocio aparece');
+    assert.ok(datos.gastos.some(x => x.descripcion === 'Almuerzo'), 'el gasto personal aparece');
+    // Un cobro de OTRO mes no entra.
+    assert.ok(!datos.cobros.some(x => String(x.fecha).slice(0, 7) !== '2026-09'), 'solo cobros de septiembre');
+
+    // Filtrado por categoría (única de este test): solo esa categoría.
+    const filtrado = await api.get(`/api/finance/monthly?month=2026-09&categoryId=${cat.datos.id}`);
+    assert.equal(Number(filtrado.datos.resumen.gastos), 40, 'solo la categoría filtrada suma');
+    assert.ok(filtrado.datos.gastos.every(x => x.categoria === 'Combustible informe'), 'solo esa categoría en la lista');
+    assert.ok(!filtrado.datos.gastos.some(x => x.descripcion === 'Almuerzo'), 'excluye otras categorías');
+  });
+});
+
 describe('vencimiento de los paquetes', () => {
   let clientId;
   before(async () => {
