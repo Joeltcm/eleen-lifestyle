@@ -4333,6 +4333,34 @@ app.get('/api/push/config', { preHandler: requireAuth }, async () => ({
   publicKey: webPushReady ? config.VAPID_PUBLIC_KEY : null
 }));
 
+// Diagnóstico temporal: intenta el envío de verdad y devuelve la respuesta
+// cruda de Apple/Google por cada suscripción, sin tragarse el error. Distingue
+// 403 (VAPID no coincide), 400 (JWT/subject mal), 410/404 (expirada) o entrega.
+// Quitar una vez resuelto el problema de push en iPhone.
+app.post('/api/debug/push', { preHandler: requireAuth }, async request => {
+  const auth = request.user as AuthUser;
+  const subscriptions = await sql`SELECT id, endpoint, p256dh, auth, active, created_at, updated_at FROM push_subscriptions WHERE user_id = ${auth.sub} ORDER BY created_at DESC`;
+  const resultados = await Promise.all(subscriptions.map(async subscription => {
+    let host = '';
+    try { host = new URL(subscription.endpoint).host; } catch {}
+    const base = { id: subscription.id, host, active: subscription.active, created_at: subscription.created_at, updated_at: subscription.updated_at };
+    if (!subscription.active) return { ...base, resultado: 'inactiva (no se intentó)' };
+    try {
+      const respuesta = await webpush.sendNotification({
+        endpoint: subscription.endpoint,
+        keys: { p256dh: subscription.p256dh, auth: subscription.auth }
+      }, JSON.stringify({ title: 'Eileen Lifestyle', body: 'Diagnóstico de push.', url: '/' }), { TTL: 60, urgency: 'high' });
+      return { ...base, resultado: 'entregada', statusCode: respuesta.statusCode };
+    } catch (error) {
+      if (error instanceof webpush.WebPushError) {
+        return { ...base, resultado: 'rechazada', statusCode: error.statusCode, body: String(error.body || '').slice(0, 300), headers: error.headers };
+      }
+      return { ...base, resultado: 'error', mensaje: error instanceof Error ? error.message : String(error) };
+    }
+  }));
+  return { webPushReady, subject: config.VAPID_SUBJECT, publicKeyPrefix: (config.VAPID_PUBLIC_KEY || '').slice(0, 12), total: subscriptions.length, resultados };
+});
+
 app.post('/api/push/subscriptions', { preHandler: requireAuth }, async (request, reply) => {
   if (!webPushReady) return reply.code(503).send({ error: 'Las notificaciones push todavía no están configuradas' });
   const auth = request.user as AuthUser; const input = pushSubscriptionSchema.parse(request.body);
