@@ -2974,24 +2974,14 @@ app.get('/api/billing/analytics', { preHandler: requireStaff }, async request =>
   const start = `${year}-01-01`; const end = `${year + 1}-01-01`;
   const [monthlyRows, topClientRows] = await Promise.all([
     // Cobrado por mes = dinero recibido (pagos por fecha de pago), no facturas
-    // emitidas. Se incluyen los cobros confirmados sin fila de pago (Zoho/legado)
-    // sin duplicar los nativos, que ya cuentan por su pago.
+    // emitidas. Los pagos de Zoho migrados ya están en invoice_payments, así que
+    // basta sumarlos: incluir además las facturas los contaría dos veces.
     sql`
-      WITH recibido AS (
-        SELECT p.amount, p.paid_on AS fecha
-        FROM invoice_payments p JOIN clients c ON c.id = p.client_id
-        WHERE c.owner_id = ${auth.sub} AND p.paid_on >= ${start}::date AND p.paid_on < ${end}::date
-        UNION ALL
-        SELECT i.amount, COALESCE(i.confirmed_at::date, i.issued_on, i.due_on) AS fecha
-        FROM invoices i JOIN clients c ON c.id = i.client_id
-        WHERE c.owner_id = ${auth.sub} AND i.status = 'confirmed'
-          AND COALESCE(i.confirmed_at::date, i.issued_on, i.due_on) >= ${start}::date
-          AND COALESCE(i.confirmed_at::date, i.issued_on, i.due_on) < ${end}::date
-          AND NOT EXISTS (SELECT 1 FROM payment_allocations pa WHERE pa.invoice_id = i.id)
-      )
-      SELECT EXTRACT(month FROM fecha)::integer AS month,
-        count(*)::integer AS invoice_count, COALESCE(sum(amount), 0)::numeric AS amount
-      FROM recibido GROUP BY 1 ORDER BY 1
+      SELECT EXTRACT(month FROM p.paid_on)::integer AS month,
+        count(*)::integer AS invoice_count, COALESCE(sum(p.amount), 0)::numeric AS amount
+      FROM invoice_payments p JOIN clients c ON c.id = p.client_id
+      WHERE c.owner_id = ${auth.sub} AND p.paid_on >= ${start}::date AND p.paid_on < ${end}::date
+      GROUP BY 1 ORDER BY 1
     `,
     sql`
       WITH received_payments AS (
