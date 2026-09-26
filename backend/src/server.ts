@@ -4333,6 +4333,44 @@ app.get('/api/push/config', { preHandler: requireAuth }, async () => ({
   publicKey: webPushReady ? config.VAPID_PUBLIC_KEY : null
 }));
 
+// Diagnóstico temporal: vuelca facturas, saldos y coberturas de un grupo
+// familiar por nombre, para entender por qué el saldo se renovó sin factura.
+// Quitar una vez resuelto el caso de Julieta / Juan de Diego.
+app.get('/api/debug/familia', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const q = ((request.query as Record<string, string>).q || '').trim();
+  if (!q) return { error: 'falta ?q=' };
+  const clientes = await sql`
+    SELECT id, full_name, status, billing_model, billing_cutoff_day, standard_price,
+      monthly_session_target, plan_id, billing_responsible_client_id
+    FROM clients
+    WHERE owner_id = ${auth.sub} AND full_name ILIKE ${'%' + q + '%'}
+    ORDER BY full_name`;
+  const ids = clientes.map(c => c.id as string);
+  if (!ids.length) return { q, clientes: [] };
+  const facturas = await sql`
+    SELECT id, client_id, billed_for_client_id, concept, amount, due_on, issued_on,
+      billing_period, status, auto_generated, source_system, package_id, balance
+    FROM invoices
+    WHERE client_id IN ${sql(ids)} OR billed_for_client_id IN ${sql(ids)}
+    ORDER BY due_on DESC NULLS LAST, issued_on DESC`;
+  const saldos = await sql`
+    SELECT id, client_id, label, kind, total_sessions, used_sessions, expires_on,
+      purchased_on, origin_invoice_id, status
+    FROM session_packages
+    WHERE client_id IN ${sql(ids)}
+    ORDER BY purchased_on DESC, created_at DESC`;
+  const coberturas = await sql`
+    SELECT cov.id, cov.client_id, cov.invoice_id, cov.billing_period, cov.package_id, cov.amount
+    FROM invoice_coverage cov
+    WHERE cov.client_id IN ${sql(ids)}
+    ORDER BY cov.billing_period DESC`;
+  const memberships = await sql`
+    SELECT id, client_id, status, starts_on, ends_on, amount FROM memberships
+    WHERE client_id IN ${sql(ids)} ORDER BY starts_on DESC`;
+  return { hoy: diaEnPanama(new Date()), q, clientes, facturas, saldos, coberturas, memberships };
+});
+
 app.post('/api/push/subscriptions', { preHandler: requireAuth }, async (request, reply) => {
   if (!webPushReady) return reply.code(503).send({ error: 'Las notificaciones push todavía no están configuradas' });
   const auth = request.user as AuthUser; const input = pushSubscriptionSchema.parse(request.body);
