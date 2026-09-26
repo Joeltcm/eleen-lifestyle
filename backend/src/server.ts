@@ -1056,7 +1056,7 @@ app.get('/api/packages', { preHandler: requireStaff }, async request => {
       )) AS pago_pendiente
     FROM session_packages p JOIN clients c ON c.id = p.client_id
     LEFT JOIN invoices oi ON oi.id = p.origin_invoice_id
-    WHERE c.owner_id = ${auth.sub} ORDER BY p.created_at DESC`;
+    WHERE c.owner_id = ${auth.sub} AND p.status <> 'cancelled' ORDER BY p.created_at DESC`;
 });
 app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = packageSchema.parse(request.body);
@@ -4485,6 +4485,77 @@ app.get('/api/debug/chequeo', { preHandler: requireStaff }, async request => {
     })
     .map(f => ({ nombre: f.full_name, corte: f.billing_cutoff_day, diaUltimoCobro: f.dia_ultimo_cobro }));
   return { hoy: diaEnPanama(new Date()), totalMensuales: filas.length, sinCobroProximo, corteSospechoso };
+});
+
+// Consolidar saldos mensuales duplicados de un cliente. Vista previa por defecto;
+// aplica sólo con ?apply=1. Dos patrones: (a) dos saldos activos con el MISMO
+// vencimiento (mismo ciclo partido) -> se queda el de más usadas; (b) saldo
+// degenerado (comprado >= vence, fechas rotas) -> se pliega al saldo bueno que
+// cubre su fecha. En ambos: se reasignan las clases descontadas al que queda,
+// se suma el uso (tope: contratadas), y el sobrante se ANULA (status cancelled,
+// reversible) — no se borra.
+app.post('/api/debug/consolidar', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const q = ((request.query as Record<string, string>).q || '').trim();
+  const aplicar = (request.query as Record<string, string>).apply === '1';
+  if (!q) return { error: 'falta ?q=' };
+  const clientes = await sql`SELECT id, full_name FROM clients WHERE owner_id = ${auth.sub} AND full_name ILIKE ${'%' + q + '%'} ORDER BY full_name`;
+  const reporte: Record<string, unknown>[] = [];
+  for (const cliente of clientes) {
+    const saldos = await sql`
+      SELECT id, label, total_sessions, used_sessions, expires_on, purchased_on
+      FROM session_packages
+      WHERE client_id = ${cliente.id} AND kind = 'monthly' AND status = 'active'
+      ORDER BY expires_on ASC, used_sessions DESC`;
+    const esDegenerado = (s: (typeof saldos)[number]) =>
+      Boolean(s.purchased_on && s.expires_on && new Date(s.purchased_on as string) >= new Date(s.expires_on as string));
+    const fusiones: { keep: string; keepLabel: string; drop: string; dropLabel: string; motivo: string; usadasResultado: number }[] = [];
+    const yaCaen = new Set<string>();
+    // (b) Degenerados: comprado >= vence -> al saldo bueno que cubre su fecha.
+    for (const d of saldos) {
+      if (yaCaen.has(d.id as string) || !esDegenerado(d)) continue;
+      const keeper = saldos.find(k => k.id !== d.id && !yaCaen.has(k.id as string) && !esDegenerado(k)
+        && new Date(k.expires_on as string) >= new Date(d.expires_on as string));
+      if (keeper) {
+        yaCaen.add(d.id as string);
+        fusiones.push({ keep: keeper.id as string, keepLabel: keeper.label as string, drop: d.id as string, dropLabel: d.label as string,
+          motivo: 'saldo degenerado (fechas rotas)',
+          usadasResultado: Math.min(Number(keeper.total_sessions), Number(keeper.used_sessions) + Number(d.used_sessions)) });
+      }
+    }
+    // (a) Mismo vencimiento -> se queda el de más usadas.
+    const porVence = new Map<string, (typeof saldos)[number][]>();
+    for (const s of saldos) {
+      if (yaCaen.has(s.id as string)) continue;
+      const clave = String(s.expires_on).slice(0, 10);
+      if (!porVence.has(clave)) porVence.set(clave, []);
+      porVence.get(clave)!.push(s);
+    }
+    for (const lista of porVence.values()) {
+      if (lista.length < 2) continue;
+      const keeper = lista.reduce((a, b) => Number(b.used_sessions) > Number(a.used_sessions) ? b : a);
+      let acumulado = Number(keeper.used_sessions);
+      for (const d of lista) {
+        if (d.id === keeper.id) continue;
+        acumulado += Number(d.used_sessions);
+        yaCaen.add(d.id as string);
+        fusiones.push({ keep: keeper.id as string, keepLabel: keeper.label as string, drop: d.id as string, dropLabel: d.label as string,
+          motivo: 'mismo vencimiento (ciclo duplicado)', usadasResultado: Math.min(Number(keeper.total_sessions), acumulado) });
+      }
+    }
+    if (aplicar && fusiones.length) {
+      await sql.begin(async tx => {
+        for (const f of fusiones) {
+          await tx`UPDATE sessions SET package_id = ${f.keep} WHERE package_id = ${f.drop}`;
+          await tx`UPDATE session_packages SET used_sessions = ${f.usadasResultado},
+            status = CASE WHEN ${f.usadasResultado} >= total_sessions THEN 'exhausted' ELSE 'active' END WHERE id = ${f.keep}`;
+          await tx`UPDATE session_packages SET status = 'cancelled', used_sessions = 0, updated_at = now() WHERE id = ${f.drop}`;
+        }
+      });
+    }
+    reporte.push({ cliente: cliente.full_name, saldosActivos: saldos.length, fusiones, aplicado: aplicar && fusiones.length > 0 });
+  }
+  return { modo: aplicar ? 'APLICADO' : 'vista previa (agrega &apply=1 para aplicar)', reporte };
 });
 
 app.post('/api/push/subscriptions', { preHandler: requireAuth }, async (request, reply) => {
