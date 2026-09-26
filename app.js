@@ -1,4 +1,4 @@
-const APP_VERSION = '184';
+const APP_VERSION = '185';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -818,21 +818,27 @@ function renderBilling() {
     const vence = pack.expiresOn ? dateOnly(pack.expiresOn) : '';
     return (!compra || compra <= finMes) && (!vence || vence >= `${paquetesMes}-01`);
   };
-  // Filtro "Corte actual": por cada cliente, su saldo del ciclo en curso — el
-  // vigente que vence primero de hoy en adelante. Deja fuera los históricos y
-  // los del ciclo siguiente ya generado.
+  // Filtro "Corte actual": por cada cliente, el fin del ciclo en curso es el
+  // vencimiento más cercano de hoy en adelante. Luego se muestran TODOS sus
+  // saldos que vencen ese mismo día — así un cliente con cobertura familiar +
+  // un paquete propio del mismo ciclo (Ernesto: 8 de Francolini + 4 suyos) sale
+  // con los dos. Deja fuera los históricos y el ciclo siguiente ya generado.
   const hoyStr = dateKey(today);
   const corteActualIds = new Set();
   if (soloCorteActual) {
-    const porCliente = {};
+    const finCicloPorCliente = {};
     data.packages.forEach(pack => {
       if (pack.status !== 'confirmed' && pack.status !== 'pending') return;
       const vence = pack.expiresOn ? dateOnly(pack.expiresOn) : '';
       if (!vence || vence < hoyStr) return;
-      const actual = porCliente[pack.clientId];
-      if (!actual || vence < actual.vence) porCliente[pack.clientId] = { id: pack.id, vence };
+      const actual = finCicloPorCliente[pack.clientId];
+      if (!actual || vence < actual) finCicloPorCliente[pack.clientId] = vence;
     });
-    Object.values(porCliente).forEach(x => corteActualIds.add(x.id));
+    data.packages.forEach(pack => {
+      if (pack.status !== 'confirmed' && pack.status !== 'pending') return;
+      const vence = pack.expiresOn ? dateOnly(pack.expiresOn) : '';
+      if (vence && vence === finCicloPorCliente[pack.clientId]) corteActualIds.add(pack.id);
+    });
   }
   const visiblesPaquetes = data.packages.filter(pack => (mostrarHistorialPaquetes || paqueteVigente(pack))
     && (soloCorteActual ? corteActualIds.has(pack.id) : saldoEnMes(pack)));
