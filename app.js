@@ -1,4 +1,4 @@
-const APP_VERSION = '186';
+const APP_VERSION = '187';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -752,6 +752,15 @@ function renderBillingInsights() {
   const dots = points.map((point, index) => `<circle cx="${point.x}" cy="${point.y}" r="4"><title>${monthNames[index]}: ${money.format(point.value)}</title></circle>`).join('');
   chart.innerHTML = `<svg viewBox="0 0 720 235" role="img" aria-label="Cobrado mensual de ${billingYear}"><g class="billing-chart-grid">${grid}${labels}</g><polygon class="billing-chart-area" points="${area}"/><polyline class="billing-chart-line" points="${line}"/>${dots}</svg>`;
   document.getElementById('billing-chart-summary').textContent = `${money.format(Number(billingAnalytics.totalBilled || 0))} cobrado en ${billingYear}`;
+  // Tarjeta "Cobrado" con la MISMA fuente que la gráfica: el mes elegido, o el
+  // año completo si no hay mes. Así el mosaico y la gráfica siempre coinciden.
+  const cobradoMes = billingMonth === 'all'
+    ? Number(billingAnalytics.totalBilled || 0)
+    : Number((months.find(m => m.month === Number(billingMonth)) || {}).amount || 0);
+  const collectedEl = document.getElementById('month-collected');
+  if (collectedEl) collectedEl.textContent = money.format(cobradoMes);
+  const collectedLabel = document.getElementById('collected-period-label');
+  if (collectedLabel) collectedLabel.textContent = billingMonth === 'all' ? `Cobrado en ${billingYear}` : 'Cobrado en el mes';
   const topClients = billingAnalytics.topClients || [];
   const topAmount = Math.max(...topClients.map(client => Number(client.amount || 0)), 1);
   ranking.innerHTML = topClients.length ? topClients.map((client, index) => `<div class="top-payer"><span class="top-payer-rank">${index + 1}</span><div class="top-payer-person"><b>${escapeHtml(client.name)}</b><small>${client.paymentCount} pago${client.paymentCount === 1 ? '' : 's'} confirmado${client.paymentCount === 1 ? '' : 's'}</small><i><span style="width:${Math.max(4, Number(client.amount || 0) / topAmount * 100)}%"></span></i></div><strong>${money.format(Number(client.amount || 0))}</strong></div>`).join('') : '<p class="empty">No hay pagos confirmados en este año.</p>';
