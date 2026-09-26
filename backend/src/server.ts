@@ -4376,7 +4376,12 @@ app.get('/api/debug/familia', { preHandler: requireStaff }, async request => {
   const memberships = await sql`
     SELECT id, client_id, status, starts_on, ends_on, amount FROM memberships
     WHERE client_id IN ${sql(ids)} ORDER BY starts_on DESC`;
-  return { hoy: diaEnPanama(new Date()), q, clientes, facturas, saldos, coberturas, memberships };
+  const sesiones = await sql`
+    SELECT id, client_id, starts_at, status, package_debited, package_id, duration_minutes
+    FROM sessions
+    WHERE client_id IN ${sql(ids)} AND starts_at >= current_date - interval '45 days'
+    ORDER BY starts_at DESC`;
+  return { hoy: diaEnPanama(new Date()), q, clientes, facturas, saldos, coberturas, memberships, sesiones };
 });
 
 app.post('/api/push/subscriptions', { preHandler: requireAuth }, async (request, reply) => {
