@@ -3652,9 +3652,13 @@ async function saveNativeInvoicePayment(ownerId: string, id: string, input: z.in
               -- la generación y la asignación de plan.
               AND sp.expires_on IS NOT NULL AND sp.expires_on > ${input.paidOn}::date
               -- Sólo cuenta como "ya cubierto" el saldo del plan/generación (sin
-              -- origen) o el de este mismo cobro; el saldo de OTRO cobro (unas
-              -- clases pagadas aparte) no bloquea su mensualidad familiar.
-              AND (sp.origin_invoice_id IS NULL OR sp.origin_invoice_id = ${invoice.id})
+              -- origen), el de este mismo cobro, o el de un cobro AUTOMÁTICO: si
+              -- la generación ya le abrió el saldo del ciclo, un cobro manual que
+              -- alguien registre aparte NO debe abrir un segundo (el duplicado de
+              -- Sally/Julieta). El saldo de OTRO cobro manual (clases pagadas
+              -- aparte) sí puede convivir con su mensualidad familiar.
+              AND (sp.origin_invoice_id IS NULL OR sp.origin_invoice_id = ${invoice.id}
+                OR EXISTS (SELECT 1 FROM invoices ai WHERE ai.id = sp.origin_invoice_id AND ai.auto_generated = true))
           )
       `;
       const entries = candidatos
