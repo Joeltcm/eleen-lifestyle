@@ -4562,6 +4562,44 @@ app.post('/api/debug/consolidar', { preHandler: requireStaff }, async request =>
   return { modo: aplicar ? 'APLICADO' : 'vista previa (agrega &apply=1 para aplicar)', reporte };
 });
 
+// Desglose del "facturado" de un mes, para explicar la diferencia con lo cobrado.
+app.get('/api/debug/facturado', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const month = ((request.query as Record<string, string>).month || diaEnPanama(new Date()).slice(0, 7));
+  const inicio = `${month}-01`;
+  const filas = await sql`
+    SELECT i.id, c.full_name, i.concept, i.amount::numeric AS amount, i.status, i.source_system, i.auto_generated,
+      i.due_on, i.issued_on, i.confirmed_at
+    FROM invoices i JOIN clients c ON c.id = i.client_id
+    WHERE c.owner_id = ${auth.sub} AND i.status <> 'void'
+      AND COALESCE(i.issued_on, i.due_on) >= ${inicio}::date
+      AND COALESCE(i.issued_on, i.due_on) < (${inicio}::date + interval '1 month')
+    ORDER BY c.full_name, i.amount DESC`;
+  const suma = (pred: (f: (typeof filas)[number]) => boolean) =>
+    filas.filter(pred).reduce((s, f) => s + Number(f.amount), 0);
+  // Posibles duplicados: mismo cliente + mismo monto, 2+ veces.
+  const conteo = new Map<string, { cliente: string; amount: number; veces: number; ids: string[] }>();
+  for (const f of filas) {
+    const k = `${f.full_name}|${Number(f.amount)}`;
+    const e = conteo.get(k) || { cliente: f.full_name as string, amount: Number(f.amount), veces: 0, ids: [] };
+    e.veces += 1; e.ids.push(f.id as string); conteo.set(k, e);
+  }
+  const posiblesDuplicados = [...conteo.values()].filter(e => e.veces > 1);
+  return {
+    month,
+    total: suma(() => true),
+    confirmado: suma(f => f.status === 'confirmed'),
+    pendiente: suma(f => f.status === 'pending'),
+    zoho: suma(f => f.source_system === 'zoho_invoice'),
+    automaticas: suma(f => f.auto_generated === true),
+    manuales: suma(f => !f.auto_generated && f.source_system !== 'zoho_invoice'),
+    cantidad: filas.length,
+    posiblesDuplicados,
+    facturas: filas.map(f => ({ cliente: f.full_name, concepto: f.concept, monto: Number(f.amount), estado: f.status,
+      origen: f.source_system === 'zoho_invoice' ? 'zoho' : f.auto_generated ? 'auto' : 'manual', vence: f.due_on }))
+  };
+});
+
 app.post('/api/push/subscriptions', { preHandler: requireAuth }, async (request, reply) => {
   if (!webPushReady) return reply.code(503).send({ error: 'Las notificaciones push todavía no están configuradas' });
   const auth = request.user as AuthUser; const input = pushSubscriptionSchema.parse(request.body);
