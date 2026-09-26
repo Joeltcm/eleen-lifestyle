@@ -4452,6 +4452,41 @@ app.post('/api/debug/fix-saldos', { preHandler: requireStaff }, async request =>
   return { cliente: cliente.full_name, cutoff, antes, cambios, despues };
 });
 
+// Chequeo de salud de la facturación mensual: quién quedó sin cobro próximo
+// emitido (tipo Julieta, saldo activo sin cobro) y quién tiene el corte
+// sospechoso (el día de su último cobro no cuadra con su día de corte).
+app.get('/api/debug/chequeo', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const filas = await sql`
+    SELECT c.id, c.full_name, c.billing_cutoff_day,
+      (SELECT max(i.due_on) FROM invoices i
+        WHERE COALESCE(i.billed_for_client_id, i.client_id) = c.id AND i.status <> 'void') AS ultimo_cobro,
+      (SELECT extract(day FROM i.due_on)::int FROM invoices i
+        WHERE COALESCE(i.billed_for_client_id, i.client_id) = c.id AND i.status <> 'void'
+        ORDER BY i.due_on DESC LIMIT 1) AS dia_ultimo_cobro,
+      EXISTS (SELECT 1 FROM session_packages sp
+        WHERE sp.client_id = c.id AND sp.kind = 'monthly' AND sp.status = 'active') AS saldo_activo,
+      (EXISTS (SELECT 1 FROM invoices i
+          WHERE COALESCE(i.billed_for_client_id, i.client_id) = c.id AND i.status <> 'void' AND i.due_on >= current_date)
+        OR EXISTS (SELECT 1 FROM invoice_coverage cov JOIN invoices ci ON ci.id = cov.invoice_id AND ci.status <> 'void'
+          WHERE cov.client_id = c.id AND cov.billing_period >= date_trunc('month', current_date)::date)
+      ) AS tiene_cobro_proximo
+    FROM clients c
+    WHERE c.owner_id = ${auth.sub} AND c.status = 'active' AND c.billing_model = 'monthly'
+    ORDER BY c.full_name`;
+  const sinCobroProximo = filas
+    .filter(f => f.saldo_activo && !f.tiene_cobro_proximo)
+    .map(f => ({ nombre: f.full_name, corte: f.billing_cutoff_day, ultimoCobro: f.ultimo_cobro }));
+  const corteSospechoso = filas
+    .filter(f => {
+      if (f.dia_ultimo_cobro == null) return false;
+      const dif = Math.abs(Number(f.dia_ultimo_cobro) - Number(f.billing_cutoff_day));
+      return dif > 3 && dif < 28;
+    })
+    .map(f => ({ nombre: f.full_name, corte: f.billing_cutoff_day, diaUltimoCobro: f.dia_ultimo_cobro }));
+  return { hoy: diaEnPanama(new Date()), totalMensuales: filas.length, sinCobroProximo, corteSospechoso };
+});
+
 app.post('/api/push/subscriptions', { preHandler: requireAuth }, async (request, reply) => {
   if (!webPushReady) return reply.code(503).send({ error: 'Las notificaciones push todavía no están configuradas' });
   const auth = request.user as AuthUser; const input = pushSubscriptionSchema.parse(request.body);
@@ -5440,6 +5475,35 @@ const primeraExpiracion = setTimeout(() => expirarPaquetesVencidos().catch(error
 const expiracionPaquetes = setInterval(() => expirarPaquetesVencidos().catch(error => app.log.error(error)), 24 * 60 * 60_000);
 primeraExpiracion.unref();
 expiracionPaquetes.unref();
+
+// Reconciliación diaria: recupera las clases realizadas que quedaron sin
+// descontar. Una clase marcada cuando aún no había un saldo activo que la
+// recibiera se completaba sin mover el saldo, y nadie la recogía después. Esto
+// pasa una vez al día por cada saldo activo con cupo y descuenta las clases de
+// SU ventana que sigan sin descontar, hasta llenar su cupo. Es la misma lógica
+// que corre al renovar (cobrarClasesYaDadas), sólo que proactiva: así el "marqué
+// la clase y el saldo no bajó" se cura solo en menos de 24 h. No toca el pasado
+// cerrado (sólo la ventana del propio saldo) ni gasta más de lo que el saldo
+// tiene.
+async function reconciliarSaldos(ownerId?: string) {
+  const saldos = await sql`
+    SELECT sp.id, sp.client_id, sp.expires_on, sp.total_sessions, sp.used_sessions
+    FROM session_packages sp JOIN clients c ON c.id = sp.client_id
+    WHERE sp.status = 'active' AND sp.used_sessions < sp.total_sessions AND sp.expires_on IS NOT NULL
+      AND (${ownerId ?? null}::uuid IS NULL OR c.owner_id = ${ownerId ?? null}::uuid)
+    ORDER BY sp.expires_on ASC`;
+  let descontadas = 0;
+  for (const saldo of saldos) {
+    const cupo = Number(saldo.total_sessions) - Number(saldo.used_sessions);
+    if (cupo <= 0) continue;
+    descontadas += await cobrarClasesYaDadas(sql, saldo.id as string, saldo.client_id as string, soloFecha(saldo.expires_on)!, cupo);
+  }
+  return descontadas;
+}
+const primeraReconciliacion = setTimeout(() => reconciliarSaldos().catch(error => app.log.error(error)), 30_000);
+const reconciliacionSaldos = setInterval(() => reconciliarSaldos().catch(error => app.log.error(error)), 24 * 60 * 60_000);
+primeraReconciliacion.unref();
+reconciliacionSaldos.unref();
 firstReminderRun.unref();
 reminderInterval.unref();
 firstBillingRun.unref();
