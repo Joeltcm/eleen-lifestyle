@@ -3420,11 +3420,19 @@ app.delete('/api/invoices/:id/coverage/:coverageId', { preHandler: requireStaff 
 // entrenadora, sin un paso extra—. Sólo cobros de Zoho pendientes; los locales
 // tienen su propio "Confirmar pago". No toca el ingreso en finanzas: ese ya vino
 // con la migración (invoice_payments), y aquí sólo se cierra la deuda.
+// Postgres devuelve las fechas como Date, y String(Date) da "Thu Sep 24 2026…",
+// no ISO: al recortar a 10 caracteres queda "Thu Sep 24" (sin año) y Postgres lo
+// malinterpreta —de ahí paquetes "comprados en 2001". Se formatea sin ambigüedad.
+function soloFecha(valor: string | Date | null): string | null {
+  if (valor == null) return null;
+  return valor instanceof Date ? valor.toISOString().slice(0, 10) : String(valor).slice(0, 10);
+}
+
 async function saldarCobroZohoPendiente(transaction: TransactionSql, invoice: { id: string; source_system: string | null; status: string; coverage_start: string | Date | null }) {
   if (invoice.source_system !== 'zoho_invoice' || invoice.status !== 'pending') return false;
   await transaction`
     UPDATE invoices SET status = 'confirmed', balance = 0,
-      confirmed_at = COALESCE(confirmed_at, ${`${String(invoice.coverage_start).slice(0, 10)}T12:00:00-05:00`}::timestamptz)
+      confirmed_at = COALESCE(confirmed_at, ${`${soloFecha(invoice.coverage_start)}T12:00:00-05:00`}::timestamptz)
     WHERE id = ${invoice.id}
   `;
   return true;
@@ -3469,7 +3477,7 @@ app.post('/api/invoices/:id/package', { preHandler: requireStaff }, async (reque
     const [pack] = await transaction`
       INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, origin_invoice_id, status)
       VALUES (${invoice.client_id}, ${`Paquete ${input.totalSessions} sesiones`}, ${input.totalSessions}, ${invoice.amount},
-        ${input.expiresOn}::date, 'package', ${String(invoice.coverage_start).slice(0, 10)}::date, ${id}, 'active')
+        ${input.expiresOn}::date, 'package', ${soloFecha(invoice.coverage_start)}::date, ${id}, 'active')
       RETURNING id, total_sessions, expires_on
     `;
     await transaction`UPDATE invoices SET package_id = ${pack.id} WHERE id = ${id}`;
