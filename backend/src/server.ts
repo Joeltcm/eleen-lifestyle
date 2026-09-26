@@ -1045,7 +1045,15 @@ app.get('/api/packages', { preHandler: requireStaff }, async request => {
       -- uso: toca renovarlo, sin cortar el uso todavía.
       (p.kind = 'package' AND p.status = 'active' AND p.purchased_on IS NOT NULL
         AND p.purchased_on + ${DIAS_RENOVACION_PAQUETE}::int <= current_date) AS renovacion_pendiente,
-      (p.expires_on IS NOT NULL AND p.expires_on < current_date AND p.used_sessions < p.total_sessions) AS vencido_con_saldo
+      (p.expires_on IS NOT NULL AND p.expires_on < current_date AND p.used_sessions < p.total_sessions) AS vencido_con_saldo,
+      -- El saldo se abre y se usa desde ya (el cliente entrena aunque pague días
+      -- después), pero mientras el cobro que lo financia siga pendiente hay que
+      -- poder verlo. Se mira por cualquiera de los dos enlaces cobro↔saldo.
+      (EXISTS (
+        SELECT 1 FROM invoices iv
+        WHERE (iv.id = p.origin_invoice_id OR iv.package_id = p.id)
+          AND iv.status = 'pending'
+      )) AS pago_pendiente
     FROM session_packages p JOIN clients c ON c.id = p.client_id
     LEFT JOIN invoices oi ON oi.id = p.origin_invoice_id
     WHERE c.owner_id = ${auth.sub} ORDER BY p.created_at DESC`;
@@ -3184,7 +3192,14 @@ async function coberturaDeCobro(ownerId: string, invoiceId: string) {
   const candidates = await sql`
     SELECT c.id, c.full_name, c.status, c.billing_cutoff_day,
       COALESCE(p.price, c.standard_price, 0) AS suggested_amount,
-      COALESCE(c.monthly_session_target, p.sessions_included, 0)::integer AS suggested_sessions,
+      -- Autocompletar sesiones: la meta del perfil, el plan, y de último el saldo
+      -- mensual vigente del cliente (así los que vienen de Zoho sin meta ni plan
+      -- también autocompletan, con lo que de verdad tienen abierto).
+      COALESCE(c.monthly_session_target, p.sessions_included,
+        (SELECT sp.total_sessions FROM session_packages sp
+          WHERE sp.client_id = c.id AND sp.kind = 'monthly' AND sp.status = 'active'
+          ORDER BY sp.expires_on DESC NULLS LAST, sp.created_at DESC LIMIT 1),
+        0)::integer AS suggested_sessions,
       p.name AS plan_name
     FROM clients c
     LEFT JOIN service_plans p ON p.id = c.plan_id
