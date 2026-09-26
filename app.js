@@ -1,4 +1,4 @@
-const APP_VERSION = '187';
+const APP_VERSION = '188';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -722,6 +722,14 @@ function renderRoutines() {
 function renderBillingInsights() {
   const chart = document.getElementById('billing-line-chart');
   const ranking = document.getElementById('top-payers-list');
+  // La tarjeta "Cobrado" no debe quedar en $0 falso mientras carga el analytics
+  // o en la vista histórica: si no hay dato del año, se muestra un guion.
+  const collectedEl = document.getElementById('month-collected');
+  const collectedLabel = document.getElementById('collected-period-label');
+  if (billingYear === 'all' || !billingAnalytics || String(billingAnalytics.year) !== billingYear) {
+    if (collectedEl) collectedEl.textContent = '—';
+    if (collectedLabel) collectedLabel.textContent = 'Cobrado';
+  }
   document.getElementById('billing-chart-year').textContent = billingYear === 'all' ? 'Histórico' : billingYear;
   document.getElementById('top-payers-summary').textContent = billingYear === 'all' ? 'Selecciona un año para comparar' : `Pagos recibidos en ${billingYear}`;
   if (billingYear === 'all') {
@@ -757,9 +765,7 @@ function renderBillingInsights() {
   const cobradoMes = billingMonth === 'all'
     ? Number(billingAnalytics.totalBilled || 0)
     : Number((months.find(m => m.month === Number(billingMonth)) || {}).amount || 0);
-  const collectedEl = document.getElementById('month-collected');
   if (collectedEl) collectedEl.textContent = money.format(cobradoMes);
-  const collectedLabel = document.getElementById('collected-period-label');
   if (collectedLabel) collectedLabel.textContent = billingMonth === 'all' ? `Cobrado en ${billingYear}` : 'Cobrado en el mes';
   const topClients = billingAnalytics.topClients || [];
   const topAmount = Math.max(...topClients.map(client => Number(client.amount || 0)), 1);
