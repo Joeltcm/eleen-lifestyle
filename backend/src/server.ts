@@ -4585,8 +4585,15 @@ app.get('/api/debug/facturado', { preHandler: requireStaff }, async request => {
     e.veces += 1; e.ids.push(f.id as string); conteo.set(k, e);
   }
   const posiblesDuplicados = [...conteo.values()].filter(e => e.veces > 1);
+  // Cobrado real del mes = dinero recibido (pagos por fecha de pago), que es lo
+  // que la entrenadora tiene en la cabeza; distinto de "facturado" (por emisión).
+  const [{ cobrado_en_el_mes }] = await sql`
+    SELECT COALESCE(sum(p.amount), 0)::numeric AS cobrado_en_el_mes
+    FROM invoice_payments p JOIN clients c ON c.id = p.client_id
+    WHERE c.owner_id = ${auth.sub} AND p.paid_on >= ${inicio}::date AND p.paid_on < (${inicio}::date + interval '1 month')`;
   return {
     month,
+    cobradoEnElMes: Number(cobrado_en_el_mes),
     total: suma(() => true),
     confirmado: suma(f => f.status === 'confirmed'),
     pendiente: suma(f => f.status === 'pending'),
