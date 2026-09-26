@@ -4549,7 +4549,7 @@ app.post('/api/debug/consolidar', { preHandler: requireStaff }, async request =>
           await tx`UPDATE sessions SET package_id = ${f.keep} WHERE package_id = ${f.drop}`;
           await tx`UPDATE session_packages SET used_sessions = ${f.usadasResultado},
             status = CASE WHEN ${f.usadasResultado} >= total_sessions THEN 'exhausted' ELSE 'active' END WHERE id = ${f.keep}`;
-          await tx`UPDATE session_packages SET status = 'cancelled', used_sessions = 0, updated_at = now() WHERE id = ${f.drop}`;
+          await tx`UPDATE session_packages SET status = 'cancelled', used_sessions = 0 WHERE id = ${f.drop}`;
         }
       });
     }
