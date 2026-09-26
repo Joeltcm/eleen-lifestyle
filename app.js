@@ -1,4 +1,4 @@
-const APP_VERSION = '181';
+const APP_VERSION = '182';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -3141,6 +3141,11 @@ function applyInvoicePackage(id) {
     .filter(p => p.clientId === invoice.clientId && p.kind === 'package')
     .sort((a, b) => (b.purchasedOn || '').localeCompare(a.purchasedOn || ''))[0];
   const clasesSugeridas = (clientePaq && clientePaq.sessionsIncluded) || (ultimoPaquete && ultimoPaquete.total) || '';
+  // La validez arranca desde el pago y dura los "días de validez" del plan del
+  // cliente (p. ej. 35 = 5 semanas). Ese es el valor por defecto; se puede
+  // ajustar a mano hasta el tope de 6 semanas.
+  const diasValidez = (clientePaq && clientePaq.validityDays) || 42;
+  const porDefecto = new Date(inicio); porDefecto.setDate(porDefecto.getDate() + diasValidez);
 
   const box = document.createElement('div');
   box.innerHTML = `
@@ -3149,8 +3154,8 @@ function applyInvoicePackage(id) {
       <h2>Aplicar a paquete de clases</h2>
       <p class="commercial-note">${escapeHtml(invoice.client)} · ${escapeHtml(invoice.concept)} · <b>${money.format(invoice.amount)}</b></p>
       <label>Clases del paquete<input type="number" name="sessions" min="1" step="1" value="${clasesSugeridas}" required /></label>
-      <label>Válido hasta<input type="date" name="expiresOn" value="${fmt(avisoDesde)}" min="${fmt(inicio)}" max="${fmt(tope)}" required /></label>
-      <p class="commercial-note" id="package-note">Un paquete no puede durar más de 6 semanas desde el pago.</p>
+      <label>Válido hasta<input type="date" name="expiresOn" value="${fmt(porDefecto)}" min="${fmt(inicio)}" max="${fmt(tope)}" required /></label>
+      <p class="commercial-note" id="package-note">${diasValidez} días de validez desde el pago, según su plan.</p>
       <button class="primary wide-button">Abrir paquete</button>
     </form>`;
   openModal(box);
@@ -3160,16 +3165,16 @@ function applyInvoicePackage(id) {
   const revisar = () => {
     const valor = form.elements.expiresOn.value;
     const boton = form.querySelector('button');
-    if (!valor) { nota.textContent = 'Un paquete no puede durar más de 6 semanas desde el pago.'; nota.classList.remove('coverage-warn'); boton.disabled = false; return; }
+    if (!valor) { nota.textContent = `${diasValidez} días de validez desde el pago, según su plan.`; nota.classList.remove('coverage-warn'); boton.disabled = false; return; }
     const expira = new Date(`${valor}T12:00:00`);
     if (expira > tope) {
       nota.textContent = 'Se pasa de las 6 semanas: acorta la fecha, un paquete no puede durar más que eso.';
       nota.classList.add('coverage-warn'); boton.disabled = true;
-    } else if (expira > avisoDesde) {
-      nota.textContent = 'Ojo: pasa del mes. Se permite hasta 6 semanas, pero revisa que sea intencional.';
+    } else if (expira > porDefecto) {
+      nota.textContent = `Pasa de los ${diasValidez} días de validez del plan; revisa que sea intencional.`;
       nota.classList.add('coverage-warn'); boton.disabled = false;
     } else {
-      nota.textContent = 'Dentro del mes. Correcto.';
+      nota.textContent = 'Dentro de la validez del plan. Correcto.';
       nota.classList.remove('coverage-warn'); boton.disabled = false;
     }
   };
