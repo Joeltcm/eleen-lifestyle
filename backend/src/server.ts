@@ -3604,8 +3604,20 @@ async function saveNativeInvoicePayment(ownerId: string, id: string, input: z.in
     // avisar a la entrenadora de que sus sesiones ya están disponibles.
     let paqueteActivado: { kind: string; sessions: number } | null = null;
     if (invoice.package_id) {
+      // Un paquete de clases empieza a correr su validez DESDE el pago: se
+      // reinicia el reloj a la fecha del pago + los días de validez del plan del
+      // cliente (si no hay plan, el tope de uso). Así, si un paquete se agota o
+      // vence y el cliente vuelve a pagar, sus semanas arrancan de cero desde ese
+      // nuevo pago. La mensualidad no se toca aquí: su ciclo lo fija el corte.
       const [activado] = await transaction`
-        UPDATE session_packages SET status = 'active' WHERE id = ${invoice.package_id} AND status = 'pending'
+        UPDATE session_packages sp SET status = 'active',
+          purchased_on = CASE WHEN sp.kind = 'package' THEN ${input.paidOn}::date ELSE sp.purchased_on END,
+          expires_on = CASE WHEN sp.kind = 'package'
+            THEN ${input.paidOn}::date + COALESCE(
+              (SELECT pl.validity_days FROM clients c LEFT JOIN service_plans pl ON pl.id = c.plan_id WHERE c.id = sp.client_id),
+              ${DIAS_USO_PAQUETE})::int
+            ELSE sp.expires_on END
+        WHERE sp.id = ${invoice.package_id} AND sp.status = 'pending'
         RETURNING kind, total_sessions`;
       if (activado) paqueteActivado = { kind: activado.kind as string, sessions: Number(activado.total_sessions) };
     }
