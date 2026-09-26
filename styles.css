@@ -450,6 +450,10 @@ details.session-row .google-session-state{display:block;padding-top:10px}
 .pack-renovar{display:inline-block;color:#8a5a12;background:#fbeccb;border-radius:6px;padding:1px 7px;font-size:10px;font-weight:600;margin-top:3px}
 .pack-vencido{display:inline-block;color:#8f3d2e;background:#f7ddd3;border-radius:6px;padding:1px 7px;font-size:10px;font-weight:600;margin-top:3px}
 .pack-adeuda{display:inline-block;color:#8a5a12;background:#fbeccb;border-radius:6px;padding:1px 7px;font-size:10px;font-weight:600;margin-top:3px}
+.inv-tag{display:inline-block;border-radius:6px;padding:1px 7px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.02em}
+.inv-manual{color:#2f6f4f;background:#d8efe1}
+.inv-auto{color:#3a5a8f;background:#dde7f6}
+.inv-zoho{color:#6b5a2e;background:#efe6cf}
 .inline-field{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);white-space:nowrap}.inline-field input{min-height:38px;padding:6px 8px;font-size:12px}
 .session-state.pausa{background:#ece6da;color:#7a6c50}
 .day-session.pausa{background:#f6f3ec;border-left-color:#c4b79b}
