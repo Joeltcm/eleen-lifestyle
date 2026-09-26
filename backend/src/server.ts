@@ -4384,6 +4384,47 @@ app.get('/api/debug/familia', { preHandler: requireStaff }, async request => {
   return { hoy: diaEnPanama(new Date()), q, clientes, facturas, saldos, coberturas, memberships, sesiones };
 });
 
+// Corrección puntual tras cambiar el día de corte de un cliente: realinea sus
+// mensualidades al ciclo del corte, activa la que quedó 'pending' y descuenta
+// las clases realizadas del ciclo en curso que no se descontaron. No toca ciclos
+// ya cerrados ni clases fuera de ventana. Quitar tras aplicarla.
+app.post('/api/debug/fix-saldos', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const q = ((request.query as Record<string, string>).q || '').trim();
+  if (!q) return { error: 'falta ?q=' };
+  const [cliente] = await sql`SELECT id, full_name, billing_cutoff_day FROM clients WHERE owner_id = ${auth.sub} AND full_name ILIKE ${'%' + q + '%'} ORDER BY full_name LIMIT 1`;
+  if (!cliente) return { error: 'cliente no encontrado' };
+  const cutoff = Number(cliente.billing_cutoff_day) || 1;
+  const columnas = sql`id, label, status, used_sessions, total_sessions, expires_on, purchased_on`;
+  const antes = await sql`SELECT ${columnas} FROM session_packages WHERE client_id = ${cliente.id} AND kind = 'monthly' ORDER BY purchased_on`;
+  const cambios = await sql.begin(async tx => {
+    const hechos: Record<string, unknown>[] = [];
+    // Ciclo en curso: la mensualidad activa que vence primero.
+    const [actual] = await tx`SELECT * FROM session_packages WHERE client_id = ${cliente.id} AND kind = 'monthly' AND status = 'active' ORDER BY expires_on ASC NULLS LAST LIMIT 1 FOR UPDATE`;
+    let venceActual: string | null = null;
+    if (actual) {
+      const { inicio, vence } = cicloDelCorte(actual.purchased_on as Date, cutoff);
+      venceActual = vence;
+      const label = 'Mensualidad · ' + rangoDelCiclo(inicio, vence);
+      await tx`UPDATE session_packages SET expires_on = ${vence}::date, label = ${label} WHERE id = ${actual.id}`;
+      const descontadas = await cobrarClasesYaDadas(tx, actual.id as string, cliente.id as string, vence, Number(actual.total_sessions));
+      hechos.push({ saldo: 'actual', id: actual.id, expires_on: vence, label, clasesDescontadas: descontadas });
+    }
+    // Ciclo siguiente: la mensualidad 'pending' -> activarla y anclarla al ciclo
+    // que abre donde cierra el actual.
+    const [siguiente] = await tx`SELECT * FROM session_packages WHERE client_id = ${cliente.id} AND kind = 'monthly' AND status = 'pending' ORDER BY purchased_on DESC LIMIT 1 FOR UPDATE`;
+    if (siguiente && venceActual) {
+      const venceSig = corteSiguiente(mediodiaEnPanama(venceActual), cutoff).toISOString().slice(0, 10);
+      const label = 'Mensualidad · ' + rangoDelCiclo(venceActual, venceSig);
+      await tx`UPDATE session_packages SET status = 'active', expires_on = ${venceSig}::date, label = ${label} WHERE id = ${siguiente.id}`;
+      hechos.push({ saldo: 'siguiente', id: siguiente.id, status: 'active', expires_on: venceSig, label });
+    }
+    return hechos;
+  });
+  const despues = await sql`SELECT ${columnas} FROM session_packages WHERE client_id = ${cliente.id} AND kind = 'monthly' ORDER BY purchased_on`;
+  return { cliente: cliente.full_name, cutoff, antes, cambios, despues };
+});
+
 app.post('/api/push/subscriptions', { preHandler: requireAuth }, async (request, reply) => {
   if (!webPushReady) return reply.code(503).send({ error: 'Las notificaciones push todavía no están configuradas' });
   const auth = request.user as AuthUser; const input = pushSubscriptionSchema.parse(request.body);
