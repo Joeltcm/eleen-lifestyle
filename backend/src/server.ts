@@ -2987,7 +2987,7 @@ app.get('/api/billing/analytics', { preHandler: requireStaff }, async request =>
         WHERE c.owner_id = ${auth.sub} AND i.status = 'confirmed'
           AND COALESCE(i.confirmed_at::date, i.issued_on, i.due_on) >= ${start}::date
           AND COALESCE(i.confirmed_at::date, i.issued_on, i.due_on) < ${end}::date
-          AND NOT EXISTS (SELECT 1 FROM invoice_payments pp WHERE pp.invoice_id = i.id)
+          AND NOT EXISTS (SELECT 1 FROM payment_allocations pa WHERE pa.invoice_id = i.id)
       )
       SELECT EXTRACT(month FROM fecha)::integer AS month,
         count(*)::integer AS invoice_count, COALESCE(sum(amount), 0)::numeric AS amount
