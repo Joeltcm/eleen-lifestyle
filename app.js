@@ -1,4 +1,4 @@
-const APP_VERSION = '180';
+const APP_VERSION = '181';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -266,7 +266,7 @@ async function loadData() {
     return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), reprogramaciones: Number(client.reprogramaciones_ciclo || 0), canceladas: Number(client.canceladas_ciclo || 0), canceladasPorElla: Number(client.canceladas_por_ella_ciclo || 0), creditoPendiente: Number(client.credito_pendiente || 0), deudaPendiente: Number(client.deuda_pendiente || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), pauseId: client.active_pause_id || null, pauseStartedOn: client.pause_started_on || null, pauseReason: client.pause_reason || '', status: { active: 'Activo', paused: 'En pausa', inactive: 'Inactivo' }[client.status] || 'Inactivo', statusRaw: client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
   });
   data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, concept: item.concept, amount: Number(item.amount), balance: item.source_system ? Number(item.balance) : item.status === 'pending' ? Number(item.amount) : 0, due: dateOnly(item.due_on), issued: dateOnly(item.issued_on || item.due_on), paidOn: item.confirmed_at ? String(item.confirmed_at).slice(0, 10) : '', method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '', coverageStart: item.coverage_start ? dateOnly(item.coverage_start) : '' }));
-  data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, kind: item.kind, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), expiresOn: item.expires_on || '', status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired', originInvoiceId: item.origin_invoice_id || null, originNumber: item.origin_invoice_number || '', originConcept: item.origin_concept || '', originSource: item.origin_source || '', originStatus: item.origin_status || '', originDate: item.origin_date ? dateOnly(item.origin_date) : '', renovacionPendiente: item.renovacion_pendiente || false, vencidoConSaldo: item.vencido_con_saldo || false, purchasedOn: item.purchased_on ? dateOnly(item.purchased_on) : '' }));
+  data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, kind: item.kind, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), expiresOn: item.expires_on || '', status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired', originInvoiceId: item.origin_invoice_id || null, originNumber: item.origin_invoice_number || '', originConcept: item.origin_concept || '', originSource: item.origin_source || '', originStatus: item.origin_status || '', originDate: item.origin_date ? dateOnly(item.origin_date) : '', renovacionPendiente: item.renovacion_pendiente || false, vencidoConSaldo: item.vencido_con_saldo || false, pagoPendiente: item.pago_pendiente || false, purchasedOn: item.purchased_on ? dateOnly(item.purchased_on) : '' }));
   data.sessions = sessions.map(sessionFromApi);
   data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: (item.assigned_client_ids || []).length, assignedClientIds: item.assigned_client_ids || [], sessions: item.sessions_per_week, dueOn: item.due_on || null, exercises: item.exercises || [] }));
   data.plans = plans.map(item => ({ id: item.id, name: item.name, description: item.description || '', billingModel: item.billing_model, price: Number(item.price), sessionsIncluded: Number(item.sessions_included || 0), validityDays: Number(item.validity_days || 0), active: item.active }));
@@ -832,7 +832,11 @@ function renderBilling() {
       : pack.renovacionPendiente
         ? '<br><small class="pack-renovar">Renovación pendiente</small>'
         : '';
-    return `<tr><td data-label="Cliente"><b>${escapeHtml(pack.client)}</b></td><td data-label="Paquete">${escapeHtml(pack.label)}${pack.originInvoiceId ? `<br><small class="pack-origin">Salió del cobro ${escapeHtml(pack.originSource === 'zoho_invoice' ? 'Zoho ' : '')}${escapeHtml(pack.originNumber || pack.originConcept || 'sin número')}${pack.originDate ? ` · ${fechaCorta(pack.originDate)}` : ''}</small>` : ''}</td><td data-label="Compradas">${pack.total}</td><td data-label="Usadas">${pack.used}</td><td data-label="Disponibles"><strong class="session-balance">${remaining}</strong></td><td data-label="Estado"><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span><br><small>${pack.expiresOn ? `vence ${fechaCorta(pack.expiresOn)}` : 'sin vencimiento'}</small>${aviso}</td><td data-label="Cumplimiento">${cumplimientoCelda(pack.clientId)}</td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-editar-paquete="${pack.id}">Editar</button>${renovable}${borrable}</div><small>${pack.status === 'confirmed' && remaining ? 'Descuento automático' : '—'}</small></td></tr>`;
+    // El saldo está activo y usable, pero su cobro sigue sin pagarse: el cliente
+    // entrena aunque pague días después, y esto lo deja a la vista sin bloquear.
+    const pagoAviso = pack.pagoPendiente && pack.status === 'confirmed'
+      ? '<br><small class="pack-adeuda">Pendiente de pago</small>' : '';
+    return `<tr><td data-label="Cliente"><b>${escapeHtml(pack.client)}</b></td><td data-label="Paquete">${escapeHtml(pack.label)}${pack.originInvoiceId ? `<br><small class="pack-origin">Salió del cobro ${escapeHtml(pack.originSource === 'zoho_invoice' ? 'Zoho ' : '')}${escapeHtml(pack.originNumber || pack.originConcept || 'sin número')}${pack.originDate ? ` · ${fechaCorta(pack.originDate)}` : ''}</small>` : ''}</td><td data-label="Compradas">${pack.total}</td><td data-label="Usadas">${pack.used}</td><td data-label="Disponibles"><strong class="session-balance">${remaining}</strong></td><td data-label="Estado"><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span><br><small>${pack.expiresOn ? `vence ${fechaCorta(pack.expiresOn)}` : 'sin vencimiento'}</small>${aviso}${pagoAviso}</td><td data-label="Cumplimiento">${cumplimientoCelda(pack.clientId)}</td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-editar-paquete="${pack.id}">Editar</button>${renovable}${borrable}</div><small>${pack.status === 'confirmed' && remaining ? 'Descuento automático' : '—'}</small></td></tr>`;
   }).join('') : `<tr><td colspan="8" class="empty">${data.packages.length ? 'No hay saldos con estos filtros. Cambia el mes o usa “Ver historial”.' : 'Aún no hay paquetes de sesiones.'}</td></tr>`;
   void ensureBillingAnalytics();
 }
@@ -3130,6 +3134,13 @@ function applyInvoicePackage(id) {
   const inicio = new Date(`${(invoice.coverageStart || invoice.paidOn || invoice.issued || invoice.due || dateKey(today))}T12:00:00`);
   const avisoDesde = new Date(inicio); avisoDesde.setMonth(avisoDesde.getMonth() + 1);
   const tope = new Date(inicio); tope.setDate(tope.getDate() + 42);
+  // Prellenar las clases: del plan del cliente, y si no, de su último paquete.
+  // Así los de paquete (que no tienen meta mensual) también autocompletan.
+  const clientePaq = data.clients.find(c => c.id === invoice.clientId);
+  const ultimoPaquete = data.packages
+    .filter(p => p.clientId === invoice.clientId && p.kind === 'package')
+    .sort((a, b) => (b.purchasedOn || '').localeCompare(a.purchasedOn || ''))[0];
+  const clasesSugeridas = (clientePaq && clientePaq.sessionsIncluded) || (ultimoPaquete && ultimoPaquete.total) || '';
 
   const box = document.createElement('div');
   box.innerHTML = `
@@ -3137,7 +3148,7 @@ function applyInvoicePackage(id) {
       <p class="eyebrow">${invoice.source === 'zoho_invoice' ? 'COBRO DE ZOHO' : 'COBRO LOCAL'}</p>
       <h2>Aplicar a paquete de clases</h2>
       <p class="commercial-note">${escapeHtml(invoice.client)} · ${escapeHtml(invoice.concept)} · <b>${money.format(invoice.amount)}</b></p>
-      <label>Clases del paquete<input type="number" name="sessions" min="1" step="1" value="" required /></label>
+      <label>Clases del paquete<input type="number" name="sessions" min="1" step="1" value="${clasesSugeridas}" required /></label>
       <label>Válido hasta<input type="date" name="expiresOn" value="${fmt(avisoDesde)}" min="${fmt(inicio)}" max="${fmt(tope)}" required /></label>
       <p class="commercial-note" id="package-note">Un paquete no puede durar más de 6 semanas desde el pago.</p>
       <button class="primary wide-button">Abrir paquete</button>
