@@ -4403,6 +4403,54 @@ app.get('/api/debug/pagos', { preHandler: requireStaff }, async request => {
   };
 });
 
+// Vista previa de cobros mensuales duplicados: por cliente, cada cobro con las
+// clases usadas de su saldo, y recomendación CONSERVAR / BORRAR (se conserva el
+// saldo con clases usadas; se borra el sobrante). No aplica nada, sólo informa.
+app.get('/api/debug/duplicados-preview', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const filas = await sql`
+    SELECT i.id, c.full_name, i.concept, i.amount::numeric AS amount, i.auto_generated, i.due_on,
+      sp.id AS saldo_id, sp.used_sessions, sp.total_sessions, sp.label AS saldo_label
+    FROM invoices i JOIN clients c ON c.id = i.client_id
+    LEFT JOIN session_packages sp ON (sp.id = i.package_id OR sp.origin_invoice_id = i.id) AND sp.kind = 'monthly'
+    WHERE c.owner_id = ${auth.sub} AND i.status = 'confirmed' AND i.source_system IS DISTINCT FROM 'zoho_invoice'
+      AND (i.concept ILIKE '%mensual%' OR i.billing_period IS NOT NULL)
+      AND i.due_on >= (current_date - interval '60 days')
+    ORDER BY c.full_name, i.due_on`;
+  // Dedupe por invoice (el LEFT JOIN puede traer el mismo cobro dos veces si hay
+  // dos enlaces): nos quedamos con la fila que tenga saldo con más usadas.
+  const porCobro = new Map<string, (typeof filas)[number]>();
+  for (const f of filas) {
+    const prev = porCobro.get(f.id as string);
+    if (!prev || Number(f.used_sessions || 0) > Number(prev.used_sessions || 0)) porCobro.set(f.id as string, f);
+  }
+  const porCliente = new Map<string, (typeof filas)[number][]>();
+  for (const f of porCobro.values()) {
+    if (!porCliente.has(f.full_name as string)) porCliente.set(f.full_name as string, []);
+    porCliente.get(f.full_name as string)!.push(f);
+  }
+  const grupos: Record<string, unknown>[] = [];
+  for (const [cliente, cobros] of porCliente) {
+    if (cobros.length < 2) continue;
+    const keeper = cobros.reduce((a, b) => Number(b.used_sessions || 0) > Number(a.used_sessions || 0) ? b : a);
+    grupos.push({
+      cliente,
+      cobros: cobros.map(f => ({
+        concepto: f.concept,
+        monto: Number(f.amount),
+        origen: f.auto_generated ? 'auto' : 'manual',
+        vence: String(f.due_on).slice(0, 10),
+        clasesUsadas: Number(f.used_sessions || 0),
+        clasesTotales: Number(f.total_sessions || 0),
+        saldo: f.saldo_label || '(sin saldo)',
+        accion: f.id === keeper.id ? 'CONSERVAR' : 'BORRAR',
+        alBorrar: f.id === keeper.id ? '—' : (Number(f.used_sessions || 0) === 0 ? 'saldo vacío: se va limpio' : 'tiene clases: el saldo se conserva, sólo se quita el cobro y su pago')
+      }))
+    });
+  }
+  return { nota: 'CONSERVAR = el saldo con más clases usadas. BORRAR = duplicados. Los saldos con clases usadas nunca se pierden.', gruposConDuplicados: grupos };
+});
+
 
 app.post('/api/push/subscriptions', { preHandler: requireAuth }, async (request, reply) => {
   if (!webPushReady) return reply.code(503).send({ error: 'Las notificaciones push todavía no están configuradas' });
