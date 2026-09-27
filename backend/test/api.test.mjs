@@ -547,6 +547,46 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     assert.match(saldo.label, /15-09-2026 – 15-10-2026/, 'la etiqueta muestra el ciclo del corte, no la fecha de pago');
   });
 
+  test('la mensualidad automática abre el saldo anclado al corte, no al 1° de mes', async () => {
+    // Antes el saldo automático vencía el 1° (mes calendario). Para un corte 15
+    // debe correr 15→15: era lo que dejaba el paquete "actual" desalineado y con
+    // las clases del ciclo cayendo en el saldo equivocado (caso Michelle).
+    const plan = await api.post('/api/plans', { name: 'Auto corte 15', billingModel: 'monthly', price: 200, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Auto corte quince', planId: plan.datos.id, cutoffDay: 15 });
+    // Un cobro con vencimiento en el corte 15; la renovación de saldo lo toma
+    // aunque no esté en la ventana de emisión de cobros.
+    await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 200, dueOn: '2026-10-15' });
+    await api.post('/api/billing/recurring/generate', {});
+    const saldo = (await api.get('/api/packages')).datos.find(p => p.client_id === c.datos.id && p.kind === 'monthly');
+    assert.ok(saldo, 'la renovación abre el saldo del cobro');
+    assert.equal(String(saldo.expires_on).slice(0, 10), '2026-11-15', 'vence el 15 (corte), no el 1° de noviembre');
+    assert.match(saldo.label, /15-10-2026 – 15-11-2026/, 'la etiqueta corre 15→15');
+  });
+
+  test('el saldo también descuenta las clases que el cliente canceló y perdió', async () => {
+    // Joel: si el cliente cancela sin pedir reagendar, la clase se consume igual.
+    // Si la canceló ANTES de que existiera el saldo (o con el saldo desalineado),
+    // la reconciliación la descuenta al abrir el saldo, igual que una clase dada.
+    const plan = await api.post('/api/plans', { name: 'Mensual con cancelada', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
+    const c = await api.post('/api/clients', { fullName: 'Canceló antes del saldo', planId: plan.datos.id, cutoffDay: 28 });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: new Date().toISOString().slice(0, 10) });
+    // Una clase de esta mañana que el cliente canceló sin reagendar, cuando aún
+    // no había saldo del que descontar.
+    const s = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: [new Date(Date.now() - 3600_000).toISOString()], durationMinutes: 60, mode: 'Presencial' });
+    await api.delete(`/api/sessions/${s.datos.sesiones[0].id}?rescheduled=false`);
+    const sinSaldo = (await api.get('/api/clients')).datos.find(x => x.id === c.datos.id);
+    assert.equal(Number(sinSaldo.available_sessions), 0, 'todavía no hay saldo del que descontar');
+
+    const mesEnCurso = new Date().toISOString().slice(0, 8) + '01';
+    await api.post(`/api/invoices/${f.datos.id}/coverage`, {
+      billingPeriod: mesEnCurso,
+      entries: [{ clientId: c.datos.id, amount: 175, sessions: 12 }]
+    });
+    const despues = (await api.get('/api/clients')).datos.find(x => x.id === c.datos.id);
+    assert.equal(Number(despues.available_sessions), 11,
+      'la clase que canceló y perdió consume su cupo: el saldo nace en 11, no en 12');
+  });
+
   test('la mensualidad familiar se abre aunque el dependiente ya tenga cobertura de otro cobro (clases extra)', async () => {
     const pagador = await api.post('/api/clients', { fullName: 'Paga por el grupo', billingModel: 'monthly', standardPrice: 900, cutoffDay: 15 });
     const dep = await api.post('/api/clients', { fullName: 'Dependiente con extra', billingModel: 'monthly', standardPrice: 240, cutoffDay: 15 });

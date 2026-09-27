@@ -154,17 +154,22 @@ function mediodiaEnPanama(fecha: Date | string): Date {
 }
 
 // Un saldo que se abre tarde tiene que hacerse cargo de las clases que ya se
-// dieron dentro de su ciclo.
+// consumieron dentro de su ciclo.
 //
-// El orden real de los hechos es ése: la clase se marca dada por la mañana y
-// el saldo se abre después, al aplicar el pago o al renovar. Al marcarla no
-// había de dónde descontar, así que la sesión quedó completada y sin cobrar a
-// ningún saldo, y nada volvía a mirarla: el saldo nacía entero y esa clase no
-// se le descontaba a nadie nunca.
+// El orden real de los hechos es ése: la clase se marca dada (o el cliente la
+// cancela y la pierde) por la mañana y el saldo se abre después, al aplicar el
+// pago o al renovar. En ese momento no había de dónde descontar, así que la
+// sesión quedó sin cobrar a ningún saldo, y nada volvía a mirarla: el saldo
+// nacía entero y esa clase no se le descontaba a nadie nunca.
+//
+// Cuentan tanto las clases DADAS como las que el cliente CANCELÓ y perdió sin
+// pedir reprogramación: una clase perdida por el cliente consume su cupo igual
+// que una dada. Las que canceló la entrenadora, o las que se reprogramaron, no
+// se descuentan (esas se reponen o se le devuelven al cliente).
 //
 // Esto no es tocar el pasado, que es lo que no se debe hacer con el dinero.
-// Es al revés: la clase se dio, y el saldo tiene que decir la verdad sobre lo
-// que queda. Sólo alcanza a las de su propio ciclo, nunca a las de un mes ya
+// Es al revés: la clase se consumió, y el saldo tiene que decir la verdad sobre
+// lo que queda. Sólo alcanza a las de su propio ciclo, nunca a las de un mes ya
 // cerrado, y nunca gasta más sesiones de las que el saldo tiene.
 async function cobrarClasesYaDadas(
   transaction: TransactionSql | typeof sql,
@@ -175,7 +180,12 @@ async function cobrarClasesYaDadas(
 ) {
   const pendientes = await transaction`
     SELECT id FROM sessions
-    WHERE client_id = ${clientId} AND status = 'completed' AND package_debited = false
+    WHERE client_id = ${clientId} AND package_debited = false
+      AND (
+        status = 'completed'
+        OR (status = 'cancelled' AND cancellation_kind = 'not_rescheduled'
+          AND COALESCE(cancelled_by, 'client') = 'client')
+      )
       AND starts_at > (${expiresOn}::date - interval '1 month')
       AND starts_at < (${expiresOn}::date + interval '1 day')
     ORDER BY starts_at
@@ -340,10 +350,13 @@ async function generateRecurringInvoices(ownerId?: string) {
     const [abierto] = await sql`
       INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, origin_invoice_id, status)
       VALUES (${cobro.entrena},
+        -- El ciclo del saldo se ancla al DÍA DE CORTE del cliente (due_on del
+        -- cobro), no al 1° de mes. Con corte 15 el saldo corre 15→15, no 01→01,
+        -- que era lo que desalineaba el descuento de clases (caso Michelle).
         ${'Mensualidad · ' + rangoDelCiclo(
-          mediodiaEnPanama(cobro.billing_period as Date),
-          mediodiaEnPanama(venceMensualidadDesde(cobro.billing_period as Date)))},
-        ${cobro.total_sessions}, ${cobro.amount}, ${venceMensualidadDesde(cobro.billing_period)}::date, 'monthly', current_date,
+          mediodiaEnPanama(cobro.due_on as Date),
+          mediodiaEnPanama(venceMensualidadDesde(cobro.due_on as Date)))},
+        ${cobro.total_sessions}, ${cobro.amount}, ${venceMensualidadDesde(cobro.due_on)}::date, 'monthly', current_date,
         -- Nace activo, y es la diferencia entre servir y no servir. Un saldo
         -- 'pending' no suma en las sesiones disponibles ni se descuenta al
         -- marcar la clase: el cliente entrenaba y su saldo no se movía. Se
@@ -358,7 +371,7 @@ async function generateRecurringInvoices(ownerId?: string) {
       RETURNING id
     `;
     await cobrarClasesYaDadas(sql, abierto.id as string, cobro.entrena as string,
-      venceMensualidadDesde(cobro.billing_period), Number(cobro.total_sessions));
+      venceMensualidadDesde(cobro.due_on), Number(cobro.total_sessions));
   }
   const reposiciones = await abrirReposiciones(ownerId);
   const descuentos = await aplicarCreditos(invoices as unknown as CobroGenerado[]);
