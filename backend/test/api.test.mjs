@@ -385,15 +385,21 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
   test('a quien ya está cubierto no se le vuelve a cobrar el mes', async () => {
     // Con el corte dentro de la ventana de generación, a esta persona sí se le
     // emitiría su mensualidad. Lo único que lo impide es la cobertura.
-    const corte = new Date(Date.now() + 4 * 24 * 3600_000).getDate();
-    const mesEnCurso = new Date().toISOString().slice(0, 8) + '01';
+    const enVentana = new Date(Date.now() + 4 * 24 * 3600_000);
+    const corte = enVentana.getDate();
+    // El mes que se genera es el del corte dentro de la ventana; a fin de mes
+    // 'hoy' y 'hoy+4' pueden caer en meses distintos y la prueba se rompía.
+    const mesEnCurso = enVentana.toISOString().slice(0, 8) + '01';
     const plan = await api.post('/api/plans', { name: 'Pareja en ventana', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
     const p = await api.post('/api/clients', { fullName: 'Paga ya', planId: plan.datos.id, cutoffDay: corte });
     const d = await api.post('/api/clients', { fullName: 'Cubierta ya', planId: plan.datos.id, cutoffDay: corte });
     await api.patch(`/api/clients/${d.datos.id}`, { fullName: 'Cubierta ya', billingResponsibleClientId: p.datos.id });
     const t = await api.post('/api/clients', { fullName: 'Sin cobertura', planId: plan.datos.id, cutoffDay: corte });
     const suelta = t.datos.id;
-    const f = await api.post('/api/invoices', { clientId: p.datos.id, concept: 'Mensualidad de los dos', amount: 350, dueOn: new Date().toISOString().slice(0, 10) });
+    // El cobro compartido es de ESTE ciclo: vence en el corte del período que se
+    // está generando. Con 'hoy' cerca de fin de mes caía en el mes anterior al
+    // corte y parecía —correctamente— un cobro de otro ciclo.
+    const f = await api.post('/api/invoices', { clientId: p.datos.id, concept: 'Mensualidad de los dos', amount: 350, dueOn: enVentana.toISOString().slice(0, 10) });
     await api.post(`/api/invoices/${f.datos.id}/coverage`, {
       billingPeriod: mesEnCurso,
       entries: [{ clientId: d.datos.id, amount: 175, sessions: 12 }]
@@ -411,6 +417,30 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     const testigo = facturas.filter(i => i.billed_for_client_id === suelta && i.auto_generated
       && String(i.billing_period).slice(0, 7) === mesEnCurso.slice(0, 7));
     assert.equal(testigo.length, 1, 'a quien no está cubierto sí se le emite');
+  });
+
+  test('una cobertura de un ciclo ANTERIOR no bloquea el cobro del ciclo nuevo', async () => {
+    // El bug de Julieta/Eduardo/Gila: el cobro de agosto (corte tardío) dejaba
+    // una cobertura etiquetada "septiembre" (punto medio del ciclo) que suprimía
+    // el cobro NUEVO de septiembre —otro ciclo—. La supresión debe mirar el mes
+    // del COBRO ORIGEN, no la etiqueta.
+    const enVentana = new Date(Date.now() + 3 * 24 * 3600_000); // corte dentro de los 7 días
+    const corte = enVentana.getDate();
+    const periodoNuevo = enVentana.toISOString().slice(0, 7); // el mes que se va a generar
+    const dueAntes = new Date(enVentana.getTime() - 30 * 24 * 3600_000).toISOString().slice(0, 10); // cobro del ciclo previo
+    const plan = await api.post('/api/plans', { name: 'Corte tardío mislabel', billingModel: 'monthly', price: 240, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Cubierto ciclo anterior', planId: plan.datos.id, cutoffDay: corte });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 240, dueOn: dueAntes });
+    // Cobertura MAL etiquetada al mes nuevo (como la migración de Zoho), pero su
+    // cobro origen es del ciclo anterior.
+    await api.post(`/api/invoices/${f.datos.id}/coverage`, {
+      billingPeriod: `${periodoNuevo}-01`, entries: [{ clientId: c.datos.id, amount: 240, sessions: 8 }]
+    });
+    await api.post('/api/billing/recurring/generate', {});
+    const facturas = (await api.get('/api/invoices')).datos;
+    const nueva = facturas.filter(i => i.client_id === c.datos.id && i.auto_generated
+      && String(i.billing_period).slice(0, 7) === periodoNuevo);
+    assert.equal(nueva.length, 1, 'el cobro del ciclo nuevo SÍ se genera aunque el ciclo anterior tenga cobertura etiquetada a este mes');
   });
 
   test('el saldo se hace cargo de las clases ya dadas del ciclo', async () => {

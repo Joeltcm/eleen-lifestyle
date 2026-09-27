@@ -257,10 +257,17 @@ async function generateRecurringInvoices(ownerId?: string) {
         -- pagador son una sola línea en Zoho: sin esto, a la persona que no
         -- aparece en la factura se le emitiría su mensualidad otra vez, como
         -- si no hubiera pagado.
+        --
+        -- Se compara por el MES DEL COBRO ORIGEN de la cobertura, no por su
+        -- etiqueta billing_period. Con corte tardío (25–28) la cobertura del
+        -- cobro de agosto quedaba etiquetada "septiembre" (por el punto medio del
+        -- ciclo) y bloqueaba el cobro NUEVO de septiembre, que es de otro ciclo.
+        -- El día del cobro origen dice a qué ciclo pertenece de verdad.
         AND NOT EXISTS (
           SELECT 1 FROM invoice_coverage cov
           JOIN invoices ci ON ci.id = cov.invoice_id AND ci.status <> 'void'
-          WHERE cov.client_id = s.billed_for_client_id AND cov.billing_period = s.billing_period
+          WHERE cov.client_id = s.billed_for_client_id
+            AND date_trunc('month', ci.due_on)::date = s.billing_period
         )
     )
     INSERT INTO invoices (
