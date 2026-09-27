@@ -4434,7 +4434,8 @@ app.get('/api/debug/realinear', { preHandler: requireStaff }, async request => {
   const prevStart = iso(py, pm, corteDelMes(py, pm));
 
   const paquetes = await sql`
-    SELECT id, label, status, total_sessions, used_sessions, expires_on
+    SELECT id, label, status, total_sessions, used_sessions,
+      to_char(expires_on, 'YYYY-MM-DD') AS expires_on
     FROM session_packages
     WHERE client_id = ${cli.id} AND kind = 'monthly' AND status <> 'cancelled'
     ORDER BY expires_on DESC NULLS LAST, purchased_on DESC LIMIT 2`;
@@ -4442,7 +4443,7 @@ app.get('/api/debug/realinear', { preHandler: requireStaff }, async request => {
   const pkgAnterior = paquetes[1];
 
   const consumidas = await sql`
-    SELECT id, (starts_at AT TIME ZONE 'America/Panama')::date AS dia, status
+    SELECT id, to_char((starts_at AT TIME ZONE 'America/Panama')::date, 'YYYY-MM-DD') AS dia, status
     FROM sessions
     WHERE client_id = ${cli.id}
       AND (status = 'completed' OR (status = 'cancelled' AND cancellation_kind = 'not_rescheduled'
