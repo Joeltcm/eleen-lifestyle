@@ -4374,6 +4374,38 @@ app.get('/api/push/config', { preHandler: requireAuth }, async () => ({
   publicKey: webPushReady ? config.VAPID_PUBLIC_KEY : null
 }));
 
+// Diagnóstico temporal (solo lectura): por qué no se generó la factura de un
+// cliente. Muestra ficha, membresías, facturas (con billing_period/estado) y
+// coberturas, para confirmar la supresión por cobertura mal etiquetada.
+app.get('/api/debug/generacion', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const q = ((request.query as Record<string, string>).q || '').trim();
+  if (!q) return { error: 'falta ?q=' };
+  const clientes = await sql`
+    SELECT id, full_name, status, billing_model, billing_cutoff_day, standard_price::numeric AS precio,
+      plan_id, billing_responsible_client_id, monthly_session_target
+    FROM clients WHERE owner_id = ${auth.sub} AND full_name ILIKE ${'%' + q + '%'} ORDER BY full_name`;
+  const ids = clientes.map(c => c.id as string);
+  if (!ids.length) return { hoy: diaEnPanama(new Date()), q, clientes: [] };
+  const memberships = await sql`
+    SELECT client_id, status, starts_on, ends_on, amount::numeric AS amount, renewal_day
+    FROM memberships WHERE client_id IN ${sql(ids)} ORDER BY starts_on DESC`;
+  const facturas = await sql`
+    SELECT id, client_id, billed_for_client_id, concept, amount::numeric AS amount, due_on, issued_on,
+      billing_period, status, auto_generated, source_system
+    FROM invoices WHERE client_id IN ${sql(ids)} OR billed_for_client_id IN ${sql(ids)}
+    ORDER BY due_on DESC NULLS LAST LIMIT 40`;
+  const coberturas = await sql`
+    SELECT cov.id, cov.client_id, cov.invoice_id, cov.billing_period, cov.amount::numeric AS amount
+    FROM invoice_coverage cov WHERE cov.client_id IN ${sql(ids)} ORDER BY cov.billing_period DESC`;
+  return { hoy: diaEnPanama(new Date()), diasAntelacion: config.BILLING_GENERATION_DAYS_AHEAD, q, clientes, memberships,
+    facturas: facturas.map(f => ({ cliente: clientes.find(c => c.id === f.client_id)?.full_name || f.client_id,
+      concepto: f.concept, monto: Number(f.amount), due_on: f.due_on ? String(f.due_on).slice(0, 10) : null,
+      billing_period: f.billing_period ? String(f.billing_period).slice(0, 10) : null, estado: f.status,
+      origen: f.auto_generated ? 'auto' : f.source_system || 'manual' })),
+    coberturas: coberturas.map(cov => ({ cliente: clientes.find(c => c.id === cov.client_id)?.full_name || cov.client_id,
+      billing_period: String(cov.billing_period).slice(0, 10), monto: Number(cov.amount), invoice_id: cov.invoice_id })) };
+});
 
 
 app.post('/api/push/subscriptions', { preHandler: requireAuth }, async (request, reply) => {
