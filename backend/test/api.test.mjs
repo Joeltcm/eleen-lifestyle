@@ -587,6 +587,35 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
       'la clase que canceló y perdió consume su cupo: el saldo nace en 11, no en 12');
   });
 
+  test('no anticipado: entrena a crédito (saldo activo del ciclo nuevo) y el cobro salda el ciclo que cierra', async () => {
+    // Julio: entrena a crédito y paga al final. El saldo del ciclo que empieza
+    // nace ACTIVO aunque no haya pagado (para poder entrenar), SIN cobro enlazado;
+    // y su cobro del corte cae sobre el ciclo que se CIERRA (las clases que ya
+    // dio), no sobre el nuevo. El flujo anticipado (default) no cambia.
+    const plan = await api.post('/api/plans', { name: 'Mensual no anticipado', billingModel: 'monthly', price: 275, sessionsIncluded: 10 });
+    const c = await api.post('/api/clients', { fullName: 'Paga al final', planId: plan.datos.id, cutoffDay: 28, paymentMode: 'no_anticipado' });
+    // Ciclo 1: el cobro del 28-sep abre el saldo del ciclo que empieza (vence
+    // 28-oct), activo y SIN cobro enlazado.
+    await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 275, dueOn: '2026-09-28' });
+    await api.post('/api/billing/recurring/generate', {});
+    const trasUno = (await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly');
+    const saldoOct = trasUno.find(p => String(p.expires_on).slice(0, 10) === '2026-10-28');
+    assert.ok(saldoOct, 'se abre el saldo del ciclo nuevo (vence 28-oct)');
+    assert.equal(saldoOct.status, 'active', 'nace activo aunque no se haya pagado: entrena a crédito');
+    assert.equal(saldoOct.origin_invoice_id, null, 'nace sin cobro: se cobra en su propio corte');
+
+    // Ciclo 2: el cobro del 28-oct salda ESE ciclo (el que ahora se cierra),
+    // enlazándose al saldo que vence el 28-oct; y abre el siguiente (vence 28-nov).
+    const cobroOct = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 275, dueOn: '2026-10-28' });
+    await api.post('/api/billing/recurring/generate', {});
+    const trasDos = (await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly');
+    const cerrado = trasDos.find(p => String(p.expires_on).slice(0, 10) === '2026-10-28');
+    const nuevo = trasDos.find(p => String(p.expires_on).slice(0, 10) === '2026-11-28');
+    assert.equal(cerrado.origin_invoice_id, cobroOct.datos.id, 'el cobro del corte salda el ciclo que se cierra');
+    assert.equal(cerrado.status, 'active', 'ese saldo sigue activo: el cliente pudo entrenar a crédito');
+    assert.ok(nuevo && nuevo.status === 'active' && nuevo.origin_invoice_id === null, 'se abre el siguiente ciclo, activo y sin cobro');
+  });
+
   test('la mensualidad familiar se abre aunque el dependiente ya tenga cobertura de otro cobro (clases extra)', async () => {
     const pagador = await api.post('/api/clients', { fullName: 'Paga por el grupo', billingModel: 'monthly', standardPrice: 900, cutoffDay: 15 });
     const dep = await api.post('/api/clients', { fullName: 'Dependiente con extra', billingModel: 'monthly', standardPrice: 240, cutoffDay: 15 });

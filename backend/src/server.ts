@@ -318,7 +318,8 @@ async function generateRecurringInvoices(ownerId?: string) {
           (SELECT sp.total_sessions FROM session_packages sp
             WHERE sp.client_id = COALESCE(i.billed_for_client_id, i.client_id) AND sp.kind = 'monthly'
             ORDER BY sp.purchased_on DESC, sp.created_at DESC LIMIT 1)
-        ) AS total_sessions
+        ) AS total_sessions,
+        c.payment_mode
       FROM invoices i
       JOIN clients c ON c.id = COALESCE(i.billed_for_client_id, i.client_id)
       LEFT JOIN service_plans pl ON pl.id = c.plan_id
@@ -347,6 +348,14 @@ async function generateRecurringInvoices(ownerId?: string) {
     ORDER BY entrena, due_on
   `;
   for (const cobro of pendientes) {
+    // El saldo del ciclo que EMPIEZA en el corte se abre para todos: el cliente
+    // entrena aunque aún no haya pagado (a crédito). La diferencia de "no
+    // anticipado" (Julio) es que ese saldo nuevo NACE SIN cobro enlazado —su
+    // cobro llega en su propio corte, más adelante— y el cobro de ahora salda el
+    // ciclo que se CIERRA en el corte (las clases que ya dio), enlazándose al
+    // saldo que vence justo en due_on. El flujo anticipado no cambia: su cobro es
+    // de este saldo nuevo (prepago).
+    const noAnticipado = cobro.payment_mode === 'no_anticipado';
     const [abierto] = await sql`
       INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, origin_invoice_id, status)
       VALUES (${cobro.entrena},
@@ -367,11 +376,25 @@ async function generateRecurringInvoices(ownerId?: string) {
         -- La mensualidad se paga por adelantado y el cobro ya está emitido:
         -- las clases del ciclo son suyas. Si no lo fueran, el cumplimiento
         -- mediría mal a quien sí entrenó, que es peor que cobrar tarde.
-        ${cobro.invoice_id}, 'active')
+        -- No anticipado: el saldo nuevo nace SIN cobro (se cobra en su corte).
+        ${noAnticipado ? null : cobro.invoice_id}, 'active')
       RETURNING id
     `;
     await cobrarClasesYaDadas(sql, abierto.id as string, cobro.entrena as string,
       venceMensualidadDesde(cobro.due_on), Number(cobro.total_sessions));
+    if (noAnticipado) {
+      // El cobro salda el ciclo que se CERRÓ en el corte: se enlaza al saldo que
+      // vence justo en due_on (el que el cliente acaba de terminar a crédito) para
+      // que ESE muestre "pago pendiente". No toca su estado: el saldo sigue activo
+      // y descontando clases —entrena a crédito— hasta que se registre el pago.
+      await sql`UPDATE session_packages SET origin_invoice_id = ${cobro.invoice_id}
+        WHERE id = (
+          SELECT id FROM session_packages
+          WHERE client_id = ${cobro.entrena} AND kind = 'monthly'
+            AND expires_on = ${soloFecha(cobro.due_on)}::date AND origin_invoice_id IS NULL
+          ORDER BY created_at DESC LIMIT 1
+        )`;
+    }
   }
   const reposiciones = await abrirReposiciones(ownerId);
   const descuentos = await aplicarCreditos(invoices as unknown as CobroGenerado[]);
