@@ -1,4 +1,4 @@
-const APP_VERSION = '188';
+const APP_VERSION = '189';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -722,14 +722,6 @@ function renderRoutines() {
 function renderBillingInsights() {
   const chart = document.getElementById('billing-line-chart');
   const ranking = document.getElementById('top-payers-list');
-  // La tarjeta "Cobrado" no debe quedar en $0 falso mientras carga el analytics
-  // o en la vista histórica: si no hay dato del año, se muestra un guion.
-  const collectedEl = document.getElementById('month-collected');
-  const collectedLabel = document.getElementById('collected-period-label');
-  if (billingYear === 'all' || !billingAnalytics || String(billingAnalytics.year) !== billingYear) {
-    if (collectedEl) collectedEl.textContent = '—';
-    if (collectedLabel) collectedLabel.textContent = 'Cobrado';
-  }
   document.getElementById('billing-chart-year').textContent = billingYear === 'all' ? 'Histórico' : billingYear;
   document.getElementById('top-payers-summary').textContent = billingYear === 'all' ? 'Selecciona un año para comparar' : `Pagos recibidos en ${billingYear}`;
   if (billingYear === 'all') {
@@ -760,13 +752,6 @@ function renderBillingInsights() {
   const dots = points.map((point, index) => `<circle cx="${point.x}" cy="${point.y}" r="4"><title>${monthNames[index]}: ${money.format(point.value)}</title></circle>`).join('');
   chart.innerHTML = `<svg viewBox="0 0 720 235" role="img" aria-label="Cobrado mensual de ${billingYear}"><g class="billing-chart-grid">${grid}${labels}</g><polygon class="billing-chart-area" points="${area}"/><polyline class="billing-chart-line" points="${line}"/>${dots}</svg>`;
   document.getElementById('billing-chart-summary').textContent = `${money.format(Number(billingAnalytics.totalBilled || 0))} cobrado en ${billingYear}`;
-  // Tarjeta "Cobrado" con la MISMA fuente que la gráfica: el mes elegido, o el
-  // año completo si no hay mes. Así el mosaico y la gráfica siempre coinciden.
-  const cobradoMes = billingMonth === 'all'
-    ? Number(billingAnalytics.totalBilled || 0)
-    : Number((months.find(m => m.month === Number(billingMonth)) || {}).amount || 0);
-  if (collectedEl) collectedEl.textContent = money.format(cobradoMes);
-  if (collectedLabel) collectedLabel.textContent = billingMonth === 'all' ? `Cobrado en ${billingYear}` : 'Cobrado en el mes';
   const topClients = billingAnalytics.topClients || [];
   const topAmount = Math.max(...topClients.map(client => Number(client.amount || 0)), 1);
   ranking.innerHTML = topClients.length ? topClients.map((client, index) => `<div class="top-payer"><span class="top-payer-rank">${index + 1}</span><div class="top-payer-person"><b>${escapeHtml(client.name)}</b><small>${client.paymentCount} pago${client.paymentCount === 1 ? '' : 's'} confirmado${client.paymentCount === 1 ? '' : 's'}</small><i><span style="width:${Math.max(4, Number(client.amount || 0) / topAmount * 100)}%"></span></i></div><strong>${money.format(Number(client.amount || 0))}</strong></div>`).join('') : '<p class="empty">No hay pagos confirmados en este año.</p>';
@@ -804,6 +789,10 @@ function renderBilling() {
   const visibleInvoices = periodInvoices.slice(0, billingVisibleInvoices);
   const billed = periodInvoices.filter(item => item.status !== 'void').reduce((sum, item) => sum + item.amount, 0);
   const pending = periodInvoices.filter(item => item.status === 'pending').reduce((sum, item) => sum + Number(item.balance ?? item.amount ?? 0), 0);
+  // Cobrado del período = lo pagado de las facturas del período, para que cuadre:
+  // facturado = cobrado + por cobrar. (La gráfica anual mide otra cosa: dinero
+  // recibido por fecha de pago, que puede cruzar meses.)
+  const collected = billed - pending;
   const periodTitle = billingYear === 'all'
     ? 'Histórico completo'
     : billingMonth === 'all'
@@ -814,6 +803,10 @@ function renderBilling() {
   const sourceName = billingSource === 'zoho_invoice' ? 'Zoho Invoice' : billingSource === 'eileen' ? 'Eileen' : 'todos los orígenes';
   document.getElementById('billing-table-summary').textContent = `${periodInvoices.length} factura${periodInvoices.length !== 1 ? 's' : ''} de ${sourceName} · Mostrando ${Math.min(visibleInvoices.length, periodInvoices.length)}`;
   document.getElementById('month-billed').textContent = money.format(billed);
+  const collectedTile = document.getElementById('billing-collected');
+  if (collectedTile) collectedTile.textContent = money.format(collected);
+  const collectedLbl = document.getElementById('collected-period-label');
+  if (collectedLbl) collectedLbl.textContent = billingYear === 'all' ? 'Cobrado en el histórico' : billingMonth === 'all' ? 'Cobrado en el año' : 'Cobrado en el mes';
   document.getElementById('active-memberships').textContent = data.clients.filter(client => client.billingModel === 'monthly' && client.status === 'Activo').length;
   document.getElementById('active-packages').textContent = data.packages.filter(pack => pack.status === 'confirmed' && remainingSessions(pack) > 0).length;
   document.getElementById('billing-pending').textContent = money.format(pending);

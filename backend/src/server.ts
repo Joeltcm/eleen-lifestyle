@@ -4374,6 +4374,35 @@ app.get('/api/push/config', { preHandler: requireAuth }, async () => ({
   publicKey: webPushReady ? config.VAPID_PUBLIC_KEY : null
 }));
 
+// Diagnóstico temporal: pagos recibidos en un mes (por fecha de pago), con la
+// factura a la que se aplican y detección de duplicados, para entender el
+// "cobrado del mes". Quitar tras resolver la duda de facturación.
+app.get('/api/debug/pagos', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const month = ((request.query as Record<string, string>).month || diaEnPanama(new Date()).slice(0, 7));
+  const inicio = `${month}-01`;
+  const pagos = await sql`
+    SELECT p.id, c.full_name, p.amount::numeric AS amount, p.paid_on, p.method, p.source_system,
+      (SELECT string_agg(i.concept, ' | ') FROM payment_allocations pa JOIN invoices i ON i.id = pa.invoice_id WHERE pa.payment_id = p.id) AS facturas
+    FROM invoice_payments p JOIN clients c ON c.id = p.client_id
+    WHERE c.owner_id = ${auth.sub} AND p.paid_on >= ${inicio}::date AND p.paid_on < (${inicio}::date + interval '1 month')
+    ORDER BY c.full_name, p.paid_on`;
+  const conteo = new Map<string, { cliente: string; amount: number; paid_on: string; veces: number }>();
+  for (const p of pagos) {
+    const k = `${p.full_name}|${Number(p.amount)}|${String(p.paid_on).slice(0, 10)}`;
+    const e = conteo.get(k) || { cliente: p.full_name as string, amount: Number(p.amount), paid_on: String(p.paid_on).slice(0, 10), veces: 0 };
+    e.veces += 1; conteo.set(k, e);
+  }
+  return {
+    month,
+    total: pagos.reduce((s, p) => s + Number(p.amount), 0),
+    cantidad: pagos.length,
+    sinFactura: pagos.filter(p => !p.facturas).reduce((s, p) => s + Number(p.amount), 0),
+    posiblesDuplicados: [...conteo.values()].filter(e => e.veces > 1),
+    pagos: pagos.map(p => ({ cliente: p.full_name, monto: Number(p.amount), paid_on: String(p.paid_on).slice(0, 10), metodo: p.method, origen: p.source_system || 'eileen', facturas: p.facturas || '(sin factura ligada)' }))
+  };
+});
+
 
 app.post('/api/push/subscriptions', { preHandler: requireAuth }, async (request, reply) => {
   if (!webPushReady) return reply.code(503).send({ error: 'Las notificaciones push todavía no están configuradas' });
