@@ -4401,9 +4401,96 @@ app.get('/api/push/config', { preHandler: requireAuth }, async () => ({
   publicKey: webPushReady ? config.VAPID_PUBLIC_KEY : null
 }));
 
-// Diagnóstico temporal (solo lectura): por qué no se generó la factura de un
-// cliente. Muestra ficha, membresías, facturas (con billing_period/estado) y
-// coberturas, para confirmar la supresión por cobertura mal etiquetada.
+// TEMPORAL: realinear los saldos mensuales de un cliente a sus ciclos de CORTE.
+// Reasigna las clases consumidas (dadas + canceladas-perdidas del cliente) al
+// paquete del ciclo de corte que les toca y ajusta usadas/vencimiento/etiqueta.
+// Preview por defecto; aplica con ?apply=1. Se quita al terminar.
+app.get('/api/debug/realinear', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const q = ((request.query as Record<string, string>).q || '').trim();
+  const apply = (request.query as Record<string, string>).apply === '1';
+  if (!q) return { error: 'falta ?q=' };
+  const [cli] = await sql`
+    SELECT c.id, c.full_name, c.billing_cutoff_day AS corte,
+      COALESCE(c.monthly_session_target, pl.sessions_included, 8)::int AS plan_sesiones
+    FROM clients c LEFT JOIN service_plans pl ON pl.id = c.plan_id
+    WHERE c.owner_id = ${auth.sub} AND c.full_name ILIKE ${'%' + q + '%'}
+    ORDER BY c.full_name LIMIT 1`;
+  if (!cli) return { error: 'cliente no encontrado' };
+  const corte = Number(cli.corte) || 1;
+
+  // Límites del ciclo de corte actual y anterior, en fecha de Panamá.
+  const hoy = diaEnPanama(new Date());
+  const [hy, hm, hd] = hoy.split('-').map(Number);
+  const diaEnMes = (y: number, m1: number) => new Date(Date.UTC(y, m1, 0)).getUTCDate();
+  const corteDelMes = (y: number, m1: number) => Math.min(corte, diaEnMes(y, m1));
+  const iso = (y: number, m1: number, d: number) => `${y}-${String(m1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  let cy = hy, cm = hm;
+  if (hd < corteDelMes(hy, hm)) { cm = hm - 1; if (cm === 0) { cm = 12; cy = hy - 1; } }
+  const currentStart = iso(cy, cm, corteDelMes(cy, cm));
+  let ny = cy, nm = cm + 1; if (nm === 13) { nm = 1; ny = cy + 1; }
+  const currentEnd = iso(ny, nm, corteDelMes(ny, nm));
+  let py = cy, pm = cm - 1; if (pm === 0) { pm = 12; py = cy - 1; }
+  const prevStart = iso(py, pm, corteDelMes(py, pm));
+
+  const paquetes = await sql`
+    SELECT id, label, status, total_sessions, used_sessions, expires_on
+    FROM session_packages
+    WHERE client_id = ${cli.id} AND kind = 'monthly' AND status <> 'cancelled'
+    ORDER BY expires_on DESC NULLS LAST, purchased_on DESC LIMIT 2`;
+  const pkgActual = paquetes[0];
+  const pkgAnterior = paquetes[1];
+
+  const consumidas = await sql`
+    SELECT id, (starts_at AT TIME ZONE 'America/Panama')::date AS dia, status
+    FROM sessions
+    WHERE client_id = ${cli.id}
+      AND (status = 'completed' OR (status = 'cancelled' AND cancellation_kind = 'not_rescheduled'
+        AND COALESCE(cancelled_by, 'client') = 'client'))
+      AND (starts_at AT TIME ZONE 'America/Panama')::date >= ${prevStart}::date
+      AND (starts_at AT TIME ZONE 'America/Panama')::date < ${currentEnd}::date
+    ORDER BY starts_at`;
+  const enActual = consumidas.filter(s => String(s.dia) >= currentStart && String(s.dia) < currentEnd);
+  const enAnterior = consumidas.filter(s => String(s.dia) >= prevStart && String(s.dia) < currentStart);
+  const detalle = (arr: Array<Record<string, unknown>>) => arr.map(s => ({ dia: String(s.dia), tipo: s.status === 'completed' ? 'dada' : 'cancelada-perdida' }));
+
+  const plan = {
+    cliente: cli.full_name, corte, hoy,
+    cicloActual: `${currentStart} → ${currentEnd}`, cicloAnterior: `${prevStart} → ${currentStart}`,
+    planSesiones: cli.plan_sesiones,
+    pkgActual: pkgActual ? { id: (pkgActual.id as string).slice(0, 8), usadasAntes: pkgActual.used_sessions, venceAntes: String(pkgActual.expires_on).slice(0, 10) } : null,
+    pkgAnterior: pkgAnterior ? { id: (pkgAnterior.id as string).slice(0, 8), usadasAntes: pkgAnterior.used_sessions, venceAntes: String(pkgAnterior.expires_on).slice(0, 10) } : null,
+    quedaActual: { usadas: enActual.length, total: Number(cli.plan_sesiones), vence: currentEnd, clases: detalle(enActual) },
+    quedaAnterior: pkgAnterior ? { usadas: enAnterior.length, total: enAnterior.length, vence: currentStart, clases: detalle(enAnterior) } : null
+  };
+  if (!apply) return { modo: 'PREVIEW (agrega ?apply=1 para aplicar)', ...plan };
+  if (!pkgActual) return { error: 'no hay paquete mensual para realinear' };
+
+  await sql.begin(async tx => {
+    if (enActual.length) {
+      await tx`UPDATE sessions SET package_id = ${pkgActual.id}, package_debited = true, debited_group_id = ${cli.id}, updated_at = now()
+        WHERE id IN ${tx(enActual.map(s => s.id as string))}`;
+    }
+    await tx`UPDATE session_packages SET used_sessions = ${enActual.length}, total_sessions = ${cli.plan_sesiones},
+      expires_on = ${currentEnd}::date, label = ${'Mensualidad · ' + rangoDelCiclo(currentStart, currentEnd)},
+      status = CASE WHEN ${enActual.length}::int >= ${Number(cli.plan_sesiones)}::int THEN 'exhausted' ELSE 'active' END
+      WHERE id = ${pkgActual.id}`;
+    if (pkgAnterior) {
+      if (enAnterior.length) {
+        await tx`UPDATE sessions SET package_id = ${pkgAnterior.id}, package_debited = true, debited_group_id = ${cli.id}, updated_at = now()
+          WHERE id IN ${tx(enAnterior.map(s => s.id as string))}`;
+      }
+      // El ciclo anterior ya cerró: total = usadas para no dejar "disponibles"
+      // falsas (una mensualidad vencida con saldo no se auto-expira).
+      await tx`UPDATE session_packages SET used_sessions = ${enAnterior.length}, total_sessions = ${enAnterior.length},
+        expires_on = ${currentStart}::date, label = ${'Mensualidad · ' + rangoDelCiclo(prevStart, currentStart)},
+        status = 'exhausted'
+        WHERE id = ${pkgAnterior.id}`;
+    }
+  });
+  return { modo: 'APLICADO', ...plan };
+});
+
 app.post('/api/push/subscriptions', { preHandler: requireAuth }, async (request, reply) => {
   if (!webPushReady) return reply.code(503).send({ error: 'Las notificaciones push todavía no están configuradas' });
   const auth = request.user as AuthUser; const input = pushSubscriptionSchema.parse(request.body);
