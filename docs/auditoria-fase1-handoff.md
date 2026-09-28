@@ -5,7 +5,11 @@ Commits:
 - `9f3ff99` — unificar el ciclo de corte en `cicloDelCorte` + estabilizar el harness.
 - `9a40730` — prueba explícita de las 4 rutas + limpieza de comentarios.
 - `f162274` — documentar el alcance real de la rama y preparar la revisión acumulada.
-- pendiente de commit — correcciones de integridad, concurrencia, saldos vencidos, estados de sesión, modalidad de pago y débito explícito de clases perdidas descritas abajo.
+- `102acc3` — correcciones de integridad, concurrencia, saldos vencidos, estados de sesión y modalidad de pago.
+- `f4a45f7` — débito de clases perdidas desde el saldo contratado + aviso visible del origen.
+- `a060e8e` — eliminar la creación de saldos `makeup` nuevos; las reprogramaciones usan el saldo normal del corte.
+
+Estado para revisión: **listo para revisión funcional de Claude; no mergear todavía**.
 
 ## Cómo reproducir (base limpia)
 El harness crea una BD Postgres temporal por corrida (createdb → migraciones desde cero → servidor real como subproceso), así que cada ejecución es base limpia.
@@ -17,7 +21,7 @@ npm run check
 npm run build
 PGHOST=localhost PGUSER=<user> PGPASSWORD= PGPORT=5432 npm test
 ```
-Resultado de la rama base verificado: `# tests 188 / # pass 188 / # fail 0`, reproducible sin importar la hora del sistema. Tras sustituir las pruebas de reposiciones automáticas por las regresiones del nuevo flujo de saldo, la suite actual queda en `# tests 185 / # pass 185 / # fail 0`.
+Resultado actual verificado el 28-09-2026: `# tests 185 / # pass 185 / # fail 0`, reproducible sin importar la hora del sistema.
 
 ## Qué hace la Fase 1 (aislada, aditiva)
 
@@ -78,6 +82,39 @@ Esto significa que un PR de esta rama contra `main` debe revisarse como un PR ac
   etiqueta y las sesiones restantes. Agenda, notificaciones, control de paquetes y portal
   muestran de dónde salió el descuento.
 
+## Regla funcional consolidada para revisar con Claude
+
+La fuente de verdad es el saldo normal generado/contratado para el ciclo de corte del cliente:
+
+1. Una clase completada descuenta una sesión del saldo que cubre la fecha de la clase.
+2. Una clase marcada `no_show` se pierde y descuenta ese mismo saldo; no crea una clase ni un
+   saldo adicional.
+3. Una cancelación del cliente sin reprogramación descuenta ese saldo.
+4. Una cancelación declarada como reprogramada no descuenta la sesión original. La nueva cita,
+   cuando se agenda y se completa, descuenta el saldo normal correspondiente a su propia fecha.
+5. Ya no existe ninguna ruta activa que inserte un nuevo `session_packages.kind='makeup'`.
+   Las filas `makeup` antiguas se conservan como histórico, pero no se usan para nuevas citas.
+6. La API devuelve el paquete, etiqueta, uso y saldo restante en `billing`; la UI lo muestra al
+   marcar cumplimiento y en la agenda/control de paquetes.
+
+### Pruebas funcionales que Claude debe confirmar
+
+- `no_show` con saldo mensual activo: baja `used_sessions` en 1 y devuelve `billing.action='debited'`.
+- Reprogramación del cliente: no crea `kind='makeup'`; la nueva sesión descuenta del paquete
+  mensual/paquete contratado.
+- Reprogramación de la entrenadora: tampoco crea un saldo separado; la nueva sesión usa el saldo
+  normal. Un crédito monetario sigue siendo una opción distinta.
+- Saldo aún no abierto al marcar `no_show`: la reconciliación posterior recoge la sesión.
+- Volver de cumplida/no cumplida a `scheduled`: devuelve el débito al saldo.
+- No quedan inserciones nuevas de `kind='makeup'` en `backend/src`.
+
+### Punto abierto que debe decidir negocio/Claude
+
+La implementación no convierte automáticamente toda sesión pasada y aún `scheduled` en `no_show`
+al llegar el corte. La pérdida se registra cuando la entrenadora marca `no_show` o cuando la
+reconciliación encuentra una sesión ya marcada como `no_show`. Confirmar si el negocio quiere un
+worker adicional que cierre automáticamente las sesiones no marcadas al llegar el corte.
+
 ## Pendientes para la revisión de mañana
 
 - Revisar con Claude la matriz completa de `payment_mode` y decidir si se requieren casos
@@ -85,6 +122,8 @@ Esto significa que un PR de esta rama contra `main` debe revisarse como un PR ac
 - Revisar el worker de arranque y los cortes 1–4, que no quedaron alterados por esta rama.
 - Confirmar con negocio qué hacer con saldos `makeup` históricos ya creados por la lógica anterior;
   esta corrección no los borra ni los usa para nuevas sesiones.
+- Confirmar la decisión sobre sesiones que lleguen al corte todavía en estado `scheduled`, descrita
+  en el punto abierto anterior.
 - Los hallazgos de seguridad de la auditoría inicial (reset con `SETUP_TOKEN`, revocación
   de JWT, datos de salud a terceros y XSS en el grid) siguen fuera de esta rama y requieren
   una auditoría/revisión separada antes de considerar el sistema completamente cerrado.
