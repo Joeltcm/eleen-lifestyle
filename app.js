@@ -1,4 +1,4 @@
-const APP_VERSION = '193';
+const APP_VERSION = '194';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -34,7 +34,9 @@ let data = { clients: [], invoices: [], packages: [], sessions: [], routines: []
 let portalData = null;
 let mostrarHistorialPaquetes = false;
 let paquetesMes = '';
-let soloCorteActual = false;
+// El control de paquetes abre en el ciclo vigente: es el saldo que Eileen
+// necesita revisar primero. El historial sigue disponible con el botón.
+let soloCorteActual = true;
 let cumplimientoPorCliente = {};
 async function cargarCumplimientoPaquetes() {
   if (!paquetesMes) { cumplimientoPorCliente = {}; renderBilling(); return; }
@@ -818,6 +820,7 @@ function renderBilling() {
   document.getElementById('billing-month').value = billingMonth;
   document.getElementById('billing-month').disabled = billingYear === 'all';
   document.getElementById('billing-source').value = billingSource;
+  document.getElementById('toggle-corte-actual')?.classList.toggle('active-filter', soloCorteActual);
   const billingBack = document.getElementById('billing-back-from-zoho');
   if (billingBack) billingBack.hidden = billingSource !== 'zoho_invoice';
   const periodInvoices = billingPeriodInvoices();
