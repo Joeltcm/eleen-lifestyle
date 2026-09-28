@@ -2096,6 +2096,13 @@ async function extenderRecurrencias(ownerId?: string, forzar = false) {
         SELECT 1 FROM sessions s
         WHERE s.recurrence_id = ${regla.id} AND s.recurrence_on = candidato.dia
       )
+      -- Eliminar físicamente una sesión también es una decisión sobre ese día.
+      -- La excepción sobrevive al borrado de la fila y evita que el proceso la
+      -- resucite en la siguiente extensión.
+      AND NOT EXISTS (
+        SELECT 1 FROM session_recurrence_exceptions e
+        WHERE e.recurrence_id = ${regla.id} AND e.recurrence_on = candidato.dia
+      )
       -- Y sigue sin pisarse con lo que ya haya a esa misma hora, venga de
       -- donde venga: dos clases a la vez para la misma persona no es un
       -- horario, es un choque.
@@ -2625,7 +2632,7 @@ app.delete('/api/sessions/:id/permanent', { preHandler: requireStaff }, async (r
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
   const [sesion] = await sql`
-    SELECT s.id, s.status FROM sessions s JOIN clients c ON c.id = s.client_id
+    SELECT s.id, s.status, s.recurrence_id, s.recurrence_on FROM sessions s JOIN clients c ON c.id = s.client_id
     WHERE s.id = ${id} AND c.owner_id = ${auth.sub}
   `;
   if (!sesion) return reply.code(404).send({ error: 'Sesión no encontrada' });
@@ -2641,7 +2648,22 @@ app.delete('/api/sessions/:id/permanent', { preHandler: requireStaff }, async (r
   // siempre, apuntando a una sesión que ya no existe.
   try { await removeSessionFromGoogle(auth.sub, id); }
   catch (error) { app.log.warn({ err: error, sessionId: id }, 'Sesión borrada pero el evento sigue en Google Calendar'); }
-  const [borrada] = await sql`DELETE FROM sessions WHERE id = ${id} RETURNING id, starts_at`;
+  const [borrada] = await sql.begin(async transaction => {
+    const [actual] = await transaction`
+      SELECT recurrence_id, recurrence_on FROM sessions WHERE id = ${id} FOR UPDATE
+    `;
+    if (!actual) return [];
+    if (actual.recurrence_id && actual.recurrence_on) {
+      await transaction`
+        INSERT INTO session_recurrence_exceptions (recurrence_id, recurrence_on)
+        SELECT recurrence_id, recurrence_on
+        FROM sessions
+        WHERE id = ${id}
+        ON CONFLICT (recurrence_id, recurrence_on) DO NOTHING
+      `;
+    }
+    return transaction`DELETE FROM sessions WHERE id = ${id} RETURNING id, starts_at`;
+  });
   return { deleted: true, session: borrada };
 });
 

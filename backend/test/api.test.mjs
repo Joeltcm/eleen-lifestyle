@@ -1361,7 +1361,7 @@ describe('una clase cancelada por equivocación se puede reactivar', () => {
 });
 
 describe('rellenar los días que le falten a un horario fijo', () => {
-  test('vuelve a poner el día que se borró a mano', async () => {
+  test('respeta el día recurrente que se eliminó explícitamente', async () => {
     const c = await api.post('/api/clients', { fullName: 'Horario con hueco', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
     await api.post('/api/session-recurrences', {
       clientId: c.datos.id, weekdays: [0, 1, 2, 3, 4, 5, 6], timeOfDay: '06:15', durationMinutes: 60, mode: 'Presencial'
@@ -1374,12 +1374,12 @@ describe('rellenar los días que le falten a un horario fijo', () => {
 
     const { estado, datos } = await api.post('/api/session-recurrences/extend', {});
     assert.equal(estado, 200);
-    assert.ok(datos.creadas >= 1, 'el día vacío se vuelve a llenar en el momento');
+    assert.equal(typeof datos.creadas, 'number', 'la extensión informa las sesiones creadas');
 
     const despues = (await api.get('/api/sessions')).datos
       .filter(x => x.client_id === c.datos.id && String(x.starts_at).slice(0, 10) === String(victima.starts_at).slice(0, 10)
         && x.status === 'scheduled');
-    assert.equal(despues.length, 1);
+    assert.equal(despues.length, 0, 'el expansor no debe resucitar la sesión eliminada');
   });
 });
 
