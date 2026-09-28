@@ -5,6 +5,20 @@ import { CREDENCIALES, SETUP_TOKEN, cliente, levantar } from './harness.mjs';
 let servidor;
 let api;
 
+// Fechas de NEGOCIO en horario de Panamá. La BD corre en America/Panama, así
+// que "hoy"/"este mes" deben construirse en esa zona: hacerlo con toISOString()
+// (UTC) o .getDate() (TZ de la máquina) desalinea las pruebas de current_date
+// cerca de medianoche y las volvía dependientes de la hora del sistema. Los
+// instantes de sesión (starts_at) sí pueden seguir en toISOString(): son un
+// momento, no una fecha de calendario, y el servidor los convierte a Panamá.
+const partesPanama = (d = new Date()) => {
+  const [a, m, dia] = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Panama', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d).split('-');
+  return { iso: `${a}-${m}-${dia}`, y: +a, m: +m, d: +dia, ym: `${a}-${m}` };
+};
+const hoyPa = () => partesPanama().iso;
+const enDiasPa = n => partesPanama(new Date(Date.now() + n * 24 * 3600_000));
+const mesActualPa = () => partesPanama().ym + '-01';
+
 before(async () => {
   servidor = await levantar();
   api = cliente(servidor.base);
@@ -336,7 +350,7 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     const c = await api.post('/api/clients', { fullName: 'Ajena a la pareja', planId: plan.datos.id, cutoffDay: 28 });
     eduardo = a.datos.id; beatris = b.datos.id; ajena = c.datos.id;
     await api.patch(`/api/clients/${beatris}`, { fullName: 'La cubierta', billingResponsibleClientId: eduardo });
-    const f = await api.post('/api/invoices', { clientId: eduardo, concept: 'Mensualidad', amount: 350, dueOn: new Date().toISOString().slice(0, 10) });
+    const f = await api.post('/api/invoices', { clientId: eduardo, concept: 'Mensualidad', amount: 350, dueOn: hoyPa() });
     factura = f.datos.id;
   });
 
@@ -424,10 +438,10 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     // una cobertura etiquetada "septiembre" (punto medio del ciclo) que suprimía
     // el cobro NUEVO de septiembre —otro ciclo—. La supresión debe mirar el mes
     // del COBRO ORIGEN, no la etiqueta.
-    const enVentana = new Date(Date.now() + 3 * 24 * 3600_000); // corte dentro de los 7 días
-    const corte = enVentana.getDate();
-    const periodoNuevo = enVentana.toISOString().slice(0, 7); // el mes que se va a generar
-    const dueAntes = new Date(enVentana.getTime() - 30 * 24 * 3600_000).toISOString().slice(0, 10); // cobro del ciclo previo
+    const ventana = enDiasPa(3); // corte dentro de los 7 días, en horario de Panamá
+    const corte = ventana.d;
+    const periodoNuevo = ventana.ym; // el mes que se va a generar
+    const dueAntes = enDiasPa(3 - 30).iso; // cobro del ciclo previo (30 días antes)
     const plan = await api.post('/api/plans', { name: 'Corte tardío mislabel', billingModel: 'monthly', price: 240, sessionsIncluded: 8 });
     const c = await api.post('/api/clients', { fullName: 'Cubierto ciclo anterior', planId: plan.datos.id, cutoffDay: corte });
     const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 240, dueOn: dueAntes });
@@ -449,7 +463,7 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     // nace en 12 y esa clase no se le descuenta a nadie nunca.
     const plan = await api.post('/api/plans', { name: 'Mensual con clase previa', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
     const c = await api.post('/api/clients', { fullName: 'Entrenó antes del saldo', planId: plan.datos.id, cutoffDay: 28 });
-    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: new Date().toISOString().slice(0, 10) });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: hoyPa() });
 
     const s = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: [new Date(Date.now() - 3600_000).toISOString()], durationMinutes: 60, mode: 'Presencial' });
     await api.patch(`/api/sessions/${s.datos.sesiones[0].id}/compliance`, { completed: true, completionPercent: 100 });
@@ -459,7 +473,7 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     // El mes en curso, no el siguiente: la clase de hoy pertenece a este ciclo
     // y con el mes siguiente quedaría fuera de la ventana según el día del mes
     // en que corra la prueba.
-    const mesEnCurso = new Date().toISOString().slice(0, 8) + '01';
+    const mesEnCurso = mesActualPa();
     await api.post(`/api/invoices/${f.datos.id}/coverage`, {
       billingPeriod: mesEnCurso,
       entries: [{ clientId: c.datos.id, amount: 175, sessions: 12 }]
@@ -475,7 +489,7 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     // nacería consumido por clases de meses que ya se cobraron y se cerraron.
     const plan = await api.post('/api/plans', { name: 'Mensual con clase vieja', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
     const c = await api.post('/api/clients', { fullName: 'Entrenó hace meses', planId: plan.datos.id, cutoffDay: 28 });
-    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: new Date().toISOString().slice(0, 10) });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: hoyPa() });
     const haceTresMeses = new Date(); haceTresMeses.setMonth(haceTresMeses.getMonth() - 3);
     const s = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: [haceTresMeses.toISOString()], durationMinutes: 60, mode: 'Presencial' });
     await api.patch(`/api/sessions/${s.datos.sesiones[0].id}/compliance`, { completed: true, completionPercent: 100 });
@@ -504,8 +518,8 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     assert.equal(antes.length, 1, 'el plan ya le abrió su único saldo del ciclo');
     assert.ok(!antes[0].origin_invoice_id, 'todavía sin cobro de origen');
 
-    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad grupo', amount: 175, dueOn: new Date().toISOString().slice(0, 10) });
-    const mesEnCurso = new Date().toISOString().slice(0, 8) + '01';
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad grupo', amount: 175, dueOn: hoyPa() });
+    const mesEnCurso = mesActualPa();
     await api.post(`/api/invoices/${f.datos.id}/coverage`, {
       billingPeriod: mesEnCurso,
       entries: [{ clientId: c.datos.id, amount: 175, sessions: 12 }]
@@ -547,6 +561,44 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     assert.match(saldo.label, /15-09-2026 – 15-10-2026/, 'la etiqueta muestra el ciclo del corte, no la fecha de pago');
   });
 
+  // Criterio de cierre (auditoría Codex): worker y paquete manual deben producir
+  // EXACTAMENTE el mismo rango, clampado al último día del mes, para cortes de
+  // fin de mes. Antes el worker usaba venceMensualidadDesde (suma un mes sin
+  // clampar) y desbordaba: corte 31 en enero vencía el 3 de marzo, no el 28 de
+  // febrero. 2027 no es bisiesto (febrero = 28), fechas futuras para que el
+  // worker las tome (due_on >= current_date).
+  const casosDeCorte = [
+    { corte: 15, due: '2027-01-15', vence: '2027-02-15' },
+    { corte: 28, due: '2027-01-28', vence: '2027-02-28' },
+    { corte: 30, due: '2027-01-30', vence: '2027-02-28' }, // febrero no tiene 30
+    { corte: 31, due: '2027-01-31', vence: '2027-02-28' }, // ni 31
+    { corte: 31, due: '2027-02-28', vence: '2027-03-31' }, // clampado atrás, marzo restaura el 31
+    { corte: 28, due: '2027-12-28', vence: '2028-01-28' }, // cambio de año
+  ];
+  for (const { corte, due, vence } of casosDeCorte) {
+    test(`ciclo de corte ${corte} (due ${due}): worker y paquete manual vencen ${vence}`, async () => {
+      // Ruta paquete manual (POST /packages)
+      const cm = await api.post('/api/clients', { fullName: `Manual ${corte} ${due}`, billingModel: 'monthly', standardPrice: 200, cutoffDay: corte });
+      const manual = await api.post('/api/packages', { clientId: cm.datos.id, totalSessions: 8, amount: 200, kind: 'monthly', dueOn: due });
+      const pm = (await api.get('/api/packages')).datos.find(p => p.id === manual.datos.id);
+      assert.equal(String(pm.expires_on).slice(0, 10), vence, `paquete manual vence ${vence}`);
+
+      // Ruta worker (cobro con due futuro en el corte). Necesita plan para que
+      // la renovación sepa cuántas sesiones abrir (total_sessions > 0).
+      const plan = await api.post('/api/plans', { name: `Plan ${corte} ${due}`, billingModel: 'monthly', price: 200, sessionsIncluded: 8 });
+      const cw = await api.post('/api/clients', { fullName: `Worker ${corte} ${due}`, planId: plan.datos.id, cutoffDay: corte });
+      const f = await api.post('/api/invoices', { clientId: cw.datos.id, concept: 'Mensualidad', amount: 200, dueOn: due });
+      // Si el corte cae en la ventana de hoy, el generador emite además el cobro
+      // del ciclo actual; DISTINCT ON procesa uno por corrida, así que se corre
+      // dos veces para que el cobro futuro también abra su saldo.
+      await api.post('/api/billing/recurring/generate', {});
+      await api.post('/api/billing/recurring/generate', {});
+      const pkgsCw = (await api.get('/api/packages')).datos.filter(p => p.client_id === cw.datos.id && p.kind === 'monthly');
+      const pw = pkgsCw.find(p => String(p.expires_on).slice(0, 10) === vence);
+      assert.ok(pw, `el worker abrió el saldo del ciclo futuro (vence ${vence}). pkgs=${JSON.stringify(pkgsCw.map(p => String(p.expires_on).slice(0, 10)))}`);
+    });
+  }
+
   test('la mensualidad automática abre el saldo anclado al corte, no al 1° de mes', async () => {
     // Antes el saldo automático vencía el 1° (mes calendario). Para un corte 15
     // debe correr 15→15: era lo que dejaba el paquete "actual" desalineado y con
@@ -569,7 +621,7 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     // la reconciliación la descuenta al abrir el saldo, igual que una clase dada.
     const plan = await api.post('/api/plans', { name: 'Mensual con cancelada', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
     const c = await api.post('/api/clients', { fullName: 'Canceló antes del saldo', planId: plan.datos.id, cutoffDay: 28 });
-    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: new Date().toISOString().slice(0, 10) });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: hoyPa() });
     // Una clase de esta mañana que el cliente canceló sin reagendar, cuando aún
     // no había saldo del que descontar.
     const s = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: [new Date(Date.now() - 3600_000).toISOString()], durationMinutes: 60, mode: 'Presencial' });
@@ -577,7 +629,7 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     const sinSaldo = (await api.get('/api/clients')).datos.find(x => x.id === c.datos.id);
     assert.equal(Number(sinSaldo.available_sessions), 0, 'todavía no hay saldo del que descontar');
 
-    const mesEnCurso = new Date().toISOString().slice(0, 8) + '01';
+    const mesEnCurso = mesActualPa();
     await api.post(`/api/invoices/${f.datos.id}/coverage`, {
       billingPeriod: mesEnCurso,
       entries: [{ clientId: c.datos.id, amount: 175, sessions: 12 }]
@@ -1615,7 +1667,7 @@ describe('lo que el portal dice que se debe', () => {
     // su mensualidad sin pagar. Se comprueba entrando al portal de verdad, que
     // es donde estaba el fallo.
     const c = await api.post('/api/clients', { fullName: 'Debe la mensualidad', billingModel: 'monthly', standardPrice: 175, cutoffDay: 1, email: 'debe@prueba.test' });
-    await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: new Date().toISOString().slice(0, 10) });
+    await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: hoyPa() });
 
     const enlace = await api.post(`/api/clients/${c.datos.id}/access-link`, {});
     const token = String(enlace.datos.url).split('acceso=')[1];

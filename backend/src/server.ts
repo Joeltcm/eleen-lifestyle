@@ -319,7 +319,7 @@ async function generateRecurringInvoices(ownerId?: string) {
             WHERE sp.client_id = COALESCE(i.billed_for_client_id, i.client_id) AND sp.kind = 'monthly'
             ORDER BY sp.purchased_on DESC, sp.created_at DESC LIMIT 1)
         ) AS total_sessions,
-        c.payment_mode
+        c.payment_mode, c.billing_cutoff_day AS corte
       FROM invoices i
       JOIN clients c ON c.id = COALESCE(i.billed_for_client_id, i.client_id)
       LEFT JOIN service_plans pl ON pl.id = c.plan_id
@@ -356,16 +356,18 @@ async function generateRecurringInvoices(ownerId?: string) {
     // saldo que vence justo en due_on. El flujo anticipado no cambia: su cobro es
     // de este saldo nuevo (prepago).
     const noAnticipado = cobro.payment_mode === 'no_anticipado';
+    // El ciclo del saldo se ancla al DÍA DE CORTE del cliente con la MISMA
+    // función que las demás rutas (cicloDelCorte, que clampa al último día del
+    // mes). Antes se usaba venceMensualidadDesde(due_on), que suma un mes sin
+    // clampar y desbordaba en cortes 30/31 hacia meses cortos (Feb): un corte
+    // 31 vencía el 3 de marzo en vez del 28 de febrero, y no coincidía con la
+    // asignación de plan, la cobertura ni la confirmación de pago.
+    const ciclo = cicloDelCorte(cobro.due_on as Date, Number(cobro.corte) || 1);
     const [abierto] = await sql`
       INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, origin_invoice_id, status)
       VALUES (${cobro.entrena},
-        -- El ciclo del saldo se ancla al DÍA DE CORTE del cliente (due_on del
-        -- cobro), no al 1° de mes. Con corte 15 el saldo corre 15→15, no 01→01,
-        -- que era lo que desalineaba el descuento de clases (caso Michelle).
-        ${'Mensualidad · ' + rangoDelCiclo(
-          mediodiaEnPanama(cobro.due_on as Date),
-          mediodiaEnPanama(venceMensualidadDesde(cobro.due_on as Date)))},
-        ${cobro.total_sessions}, ${cobro.amount}, ${venceMensualidadDesde(cobro.due_on)}::date, 'monthly', current_date,
+        ${'Mensualidad · ' + rangoDelCiclo(ciclo.inicio, ciclo.vence)},
+        ${cobro.total_sessions}, ${cobro.amount}, ${ciclo.vence}::date, 'monthly', current_date,
         -- Nace activo, y es la diferencia entre servir y no servir. Un saldo
         -- 'pending' no suma en las sesiones disponibles ni se descuenta al
         -- marcar la clase: el cliente entrenaba y su saldo no se movía. Se
@@ -381,7 +383,7 @@ async function generateRecurringInvoices(ownerId?: string) {
       RETURNING id
     `;
     await cobrarClasesYaDadas(sql, abierto.id as string, cobro.entrena as string,
-      venceMensualidadDesde(cobro.due_on), Number(cobro.total_sessions));
+      ciclo.vence, Number(cobro.total_sessions));
     if (noAnticipado) {
       // El cobro salda el ciclo que se CERRÓ en el corte: se enlaza al saldo que
       // vence justo en due_on (el que el cliente acaba de terminar a crédito) para
@@ -1057,12 +1059,6 @@ function proximoCorte(diaDeCorte: number) {
   return corte.toISOString().slice(0, 10);
 }
 
-// El día de corte determina cuándo se genera el cobro, no la duración del saldo.
-function venceMensualidadDesde(periodo: Date | string): string {
-  const inicio = mediodiaEnPanama(periodo);
-  return new Date(Date.UTC(inicio.getUTCFullYear(), inicio.getUTCMonth() + 1, inicio.getUTCDate())).toISOString().slice(0, 10);
-}
-
 // Un paquete de clases vive 6 semanas (42 días) desde el pago: ese es el tope de
 // uso, hasta donde se pueden seguir descontando clases si aún quedan. A las 4
 // semanas (28 días) sólo se marca "renovación pendiente" —no corta el uso—; el
@@ -1125,11 +1121,15 @@ app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) =
   // esto, purchased_on salía de current_date (Postgres) y el vencimiento de
   // new Date() (Node, en UTC), y cerca de medianoche diferían un día.
   const refDia = input.dueOn || diaEnPanama(new Date());
+  // La mensualidad usa la MISMA función de ciclo que el worker, la cobertura y
+  // la asignación de plan (cicloDelCorte, que clampa el corte al último día del
+  // mes). Antes usaba venceMensualidadDesde, que desbordaba en cortes 30/31.
+  const cicloMensual = esCobroMensual ? cicloDelCorte(refDia, Number(client.billing_cutoff_day) || 1) : null;
   const vence = input.expiresOn
     ? input.expiresOn
-    : esCobroMensual ? venceMensualidadDesde(refDia) : vencePaqueteDesde(refDia);
+    : esCobroMensual ? cicloMensual!.vence : vencePaqueteDesde(refDia);
   const etiqueta = esCobroMensual
-    ? `Mensualidad · ${rangoDelCiclo(refDia, vence || new Date())}`
+    ? `Mensualidad · ${rangoDelCiclo(cicloMensual!.inicio, vence || new Date())}`
     : `Paquete ${input.totalSessions} sesiones`;
 
   const pack = await sql.begin(async transaction => {

@@ -40,6 +40,11 @@ export async function levantar() {
 
   const entorno = {
     ...process.env,
+    // El negocio corre en horario de Panamá y la BD fija ese timezone por
+    // conexión (src/db.ts). Se fija también el TZ del proceso del servidor para
+    // que cualquier fecha del lado de Node quede en la misma zona, y las
+    // pruebas sean reproducibles sin importar la hora UTC del sistema.
+    TZ: 'America/Panama',
     DATABASE_URL: url,
     JWT_SECRET: 'secreto-de-pruebas-con-mas-de-treinta-y-dos-caracteres',
     SETUP_TOKEN,
