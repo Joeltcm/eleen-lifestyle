@@ -773,6 +773,57 @@ describe('informe de asistencia flexible', () => {
   });
 });
 
+describe('integridad de saldos y concurrencia', () => {
+  test('dos generaciones simultáneas abren un solo saldo y no descuentan dos veces', async () => {
+    const plan = await api.post('/api/plans', { name: 'Concurrencia mensual', billingModel: 'monthly', price: 180, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Worker concurrente', planId: plan.datos.id, cutoffDay: 15 });
+    await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 180, dueOn: hoyPa() });
+    const lote = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: [new Date(Date.now() - 3600_000).toISOString()], durationMinutes: 60, mode: 'Presencial' });
+    await api.patch(`/api/sessions/${lote.datos.sesiones[0].id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+
+    const resultados = await Promise.all([
+      api.post('/api/billing/recurring/generate', {}),
+      api.post('/api/billing/recurring/generate', {})
+    ]);
+    assert.deepEqual(resultados.map(r => r.estado).sort(), [200, 200], 'las dos corridas terminan correctamente');
+    const saldos = (await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly');
+    assert.equal(saldos.length, 1, 'dos workers no crean dos saldos del mismo ciclo');
+    assert.equal(Number(saldos[0].used_sessions), 1, 'la sesión no se descuenta dos veces');
+  });
+
+  test('un saldo mensual vencido no aparece como disponible', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Saldo vencido visible', billingModel: 'monthly', standardPrice: 180, cutoffDay: 15 });
+    const p = await api.post('/api/packages', { clientId: c.datos.id, totalSessions: 8, amount: 180, kind: 'monthly', expiresOn: enDiasPa(-2).iso });
+    await api.patch(`/api/packages/${p.datos.id}`, { markPaid: true });
+    const cliente = (await api.get('/api/clients')).datos.find(row => row.id === c.datos.id);
+    assert.equal(Number(cliente.available_sessions), 0, 'un saldo mensual vencido no suma disponibles');
+    const diario = (await api.get(`/api/trainings/daily?date=${hoyPa()}`)).datos.find(row => row.client_id === c.datos.id);
+    assert.equal(Number(diario.available_sessions), 0, 'el registro diario usa la misma regla');
+    const saldo = (await api.get('/api/packages')).datos.find(row => row.id === p.datos.id);
+    assert.equal(saldo.vencido_con_saldo, true, 'el saldo sigue visible como vencido para poder gestionarlo');
+  });
+});
+
+describe('modalidad de pago y cobros pendientes', () => {
+  test('una mensualidad anticipada pendiente no abre un paquete activo manualmente', async () => {
+    const plan = await api.post('/api/plans', { name: 'Anticipado pendiente', billingModel: 'monthly', price: 180, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Anticipado sin pagar', planId: plan.datos.id, cutoffDay: 15, paymentMode: 'anticipado' });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 180, dueOn: hoyPa() });
+    const respuesta = await api.post(`/api/invoices/${f.datos.id}/package`, { totalSessions: 8, expiresOn: enDiasPa(21).iso });
+    assert.equal(respuesta.estado, 409, 'el saldo anticipado exige confirmar el pago');
+    assert.equal((await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id).length, 0, 'no deja un saldo activo colgado');
+  });
+
+  test('la modalidad se conserva al crear y cambiar el cliente', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Modalidad editable', billingModel: 'monthly', standardPrice: 180, cutoffDay: 15 });
+    let row = (await api.get('/api/clients')).datos.find(item => item.id === c.datos.id);
+    assert.equal(row.payment_mode, 'anticipado');
+    await api.patch(`/api/clients/${c.datos.id}`, { fullName: 'Modalidad editable', paymentMode: 'no_anticipado' });
+    row = (await api.get('/api/clients')).datos.find(item => item.id === c.datos.id);
+    assert.equal(row.payment_mode, 'no_anticipado');
+  });
+});
+
 describe('el saldo dice de qué cobro salió', () => {
   test('POST /api/packages enlaza el saldo con su cobro, visible en Paquetes y en el expediente', async () => {
     const c = await api.post('/api/clients', { fullName: 'Origen del saldo', billingModel: 'package', standardPrice: 200, cutoffDay: 15 });
@@ -1003,6 +1054,17 @@ describe('el resultado de una sesión se dice, no se deduce', () => {
     // El registro diario y el portal siguen mandando 'completed'.
     const { datos } = await api.patch(`/api/sessions/${sesion.id}/compliance`, { completed: true, completionPercent: 100 });
     assert.equal(datos.status, 'completed');
+  });
+});
+
+describe('transiciones de estado de sesiones', () => {
+  test('una sesión cancelada no puede marcarse como realizada sin reactivarla', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Transición inválida', billingModel: 'monthly', standardPrice: 120, cutoffDay: 1 });
+    const lote = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: [new Date(Date.now() + 24 * 3600_000).toISOString()], durationMinutes: 60, mode: 'Presencial' });
+    const id = lote.datos.sesiones[0].id;
+    assert.equal((await api.delete(`/api/sessions/${id}?rescheduled=false`)).estado, 200);
+    const respuesta = await api.patch(`/api/sessions/${id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    assert.equal(respuesta.estado, 409, 'la transición debe pasar por reactivar');
   });
 });
 
@@ -1412,10 +1474,8 @@ describe('reposiciones: dos clases y una semana', () => {
 
   test('son extra, no salen de las del mes', async () => {
     const cliente = (await api.get('/api/clients')).datos.find(c => c.id === clientId);
-    const mensual = (await saldos()).find(p => p.kind === 'monthly');
-    const quedaban = Number(mensual.total_sessions) - Number(mensual.used_sessions);
-    assert.equal(Number(cliente.available_sessions), quedaban + 2,
-      'si se comieran dos de las del mes, cruzarlas no serviría de nada');
+    assert.equal(Number(cliente.available_sessions), 2,
+      'las reposiciones son extra; el saldo mensual vencido no puede volver a estar disponible');
   });
 
   test('la clase que da se descuenta de la reposición, que vence antes', async () => {

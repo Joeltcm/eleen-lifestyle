@@ -70,6 +70,19 @@ async function requireStaff(request: FastifyRequest) {
   return user;
 }
 
+// Todas las rutas que pueden abrir o consumir un saldo mensual toman el mismo
+// lock transaccional por cliente. El índice único de facturas no protege
+// session_packages, y un lock sólo en memoria no coordina procesos distintos.
+async function lockBillingClient(transaction: TransactionSql, clientId: string) {
+  await transaction`SELECT pg_advisory_xact_lock(hashtext('eileen:billing'), hashtext(${clientId}))`;
+}
+
+function sessionStateConflict(message: string): never {
+  const error = new Error(message) as Error & { statusCode: number };
+  error.statusCode = 409;
+  throw error;
+}
+
 async function recurringBillingStatus(ownerId: string) {
   const [zohoConnection] = await sql`
     SELECT status, sync_enabled, last_sync_at
@@ -178,6 +191,14 @@ async function cobrarClasesYaDadas(
   expiresOn: string,
   totalSessions: number
 ) {
+  const [saldo] = await transaction`
+    SELECT total_sessions, used_sessions FROM session_packages
+    WHERE id = ${packageId} FOR UPDATE
+  `;
+  if (!saldo) return 0;
+  const capacidad = Math.max(0, Number(saldo.total_sessions) - Number(saldo.used_sessions));
+  const limite = Math.min(totalSessions, capacidad);
+  if (limite <= 0) return 0;
   const pendientes = await transaction`
     SELECT id FROM sessions
     WHERE client_id = ${clientId} AND package_debited = false
@@ -189,22 +210,25 @@ async function cobrarClasesYaDadas(
       AND starts_at > (${expiresOn}::date - interval '1 month')
       AND starts_at < (${expiresOn}::date + interval '1 day')
     ORDER BY starts_at
-    LIMIT ${totalSessions}
+    LIMIT ${limite}
+    FOR UPDATE SKIP LOCKED
   `;
   if (!pendientes.length) return 0;
   const ids = pendientes.map(fila => fila.id as string);
-  await transaction`
+  const cobradas = await transaction`
     UPDATE sessions SET package_id = ${packageId}, package_debited = true,
       debited_group_id = ${clientId}, updated_at = now()
-    WHERE id IN ${transaction(ids)}
+    WHERE id IN ${transaction(ids)} AND package_debited = false
+    RETURNING id
   `;
+  if (!cobradas.length) return 0;
   await transaction`
     UPDATE session_packages
-    SET used_sessions = used_sessions + ${ids.length},
-      status = CASE WHEN used_sessions + ${ids.length} >= total_sessions THEN 'exhausted' ELSE 'active' END
+    SET used_sessions = used_sessions + ${cobradas.length},
+      status = CASE WHEN used_sessions + ${cobradas.length} >= total_sessions THEN 'exhausted' ELSE 'active' END
     WHERE id = ${packageId}
   `;
-  return ids.length;
+  return cobradas.length;
 }
 
 async function generateRecurringInvoices(ownerId?: string) {
@@ -363,7 +387,17 @@ async function generateRecurringInvoices(ownerId?: string) {
     // el 3 de marzo en vez del 28 de febrero) y no coincidía con la asignación de
     // plan, la cobertura ni la confirmación de pago.
     const ciclo = cicloDelCorte(cobro.due_on as Date, Number(cobro.corte) || 1);
-    const [abierto] = await sql`
+    await sql.begin(async transaction => {
+      await lockBillingClient(transaction, cobro.entrena as string);
+      const [existente] = await transaction`
+        SELECT id FROM session_packages
+        WHERE client_id = ${cobro.entrena} AND kind = 'monthly'
+          AND expires_on IS NOT NULL AND expires_on > ${soloFecha(cobro.due_on)}::date
+          AND status <> 'cancelled'
+        LIMIT 1
+      `;
+      if (existente) return;
+      const [abierto] = await transaction`
       INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, origin_invoice_id, status)
       VALUES (${cobro.entrena},
         ${'Mensualidad · ' + rangoDelCiclo(ciclo.inicio, ciclo.vence)},
@@ -381,22 +415,23 @@ async function generateRecurringInvoices(ownerId?: string) {
         -- No anticipado: el saldo nuevo nace SIN cobro (se cobra en su corte).
         ${noAnticipado ? null : cobro.invoice_id}, 'active')
       RETURNING id
-    `;
-    await cobrarClasesYaDadas(sql, abierto.id as string, cobro.entrena as string,
+      `;
+      await cobrarClasesYaDadas(transaction, abierto.id as string, cobro.entrena as string,
       ciclo.vence, Number(cobro.total_sessions));
-    if (noAnticipado) {
+      if (noAnticipado) {
       // El cobro salda el ciclo que se CERRÓ en el corte: se enlaza al saldo que
       // vence justo en due_on (el que el cliente acaba de terminar a crédito) para
       // que ESE muestre "pago pendiente". No toca su estado: el saldo sigue activo
       // y descontando clases —entrena a crédito— hasta que se registre el pago.
-      await sql`UPDATE session_packages SET origin_invoice_id = ${cobro.invoice_id}
+        await transaction`UPDATE session_packages SET origin_invoice_id = ${cobro.invoice_id}
         WHERE id = (
           SELECT id FROM session_packages
           WHERE client_id = ${cobro.entrena} AND kind = 'monthly'
             AND expires_on = ${soloFecha(cobro.due_on)}::date AND origin_invoice_id IS NULL
           ORDER BY created_at DESC LIMIT 1
-        )`;
-    }
+          )`;
+      }
+    });
   }
   const reposiciones = await abrirReposiciones(ownerId);
   const descuentos = await aplicarCreditos(invoices as unknown as CobroGenerado[]);
@@ -712,7 +747,7 @@ app.get('/api/clients', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`
     SELECT c.*, p.name AS plan_name, p.sessions_included, p.validity_days,
-      COALESCE((SELECT sum(total_sessions - used_sessions) FROM session_packages sp WHERE sp.client_id = c.id AND sp.status = 'active'), 0)::integer AS available_sessions,
+      COALESCE((SELECT sum(total_sessions - used_sessions) FROM session_packages sp WHERE sp.client_id = c.id AND sp.status = 'active' AND (sp.expires_on IS NULL OR sp.expires_on >= current_date)), 0)::integer AS available_sessions,
       -- Movimientos del ciclo en curso, separados. Cancelar y perder la clase
       -- no es lo mismo que pedir otro día: lo primero mide el cumplimiento del
       -- cliente, lo segundo el desgaste de la agenda. Juntos no dicen nada.
@@ -846,6 +881,7 @@ const clientPlanSchema = z.object({
 app.patch('/api/clients/:id/plan', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = clientPlanSchema.parse(request.body);
   const result = await sql.begin(async transaction => {
+    await lockBillingClient(transaction, id);
     // Clase suelta directa: se cobra por sesión, sin bolsa ni mensualidad. Se
     // limpia la meta mensual y se pausa la membresía; conserva cumplimiento.
     if (input.model === 'single' && !input.planId) {
@@ -1133,6 +1169,7 @@ app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) =
     : `Paquete ${input.totalSessions} sesiones`;
 
   const pack = await sql.begin(async transaction => {
+    await lockBillingClient(transaction, input.clientId);
     const [created] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on) VALUES (${input.clientId}, ${etiqueta}, ${input.totalSessions}, ${input.amount}, ${vence}, ${input.kind}, ${refDia}::date) RETURNING *`;
     const [invoice] = await transaction`
       INSERT INTO invoices (client_id, package_id, concept, amount, due_on, issued_on, billing_period)
@@ -1200,42 +1237,46 @@ app.patch('/api/packages/:id', { preHandler: requireStaff }, async (request, rep
   const input = editPackageSchema.parse(request.body);
   const tocaVencimiento = 'expiresOn' in (request.body as Record<string, unknown>);
 
-  const [actual] = await sql`
-    SELECT total_sessions, used_sessions FROM session_packages
-    WHERE id = ${id} AND client_id IN (SELECT id FROM clients WHERE owner_id = ${auth.sub})
-  `;
-  if (!actual) return reply.code(404).send({ error: 'Saldo no encontrado' });
+  const result = await sql.begin(async transaction => {
+    const [actual] = await transaction`
+      SELECT id, client_id, total_sessions, used_sessions FROM session_packages
+      WHERE id = ${id} AND client_id IN (SELECT id FROM clients WHERE owner_id = ${auth.sub})
+      FOR UPDATE
+    `;
+    if (!actual) return null;
+    await lockBillingClient(transaction, actual.client_id as string);
 
-  const total = input.totalSessions ?? Number(actual.total_sessions);
-  const usadas = input.usedSessions ?? Number(actual.used_sessions);
-  // Usadas por encima de contratadas dejaría un saldo negativo en pantalla y
-  // un cliente sin sesiones que sí pagó.
-  if (usadas > total) return reply.code(400).send({ error: 'Las sesiones usadas no pueden superar las contratadas' });
+    const total = input.totalSessions ?? Number(actual.total_sessions);
+    const usadas = input.usedSessions ?? Number(actual.used_sessions);
+    // Usadas por encima de contratadas dejaría un saldo negativo en pantalla y
+    // un cliente sin sesiones que sí pagó.
+    if (usadas > total) return { error: 'Las sesiones usadas no pueden superar las contratadas' };
 
-  const [pack] = await sql`
-    UPDATE session_packages SET
-      label = COALESCE(${input.label ?? null}, label),
-      total_sessions = ${total},
-      used_sessions = ${usadas},
-      expires_on = CASE WHEN ${tocaVencimiento} THEN ${input.expiresOn}::date ELSE expires_on END,
-      -- El estado se recalcula siempre: subir las contratadas revive un saldo
-      -- agotado, y bajarlas lo agota.
-      -- Los ::int no son decorativos: sin ellos postgres.js manda los
-      -- parámetros sin tipo y la comparación se hace como texto, donde '8'
-      -- es mayor que '12'. Un saldo con 8 de 12 usadas se quedaba agotado.
-      status = CASE
-                    WHEN ${input.markPaid === true} THEN (CASE WHEN ${usadas}::int >= ${total}::int THEN 'exhausted' ELSE 'active' END)
-                    WHEN ${input.markPaid === false} THEN 'pending'
-                    WHEN status = 'pending' THEN 'pending'
-                    WHEN ${usadas}::int >= ${total}::int THEN 'exhausted' ELSE 'active' END
-    WHERE id = ${id} AND client_id IN (SELECT id FROM clients WHERE owner_id = ${auth.sub})
-    RETURNING *
-  `;
-  if (pack && pack.kind === 'monthly' && pack.status === 'active' && tocaVencimiento) {
-    const restantes = Math.max(0, Number(pack.total_sessions) - Number(pack.used_sessions));
-    if (restantes) await cobrarClasesYaDadas(sql, pack.id as string, pack.client_id as string, String(pack.expires_on).slice(0, 10), restantes);
-  }
-  return pack;
+    const [pack] = await transaction`
+      UPDATE session_packages SET
+        label = COALESCE(${input.label ?? null}, label),
+        total_sessions = ${total},
+        used_sessions = ${usadas},
+        expires_on = CASE WHEN ${tocaVencimiento} THEN ${input.expiresOn}::date ELSE expires_on END,
+        -- El estado se recalcula siempre: subir las contratadas revive un saldo
+        -- agotado, y bajarlas lo agota.
+        status = CASE
+                      WHEN ${input.markPaid === true} THEN (CASE WHEN ${usadas}::int >= ${total}::int THEN 'exhausted' ELSE 'active' END)
+                      WHEN ${input.markPaid === false} THEN 'pending'
+                      WHEN status = 'pending' THEN 'pending'
+                      WHEN ${usadas}::int >= ${total}::int THEN 'exhausted' ELSE 'active' END
+      WHERE id = ${id}
+      RETURNING *
+    `;
+    if (pack && pack.kind === 'monthly' && pack.status === 'active' && tocaVencimiento) {
+      const restantes = Math.max(0, Number(pack.total_sessions) - Number(pack.used_sessions));
+      if (restantes) await cobrarClasesYaDadas(transaction, pack.id as string, pack.client_id as string, soloFecha(pack.expires_on)!, restantes);
+    }
+    return pack;
+  });
+  if (!result) return reply.code(404).send({ error: 'Saldo no encontrado' });
+  if ('error' in result) return reply.code(400).send({ error: result.error });
+  return result;
 });
 
 // Renovar un paquete de clases, por decisión de la entrenadora. Abre uno nuevo
@@ -2755,6 +2796,9 @@ async function recordSessionCompliance(id: string, ownerId: string, markedBy: st
   return sql.begin(async transaction => {
     const [current] = await transaction`SELECT s.* FROM sessions s JOIN clients c ON c.id = s.client_id WHERE s.id = ${id} AND c.owner_id = ${ownerId} FOR UPDATE`;
     if (!current) return null;
+    if (current.status === 'cancelled') {
+      sessionStateConflict('Una sesión cancelada debe reactivarse antes de registrar su resultado.');
+    }
     // Devolverla a programada: se deshace lo que la marca había hecho —incluido
     // el descuento del saldo— y la sesión vuelve a estar por delante, sin
     // contar ni a favor ni en contra.
@@ -2868,7 +2912,7 @@ app.get('/api/trainings/daily', { preHandler: requireStaff }, async request => {
   const { date } = dailyDateSchema.parse(request.query);
   return sql`
     SELECT c.id AS client_id, c.full_name, c.status, c.billing_model,
-      COALESCE((SELECT sum(total_sessions - used_sessions) FROM session_packages sp WHERE sp.client_id = c.id AND sp.status = 'active'), 0)::integer AS available_sessions,
+      COALESCE((SELECT sum(total_sessions - used_sessions) FROM session_packages sp WHERE sp.client_id = c.id AND sp.status = 'active' AND (sp.expires_on IS NULL OR sp.expires_on >= current_date)), 0)::integer AS available_sessions,
       s.id AS session_id, s.status AS session_status, s.completion_percent, s.quick_logged,
       COALESCE(r.title, '') AS routine_title
     FROM clients c
@@ -3315,6 +3359,7 @@ async function abrirCobertura(
 ): Promise<{ abiertos: { clientId: string; fullName: string; sessions: number; packageId: string | null }[] } | { error: string; code: number }> {
   const abiertos: { clientId: string; fullName: string; sessions: number; packageId: string | null }[] = [];
   for (const entry of entries) {
+    await lockBillingClient(transaction, entry.clientId);
     const [cliente] = await transaction`
       SELECT c.id, c.full_name, c.billing_cutoff_day, c.billing_model
       FROM clients c
@@ -3527,6 +3572,7 @@ app.post('/api/invoices/:id/package', { preHandler: requireStaff }, async (reque
   const resultado = await sql.begin(async transaction => {
     const [invoice] = await transaction`
       SELECT i.id, i.client_id, i.amount, i.package_id, i.status, i.source_system,
+        c.billing_model, c.payment_mode,
         COALESCE((SELECT min(ip.paid_on) FROM payment_allocations pa JOIN invoice_payments ip ON ip.id = pa.payment_id WHERE pa.invoice_id = i.id), i.issued_on, i.due_on) AS coverage_start
       FROM invoices i JOIN clients c ON c.id = i.client_id
       WHERE i.id = ${id} AND c.owner_id = ${auth.sub} AND i.status <> 'void'
@@ -3534,6 +3580,11 @@ app.post('/api/invoices/:id/package', { preHandler: requireStaff }, async (reque
     `;
     if (!invoice) return { error: 'Cobro no encontrado', code: 404 };
     if (invoice.package_id) return { error: 'Este cobro ya tiene un paquete ligado.', code: 409 };
+    if (invoice.status === 'pending' && invoice.source_system !== 'zoho_invoice'
+      && invoice.billing_model === 'monthly' && invoice.payment_mode === 'anticipado') {
+      return { error: 'Una mensualidad anticipada debe confirmarse antes de abrir su saldo.', code: 409 };
+    }
+    await lockBillingClient(transaction, invoice.client_id as string);
     // Las clases del paquete cuelgan del día del pago: es cuando el cliente lo
     // compró, y desde ahí corre su validez.
     const inicio = mediodiaEnPanama(invoice.coverage_start || new Date());
@@ -5431,9 +5482,19 @@ async function reconciliarSaldos(ownerId?: string) {
     ORDER BY sp.expires_on ASC`;
   let descontadas = 0;
   for (const saldo of saldos) {
-    const cupo = Number(saldo.total_sessions) - Number(saldo.used_sessions);
-    if (cupo <= 0) continue;
-    descontadas += await cobrarClasesYaDadas(sql, saldo.id as string, saldo.client_id as string, soloFecha(saldo.expires_on)!, cupo);
+    descontadas += await sql.begin(async transaction => {
+      await lockBillingClient(transaction, saldo.client_id as string);
+      const [actual] = await transaction`
+        SELECT id, client_id, expires_on, total_sessions, used_sessions
+        FROM session_packages
+        WHERE id = ${saldo.id} AND status = 'active' AND used_sessions < total_sessions
+        FOR UPDATE
+      `;
+      if (!actual) return 0;
+      const cupo = Number(actual.total_sessions) - Number(actual.used_sessions);
+      if (cupo <= 0) return 0;
+      return cobrarClasesYaDadas(transaction, actual.id as string, actual.client_id as string, soloFecha(actual.expires_on)!, cupo);
+    });
   }
   return descontadas;
 }

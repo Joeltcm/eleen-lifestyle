@@ -86,7 +86,7 @@ cobro en un saldo de sesiones del ciclo.
   persona (`DISTINCT ON (entrena)`).
 - **Sesiones del saldo:** `monthly_session_target` de la ficha → `sessions_included` del
   plan → total del último saldo.
-- **Anclaje al corte:** `expires_on = venceMensualidadDesde(due_on)` = `due_on + 1 mes`;
+- **Anclaje al corte:** `expires_on` sale de `cicloDelCorte(due_on, billing_cutoff_day)`;
   etiqueta = rango corte→corte. **Nace `active`** — el cliente entrena aunque no haya pagado.
 - **Reconciliación:** `cobrarClasesYaDadas()` descuenta retroactivamente las clases del
   ciclo ya consumidas (ver §6).
@@ -216,10 +216,11 @@ los dueños.
 Bordes conocidos donde el comportamiento puede sorprender. No son todos bugs; son cosas a
 confirmar contra la realidad del negocio.
 
-1. ⚠️ **Vencido con saldo cuenta en disponibles.** Una mensualidad vencida con clases sin usar
-   **no se auto-expira** (`expirarPaquetesVencidos` sólo toca `kind='package'`). Sigue sumando
-   en `available_sessions` hasta que se cierra, así que un cliente puede mostrar disponibles de
-   un ciclo ya cerrado.
+1. ✅ **Vencido con saldo visible, pero no disponible.** Las mensualidades vencidas no se
+   auto-expiran (`expirarPaquetesVencidos` sigue tocando sólo `kind='package'`), pero las
+   consultas de clientes, agenda y frontend ya excluyen `expires_on < current_date` de
+   `available_sessions`. `/api/packages` las conserva visibles con `vencido_con_saldo` para
+   poder gestionarlas.
 2. ⚠️ **Worker de arranque incompleto.** La corrida de generación al bootear no siempre emite a
    todos (observado con Julio; se resolvió con el botón manual). Vale confirmar que una sola
    corrida completa a todos los clientes elegibles.
@@ -229,9 +230,9 @@ confirmar contra la realidad del negocio.
 4. ⚠️ **Dos filas en no_anticipado.** El saldo del ciclo nuevo se abre con el cobro (hasta 7 días
    antes del corte), así que hay dos saldos hasta que llega el corte. Decisión abierta: abrirlo
    recién *en* el corte para ver una sola fila.
-5. 🔴 **Bug de fecha 2001 — patrón a vigilar.** `String(fechaDate).slice(0,10)` da `"Thu Sep 15"`
-   (sin año) y Postgres lo tuerce a 2001. Usar siempre el helper `soloFecha()` o
-   `to_char(...,'YYYY-MM-DD')` al pasar fechas que vuelven como `Date` de postgres.js.
+5. ✅ **Bug de fecha 2001 corregido en el flujo auditado.** `PATCH /api/packages/:id` usa
+   `soloFecha()` al reconciliar el vencimiento; mantener la misma regla en cualquier código
+   nuevo que pase fechas devueltas como `Date` por postgres.js.
 6. 🔴 **Seguridad — auditoría aparte.** Este documento cubre la lógica de facturación, no la
    superficie de seguridad. Los hallazgos de seguridad (reset de admin con `SETUP_TOKEN`, JWT sin
    revocación, datos de salud a un tercero, XSS en el grid) están en su propia auditoría y siguen

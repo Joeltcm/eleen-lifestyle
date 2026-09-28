@@ -385,7 +385,7 @@ const formatoDiaLargo = fecha => new Intl.DateTimeFormat('es-PA', { weekday: 'lo
   .format(new Date(`${String(fecha).slice(0, 10)}T12:00:00-05:00`));
 
 const saldoDelMes = client => {
-  const pack = data.packages.find(item => item.clientId === client.id && item.status === 'confirmed' && item.kind === 'monthly');
+  const pack = data.packages.find(item => item.clientId === client.id && item.status === 'confirmed' && item.kind === 'monthly' && !item.vencidoConSaldo);
   // La reposición se nombra aparte: son clases que el cliente ya pagó el mes
   // pasado y que sólo valen esta semana. Sumarlas al total las escondería justo
   // cuando hay que darles prioridad.
