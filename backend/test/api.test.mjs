@@ -824,6 +824,194 @@ describe('modalidad de pago y cobros pendientes', () => {
   });
 });
 
+describe('cobertura end-to-end de facturación y modalidad de pago', () => {
+  async function saldoGeneradoPorWorker(paymentMode, nombre, sessions = 3) {
+    const plan = await api.post('/api/plans', {
+      name: `${nombre} plan`, billingModel: 'monthly', price: 180, sessionsIncluded: sessions
+    });
+    assert.equal(plan.estado, 201);
+    const c = await api.post('/api/clients', {
+      fullName: nombre, planId: plan.datos.id, cutoffDay: 1, paymentMode
+    });
+    assert.equal(c.estado, 201);
+    const factura = await api.post('/api/invoices', {
+      clientId: c.datos.id, concept: 'Mensualidad', amount: 180, dueOn: hoyPa()
+    });
+    assert.equal(factura.estado, 201);
+    const generado = await api.post('/api/billing/recurring/generate', {});
+    assert.equal(generado.estado, 200);
+    const saldo = (await api.get('/api/packages')).datos.find(p => p.client_id === c.datos.id && p.kind === 'monthly');
+    assert.ok(saldo, `${paymentMode}: el worker debe abrir el saldo del ciclo`);
+    assert.equal(saldo.status, 'active', `${paymentMode}: el saldo debe permitir entrenar`);
+    return { clientId: c.datos.id, invoiceId: factura.datos.id, packageId: saldo.id, saldo };
+  }
+
+  test('un cliente nuevo recorre cliente → plan → saldo → sesión → descuento', async () => {
+    const plan = await api.post('/api/plans', {
+      name: 'Alta completa', billingModel: 'monthly', price: 210, sessionsIncluded: 3
+    });
+    const creado = await api.post('/api/clients', {
+      fullName: 'Cliente nuevo e2e', billingModel: 'single', standardPrice: 35, cutoffDay: 1
+    });
+    assert.equal(creado.estado, 201);
+    assert.equal((await api.get('/api/packages')).datos.filter(p => p.client_id === creado.datos.id).length, 0,
+      'un cliente recién creado aún no tiene saldo mensual');
+
+    const asignado = await api.patch(`/api/clients/${creado.datos.id}/plan`, { planId: plan.datos.id, cutoffDay: 1 });
+    assert.equal(asignado.estado, 200);
+    const antes = (await api.get('/api/packages')).datos.find(p => p.client_id === creado.datos.id && p.kind === 'monthly');
+    assert.ok(antes, 'asignar el plan abre el saldo del ciclo');
+    assert.equal(Number(antes.total_sessions), 3);
+
+    const lote = await api.post('/api/sessions/batch', {
+      clientId: creado.datos.id,
+      startsAt: [new Date(Date.now() - 45 * 60_000).toISOString()],
+      durationMinutes: 45,
+      mode: 'Presencial'
+    });
+    assert.equal(lote.estado, 201);
+    const marcada = await api.patch(`/api/sessions/${lote.datos.sesiones[0].id}/compliance`, {
+      outcome: 'completed', completionPercent: 100
+    });
+    assert.equal(marcada.estado, 200);
+    assert.equal(marcada.datos.billing.action, 'debited');
+    assert.equal(marcada.datos.billing.packageId, antes.id);
+    assert.equal(marcada.datos.billing.remainingSessions, 2);
+
+    const despues = (await api.get('/api/packages')).datos.find(p => p.id === antes.id);
+    assert.equal(Number(despues.used_sessions), 1, 'el flujo completo debe consumir una sesión del saldo contratado');
+  });
+
+  test('una mensualidad anticipada pendiente sí permite entrenar por el worker, aunque la ruta manual esté bloqueada', async () => {
+    const flujo = await saldoGeneradoPorWorker('anticipado', 'Anticipado pendiente que entrena', 2);
+    assert.equal(flujo.saldo.origin_invoice_id, flujo.invoiceId,
+      'el saldo anticipado queda ligado al cobro que ya existe');
+
+    const lote = await api.post('/api/sessions/batch', {
+      clientId: flujo.clientId,
+      startsAt: [new Date(Date.now() - 30 * 60_000).toISOString()],
+      durationMinutes: 30,
+      mode: 'Presencial'
+    });
+    const marcada = await api.patch(`/api/sessions/${lote.datos.sesiones[0].id}/compliance`, {
+      outcome: 'completed', completionPercent: 100
+    });
+    assert.equal(marcada.estado, 200);
+    assert.equal(marcada.datos.billing.packageId, flujo.packageId,
+      'el cliente puede entrenar aunque la factura anticipada siga pendiente');
+    assert.equal(marcada.datos.billing.remainingSessions, 1);
+  });
+
+  test('una cobertura familiar liga el cobro al expediente de cada persona y descuenta al dependiente que entrenó', async () => {
+    const plan = await api.post('/api/plans', {
+      name: 'Familiar e2e', billingModel: 'monthly', price: 120, sessionsIncluded: 2
+    });
+    const pagador = await api.post('/api/clients', {
+      fullName: 'Pagador e2e', planId: plan.datos.id, cutoffDay: 1
+    });
+    const dependiente = await api.post('/api/clients', {
+      fullName: 'Dependiente e2e', planId: plan.datos.id, cutoffDay: 1
+    });
+    await api.patch(`/api/clients/${dependiente.datos.id}`, {
+      fullName: 'Dependiente e2e', billingResponsibleClientId: pagador.datos.id
+    });
+    const factura = await api.post('/api/invoices', {
+      clientId: pagador.datos.id, concept: 'Mensualidad familiar', amount: 240, dueOn: hoyPa()
+    });
+    const cobertura = await api.post(`/api/invoices/${factura.datos.id}/coverage`, {
+      billingPeriod: mesActualPa(),
+      entries: [
+        { clientId: pagador.datos.id, amount: 120, sessions: 2 },
+        { clientId: dependiente.datos.id, amount: 120, sessions: 2 }
+      ]
+    });
+    assert.equal(cobertura.estado, 201);
+
+    const saldos = (await api.get('/api/packages')).datos.filter(p => p.kind === 'monthly');
+    const saldoPagador = saldos.find(p => p.client_id === pagador.datos.id);
+    const saldoDependiente = saldos.find(p => p.client_id === dependiente.datos.id);
+    assert.ok(saldoPagador && saldoDependiente, 'la cobertura debe abrir un saldo por expediente');
+    assert.equal(saldoPagador.origin_invoice_id, factura.datos.id);
+    assert.equal(saldoDependiente.origin_invoice_id, factura.datos.id);
+
+    const lote = await api.post('/api/sessions/batch', {
+      clientId: dependiente.datos.id,
+      startsAt: [new Date(Date.now() - 20 * 60_000).toISOString()],
+      durationMinutes: 30,
+      mode: 'Presencial'
+    });
+    const marcada = await api.patch(`/api/sessions/${lote.datos.sesiones[0].id}/compliance`, {
+      outcome: 'completed', completionPercent: 100
+    });
+    assert.equal(marcada.datos.billing.packageId, saldoDependiente.id,
+      'el débito pertenece a quien entrenó, no a quien pagó');
+
+    const finales = (await api.get('/api/packages')).datos;
+    assert.equal(Number(finales.find(p => p.id === saldoPagador.id).used_sessions), 0);
+    assert.equal(Number(finales.find(p => p.id === saldoDependiente.id).used_sessions), 1);
+  });
+
+  test('la renovación de ambas modalidades conserva la regla de origen del saldo', async () => {
+    for (const paymentMode of ['anticipado', 'no_anticipado']) {
+      const flujo = await saldoGeneradoPorWorker(paymentMode, `Renovación ${paymentMode}`);
+      if (paymentMode === 'anticipado') {
+        assert.equal(flujo.saldo.origin_invoice_id, flujo.invoiceId,
+          'anticipado: el cobro emitido abre su propio saldo');
+      } else {
+        assert.equal(flujo.saldo.origin_invoice_id, null,
+          'no anticipado: el saldo nuevo nace activo y se cobra en su propio corte');
+      }
+    }
+  });
+
+  test('la cancelación del cliente descuenta el saldo contratado en ambas modalidades', async () => {
+    for (const paymentMode of ['anticipado', 'no_anticipado']) {
+      const flujo = await saldoGeneradoPorWorker(paymentMode, `Cancelación ${paymentMode}`);
+      const lote = await api.post('/api/sessions/batch', {
+        clientId: flujo.clientId,
+        startsAt: [new Date(Date.now() - 15 * 60_000).toISOString()],
+        durationMinutes: 30,
+        mode: 'Presencial'
+      });
+      const cancelada = await api.delete(`/api/sessions/${lote.datos.sesiones[0].id}?rescheduled=false`);
+      assert.equal(cancelada.estado, 200);
+      assert.equal(cancelada.datos.compensacion.tipo, 'debit');
+      const saldo = (await api.get('/api/packages')).datos.find(p => p.id === flujo.packageId);
+      assert.equal(Number(saldo.used_sessions), 1, `${paymentMode}: cancelar sin reprogramar consume la clase`);
+    }
+  });
+
+  test('la reconciliación al abrir el saldo recoge clases ya marcadas en ambas modalidades', async () => {
+    for (const paymentMode of ['anticipado', 'no_anticipado']) {
+      const plan = await api.post('/api/plans', {
+        name: `Reconciliación ${paymentMode}`, billingModel: 'monthly', price: 180, sessionsIncluded: 2
+      });
+      const c = await api.post('/api/clients', {
+        fullName: `Reconciliación ${paymentMode}`, planId: plan.datos.id, cutoffDay: 1, paymentMode
+      });
+      const lote = await api.post('/api/sessions/batch', {
+        clientId: c.datos.id,
+        startsAt: [new Date(Date.now() - 10 * 60_000).toISOString()],
+        durationMinutes: 30,
+        mode: 'Presencial'
+      });
+      const marcadaAntes = await api.patch(`/api/sessions/${lote.datos.sesiones[0].id}/compliance`, {
+        outcome: 'completed', completionPercent: 100
+      });
+      assert.equal(marcadaAntes.datos.billing.action, 'not_debited',
+        `${paymentMode}: antes de abrir el saldo no hay de dónde descontar`);
+      await api.post('/api/invoices', {
+        clientId: c.datos.id, concept: 'Mensualidad', amount: 180, dueOn: hoyPa()
+      });
+      await api.post('/api/billing/recurring/generate', {});
+      const saldo = (await api.get('/api/packages')).datos.find(p => p.client_id === c.datos.id && p.kind === 'monthly');
+      assert.ok(saldo, `${paymentMode}: el worker debe crear el saldo`);
+      assert.equal(Number(saldo.used_sessions), 1,
+        `${paymentMode}: la reconciliación debe recoger la clase marcada antes`);
+    }
+  });
+});
+
 describe('el saldo dice de qué cobro salió', () => {
   test('POST /api/packages enlaza el saldo con su cobro, visible en Paquetes y en el expediente', async () => {
     const c = await api.post('/api/clients', { fullName: 'Origen del saldo', billingModel: 'package', standardPrice: 200, cutoffDay: 15 });
