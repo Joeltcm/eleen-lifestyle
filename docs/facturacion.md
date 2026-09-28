@@ -126,25 +126,38 @@ de qué consume.
 | Evento | ¿Consume cupo? | Regla |
 |---|---|---|
 | Clase **completada** | **Sí** | Descuenta del saldo activo que cubre esa fecha |
+| Clase marcada **no cumplida** al llegar el corte | **Sí** | Se pierde y descuenta del paquete que cubría la fecha; no crea una clase suelta |
 | Cliente **cancela sin reagendar** | **Sí** | Entrena a crédito: la clase contratada se consume igual (`resolution='debit'`) |
-| Cliente **pide reagendar** | No | Conserva la clase para la nueva cita (`cancellation_kind='rescheduled'`) |
+| Cliente **pide reagendar explícitamente** | No | Conserva la sesión; no abre un saldo `makeup` automático (`cancellation_kind='rescheduled'`) |
 | Cancela **la entrenadora** | No | Se compensa al cliente: reposición, descuento o nada — nunca se le cobra la falta |
 
 ### Los tres caminos
 
-1. **Al completar — `recordSessionCompliance()`.** Si no estaba debitada, busca el saldo
+1. **Al completar o marcarla no cumplida — `recordSessionCompliance()`.** Si no estaba debitada, busca el saldo
    activo con `used<total` que cubra la fecha de la clase (`expires_on ≥ día de la clase`),
    **ordenado por `expires_on` ascendente** (el que caduca antes). Descuenta 1. Sin saldo,
-   completa sin descontar y la reconciliación lo recoge. Volver a *scheduled*/*no_show*
-   devuelve la clase.
+   completa o marca la falta sin descontar y la reconciliación lo recoge. Una clase marcada
+   como `no_show` queda perdida: no se convierte en una reposición independiente. Volver a
+   *scheduled* devuelve el débito y la clase al saldo.
 2. **Al cancelar — endpoint de cancelación.** Cliente sin reagendar → busca el saldo activo
    que cubre la fecha y descuenta. Editar la cancelación (`PATCH /sessions/:id/cancellation`)
    revierte el débito previo y recalcula según la nueva resolución.
 3. **Reconciliación — `cobrarClasesYaDadas()`.** Al abrir un saldo y en el worker diario.
-   Recupera las clases del ciclo consumidas sin debitar — **completadas + canceladas-perdidas
-   del cliente** (`not_rescheduled`, `cancelled_by='client'`) — en la ventana
+   Recupera las clases del ciclo consumidas sin debitar — **completadas + no cumplidas +
+   canceladas-perdidas del cliente** (`not_rescheduled`, `cancelled_by='client'`) — en la ventana
    `(expires−1 mes, expires]` y hasta el cupo. Existe porque la clase se marca temprano y el
    saldo puede abrirse después.
+
+### Reposición y aviso visible
+
+Una reprogramación sólo conserva la sesión cuando se declara explícitamente (`rescheduled=true`).
+El worker no crea una bolsa `makeup` por una reprogramación del cliente. Los saldos `makeup` que
+aparecen en Paquetes siguen reservados para una compensación elegida por la entrenadora cuando
+ella cancela una clase.
+
+Al marcar una clase como cumplida o no cumplida, la respuesta indica el saldo exacto descontado,
+cuántas sesiones quedan y su etiqueta. La agenda muestra esa misma fuente bajo la sesión y el
+control de paquetes deja claro qué saldos son los que descuentan las clases.
 
 ---
 

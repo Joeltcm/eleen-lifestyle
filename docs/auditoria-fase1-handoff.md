@@ -5,7 +5,7 @@ Commits:
 - `9f3ff99` — unificar el ciclo de corte en `cicloDelCorte` + estabilizar el harness.
 - `9a40730` — prueba explícita de las 4 rutas + limpieza de comentarios.
 - `f162274` — documentar el alcance real de la rama y preparar la revisión acumulada.
-- pendiente de commit — correcciones de integridad, concurrencia, saldos vencidos, estados de sesión y modalidad de pago descritas abajo.
+- pendiente de commit — correcciones de integridad, concurrencia, saldos vencidos, estados de sesión, modalidad de pago y débito explícito de clases perdidas descritas abajo.
 
 ## Cómo reproducir (base limpia)
 El harness crea una BD Postgres temporal por corrida (createdb → migraciones desde cero → servidor real como subproceso), así que cada ejecución es base limpia.
@@ -17,7 +17,7 @@ npm run check
 npm run build
 PGHOST=localhost PGUSER=<user> PGPASSWORD= PGPORT=5432 npm test
 ```
-Resultado verificado: `# tests 188 / # pass 188 / # fail 0`, reproducible sin importar la hora del sistema (ver más abajo).
+Resultado de la rama base verificado: `# tests 188 / # pass 188 / # fail 0`, reproducible sin importar la hora del sistema. Tras sustituir la prueba de reposiciones automáticas por las regresiones del nuevo flujo de saldo, la suite actual queda en `# tests 186 / # pass 186 / # fail 0`.
 
 ## Qué hace la Fase 1 (aislada, aditiva)
 
@@ -39,7 +39,7 @@ Resultado verificado: `# tests 188 / # pass 188 / # fail 0`, reproducible sin im
 ## Checklist de pre-merge — estado actual
 - [x] No quedan referencias a `venceMensualidadDesde` — `grep -rn venceMensualidadDesde src/ test/` → vacío.
 - [x] Las 4 rutas producen el mismo rango — test explícito para plan/manual/confirmación y 6 casos worker↔manual que comparan `expires_on` y etiqueta/rango.
-- [x] `188/188` sobre base limpia — BD temporal por corrida; incluye las regresiones nuevas de esta rama.
+- [x] `186/186` sobre base limpia — BD temporal por corrida; incluye las regresiones nuevas de esta rama.
 - [x] Reproducible sin importar la hora — TZ fija por conexión + fechas de negocio en Panamá.
 - [x] Los commits de la Fase 1 solo tocan harness, ciclo y pruebas — `db.ts`, `server.ts`, `api.test.mjs`, `harness.mjs`.
 - [x] Las correcciones posteriores están cubiertas por pruebas y no modifican `main`.
@@ -69,12 +69,24 @@ Esto significa que un PR de esta rama contra `main` debe revisarse como un PR ac
   completa de renovación/cancelación/reconciliación por modalidad sigue siendo una
   recomendación de cobertura adicional, no un supuesto de que ya esté exhaustivamente
   probada.
+- **Clases perdidas y reprogramaciones:** se eliminó la apertura automática de saldos `makeup`
+  para reprogramaciones del cliente. Una clase marcada `no_show` o cancelada por el cliente sin
+  reprogramar consume el saldo que cubría la fecha; si ese saldo todavía no existía, la
+  reconciliación posterior también recoge la sesión. Sólo una reprogramación declarada conserva
+  la clase. Las reposiciones `makeup` siguen existiendo para la compensación explícita de una
+  cancelación de la entrenadora.
+- **Aviso de débito:** las respuestas de cumplimiento incluyen `billing` con el paquete, la
+  etiqueta y las sesiones restantes. Agenda, notificaciones, control de paquetes y portal
+  muestran de dónde salió el descuento.
 
 ## Pendientes para la revisión de mañana
 
 - Revisar con Claude la matriz completa de `payment_mode` y decidir si se requieren casos
   separados para cancelación y reconciliación en cada modalidad.
 - Revisar el worker de arranque y los cortes 1–4, que no quedaron alterados por esta rama.
+- Confirmar con negocio qué hacer con saldos `makeup` históricos ya creados por la lógica anterior;
+  esta corrección no los borra porque podrían corresponder a una compensación legítima de la
+  entrenadora.
 - Los hallazgos de seguridad de la auditoría inicial (reset con `SETUP_TOKEN`, revocación
   de JWT, datos de salud a terceros y XSS en el grid) siguen fuera de esta rama y requieren
   una auditoría/revisión separada antes de considerar el sistema completamente cerrado.

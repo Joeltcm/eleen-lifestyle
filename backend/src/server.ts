@@ -176,9 +176,10 @@ function mediodiaEnPanama(fecha: Date | string): Date {
 // nacía entero y esa clase no se le descontaba a nadie nunca.
 //
 // Cuentan tanto las clases DADAS como las que el cliente CANCELÓ y perdió sin
-// pedir reprogramación: una clase perdida por el cliente consume su cupo igual
-// que una dada. Las que canceló la entrenadora, o las que se reprogramaron, no
-// se descuentan (esas se reponen o se le devuelven al cliente).
+// pedir reprogramación, o que quedaron marcadas como NO CUMPLIDAS: una clase
+// perdida por el cliente consume su cupo igual que una dada. Las que canceló
+// la entrenadora, o las que se reprogramaron, no se descuentan (esas se reponen
+// o se le devuelven al cliente).
 //
 // Esto no es tocar el pasado, que es lo que no se debe hacer con el dinero.
 // Es al revés: la clase se consumió, y el saldo tiene que decir la verdad sobre
@@ -203,7 +204,7 @@ async function cobrarClasesYaDadas(
     SELECT id FROM sessions
     WHERE client_id = ${clientId} AND package_debited = false
       AND (
-        status = 'completed'
+        status IN ('completed', 'no_show')
         OR (status = 'cancelled' AND cancellation_kind = 'not_rescheduled'
           AND COALESCE(cancelled_by, 'client') = 'client')
       )
@@ -433,9 +434,8 @@ async function generateRecurringInvoices(ownerId?: string) {
       }
     });
   }
-  const reposiciones = await abrirReposiciones(ownerId);
   const descuentos = await aplicarCreditos(invoices as unknown as CobroGenerado[]);
-  return { generated: invoices.length, balances: pendientes.length, reposiciones, descuentos, invoices };
+  return { generated: invoices.length, balances: pendientes.length, reposiciones: 0, descuentos, invoices };
 }
 
 app.get('/api/billing/recurring/status', { preHandler: requireStaff }, async request => {
@@ -1770,7 +1770,14 @@ async function clienteAgendable(clientId: string, ownerId: string) {
 const sessionSchema = z.object({ clientId: z.string().uuid(), routineId: z.string().uuid().optional(), startsAt: z.string().datetime(), durationMinutes: z.coerce.number().int().positive().default(60), mode: z.string().default('Presencial'), notes: z.string().optional(), completionPercent: z.coerce.number().int().min(0).max(100).optional() });
 app.get('/api/sessions', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
-  return sql`SELECT s.*, c.full_name, r.title AS routine_title FROM sessions s JOIN clients c ON c.id = s.client_id LEFT JOIN routines r ON r.id = s.routine_id WHERE c.owner_id = ${auth.sub} ORDER BY s.starts_at`;
+  return sql`SELECT s.*, c.full_name, r.title AS routine_title,
+    charged.label AS charged_package_label, charged.used_sessions AS charged_package_used,
+    charged.total_sessions AS charged_package_total
+    FROM sessions s
+    JOIN clients c ON c.id = s.client_id
+    LEFT JOIN routines r ON r.id = s.routine_id
+    LEFT JOIN session_packages charged ON charged.id = s.package_id
+    WHERE c.owner_id = ${auth.sub} ORDER BY s.starts_at`;
 });
 // El horario de trabajo, por tramos. Sin tramos configurados la aplicación
 // sigue deduciéndolo de la agenda, que es lo que hacía hasta ahora: nadie se
@@ -1945,15 +1952,6 @@ const HORIZONTE_DIAS = 56;
 // "rellena lo que falte", y entonces manda ella: si ese día está vacío a esa
 // hora, se crea, aunque quede una marca vieja apuntando a otra parte. La marca
 // suelta se libera antes, que si no el índice único rechazaría la nueva.
-// Abrir las reposiciones del ciclo que acaba de cerrar.
-//
-// Se cuentan las clases que el cliente pidió mover y no se llegaron a dar, con
-// tope de dos, y se le abre un saldo aparte que vive una semana desde su
-// corte. Ni se acumulan de un mes a otro ni se suman a las del mes siguiente:
-// son dos, esta semana, o se pierden.
-const REPOSICIONES_MAXIMAS = 2;
-const DIAS_PARA_REPONER = 7;
-
 // Bajar del cobro nuevo lo que se le debe al cliente por clases que no se
 // dieron. Se aplica sobre el cobro de quien entrena —el crédito es suyo—
 // aunque el cobro salga a nombre de quien paga, y nunca deja el cobro en
@@ -1993,57 +1991,6 @@ async function aplicarCreditos(invoices: CobroGenerado[]) {
     aplicados += usados.length;
   }
   return aplicados;
-}
-
-async function abrirReposiciones(ownerId?: string) {
-  const candidatos = await sql`
-    SELECT c.id AS client_id, inicio_ciclo(c.billing_cutoff_day) AS desde,
-      -- Lo que quedó sin dar en la mensualidad que acaba de cerrar. Es la
-      -- deuda real: si el cliente dio sus 8, no hay nada que reponer por mucho
-      -- que haya movido clases de sitio dentro del mes.
-      COALESCE((
-        SELECT max(sp.total_sessions - sp.used_sessions) FROM session_packages sp
-        WHERE sp.client_id = c.id AND sp.kind = 'monthly' AND sp.expires_on IS NOT NULL
-          AND sp.expires_on < inicio_ciclo(c.billing_cutoff_day) + 1
-          AND sp.expires_on >= inicio_ciclo(c.billing_cutoff_day) - interval '1 month'
-      ), 0) AS sin_dar,
-      -- Y de esas, cuántas fueron porque el cliente pidió moverla. Una clase
-      -- que simplemente perdió no se repone: ésa es la diferencia que la
-      -- entrenadora ya declara al cancelar.
-      (SELECT count(*)::int FROM session_reschedules sr
-        WHERE sr.client_id = c.id
-          AND sr.from_starts_at >= inicio_ciclo(c.billing_cutoff_day) - interval '1 month'
-          AND sr.from_starts_at < inicio_ciclo(c.billing_cutoff_day)) AS pedidas
-    FROM clients c
-    WHERE c.status = 'active' AND c.billing_model = 'monthly'
-      AND (${ownerId ?? null}::uuid IS NULL OR c.owner_id = ${ownerId ?? null}::uuid)
-      -- Sólo durante la semana de gracia: abrirla más tarde daría unos días
-      -- que ya no le corresponden.
-      AND current_date < inicio_ciclo(c.billing_cutoff_day) + (${DIAS_PARA_REPONER})::int
-  `;
-  let abiertas = 0;
-  for (const fila of candidatos) {
-    const cuantas = Math.min(Number(fila.sin_dar) || 0, Number(fila.pedidas) || 0, REPOSICIONES_MAXIMAS);
-    if (!cuantas) continue;
-    // Las columnas date vuelven de postgres.js como Date, y tratarlas como
-    // texto da "Invalid time value" —el mismo tropiezo de la renovación—.
-    const inicio = mediodiaEnPanama(fila.desde as Date);
-    const desde = inicio.toISOString().slice(0, 10);
-    const vence = new Date(inicio);
-    vence.setUTCDate(vence.getUTCDate() + DIAS_PARA_REPONER);
-    // El índice único por (cliente, ciclo) es lo que hace inofensivo que el
-    // proceso pase varias veces durante esa semana.
-    const [creada] = await sql`
-      INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status, makeup_for_period)
-      VALUES (${fila.client_id},
-        ${`Reposición · ${cuantas} clase${cuantas === 1 ? '' : 's'} del mes anterior`},
-        ${cuantas}, 0, ${vence.toISOString().slice(0, 10)}::date, 'makeup', ${desde}::date, 'active', ${desde}::date)
-      ON CONFLICT DO NOTHING
-      RETURNING id
-    `;
-    if (creada) abiertas += 1;
-  }
-  return abiertas;
 }
 
 async function extenderRecurrencias(ownerId?: string, forzar = false) {
@@ -2791,6 +2738,46 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
 // estado, y se pide en claro.
 type ResultadoSesion = 'scheduled' | 'completed' | 'no_show';
 
+type SessionBillingNotice = {
+  action: 'debited' | 'returned' | 'not_debited';
+  packageId: string | null;
+  packageLabel: string | null;
+  usedSessions: number | null;
+  totalSessions: number | null;
+  remainingSessions: number | null;
+  message: string;
+};
+
+type SessionPackageBalance = {
+  id: string;
+  label: string;
+  total_sessions: number | string;
+  used_sessions: number | string;
+};
+
+function sessionBillingNotice(pack: Record<string, unknown> | null | undefined, action: SessionBillingNotice['action']): SessionBillingNotice {
+  if (!pack) {
+    return {
+      action, packageId: null, packageLabel: null, usedSessions: null, totalSessions: null, remainingSessions: null,
+      message: action === 'returned' ? 'La sesión volvió a estar sin marcar y no consume saldo.' : 'No había un saldo vigente para descontar.'
+    };
+  }
+  const used = Number(pack.used_sessions);
+  const total = Number(pack.total_sessions);
+  const remaining = Math.max(0, total - used);
+  return {
+    action,
+    packageId: pack.id as string,
+    packageLabel: pack.label as string,
+    usedSessions: used,
+    totalSessions: total,
+    remainingSessions: remaining,
+    message: action === 'returned'
+      ? `Se devolvió la clase a «${pack.label}». Quedan ${remaining} disponibles.`
+      : `Se descontó de «${pack.label}». Quedan ${remaining} disponibles.`
+  };
+}
+
 async function recordSessionCompliance(id: string, ownerId: string, markedBy: string, resultado: ResultadoSesion, completionPercent: number) {
   const completed = resultado === 'completed';
   return sql.begin(async transaction => {
@@ -2799,28 +2786,59 @@ async function recordSessionCompliance(id: string, ownerId: string, markedBy: st
     if (current.status === 'cancelled') {
       sessionStateConflict('Una sesión cancelada debe reactivarse antes de registrar su resultado.');
     }
+    const grupo = current.client_id as string;
+    const saldoParaSesion = async () => {
+      const [pack] = await transaction`
+        SELECT id, label, total_sessions, used_sessions
+        FROM session_packages
+        WHERE client_id = ${current.client_id} AND status = 'active' AND used_sessions < total_sessions
+          -- Una clase se cobra con el saldo que estaba vivo el día en que
+          -- ocurrió, aunque se marque después del corte.
+          AND (expires_on IS NULL OR expires_on >= (${current.starts_at}::timestamptz AT TIME ZONE 'America/Panama')::date)
+        ORDER BY expires_on ASC NULLS LAST, purchased_on
+        LIMIT 1 FOR UPDATE
+      `;
+      return pack as SessionPackageBalance | undefined;
+    };
+    const descontarSaldo = async () => {
+      const pack = await saldoParaSesion();
+      if (!pack) return null;
+      const nextUsed = Number(pack.used_sessions) + 1;
+      const packageId = String(pack.id);
+      await transaction`UPDATE session_packages SET used_sessions = ${nextUsed}, status = ${nextUsed >= Number(pack.total_sessions) ? 'exhausted' : 'active'} WHERE id = ${packageId}`;
+      return { ...pack, id: packageId, used_sessions: nextUsed };
+    };
     // Devolverla a programada: se deshace lo que la marca había hecho —incluido
     // el descuento del saldo— y la sesión vuelve a estar por delante, sin
     // contar ni a favor ni en contra.
     if (resultado === 'scheduled') {
+      let billing: SessionBillingNotice = sessionBillingNotice(null, 'returned');
       if (current.package_debited && current.package_id) {
-        await transaction`UPDATE session_packages SET used_sessions = GREATEST(0, used_sessions - 1), status = 'active' WHERE id = ${current.package_id}`;
+        const [pack] = await transaction`SELECT id, label, total_sessions, used_sessions FROM session_packages WHERE id = ${current.package_id} FOR UPDATE`;
+        if (pack) {
+          await transaction`UPDATE session_packages SET used_sessions = GREATEST(0, used_sessions - 1), status = 'active' WHERE id = ${current.package_id}`;
+          billing = sessionBillingNotice({ ...pack, used_sessions: Math.max(0, Number(pack.used_sessions || 0) - 1) } as Record<string, unknown>, 'returned');
+        }
       }
       const [devuelta] = await transaction`
         UPDATE sessions SET status = 'scheduled', completion_percent = 0, package_id = null, package_debited = false,
           completed_by_user_id = null, completion_recorded_at = null, updated_at = now()
         WHERE id = ${id} RETURNING *
       `;
-      return devuelta;
+      return { ...devuelta, billing };
+    }
+    if (!completed && current.status === 'no_show' && !current.package_debited) {
+      return { ...current, billing: sessionBillingNotice(null, 'not_debited') };
     }
     if (!completed && current.package_debited && current.package_id) {
-      await transaction`UPDATE session_packages SET used_sessions = GREATEST(0, used_sessions - 1), status = 'active' WHERE id = ${current.package_id}`;
+      const [pack] = await transaction`SELECT id, label, total_sessions, used_sessions FROM session_packages WHERE id = ${current.package_id} FOR UPDATE`;
+      const billing = sessionBillingNotice(pack as Record<string, unknown>, 'debited');
       const [updated] = await transaction`
-        UPDATE sessions SET status = 'no_show', completion_percent = 0, package_id = null, package_debited = false,
+        UPDATE sessions SET status = 'no_show', completion_percent = 0,
           completed_by_user_id = ${markedBy}, completion_recorded_at = now(), updated_at = now()
         WHERE id = ${id} RETURNING *
       `;
-      return updated;
+      return { ...updated, billing };
     }
     if (completed && !current.package_debited) {
       // El saldo es de cada quien, aunque pague otro. Antes se descontaba del
@@ -2832,51 +2850,49 @@ async function recordSessionCompliance(id: string, ownerId: string, markedBy: st
       // hace que consuman una sola clase: cada uno gasta una de las suyas.
       //
       // Lo que sigue siendo del pagador es el dinero, no las clases.
-      const grupo = current.client_id as string;
-
-      // Se gasta el saldo que caduca antes. Ir por el más antiguo parecía
-      // razonable hasta que un cliente tuvo dos a la vez: su mensualidad, que
-      // vence en el corte, y un paquete suelto comprado antes que no vence
-      // nunca. Con el orden viejo se consumía el paquete y las clases de la
-      // mensualidad se perdían al vencer —y el cumplimiento se las apuntaba
-      // como incumplidas, cuando el cliente sí había entrenado—.
-      const [pack] = await transaction`
-        SELECT * FROM session_packages
-        WHERE client_id = ${grupo} AND status = 'active' AND used_sessions < total_sessions
-          -- Un saldo vencido no se gasta. Seguía estando 'active' después de
-          -- su fecha, así que una clase dada hoy salía de un mes ya cerrado y
-          -- las sesiones del ciclo en curso —o la reposición, que dura una
-          -- semana— se quedaban intactas para vencer después.
-          --
-          -- Se compara contra el día de la clase y no contra hoy: una clase
-          -- del 30 marcada el 2 se pagó con el saldo de aquel mes, que era el
-          -- que estaba vivo cuando ocurrió.
-          AND (expires_on IS NULL OR expires_on >= (${current.starts_at}::timestamptz AT TIME ZONE 'America/Panama')::date)
-        ORDER BY expires_on ASC NULLS LAST, purchased_on
-        LIMIT 1 FOR UPDATE
-      `;
+      // Se gasta el saldo que caduca antes. Se compara contra el día de la
+      // clase, no contra hoy, para que marcarla tarde no cambie el ciclo que
+      // realmente consumió.
+      const pack = await descontarSaldo();
       if (!pack) {
         const [updated] = await transaction`
           UPDATE sessions SET status = 'completed', completion_percent = ${completionPercent}, debited_group_id = ${grupo}, completed_by_user_id = ${markedBy}, completion_recorded_at = now(), updated_at = now()
           WHERE id = ${id} RETURNING *
         `;
-        return updated;
+        return { ...updated, billing: sessionBillingNotice(null, 'not_debited') };
       }
-      const nextUsed = pack.used_sessions + 1;
-      await transaction`UPDATE session_packages SET used_sessions = ${nextUsed}, status = ${nextUsed >= pack.total_sessions ? 'exhausted' : 'active'} WHERE id = ${pack.id}`;
+      const billing = sessionBillingNotice(pack, 'debited');
       const [updated] = await transaction`
         UPDATE sessions SET status = 'completed', completion_percent = ${completionPercent}, package_id = ${pack.id}, package_debited = true, debited_group_id = ${grupo},
           completed_by_user_id = ${markedBy}, completion_recorded_at = now(), updated_at = now()
         WHERE id = ${id} RETURNING *
       `;
-      return updated;
+      return { ...updated, billing };
+    }
+    if (!completed) {
+      // No cumplió no crea una clase nueva ni la deja flotando: la clase se
+      // pierde y consume el saldo que correspondía al día en que ocurrió.
+      const pack = await descontarSaldo();
+      const billing = sessionBillingNotice(pack, 'debited');
+      const [updated] = await transaction`
+        UPDATE sessions SET status = 'no_show', completion_percent = 0,
+          package_id = ${pack?.id || null}, package_debited = ${Boolean(pack)}, debited_group_id = ${pack ? grupo : null},
+          completed_by_user_id = ${markedBy}, completion_recorded_at = now(), updated_at = now()
+        WHERE id = ${id} RETURNING *
+      `;
+      return { ...updated, billing };
+    }
+    let billing = sessionBillingNotice(null, 'not_debited');
+    if (current.package_debited && current.package_id) {
+      const [pack] = await transaction`SELECT id, label, total_sessions, used_sessions FROM session_packages WHERE id = ${current.package_id}`;
+      billing = sessionBillingNotice(pack as Record<string, unknown>, 'debited');
     }
     const [updated] = await transaction`
-      UPDATE sessions SET status = ${completed ? 'completed' : 'no_show'}, completion_percent = ${completed ? completionPercent : 0},
+      UPDATE sessions SET status = 'completed', completion_percent = ${completionPercent},
         completed_by_user_id = ${markedBy}, completion_recorded_at = now(), updated_at = now()
       WHERE id = ${id} RETURNING *
     `;
-    return updated;
+    return { ...updated, billing };
   });
 }
 

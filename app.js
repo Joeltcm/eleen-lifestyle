@@ -205,6 +205,9 @@ const sessionFromApi = item => {
     date: starts.date, time: starts.time, durationMinutes: Number(item.duration_minutes || 60),
     routine: item.routine_title || 'Evaluación / seguimiento', mode: item.mode, status: item.status,
     completionPercent: Number(item.completion_percent || 0), notes: item.notes || '',
+    packageId: item.package_id || '', packageLabel: item.charged_package_label || '',
+    packageUsed: item.charged_package_used == null ? null : Number(item.charged_package_used),
+    packageTotal: item.charged_package_total == null ? null : Number(item.charged_package_total),
     cancelledBy: item.cancelled_by || '', cancellationKind: item.cancellation_kind || '', cancellationResolution: item.cancellation_resolution || '', pausedHold: Boolean(item.paused_hold),
     googleSynced: Boolean(item.google_event_id), googleEventLink: item.google_event_link || '',
     googleSyncError: item.google_sync_error || ''
@@ -711,6 +714,7 @@ function renderCalendar() {
           <span class="session-state ${estadoSesion(session)}">${sessionStateLabel(session)}</span>
         </summary>
         ${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}
+        ${session.packageLabel && session.packageId ? `<small class="session-charge">Descontada de «${escapeHtml(session.packageLabel)}»${session.packageUsed != null && session.packageTotal != null ? ` · quedan ${Math.max(0, session.packageTotal - session.packageUsed)}` : ''}</small>` : ''}
         ${session.status === 'cancelled'
           ? `<div class="session-management"><button type="button" class="secondary" data-reactivar-sesion="${session.id}">Reactivar</button><button type="button" class="secondary" data-edit-cancellation="${session.id}">Editar cancelación</button><button type="button" class="secondary" data-purge-session="${session.id}">Quitar de la agenda</button></div>`
           : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button><button type="button" class="secondary" data-cancel-session="${session.id}">Cancelar</button><button type="button" class="secondary" data-purge-session="${session.id}">Eliminar</button>${sessionComplianceForm(session)}</div>`}
@@ -874,7 +878,7 @@ function renderBilling() {
     // entrena aunque pague días después, y esto lo deja a la vista sin bloquear.
     const pagoAviso = pack.pagoPendiente && pack.status === 'confirmed'
       ? '<br><small class="pack-adeuda">Pendiente de pago</small>' : '';
-    return `<tr><td data-label="Cliente"><b>${escapeHtml(pack.client)}</b></td><td data-label="Paquete">${escapeHtml(pack.label)}${pack.originInvoiceId ? `<br><small class="pack-origin">Salió del cobro ${escapeHtml(pack.originSource === 'zoho_invoice' ? 'Zoho ' : '')}${escapeHtml(pack.originNumber || pack.originConcept || 'sin número')}${pack.originDate ? ` · ${fechaCorta(pack.originDate)}` : ''}</small>` : ''}</td><td data-label="Compradas">${pack.total}</td><td data-label="Usadas">${pack.used}</td><td data-label="Disponibles"><strong class="session-balance">${remaining}</strong></td><td data-label="Estado"><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span><br><small>${pack.expiresOn ? `vence ${fechaCorta(pack.expiresOn)}` : 'sin vencimiento'}</small>${aviso}${pagoAviso}</td><td data-label="Cumplimiento">${cumplimientoCelda(pack.clientId)}</td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-editar-paquete="${pack.id}">Editar</button>${renovable}${borrable}</div><small>${pack.status === 'confirmed' && remaining ? 'Descuento automático' : '—'}</small></td></tr>`;
+    return `<tr><td data-label="Cliente"><b>${escapeHtml(pack.client)}</b></td><td data-label="Paquete">${escapeHtml(pack.label)}${pack.originInvoiceId ? `<br><small class="pack-origin">Salió del cobro ${escapeHtml(pack.originSource === 'zoho_invoice' ? 'Zoho ' : '')}${escapeHtml(pack.originNumber || pack.originConcept || 'sin número')}${pack.originDate ? ` · ${fechaCorta(pack.originDate)}` : ''}</small>` : ''}</td><td data-label="Compradas">${pack.total}</td><td data-label="Usadas">${pack.used}</td><td data-label="Disponibles"><strong class="session-balance">${remaining}</strong></td><td data-label="Estado"><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span><br><small>${pack.expiresOn ? `vence ${fechaCorta(pack.expiresOn)}` : 'sin vencimiento'}</small>${aviso}${pagoAviso}</td><td data-label="Cumplimiento">${cumplimientoCelda(pack.clientId)}</td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-editar-paquete="${pack.id}">Editar</button>${renovable}${borrable}</div><small>${pack.status === 'confirmed' && remaining ? 'Aquí se descuentan las clases' : '—'}</small></td></tr>`;
   }).join('') : `<tr><td colspan="8" class="empty">${data.packages.length ? 'No hay saldos con estos filtros. Cambia el mes o usa “Ver historial”.' : 'Aún no hay paquetes de sesiones.'}</td></tr>`;
   void ensureBillingAnalytics();
 }
@@ -1229,17 +1233,19 @@ async function notificationCenter(isPortal = false) {
       const fila = boton.closest('.notification-item');
       fila.querySelectorAll('button').forEach(b => { b.disabled = true; });
       try {
+        let resumen = 'Guardado';
         if (boton.dataset.marcar === 'cancel') {
           await api(`/api/sessions/${boton.dataset.sesion}?rescheduled=false`, { method: 'DELETE' });
         } else {
-          await api(`/api/sessions/${boton.dataset.sesion}/compliance`, { method: 'PATCH', body: {
+          const resultado = await api(`/api/sessions/${boton.dataset.sesion}/compliance`, { method: 'PATCH', body: {
             outcome: boton.dataset.marcar, completionPercent: boton.dataset.marcar === 'completed' ? 100 : 0
           } });
+          resumen = mensajeDeSaldo(resultado, boton.dataset.marcar === 'completed' ? 'Cumplió' : 'No cumplió');
         }
         await loadData(); renderAll();
         fila.remove();
         const quedan = box.querySelectorAll('.notification-item.pending').length;
-        toast(quedan ? `Guardado · quedan ${quedan} por marcar` : 'Guardado · no queda ninguna por marcar');
+        toast(`${resumen} · ${quedan ? `quedan ${quedan} por marcar` : 'no queda ninguna por marcar'}`);
       } catch (error) {
         toast(error.message, true);
         fila.querySelectorAll('button').forEach(b => { b.disabled = false; });
@@ -2527,8 +2533,17 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
+function mensajeDeSaldo(resultado, dicho) {
+  const billing = resultado?.billing;
+  if (billing?.action === 'debited' && billing.packageLabel) {
+    return `${dicho} · descontado de «${billing.packageLabel}» · quedan ${billing.remainingSessions}`;
+  }
+  if (billing?.action === 'returned') return `${dicho} · ${billing.message}`;
+  if (billing?.action === 'not_debited') return `${dicho} · ${billing.message}`;
+  return dicho;
+}
 async function completeSession(id) {
-  try { await api(`/api/sessions/${id}/complete`, { method: 'POST' }); await loadData(); renderAll(); toast('Sesión completada'); }
+  try { const resultado = await api(`/api/sessions/${id}/complete`, { method: 'POST' }); await loadData(); renderAll(); toast(mensajeDeSaldo(resultado, 'Sesión completada')); }
   catch (error) { toast(error.message, true); }
 }
 // Cobrar en dos toques: abrir el selector y elegir el método. La fecha es hoy,
@@ -4014,7 +4029,7 @@ document.addEventListener('submit', async event => {
   const outcome = form.elements.outcome ? form.elements.outcome.value : (form.elements.completed.checked ? 'completed' : 'no_show');
   const completionPercent = outcome === 'completed' ? Number(form.elements.completionPercent.value) : 0;
   const dicho = { scheduled: 'Sin marcar', completed: 'Cumplió', no_show: 'No cumplió' }[outcome];
-  try { form.classList.add('loading-state'); await api(`/api/sessions/${form.dataset.sessionCompliance}/compliance`, { method: 'PATCH', body: { outcome, completionPercent } }); await loadData(); renderAll(); toast(`Guardado · ${dicho}`); }
+  try { form.classList.add('loading-state'); const resultado = await api(`/api/sessions/${form.dataset.sessionCompliance}/compliance`, { method: 'PATCH', body: { outcome, completionPercent } }); await loadData(); renderAll(); toast(mensajeDeSaldo(resultado, `Guardado · ${dicho}`)); }
   catch (error) { toast(error.message, true); form.classList.remove('loading-state'); }
 });
 document.addEventListener('change', event => {
@@ -4489,7 +4504,11 @@ document.addEventListener('submit', async event => {
   try {
     form.classList.add('loading-state');
     if (routineForm) await api('/api/portal/routine-completions', { method: 'POST', body: { routineId: routineForm.dataset.portalRoutine, completedOn: dateKey(today), completionPercent } });
-    else await api(`/api/portal/sessions/${sessionForm.dataset.portalSession}/compliance`, { method: 'PATCH', body: { completed, completionPercent } });
+    else {
+      const resultado = await api(`/api/portal/sessions/${sessionForm.dataset.portalSession}/compliance`, { method: 'PATCH', body: { completed, completionPercent } });
+      await loadPortalData(); toast(mensajeDeSaldo(resultado, 'Cumplimiento actualizado'));
+      return;
+    }
     await loadPortalData(); toast('Cumplimiento actualizado');
   } catch (error) { toast(error.message, true); form.classList.remove('loading-state'); }
 });
