@@ -358,10 +358,10 @@ async function generateRecurringInvoices(ownerId?: string) {
     const noAnticipado = cobro.payment_mode === 'no_anticipado';
     // El ciclo del saldo se ancla al DÍA DE CORTE del cliente con la MISMA
     // función que las demás rutas (cicloDelCorte, que clampa al último día del
-    // mes). Antes se usaba venceMensualidadDesde(due_on), que suma un mes sin
-    // clampar y desbordaba en cortes 30/31 hacia meses cortos (Feb): un corte
-    // 31 vencía el 3 de marzo en vez del 28 de febrero, y no coincidía con la
-    // asignación de plan, la cobertura ni la confirmación de pago.
+    // mes). Es la única fuente de verdad del ciclo: sumar un mes sin clampar
+    // desbordaba en cortes 30/31 hacia meses cortos (un corte 31 en enero vencía
+    // el 3 de marzo en vez del 28 de febrero) y no coincidía con la asignación de
+    // plan, la cobertura ni la confirmación de pago.
     const ciclo = cicloDelCorte(cobro.due_on as Date, Number(cobro.corte) || 1);
     const [abierto] = await sql`
       INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, origin_invoice_id, status)
@@ -1123,7 +1123,7 @@ app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) =
   const refDia = input.dueOn || diaEnPanama(new Date());
   // La mensualidad usa la MISMA función de ciclo que el worker, la cobertura y
   // la asignación de plan (cicloDelCorte, que clampa el corte al último día del
-  // mes). Antes usaba venceMensualidadDesde, que desbordaba en cortes 30/31.
+  // mes) para no desbordar en cortes 30/31 hacia meses cortos.
   const cicloMensual = esCobroMensual ? cicloDelCorte(refDia, Number(client.billing_cutoff_day) || 1) : null;
   const vence = input.expiresOn
     ? input.expiresOn

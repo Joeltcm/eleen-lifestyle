@@ -563,10 +563,9 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
 
   // Criterio de cierre (auditoría Codex): worker y paquete manual deben producir
   // EXACTAMENTE el mismo rango, clampado al último día del mes, para cortes de
-  // fin de mes. Antes el worker usaba venceMensualidadDesde (suma un mes sin
-  // clampar) y desbordaba: corte 31 en enero vencía el 3 de marzo, no el 28 de
-  // febrero. 2027 no es bisiesto (febrero = 28), fechas futuras para que el
-  // worker las tome (due_on >= current_date).
+  // fin de mes. Sumar un mes sin clampar desbordaba: un corte 31 en enero vencía
+  // el 3 de marzo, no el 28 de febrero. 2027 no es bisiesto (febrero = 28), y las
+  // fechas son futuras para que el worker las tome (due_on >= current_date).
   const casosDeCorte = [
     { corte: 15, due: '2027-01-15', vence: '2027-02-15' },
     { corte: 28, due: '2027-01-28', vence: '2027-02-28' },
@@ -598,6 +597,42 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
       assert.ok(pw, `el worker abrió el saldo del ciclo futuro (vence ${vence}). pkgs=${JSON.stringify(pkgsCw.map(p => String(p.expires_on).slice(0, 10)))}`);
     });
   }
+
+  test('las 4 rutas usan el mismo ciclo de corte (misma fuente de verdad)', async () => {
+    // Cierra el criterio de la auditoría: asignación de plan, paquete manual y
+    // confirmación de pago producen el MISMO ciclo (inicio, expires y etiqueta).
+    // El worker se compara con el paquete manual en los 6 casos de borde de
+    // arriba, así que por transitividad las 4 rutas comparten la fuente de verdad.
+    const corte = 31; // fin de mes: el caso que desbordaba
+    const plan = await api.post('/api/plans', { name: 'Cuatro rutas', billingModel: 'monthly', price: 200, sessionsIncluded: 8 });
+
+    // Ruta 1 — ASIGNACIÓN DE PLAN: abre el saldo del ciclo actual. Es la referencia.
+    const c1 = await api.post('/api/clients', { fullName: 'Ruta plan', billingModel: 'monthly', standardPrice: 200, cutoffDay: corte });
+    await api.patch(`/api/clients/${c1.datos.id}/plan`, { planId: plan.datos.id, cutoffDay: corte });
+    const sPlan = (await api.get('/api/packages')).datos.find(p => p.client_id === c1.datos.id && p.kind === 'monthly');
+    assert.ok(sPlan, 'asignar el plan abre el saldo del ciclo');
+    const inicio = String(sPlan.purchased_on).slice(0, 10);
+    const vence = String(sPlan.expires_on).slice(0, 10);
+    const etiqueta = sPlan.label;
+
+    // Ruta 2 — PAQUETE MANUAL con el mismo inicio de ciclo.
+    const c2 = await api.post('/api/clients', { fullName: 'Ruta manual', billingModel: 'monthly', standardPrice: 200, cutoffDay: corte });
+    const man = await api.post('/api/packages', { clientId: c2.datos.id, totalSessions: 8, amount: 200, kind: 'monthly', dueOn: inicio });
+    const sMan = (await api.get('/api/packages')).datos.find(p => p.id === man.datos.id);
+    assert.equal(String(sMan.expires_on).slice(0, 10), vence, 'paquete manual: mismo expires que asignar plan');
+    assert.equal(sMan.label, etiqueta, 'paquete manual: misma etiqueta que asignar plan');
+
+    // Ruta 3 — CONFIRMAR PAGO (cobertura) con el mismo inicio de ciclo. Con plan
+    // (para que la cobertura sepa cuántas sesiones abrir) pero sin saldo previo:
+    // crear el cliente con plan fija la meta pero no abre saldo; lo abre el pago.
+    const c3 = await api.post('/api/clients', { fullName: 'Ruta confirmar', planId: plan.datos.id, cutoffDay: corte });
+    const inv = await api.post('/api/invoices', { clientId: c3.datos.id, concept: 'Mensualidad', amount: 200, dueOn: inicio });
+    await api.post(`/api/invoices/${inv.datos.id}/confirm`, { method: 'Efectivo', paidOn: inicio });
+    const sConf = (await api.get('/api/packages')).datos.find(p => p.client_id === c3.datos.id && p.kind === 'monthly');
+    assert.ok(sConf, 'confirmar el pago abre el saldo del ciclo');
+    assert.equal(String(sConf.expires_on).slice(0, 10), vence, 'confirmar pago: mismo expires que asignar plan');
+    assert.equal(sConf.label, etiqueta, 'confirmar pago: misma etiqueta que asignar plan');
+  });
 
   test('la mensualidad automática abre el saldo anclado al corte, no al 1° de mes', async () => {
     // Antes el saldo automático vencía el 1° (mes calendario). Para un corte 15
