@@ -332,6 +332,28 @@ describe('la pareja que paga uno y entrenan los dos', () => {
     assert.equal(Number(clientes.find(c => c.id === beatris).available_sessions), 11, 'ella gastó una');
     assert.equal(Number(clientes.find(c => c.id === eduardo).available_sessions), 12, 'él no entrenó');
   });
+
+  test('una línea familiar queda ligada a una sola persona y a su importe completo', async () => {
+    const factura = (await api.get('/api/invoices')).datos.find(invoice => invoice.auto_generated
+      && invoice.client_id === eduardo && invoice.billed_for_client_id === beatris);
+    assert.ok(factura, 'la renovación crea una línea propia para quien paga la mensualidad de Beatris');
+    assert.equal(Number(factura.amount), 175);
+
+    const cobertura = await api.get(`/api/invoices/${factura.id}/coverage`);
+    assert.equal(cobertura.datos.invoice.billed_for_client_id, beatris);
+
+    const aplicada = await api.post(`/api/invoices/${factura.id}/coverage`, {
+      billingPeriod: String(factura.billing_period).slice(0, 10),
+      entries: [{ clientId: beatris, amount: 175, sessions: 12 }]
+    });
+    assert.equal(aplicada.estado, 201);
+
+    const dividida = await api.post(`/api/invoices/${factura.id}/coverage`, {
+      billingPeriod: String(factura.billing_period).slice(0, 10),
+      entries: [{ clientId: eduardo, amount: 87.5, sessions: 12 }, { clientId: beatris, amount: 87.5, sessions: 12 }]
+    });
+    assert.equal(dividida.estado, 400, 'una línea de $175 no se puede repartir entre dos personas');
+  });
 });
 
 describe('aplicar un cobro a las mensualidades que cubre', () => {
@@ -1141,6 +1163,13 @@ describe('aplicar un cobro ya pagado a un paquete de clases', () => {
     // congelados de la migración. El local tiene su propio "Confirmar pago".
     assert.equal(datos.saldado, false, 'un cobro local no se marca pagado al aplicar el paquete');
     assert.equal((await api.get('/api/invoices')).datos.find(x => x.id === facturaId).status, 'pending', 'sigue pendiente hasta confirmar el pago');
+  });
+
+  test('no permite aplicar a paquete un cobro de una mensualidad', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Cliente mensual sin paquete', billingModel: 'monthly', standardPrice: 200, cutoffDay: 15 });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 200, dueOn: hoy });
+    const respuesta = await api.post(`/api/invoices/${f.datos.id}/package`, { totalSessions: 8, expiresOn: enDias(21) });
+    assert.equal(respuesta.estado, 409, 'la opción de paquete no aplica a una mensualidad');
   });
 
   test('no se puede aplicar dos veces al mismo cobro', async () => {

@@ -3323,7 +3323,7 @@ function cicloDelCorte(referencia: string | Date, diaDeCorte: number): { inicio:
 
 async function coberturaDeCobro(ownerId: string, invoiceId: string) {
   const [invoice] = await sql`
-    SELECT i.id, i.client_id, i.concept, i.amount, i.due_on, i.billing_period, i.status,
+    SELECT i.id, i.client_id, i.billed_for_client_id, i.concept, i.amount, i.due_on, i.billing_period, i.status,
       i.source_system, i.issued_on, c.full_name,
       COALESCE((SELECT min(ip.paid_on) FROM payment_allocations pa JOIN invoice_payments ip ON ip.id = pa.payment_id WHERE pa.invoice_id = i.id), i.issued_on, i.due_on) AS coverage_start
     FROM invoices i JOIN clients c ON c.id = i.client_id
@@ -3509,12 +3509,17 @@ app.post('/api/invoices/:id/coverage', { preHandler: requireStaff }, async (requ
   const id = z.string().uuid().parse((request.params as { id: string }).id);
   const input = coverageSchema.parse(request.body);
   const [invoice] = await sql`
-    SELECT i.id, i.client_id, i.amount, i.status, i.source_system,
+    SELECT i.id, i.client_id, i.billed_for_client_id, i.auto_generated, i.amount, i.status, i.source_system,
       COALESCE((SELECT min(ip.paid_on) FROM payment_allocations pa JOIN invoice_payments ip ON ip.id = pa.payment_id WHERE pa.invoice_id = i.id), i.issued_on, i.due_on) AS coverage_start
     FROM invoices i JOIN clients c ON c.id = i.client_id
     WHERE i.id = ${id} AND c.owner_id = ${auth.sub} AND i.status <> 'void'
   `;
   if (!invoice) return reply.code(404).send({ error: 'Cobro no encontrado' });
+  if (invoice.auto_generated && invoice.billed_for_client_id && (input.entries.length !== 1
+    || input.entries[0].clientId !== invoice.billed_for_client_id
+    || Math.abs(Number(input.entries[0].amount) - Number(invoice.amount)) > 0.01)) {
+    return reply.code(400).send({ error: 'Esta línea corresponde a una sola persona y debe aplicarse por el importe completo de la línea.' });
+  }
   // El mes se guarda siempre por su día uno: es la unidad con la que compara
   // la generación, y un día suelto la haría fallar por un día de diferencia.
   const periodo = input.billingPeriod.slice(0, 8) + '01';
@@ -3618,20 +3623,23 @@ app.post('/api/invoices/:id/package', { preHandler: requireStaff }, async (reque
   const input = packageFromInvoiceSchema.parse(request.body);
   const resultado = await sql.begin(async transaction => {
     const [invoice] = await transaction`
-      SELECT i.id, i.client_id, i.amount, i.package_id, i.status, i.source_system,
-        c.billing_model, c.payment_mode,
+      SELECT i.id, i.client_id, COALESCE(i.billed_for_client_id, i.client_id) AS billed_for_client_id,
+        i.amount, i.package_id, i.status, i.source_system,
+        beneficiario.billing_model, c.payment_mode,
         COALESCE((SELECT min(ip.paid_on) FROM payment_allocations pa JOIN invoice_payments ip ON ip.id = pa.payment_id WHERE pa.invoice_id = i.id), i.issued_on, i.due_on) AS coverage_start
-      FROM invoices i JOIN clients c ON c.id = i.client_id
+      FROM invoices i
+      JOIN clients c ON c.id = i.client_id
+      JOIN clients beneficiario ON beneficiario.id = COALESCE(i.billed_for_client_id, i.client_id)
       WHERE i.id = ${id} AND c.owner_id = ${auth.sub} AND i.status <> 'void'
       FOR UPDATE OF i
     `;
     if (!invoice) return { error: 'Cobro no encontrado', code: 404 };
     if (invoice.package_id) return { error: 'Este cobro ya tiene un paquete ligado.', code: 409 };
-    if (invoice.status === 'pending' && invoice.source_system !== 'zoho_invoice'
-      && invoice.billing_model === 'monthly' && invoice.payment_mode === 'anticipado') {
-      return { error: 'Una mensualidad anticipada debe confirmarse antes de abrir su saldo.', code: 409 };
+    if (invoice.billing_model !== 'package') {
+      return { error: 'Este cobro no corresponde a un plan de paquete.', code: 409 };
     }
-    await lockBillingClient(transaction, invoice.client_id as string);
+    const destinatarioId = invoice.billed_for_client_id as string;
+    await lockBillingClient(transaction, destinatarioId);
     // Las clases del paquete cuelgan del día del pago: es cuando el cliente lo
     // compró, y desde ahí corre su validez.
     const inicio = mediodiaEnPanama(invoice.coverage_start || new Date());
@@ -3641,7 +3649,7 @@ app.post('/api/invoices/:id/package', { preHandler: requireStaff }, async (reque
     if (expira > tope) return { error: 'Un paquete de clases no puede durar más de 6 semanas desde el pago.', code: 400 };
     const [pack] = await transaction`
       INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, origin_invoice_id, status)
-      VALUES (${invoice.client_id}, ${`Paquete ${input.totalSessions} sesiones`}, ${input.totalSessions}, ${invoice.amount},
+      VALUES (${destinatarioId}, ${`Paquete ${input.totalSessions} sesiones`}, ${input.totalSessions}, ${invoice.amount},
         ${input.expiresOn}::date, 'package', ${soloFecha(invoice.coverage_start)}::date, ${id}, 'active')
       RETURNING id, total_sessions, expires_on
     `;
