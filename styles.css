@@ -467,3 +467,4 @@ button.active-filter{background:#2f6f4f;color:#fff;border-color:#2f6f4f}
   .section-heading>div{flex-wrap:wrap;width:100%}
   .section-heading>div button{flex:1 1 auto}
 }
+.invoice-family-note{display:block;color:#8e5d76;font-weight:600;margin-top:3px}.invoice-payer-note,.invoice-family-total{display:block;color:#8a7a82;font-size:10px;margin-top:3px}.invoice-family-total{color:#9a607a;font-weight:600}

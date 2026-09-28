@@ -2574,8 +2574,12 @@ describe('un pagador que cubre a varias personas', () => {
       .filter(i => i.client_id === pagador && i.auto_generated);
     const dela = facturas.find(f => f.billed_for_client_id === esposa);
     assert.match(dela.concept, /La esposa/, 'sin el nombre, tres cobros iguales serían indistinguibles');
+    assert.equal(dela.full_name, 'El que paga', 'la lista conserva al pagador como cliente visible');
+    assert.equal(dela.billed_for_name, 'La esposa', 'la API expone a quién cubre la línea');
     const suyo = facturas.find(f => f.billed_for_client_id === pagador);
     assert.ok(!/·.*·/.test(suyo.concept.replace(/ · \d{2}\/\d{4}/, '')), 'el suyo no lleva nombre repetido');
+    assert.equal(suyo.full_name, 'El que paga');
+    assert.equal(suyo.billed_for_name, 'El que paga');
   });
 
   test('no duplica al volver a generar', async () => {
