@@ -2477,7 +2477,7 @@ app.post('/api/client-pauses/:id/resume', { preHandler: requireStaff }, async (r
 
 // Editar una cancelación recalcula el efecto de saldo sin crear descuentos o
 // débitos duplicados. Las compensaciones ya aplicadas quedan protegidas.
-const cancellationEditSchema = z.object({ cancelledBy: z.enum(['client', 'trainer']), rescheduled: z.boolean(), resolution: z.enum(['discount', 'makeup', 'none', 'debit']).optional(), amount: z.coerce.number().positive().optional() });
+const cancellationEditSchema = z.object({ cancelledBy: z.enum(['client', 'trainer']), rescheduled: z.boolean(), resolution: z.enum(['discount', 'none', 'debit']).optional(), amount: z.coerce.number().positive().optional() });
 app.patch('/api/sessions/:id/cancellation', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id);
   const input = cancellationEditSchema.parse(request.body); const resolution = input.resolution || (input.cancelledBy === 'client' && !input.rescheduled ? 'debit' : 'none');
@@ -2505,13 +2505,6 @@ app.patch('/api/sessions/:id/cancellation', { preHandler: requireStaff }, async 
       const [client] = await transaction`SELECT c.standard_price, COALESCE(p.sessions_included, c.monthly_session_target, 0)::int AS included FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id WHERE c.id = ${session.client_id}`;
       const amount = input.amount || (Number(client?.included) ? Number(client.standard_price) / Number(client.included) : 0);
       if (amount > 0) await transaction`INSERT INTO billing_credits (client_id, session_id, concept, amount) VALUES (${session.client_id}, ${id}, 'Clase cancelada por la entrenadora', ${Math.round(amount * 100) / 100})`;
-    }
-    if (input.cancelledBy === 'trainer' && resolution === 'makeup') {
-      const [existing] = await transaction`SELECT id FROM session_packages WHERE client_id = ${session.client_id} AND kind = 'makeup' AND status = 'active' AND makeup_for_period IS NULL ORDER BY created_at DESC LIMIT 1`;
-      let makeupId = existing?.id;
-      if (makeupId) await transaction`UPDATE session_packages SET total_sessions = total_sessions + 1 WHERE id = ${makeupId}`;
-      else { const [created] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status) VALUES (${session.client_id}, 'Reposición · clases canceladas por la entrenadora', 1, 0, NULL, 'makeup', current_date, 'active') RETURNING id`; makeupId = created.id; }
-      await transaction`UPDATE sessions SET cancellation_makeup_package_id = ${makeupId} WHERE id = ${id}`;
     }
     const [updated] = await transaction`UPDATE sessions SET cancellation_kind = ${input.rescheduled ? 'rescheduled' : 'not_rescheduled'}, cancelled_by = ${input.cancelledBy}, cancellation_resolution = ${resolution}, cancellation_edited_at = now(), updated_at = now() WHERE id = ${id} RETURNING *`;
     await transaction`INSERT INTO session_cancellation_edits (session_id, editor_user_id, previous_cancelled_by, previous_cancellation_kind, previous_resolution, new_cancelled_by, new_cancellation_kind, new_resolution) VALUES (${id}, ${auth.sub}, ${session.cancelled_by || null}, ${session.cancellation_kind || null}, ${session.cancellation_resolution || null}, ${input.cancelledBy}, ${input.rescheduled ? 'rescheduled' : 'not_rescheduled'}, ${resolution})`;
@@ -2625,8 +2618,7 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
   // decida después, o que no haya nada que compensar. Obligarla a elegir entre
   // reponer y descontar la empujaría a marcar cualquiera de las dos por salir
   // del paso, y eso ensucia el saldo o el cobro.
-  const compensa = consulta.resolution === 'discount' ? 'discount'
-    : consulta.resolution === 'none' ? 'none' : 'makeup';
+  const compensa = consulta.resolution === 'discount' ? 'discount' : 'none';
 
     const [session] = await sql`
     UPDATE sessions s SET status = 'cancelled',
@@ -2681,9 +2673,9 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
     }
   }
 
-  // Cuando cancela ella, el cliente queda a favor y hay que devolverle el
-  // valor: otra clase, o menos dinero. Se resuelve aquí y no se deja para
-  // luego, que es como se olvida.
+  // Cuando cancela ella, el cliente no pierde una clase del plan. Si se
+  // reprograma, la nueva sesión se marca normalmente y consume el saldo
+  // mensual/paquete que corresponda a su fecha; no se abre una bolsa aparte.
   if (laCancelaEllaSola && compensa !== 'none') {
     const [cliente] = await sql`
       SELECT c.id, c.standard_price, COALESCE(p.sessions_included, c.monthly_session_target, 0)::int AS incluidas
@@ -2704,26 +2696,6 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
         `;
         compensacion = { tipo: 'discount', detalle: `Descuento de ${porClase.toFixed(2)} para el próximo cobro` };
       }
-    } else {
-      // Reposición sin tope y sin fecha: el cliente no provocó el problema, y
-      // darle una semana para arreglarlo sería trasladarle la prisa de otro.
-      const [existente] = await sql`
-        SELECT id, total_sessions FROM session_packages
-        WHERE client_id = ${session.client_id} AND kind = 'makeup' AND makeup_for_period IS NULL AND status = 'active'
-        ORDER BY created_at DESC LIMIT 1
-      `;
-      if (existente) {
-        await sql`UPDATE session_packages SET total_sessions = total_sessions + 1 WHERE id = ${existente.id}`;
-        await sql`UPDATE sessions SET cancellation_makeup_package_id = ${existente.id} WHERE id = ${id}`;
-      } else {
-        const [creado] = await sql`
-          INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, status)
-          VALUES (${session.client_id}, 'Reposición · clases canceladas por la entrenadora', 1, 0, NULL, 'makeup', current_date, 'active')
-          RETURNING id
-        `;
-        await sql`UPDATE sessions SET cancellation_makeup_package_id = ${creado.id} WHERE id = ${id}`;
-      }
-      compensacion = { tipo: 'makeup', detalle: 'Una clase por reponer, sin fecha límite' };
     }
   }
   try { await cancelSessionInGoogle(auth.sub, id); }

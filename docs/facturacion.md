@@ -36,7 +36,7 @@ día del corte**, no al siguiente. Casi todo ciclo pisa dos meses de calendario.
 | **memberships** | `amount`, `renewal_day`, `status` (active/paused). Su existencia activa habilita la emisión recurrente; un `ends_on` vencido la bloquea. |
 | **service_plans** | `price`, `sessions_included`, `validity_days`, `billing_model` |
 | **invoices** (cobros) | `due_on`, `billing_period`, `status` (pending/confirmed/void), `auto_generated`, `source_system` (zoho_invoice…), `billed_for_client_id`, `package_id` |
-| **session_packages** (saldos) | `total_sessions` / `used_sessions`, `expires_on`, `kind` (monthly/package/makeup), `purchased_on`, `origin_invoice_id`, `status` (active/exhausted/expired/pending/cancelled) |
+| **session_packages** (saldos) | `total_sessions` / `used_sessions`, `expires_on`, `kind` (monthly/package; `makeup` sólo histórico), `purchased_on`, `origin_invoice_id`, `status` (active/exhausted/expired/pending/cancelled) |
 | **sessions** | `status` (scheduled/completed/cancelled/no_show), `package_id` + `package_debited`, `cancellation_kind` (rescheduled/not_rescheduled), `cancelled_by` (client/trainer), `cancellation_resolution` |
 | **invoice_coverage** | Cobertura familiar: `client_id`, `invoice_id`, `billing_period`, `amount` |
 | **billing_credits** | Descuentos por clase cancelada por la entrenadora; `applied_invoice_id` al aplicarse al próximo cobro |
@@ -129,7 +129,7 @@ de qué consume.
 | Clase marcada **no cumplida** al llegar el corte | **Sí** | Se pierde y descuenta del paquete que cubría la fecha; no crea una clase suelta |
 | Cliente **cancela sin reagendar** | **Sí** | Entrena a crédito: la clase contratada se consume igual (`resolution='debit'`) |
 | Cliente **pide reagendar explícitamente** | No | Conserva la sesión; no abre un saldo `makeup` automático (`cancellation_kind='rescheduled'`) |
-| Cancela **la entrenadora** | No | Se compensa al cliente: reposición, descuento o nada — nunca se le cobra la falta |
+| Cancela **la entrenadora** | No | No se le cobra la falta; la nueva sesión, si se agenda, consume el saldo normal. Puede registrarse un crédito monetario |
 
 ### Los tres caminos
 
@@ -151,9 +151,9 @@ de qué consume.
 ### Reposición y aviso visible
 
 Una reprogramación sólo conserva la sesión cuando se declara explícitamente (`rescheduled=true`).
-El worker no crea una bolsa `makeup` por una reprogramación del cliente. Los saldos `makeup` que
-aparecen en Paquetes siguen reservados para una compensación elegida por la entrenadora cuando
-ella cancela una clase.
+El worker y las rutas de cancelación no crean saldos `makeup`: la sesión nueva, cuando se agenda,
+consume el saldo mensual o paquete normal que corresponda a su fecha de corte. Los saldos `makeup`
+que todavía aparecen en Paquetes son históricos y no deben usarse para nuevas clases.
 
 Al marcar una clase como cumplida o no cumplida, la respuesta indica el saldo exacto descontado,
 cuántas sesiones quedan y su etiqueta. La agenda muestra esa misma fuente bajo la sesión y el

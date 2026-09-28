@@ -1579,7 +1579,6 @@ describe('horario de trabajo con turnos', () => {
 
 describe('cuando cancela la entrenadora', () => {
   let clientId, planId;
-  const suSaldo = async tipo => (await api.get('/api/packages')).datos.find(p => p.client_id === clientId && p.kind === tipo);
   const agendarPasada = async () => {
     const cuando = new Date(Date.now() - 2 * 3600_000).toISOString();
     const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [cuando], durationMinutes: 60, mode: 'Presencial' });
@@ -1623,20 +1622,23 @@ describe('cuando cancela la entrenadora', () => {
     assert.equal(Number(despues), Number(antes), 'ese contador mide al cliente, no a ella');
   });
 
-  test('reponer le abre una clase sin fecha límite', async () => {
+  test('reprogramar no crea un saldo separado y la nueva clase consume el plan', async () => {
+    const paquete = await api.post('/api/packages', {
+      clientId, totalSessions: 8, amount: 280, kind: 'monthly', expiresOn: enDiasPa(21).iso
+    });
+    await api.post(`/api/invoices/${paquete.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: hoyPa() });
     const s = await agendarPasada();
     const { datos } = await api.delete(`/api/sessions/${s.id}?rescheduled=true&by=trainer&resolution=makeup`);
-    assert.equal(datos.compensacion.tipo, 'makeup');
-    const saldo = await suSaldo('makeup');
-    assert.ok(saldo, 'le queda una clase a favor');
-    assert.equal(saldo.expires_on, null, 'sin fecha: el cliente no provocó el problema');
-  });
-
-  test('cancelar dos veces suma sobre el mismo saldo', async () => {
-    const antes = Number((await suSaldo('makeup')).total_sessions);
-    const s = await agendarPasada();
-    await api.delete(`/api/sessions/${s.id}?rescheduled=true&by=trainer&resolution=makeup`);
-    assert.equal(Number((await suSaldo('makeup')).total_sessions), antes + 1, 'no abre un saldo nuevo por cada clase');
+    assert.equal(datos.compensacion, null, 'reprogramar no abre una bolsa aparte');
+    const saldos = (await api.get('/api/packages')).datos.filter(p => p.client_id === clientId);
+    assert.equal(saldos.filter(p => p.kind === 'makeup').length, 0, 'no crea un saldo makeup');
+    const reemplazo = await api.post('/api/sessions/batch', {
+      clientId, startsAt: [new Date(Date.now() - 90 * 60_000).toISOString()], durationMinutes: 60, mode: 'Presencial'
+    });
+    const realizada = await api.patch(`/api/sessions/${reemplazo.datos.sesiones[0].id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    assert.equal(realizada.datos.billing.packageId, paquete.datos.id, 'la nueva clase usa el saldo del corte');
+    const saldo = (await api.get('/api/packages')).datos.find(p => p.id === paquete.datos.id);
+    assert.equal(Number(saldo.used_sessions), 1, 'la clase reprogramada consume el paquete contratado');
   });
 
   test('el descuento baja el cobro del mes siguiente', async () => {
