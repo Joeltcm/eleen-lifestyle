@@ -839,18 +839,61 @@ app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, repl
     const [dependientes] = await sql`SELECT id FROM clients WHERE billing_responsible_client_id = ${id} LIMIT 1`;
     if (dependientes) return reply.code(409).send({ error: 'Este cliente ya paga por alguien más, no puede depender de otro' });
   }
-  const [client] = await sql`UPDATE clients SET full_name = ${input.fullName}, email = ${input.email || null}, phone = ${input.phone || null}, goal = ${input.goal || null}, notes = ${input.notes || null}, monthly_session_target = ${input.monthlySessionTarget ?? null}, billing_responsible_client_id = ${input.billingResponsibleClientId ?? null}, status = COALESCE(${input.status ?? null}, status),
-    billing_cutoff_day = CASE WHEN ${tocaCorte} THEN ${input.cutoffDay}::int ELSE billing_cutoff_day END,
-    payment_mode = CASE WHEN ${tocaModalidad} THEN ${input.paymentMode} ELSE payment_mode END, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
-  if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
-  // La membresía guarda su propio día de renovación. Si sólo se moviera el del
-  // cliente, quedarían dos fechas distintas para lo mismo y cuál manda
-  // dependería de por dónde se mire.
-  if (tocaCorte) {
-    // memberships no tiene updated_at; añadirlo aquí rompía el guardado entero.
-    await sql`UPDATE memberships SET renewal_day = ${input.cutoffDay} WHERE client_id = ${id} AND status = 'active'`;
+  const desactiva = input.status === 'inactive';
+  const actualizacion = await sql.begin(async transaction => {
+    const [antes] = await transaction`SELECT status FROM clients WHERE id = ${id} AND owner_id = ${auth.sub} FOR UPDATE`;
+    if (!antes) return null;
+
+    const [client] = await transaction`UPDATE clients SET full_name = ${input.fullName}, email = ${input.email || null}, phone = ${input.phone || null}, goal = ${input.goal || null}, notes = ${input.notes || null}, monthly_session_target = ${input.monthlySessionTarget ?? null}, billing_responsible_client_id = ${input.billingResponsibleClientId ?? null}, status = COALESCE(${input.status ?? null}, status),
+      billing_cutoff_day = CASE WHEN ${tocaCorte} THEN ${input.cutoffDay}::int ELSE billing_cutoff_day END,
+      payment_mode = CASE WHEN ${tocaModalidad} THEN ${input.paymentMode} ELSE payment_mode END, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
+
+    // La membresía guarda su propio día de renovación. Si sólo se moviera el
+    // del cliente, quedarían dos fechas distintas para lo mismo y cuál manda
+    // dependería de por dónde se mire.
+    if (tocaCorte) {
+      // memberships no tiene updated_at; añadirlo aquí rompía el guardado entero.
+      await transaction`UPDATE memberships SET renewal_day = ${input.cutoffDay} WHERE client_id = ${id} AND status = 'active'`;
+    }
+
+    // Inactivar termina el contrato operativo: el expediente y el historial
+    // permanecen, pero el horario futuro deja de reservar un hueco. Se listan
+    // aquí, antes de borrarlas, para retirar también sus eventos de Google
+    // después de cerrar la transacción.
+    let futuras: string[] = [];
+    if (desactiva && antes.status !== 'inactive') {
+      await transaction`
+        UPDATE session_recurrences
+        SET active = false, stopped_at = now(),
+            stopped_reason = 'Cliente marcado inactivo', updated_at = now()
+        WHERE client_id = ${id} AND active = true
+      `;
+      const sesiones = await transaction`
+        SELECT id FROM sessions
+        WHERE client_id = ${id} AND starts_at > now() AND status = 'scheduled'
+        FOR UPDATE
+      `;
+      futuras = sesiones.map(sesion => String(sesion.id));
+    }
+    return { client, futuras };
+  });
+  if (!actualizacion) return reply.code(404).send({ error: 'Cliente no encontrado' });
+
+  // Google necesita que la fila aún exista para encontrar el evento asociado.
+  // Un fallo de sincronización no debe conservar un horario que el cliente ya
+  // no puede ocupar, por eso se registra y se continúa con la liberación local.
+  for (const sessionId of actualizacion.futuras) {
+    try { await removeSessionFromGoogle(auth.sub, sessionId); }
+    catch (error) { app.log.warn({ err: error, sessionId }, 'Sesión liberada pero el evento sigue en Google Calendar'); }
   }
-  return client;
+  if (actualizacion.futuras.length) {
+    await sql`
+      DELETE FROM sessions
+      WHERE id IN ${sql(actualizacion.futuras)} AND client_id = ${id}
+        AND starts_at > now() AND status = 'scheduled'
+    `;
+  }
+  return actualizacion.client;
 });
 
 app.delete('/api/clients/:id', { preHandler: requireStaff }, async (request, reply) => {
@@ -2753,10 +2796,19 @@ function sessionBillingNotice(pack: Record<string, unknown> | null | undefined, 
 async function recordSessionCompliance(id: string, ownerId: string, markedBy: string, resultado: ResultadoSesion, completionPercent: number) {
   const completed = resultado === 'completed';
   return sql.begin(async transaction => {
-    const [current] = await transaction`SELECT s.* FROM sessions s JOIN clients c ON c.id = s.client_id WHERE s.id = ${id} AND c.owner_id = ${ownerId} FOR UPDATE`;
+    const [current] = await transaction`SELECT s.*, now() AS database_now FROM sessions s JOIN clients c ON c.id = s.client_id WHERE s.id = ${id} AND c.owner_id = ${ownerId} FOR UPDATE`;
     if (!current) return null;
     if (current.status === 'cancelled') {
       sessionStateConflict('Una sesión cancelada debe reactivarse antes de registrar su resultado.');
+    }
+    // Una sesión futura sigue siendo una reserva, no una asistencia ni una
+    // falta. Permitir marcarla aquí hacía que un clic prematuro descontara una
+    // clase antes de que llegara su fecha —el caso que dejó a Julieta con una
+    // sesión usada pese a no haber entrenado—. Se compara contra now() de la
+    // misma conexión para no depender del reloj del proceso ni de su zona horaria.
+    if (current.status === 'scheduled' && resultado !== 'scheduled'
+      && new Date(current.starts_at as Date | string) > new Date(current.database_now as Date | string)) {
+      sessionStateConflict('No se puede marcar una sesión futura como realizada o no cumplida.');
     }
     const grupo = current.client_id as string;
     const saldoParaSesion = async () => {
@@ -2922,6 +2974,10 @@ const dailyLogSchema = z.object({
 app.post('/api/trainings/daily', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const input = dailyLogSchema.parse(request.body);
+  const [calendario] = await sql`SELECT ${input.date}::date > current_date AS fecha_futura`;
+  if (calendario?.fecha_futura) {
+    return reply.code(409).send({ error: 'No se puede registrar entrenamiento en una fecha futura.' });
+  }
   // Mediodía de Panamá: la sesión debe caer en el día marcado sin importar
   // desde qué huso horario se guarde.
   const startsAt = `${input.date}T12:00:00-05:00`;

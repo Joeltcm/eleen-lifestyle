@@ -1208,38 +1208,63 @@ describe('editar una sesión de un horario indefinido', () => {
 });
 
 describe('el resultado de una sesión se dice, no se deduce', () => {
-  let clientId, sesion;
+  let clientId, sesionFutura;
   before(async () => {
     const plan = await api.post('/api/plans', { name: 'Mensual para marcar', billingModel: 'monthly', price: 100, sessionsIncluded: 8 });
     const c = await api.post('/api/clients', { fullName: 'Se marcó por error', planId: plan.datos.id, cutoffDay: 1 });
     clientId = c.datos.id;
     const p = await api.post('/api/packages', { clientId, totalSessions: 8, amount: 100, kind: 'monthly' });
     await api.post(`/api/invoices/${p.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-01' });
-    // Mañana: todavía no ha ocurrido, así que no puede haberse incumplido.
+    // Mañana: todavía no ha ocurrido, así que no puede haberse cumplido ni incumplido.
     const manana = new Date(Date.now() + 24 * 3600_000).toISOString();
     const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [manana], durationMinutes: 60, mode: 'Presencial' });
-    sesion = lote.datos.sesiones[0];
+    sesionFutura = lote.datos.sesiones[0];
   });
 
-  test('desmarcar por error la devuelve a programada, no a incumplida', async () => {
+  test('una sesión futura no se puede marcar como realizada', async () => {
+    const respuesta = await api.patch(`/api/sessions/${sesionFutura.id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    assert.equal(respuesta.estado, 409);
+    assert.match(respuesta.datos.error, /futura/i);
+    const marcada = (await api.get('/api/packages')).datos.find(p => p.client_id === clientId);
+    assert.equal(Number(marcada.used_sessions), 0, 'una futura no descuenta');
+    const agenda = (await api.get('/api/sessions')).datos.find(s => s.id === sesionFutura.id);
+    assert.equal(agenda.status, 'scheduled');
+  });
+
+  test('una sesión futura tampoco se puede marcar como no-show', async () => {
+    const respuesta = await api.patch(`/api/sessions/${sesionFutura.id}/compliance`, { outcome: 'no_show', completionPercent: 0 });
+    assert.equal(respuesta.estado, 409);
+    assert.match(respuesta.datos.error, /futura/i);
+  });
+
+  test('el registro diario tampoco acepta una fecha futura', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Registro futuro inválido', billingModel: 'single', standardPrice: 30, cutoffDay: 1 });
+    const respuesta = await api.post('/api/trainings/daily', { date: enDiasPa(1).iso, clientIds: [c.datos.id] });
+    assert.equal(respuesta.estado, 409);
+    assert.match(respuesta.datos.error, /futura/i);
+    const sesiones = (await api.get('/api/sessions')).datos.filter(s => s.client_id === c.datos.id);
+    assert.equal(sesiones.length, 0, 'rechazar la fecha no debe crear una sesión completada');
+  });
+
+  test('una clase pasada sí se puede marcar y devolver a programada', async () => {
+    const pasada = new Date(Date.now() - 24 * 3600_000).toISOString();
+    const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [pasada], durationMinutes: 60, mode: 'Presencial' });
+    const sesion = lote.datos.sesiones[0];
     await api.patch(`/api/sessions/${sesion.id}/compliance`, { outcome: 'completed', completionPercent: 100 });
     const marcada = (await api.get('/api/packages')).datos.find(p => p.client_id === clientId);
-    assert.equal(Number(marcada.used_sessions), 1, 'marcarla descuenta');
+    assert.equal(Number(marcada.used_sessions), 1, 'una pasada sí descuenta');
 
     const { datos } = await api.patch(`/api/sessions/${sesion.id}/compliance`, { outcome: 'scheduled', completionPercent: 0 });
-    assert.equal(datos.status, 'scheduled',
-      'quitar la marca de una clase que aún no ha ocurrido no puede dejarla incumplida');
+    assert.equal(datos.status, 'scheduled');
     const devuelta = (await api.get('/api/packages')).datos.find(p => p.client_id === clientId);
-    assert.equal(Number(devuelta.used_sessions), 0, 'y le devuelve la sesión al saldo');
-  });
-
-  test('y no cumplió sigue estando, cuando se quiere decir eso', async () => {
-    const { datos } = await api.patch(`/api/sessions/${sesion.id}/compliance`, { outcome: 'no_show', completionPercent: 0 });
-    assert.equal(datos.status, 'no_show');
+    assert.equal(Number(devuelta.used_sessions), 0, 'al desmarcar devuelve la sesión al saldo');
   });
 
   test('el contrato viejo sigue funcionando', async () => {
     // El registro diario y el portal siguen mandando 'completed'.
+    const pasada = new Date(Date.now() - 2 * 24 * 3600_000).toISOString();
+    const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [pasada], durationMinutes: 60, mode: 'Presencial' });
+    const sesion = lote.datos.sesiones[0];
     const { datos } = await api.patch(`/api/sessions/${sesion.id}/compliance`, { completed: true, completionPercent: 100 });
     assert.equal(datos.status, 'completed');
   });
@@ -2463,7 +2488,7 @@ describe('quitar sesiones canceladas de la agenda', () => {
   });
 
   test('una realizada no se borra: descontó del saldo', async () => {
-    const lote = await api.post('/api/sessions/batch', { clientId: clienteId, startsAt: ['2026-10-12T13:00:00.000Z'], durationMinutes: 60, mode: 'Presencial' });
+    const lote = await api.post('/api/sessions/batch', { clientId: clienteId, startsAt: [new Date(Date.now() - 24 * 3600_000).toISOString()], durationMinutes: 60, mode: 'Presencial' });
     const id = lote.datos.sesiones[0].id;
     await api.patch(`/api/sessions/${id}/compliance`, { completed: true, completionPercent: 100 });
     const { estado } = await api.delete(`/api/sessions/${id}/permanent`);
@@ -2631,6 +2656,59 @@ describe('desactivar clientes', () => {
   test('editar sin tocar el estado lo respeta', async () => {
     const { datos } = await api.patch(`/api/clients/${clienteId}`, { fullName: 'Nombre nuevo' });
     assert.equal(datos.status, 'inactive', 'no debe reactivarse por editar el nombre');
+  });
+});
+
+describe('desactivar libera el horario futuro', () => {
+  let clienteId;
+  let sesionPasada;
+  let sesionFutura;
+  let reglaId;
+
+  before(async () => {
+    const c = await api.post('/api/clients', { fullName: 'Contrato terminado', billingModel: 'single', standardPrice: 30, cutoffDay: 1 });
+    clienteId = c.datos.id;
+    const lote = await api.post('/api/sessions/batch', {
+      clientId: clienteId,
+      startsAt: [
+        new Date(Date.now() - 24 * 3600_000).toISOString(),
+        new Date(Date.now() + 3 * 24 * 3600_000).toISOString()
+      ],
+      durationMinutes: 60,
+      mode: 'Presencial'
+    });
+    sesionPasada = lote.datos.sesiones[0];
+    sesionFutura = lote.datos.sesiones[1];
+    const horario = await api.post('/api/session-recurrences', {
+      clientId: clienteId, weekdays: [0, 1, 2, 3, 4, 5, 6], timeOfDay: '23:59', durationMinutes: 60, mode: 'Presencial'
+    });
+    reglaId = horario.datos.recurrence.id;
+    assert.ok(horario.datos.creadas > 0, 'el cliente debe tener un horario futuro antes de darse de baja');
+  });
+
+  test('conserva el historial y libera sesiones y recurrencia por delante', async () => {
+    const antes = (await api.get('/api/sessions')).datos.filter(s => s.client_id === clienteId && new Date(s.starts_at) > new Date());
+    assert.ok(antes.some(s => s.id === sesionFutura.id));
+
+    const baja = await api.patch(`/api/clients/${clienteId}`, { fullName: 'Contrato terminado', status: 'inactive' });
+    assert.equal(baja.estado, 200);
+    assert.equal(baja.datos.status, 'inactive');
+
+    const sesiones = (await api.get('/api/sessions')).datos.filter(s => s.client_id === clienteId);
+    assert.ok(sesiones.some(s => s.id === sesionPasada.id), 'el historial pasado no se borra');
+    assert.equal(sesiones.filter(s => new Date(s.starts_at) > new Date()).length, 0, 'el horario futuro queda libre');
+    const reglas = (await api.get('/api/session-recurrences')).datos;
+    assert.ok(!reglas.some(r => r.id === reglaId), 'la recurrencia inactiva no sigue reservando agenda');
+  });
+
+  test('una baja no deja una puerta para volver a agendar', async () => {
+    const respuesta = await api.post('/api/sessions', {
+      clientId: clienteId,
+      startsAt: new Date(Date.now() + 5 * 24 * 3600_000).toISOString(),
+      durationMinutes: 60,
+      mode: 'Presencial'
+    });
+    assert.equal(respuesta.estado, 409);
   });
 });
 
