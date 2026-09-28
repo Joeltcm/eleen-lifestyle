@@ -595,6 +595,8 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
       const pkgsCw = (await api.get('/api/packages')).datos.filter(p => p.client_id === cw.datos.id && p.kind === 'monthly');
       const pw = pkgsCw.find(p => String(p.expires_on).slice(0, 10) === vence);
       assert.ok(pw, `el worker abrió el saldo del ciclo futuro (vence ${vence}). pkgs=${JSON.stringify(pkgsCw.map(p => String(p.expires_on).slice(0, 10)))}`);
+      assert.equal(String(pw.expires_on).slice(0, 10), String(pm.expires_on).slice(0, 10), 'worker y paquete manual: mismo expires');
+      assert.equal(pw.label, pm.label, 'worker y paquete manual: misma etiqueta y rango de ciclo');
     });
   }
 

@@ -34,15 +34,19 @@ Resultado esperado: `# tests 183 / # pass 183 / # fail 0`, reproducible sin impo
 - 6 casos parametrizados (cortes 15/28/30/31 + restaurar marzo + cambio de año) que comparan **worker vs paquete manual** → mismo `expires_on` clampado.
 - 1 test **"las 4 rutas usan el mismo ciclo de corte"**: verifica que **asignación de plan, paquete manual y confirmación de pago** dan inicio/expires/etiqueta idénticos para corte 31. Por transitividad vía el paquete manual, las 4 rutas comparten la fuente de verdad. Confirma también que `inicio_ciclo` (plan) y `cicloDelCorte` (manual/cobertura) concuerdan.
 
-## Checklist de pre-merge (lo que Codex pidió) — estado
+## Checklist de pre-merge (lo que Codex pidió) — estado de la Fase 1
 - [x] No quedan referencias a `venceMensualidadDesde` — `grep -rn venceMensualidadDesde src/ test/` → vacío.
-- [x] Las 4 rutas producen el mismo `start`/`expires_on`/`label` — test explícito + 6 casos worker↔manual.
+- [x] Las 4 rutas producen el mismo rango — test explícito para plan/manual/confirmación y 6 casos worker↔manual que comparan `expires_on` y etiqueta/rango.
 - [x] `183/183` sobre base limpia — BD temporal por corrida.
 - [x] Reproducible sin importar la hora — TZ fija por conexión + fechas de negocio en Panamá.
-- [x] Sólo archivos de harness + ciclo — `db.ts`, `server.ts`, `api.test.mjs`, `harness.mjs`.
+- [x] Los commits de la Fase 1 solo tocan harness, ciclo y pruebas — `db.ts`, `server.ts`, `api.test.mjs`, `harness.mjs`.
 - [x] Sin cambios de fases posteriores.
 
-Alcance exacto: `git diff --stat origin/main...HEAD`.
+## Alcance real de la rama
+
+Los commits de la Fase 1 son `9f3ff99` y `9a40730`; su diff conjunto está limitado a los cuatro archivos indicados arriba. La rama, sin embargo, está construida sobre cambios de facturación anteriores que todavía no están en `origin/main`. Por eso `git diff --stat origin/main...HEAD` muestra el diff acumulado completo, actualmente incluyendo también la migración de `payment_mode`, cambios de frontend, documentación y otros archivos previos.
+
+Esto significa que un PR de esta rama contra `main` debe revisarse como un PR acumulado, no como un PR aislado de cuatro archivos. Para revisar solo la Fase 1, usar el rango `9f3ff99^..9a40730` o establecer como base una rama que ya contenga los commits anteriores.
 
 ## Pendiente (fases siguientes — NO tocado en esta rama)
 Del análisis conjunto, siguen abiertos sobre `main` actual:
