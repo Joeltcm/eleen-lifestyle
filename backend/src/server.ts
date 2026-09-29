@@ -813,7 +813,9 @@ app.get('/api/clients', { preHandler: requireStaff }, async request => {
       -- nombre de quien paga. El saldo se renueva igual —no se le cierra la
       -- puerta a nadie por un pago que entra tarde—, pero queda dicho.
       COALESCE((
-        SELECT sum(CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance ELSE i.amount END)
+        SELECT sum(CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance
+          ELSE GREATEST(i.amount - COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), 0), 0)
+        END)
         FROM invoices i
         WHERE COALESCE(i.billed_for_client_id, i.client_id) = c.id AND i.status = 'pending'
       ), 0)::numeric(12,2) AS deuda_pendiente
@@ -3331,8 +3333,10 @@ async function accountStatementData(ownerId: string, query: z.infer<typeof state
     SELECT i.id, COALESCE(i.issued_on, i.created_at::date) AS issued_on, i.due_on,
       COALESCE(i.invoice_number, 'EIL-' || upper(substr(i.id::text, 1, 8))) AS invoice_number,
       i.concept, i.amount,
-      CASE WHEN i.source_system = 'zoho_invoice' THEN GREATEST(i.amount - i.balance, 0) WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END AS paid_amount,
-      CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance WHEN i.status = 'confirmed' THEN 0 ELSE i.amount END AS balance_amount,
+      CASE WHEN i.source_system = 'zoho_invoice' THEN GREATEST(i.amount - i.balance, 0)
+        ELSE COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), CASE WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END) END AS paid_amount,
+      CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance
+        ELSE GREATEST(i.amount - COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), CASE WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END), 0) END AS balance_amount,
       i.status,
       CASE WHEN i.source_system = 'zoho_invoice' THEN 'Zoho' ELSE 'Eileen' END AS source_label
     FROM invoices i JOIN clients c ON c.id = i.client_id
@@ -3348,12 +3352,14 @@ async function receivablesData(ownerId: string, asOf: string) {
   const rows = await sql`
     SELECT i.id, i.client_id, c.full_name, i.due_on,
       COALESCE(i.invoice_number, 'EIL-' || upper(substr(i.id::text, 1, 8))) AS invoice_number,
-      i.concept, CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance WHEN i.status = 'confirmed' THEN 0 ELSE i.amount END AS balance_amount,
+      i.concept, CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance
+        ELSE GREATEST(i.amount - COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), CASE WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END), 0) END AS balance_amount,
       (${asOf}::date - i.due_on)::integer AS days_overdue,
       CASE WHEN i.source_system = 'zoho_invoice' THEN 'Zoho' ELSE 'Eileen' END AS source_label
     FROM invoices i JOIN clients c ON c.id = i.client_id
     WHERE c.owner_id = ${ownerId} AND i.status <> 'void'
-      AND CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance WHEN i.status = 'confirmed' THEN 0 ELSE i.amount END > 0
+      AND CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance
+        ELSE GREATEST(i.amount - COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), CASE WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END), 0) END > 0
       AND COALESCE(i.issued_on, i.created_at::date) <= ${asOf}::date
     ORDER BY days_overdue DESC, c.full_name
   ` as unknown as Record<string, any>[];
@@ -3389,6 +3395,10 @@ app.get('/api/invoices', { preHandler: requireStaff }, async request => {
       i.billed_for_client_id, c.full_name,
       beneficiario.full_name AS billed_for_name,
       (SELECT count(*)::int FROM invoice_coverage cov WHERE cov.invoice_id = i.id) AS coverage_applied,
+      CASE WHEN i.source_system = 'zoho_invoice' THEN GREATEST(i.amount - i.balance, 0)
+        ELSE COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), CASE WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END) END AS paid_amount,
+      CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance
+        ELSE GREATEST(i.amount - COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), CASE WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END), 0) END AS balance_amount,
       -- La fecha desde la que corre la validez de un paquete: el pago real, no la
       -- emisión. Un cobro de Zoho no tiene confirmed_at pero sí un pago en
       -- invoice_payments, y anclar a la emisión dejaba el tope de 6 semanas en el
@@ -3453,8 +3463,10 @@ app.get('/api/invoices/:id/pdf', { preHandler: requireAuth }, async (request, re
   const staff = ['admin', 'trainer'].includes(auth.role);
   const [invoice] = await sql`
     SELECT i.*, c.full_name, c.email,
-      CASE WHEN i.source_system = 'zoho_invoice' THEN GREATEST(i.amount - i.balance, 0) WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END AS paid_amount,
-      CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance WHEN i.status = 'confirmed' THEN 0 ELSE i.amount END AS balance_amount
+      CASE WHEN i.source_system = 'zoho_invoice' THEN GREATEST(i.amount - i.balance, 0)
+        ELSE COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), CASE WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END) END AS paid_amount,
+      CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance
+        ELSE GREATEST(i.amount - COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), CASE WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END), 0) END AS balance_amount
     FROM invoices i JOIN clients c ON c.id = i.client_id
     WHERE i.id = ${id} AND ((${staff}::boolean AND c.owner_id = ${auth.sub}) OR (${!staff}::boolean AND c.portal_user_id = ${auth.sub}))
   `;
@@ -4027,22 +4039,33 @@ app.delete('/api/invoices/:id/permanent', { preHandler: requireStaff }, async (r
   return { deleted: true, saldoBorrado: resultado.saldoBorrado, pagosBorrados: resultado.pagosBorrados, concept: resultado.concept };
 });
 
-const paymentSchema = z.object({ method: z.enum(['Efectivo', 'Yappy', 'Transferencia bancaria', 'Tarjeta', 'Otro']), reference: z.string().max(160).optional(), paidOn: z.string().date() });
+const paymentSchema = z.object({ method: z.enum(['Efectivo', 'Yappy', 'Transferencia bancaria', 'Tarjeta', 'Otro']), reference: z.string().max(160).optional(), paidOn: z.string().date(), amount: z.coerce.number().min(0).optional() });
 async function saveNativeInvoicePayment(ownerId: string, id: string, input: z.infer<typeof paymentSchema>) {
   return sql.begin(async transaction => {
     // El estado antes de cobrar: la apertura automática del saldo mensual sólo
     // corre cuando el cobro pasa de pendiente a pagado, no al editar un pago
     // que ya estaba registrado (ahí ella ya pudo haber ajustado la cobertura).
     const [previo] = await transaction`
-      SELECT i.status, i.package_id, i.billing_period, i.due_on, c.billing_model
+      SELECT i.status, i.package_id, i.billing_period, i.due_on, i.amount,
+        COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), 0) AS paid_amount,
+        COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa JOIN invoice_payments ip ON ip.id = pa.payment_id
+          WHERE pa.invoice_id = i.id AND ip.source_system = 'eileen'), 0) AS native_paid_amount,
+        c.billing_model
       FROM invoices i JOIN clients c ON c.id = i.client_id
       WHERE i.id = ${id} AND c.owner_id = ${ownerId} AND i.source_system IS DISTINCT FROM 'zoho_invoice'
       FOR UPDATE OF i
     `;
     if (!previo) return null;
+    const invoiceAmount = Number(previo.amount);
+    const paidAmount = input.amount === undefined
+      ? (Number(previo.native_paid_amount) > 0 ? Number(previo.native_paid_amount) : invoiceAmount)
+      : Number(input.amount);
+    if (paidAmount > invoiceAmount + 0.01) throw new Error('El pago no puede superar el monto de la factura');
+    const complete = paidAmount >= invoiceAmount - 0.01;
+    const remaining = complete ? 0 : Math.max(0, invoiceAmount - paidAmount);
     const [invoice] = await transaction`
-      UPDATE invoices i SET status = 'confirmed', payment_method = ${input.method}, payment_reference = ${input.reference || null},
-        confirmed_at = ${`${input.paidOn}T12:00:00-05:00`}, balance = 0
+      UPDATE invoices i SET status = ${complete ? 'confirmed' : 'pending'}, payment_method = ${input.method}, payment_reference = ${input.reference || null},
+        confirmed_at = ${complete ? `${input.paidOn}T12:00:00-05:00` : null}, balance = ${remaining}
       FROM clients c WHERE i.id = ${id} AND c.id = i.client_id AND c.owner_id = ${ownerId} AND i.source_system IS DISTINCT FROM 'zoho_invoice'
       RETURNING i.*
     `;
@@ -4050,11 +4073,11 @@ async function saveNativeInvoicePayment(ownerId: string, id: string, input: z.in
     const externalId = `eileen-payment:${id}`;
     const [payment] = await transaction`
       INSERT INTO invoice_payments (client_id, source_system, external_id, payment_number, amount, paid_on, method, reference)
-      VALUES (${invoice.client_id}, 'eileen', ${externalId}, ${invoice.invoice_number || null}, ${invoice.amount}, ${input.paidOn}, ${input.method}, ${input.reference || null})
+      VALUES (${invoice.client_id}, 'eileen', ${externalId}, ${invoice.invoice_number || null}, ${paidAmount}, ${input.paidOn}, ${input.method}, ${input.reference || null})
       ON CONFLICT (source_system, external_id) DO UPDATE SET amount = EXCLUDED.amount, paid_on = EXCLUDED.paid_on, method = EXCLUDED.method, reference = EXCLUDED.reference, updated_at = now()
       RETURNING *
     `;
-    await transaction`INSERT INTO payment_allocations (payment_id, invoice_id, amount) VALUES (${payment.id}, ${invoice.id}, ${invoice.amount}) ON CONFLICT (payment_id, invoice_id) DO UPDATE SET amount = EXCLUDED.amount`;
+    await transaction`INSERT INTO payment_allocations (payment_id, invoice_id, amount) VALUES (${payment.id}, ${invoice.id}, ${paidAmount}) ON CONFLICT (payment_id, invoice_id) DO UPDATE SET amount = EXCLUDED.amount`;
     // Un paquete ligado nace dormido y el pago lo despierta. Se devuelve lo que
     // de verdad se activó —sólo si estaba pendiente, no al reconfirmar— para
     // avisar a la entrenadora de que sus sesiones ya están disponibles.
@@ -5052,10 +5075,12 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
     const [client] = await sql`SELECT * FROM clients WHERE portal_user_id = ${auth.sub}`;
     if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
     const sessions = await sql`SELECT starts_at, duration_minutes FROM sessions WHERE client_id = ${client.id} AND status = 'scheduled' AND NOT COALESCE(paused_hold, false) AND starts_at BETWEEN now() AND now() + ${`${sessionHours} hours`}::interval ORDER BY starts_at`;
-    const invoices = await sql`SELECT due_on, amount, concept FROM invoices WHERE client_id = ${client.id} AND status = 'pending' AND source_system IS DISTINCT FROM 'zoho_invoice' AND due_on <= current_date + (${paymentDays})::integer ORDER BY due_on`;
+    const invoices = await sql`SELECT due_on, amount, concept,
+      GREATEST(amount - COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = invoices.id), CASE WHEN status = 'confirmed' THEN amount ELSE 0 END), 0) AS balance
+      FROM invoices WHERE client_id = ${client.id} AND status = 'pending' AND source_system IS DISTINCT FROM 'zoho_invoice' AND due_on <= current_date + (${paymentDays})::integer ORDER BY due_on`;
     return [
       ...sessions.map(session => ({ type: 'session', title: 'Próximo entrenamiento', body: `Tienes una sesión el ${new Date(session.starts_at).toLocaleString('es-PA', { timeZone: 'America/Panama' })}.`, scheduledFor: session.starts_at })),
-      ...invoices.map(invoice => ({ type: 'payment', title: 'Recordatorio de pago', body: `${invoice.concept}: $${Number(invoice.amount).toFixed(2)} · vence ${invoice.due_on}.`, scheduledFor: invoice.due_on }))
+      ...invoices.map(invoice => ({ type: 'payment', title: 'Recordatorio de pago', body: `${invoice.concept}: $${Number(invoice.balance).toFixed(2)} pendientes de $${Number(invoice.amount).toFixed(2)} · vence ${invoice.due_on}.`, scheduledFor: invoice.due_on }))
     ];
   }
   const sessions = await sql`
@@ -5064,6 +5089,7 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
   `;
   const invoices = await sql`
     SELECT i.due_on, i.amount, i.concept, c.full_name,
+      GREATEST(i.amount - COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), CASE WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END), 0) AS balance,
       (i.due_on < current_date) AS atrasada,
       (current_date - i.due_on) AS dias_atraso
     FROM invoices i JOIN clients c ON c.id = i.client_id
@@ -5107,8 +5133,8 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
     // Las clases siguen —hay clientes que pagan unos días tarde por temas
     // personales—, pero la entrenadora ve que ese cobro ya venció.
     ...invoices.map(invoice => invoice.atrasada
-      ? ({ type: 'overdue', title: `Pago atrasado: ${invoice.full_name}`, body: `${invoice.concept}: $${Number(invoice.amount).toFixed(2)} · venció ${invoice.due_on}${Number(invoice.dias_atraso) > 0 ? ` (${invoice.dias_atraso} día${Number(invoice.dias_atraso) === 1 ? '' : 's'})` : ''}. Las clases siguen; sólo falta el pago.`, scheduledFor: invoice.due_on })
-      : ({ type: 'payment', title: `Pago de ${invoice.full_name}`, body: `${invoice.concept}: $${Number(invoice.amount).toFixed(2)} · vence ${invoice.due_on}.`, scheduledFor: invoice.due_on }))
+      ? ({ type: 'overdue', title: `Pago atrasado: ${invoice.full_name}`, body: `${invoice.concept}: $${Number(invoice.balance).toFixed(2)} pendientes de $${Number(invoice.amount).toFixed(2)} · venció ${invoice.due_on}${Number(invoice.dias_atraso) > 0 ? ` (${invoice.dias_atraso} día${Number(invoice.dias_atraso) === 1 ? '' : 's'})` : ''}. Las clases siguen; sólo falta el pago.`, scheduledFor: invoice.due_on })
+      : ({ type: 'payment', title: `Pago de ${invoice.full_name}`, body: `${invoice.concept}: $${Number(invoice.balance).toFixed(2)} pendientes de $${Number(invoice.amount).toFixed(2)} · vence ${invoice.due_on}.`, scheduledFor: invoice.due_on }))
   ];
 });
 
@@ -5121,6 +5147,7 @@ type ReminderCandidate = {
   starts_at?: string;
   due_on?: string;
   amount?: number | string;
+  balance?: number | string;
   concept?: string;
   ends_on?: string;
 };
@@ -5189,7 +5216,8 @@ async function dispatchReminders() {
     `,
     sql<ReminderCandidate[]>`
       SELECT u.id AS user_id, 'payment' AS kind, i.id AS reference_id, u.role, c.full_name,
-        i.due_on, i.amount, i.concept
+        i.due_on, i.amount, i.concept,
+        GREATEST(i.amount - COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), CASE WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END), 0) AS balance
       FROM notification_preferences np
       JOIN users u ON u.id = np.user_id AND u.active = true
       JOIN clients c ON (u.role = 'client' AND c.portal_user_id = u.id)
@@ -5262,7 +5290,7 @@ async function dispatchReminders() {
       : reminder.kind === 'payment'
       ? {
           title: isClient ? 'Recordatorio de pago' : `Pago de ${reminder.full_name}`,
-          body: `${reminder.concept}: $${Number(reminder.amount).toFixed(2)} · vence ${reminder.due_on}.`,
+          body: `${reminder.concept}: $${Number(reminder.balance).toFixed(2)} pendientes de $${Number(reminder.amount).toFixed(2)} · vence ${reminder.due_on}.`,
           url: new URL(isClient ? '/#portal-billing' : '/#billing', config.APP_URL).toString()
         }
       : {
@@ -5297,8 +5325,7 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
         -- "Saldo pendiente $0.00" y se quedaba tan tranquilo.
         CASE
           WHEN source_system = 'zoho_invoice' THEN balance
-          WHEN status = 'pending' THEN amount
-          ELSE 0
+          ELSE GREATEST(amount - COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = invoices.id), CASE WHEN status = 'confirmed' THEN amount ELSE 0 END), 0)
         END::numeric(12,2) AS balance
       FROM invoices WHERE client_id = ${client.id} ORDER BY COALESCE(issued_on, due_on) DESC LIMIT 60
     `,

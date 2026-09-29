@@ -292,3 +292,29 @@ Rama: `fix/asistencia-sin-avisos`
 - Producción verificada: sirve `app.js?v=204` sin los avisos retirados.
 - La casilla `Solo activos` continúa marcada por defecto.
 - Railway `/health` respondió `status: ok`.
+
+## Cobro automático y pagos parciales
+
+Rama: `feature/cobro-auto-aplicado`
+
+- Confirmar un cobro local sigue abriendo automáticamente la cobertura de la
+  mensualidad y activando el paquete ligado; las rutas manuales se conservan
+  solo como respaldo para históricos o correcciones.
+- El pago admite un `amount` total acumulado. Un pago parcial permanece como
+  `pending`, conserva el saldo restante y se muestra como `Pago parcial`.
+- Editar el pago puede completar una factura o corregirla a parcial sin
+  revocar el saldo de clases: pagar tarde o pagar parcialmente no bloquea al
+  cliente para entrenar.
+- Facturación, expediente, estado de cuenta, cuentas por cobrar, portal y
+  recordatorios calculan el saldo desde `payment_allocations`, no desde el
+  importe bruto de la factura.
+- Se añadió cobertura de prueba para parcial, completar y corregir un pago,
+  además de preservar las clases disponibles.
+- Frontend actualizado de v209 a v210.
+
+### Validación antes de revisión
+
+- `npm run verify` ✅
+- Suite backend: `213/213` ✅ sobre bases temporales limpias.
+- Sin cambios en `main` ni despliegue de producción; pendiente de revisión de
+  Claude antes de publicar.

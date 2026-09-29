@@ -1314,6 +1314,32 @@ describe('confirmar una mensualidad abre sola su cobertura', () => {
     assert.equal((await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly').length, 0, 'y no crea un saldo mensual');
   });
 
+  test('un pago parcial conserva el saldo real y no bloquea las clases', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Pago parcial y entrena', planId, cutoffDay: 15 });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad parcial', amount: 120, dueOn: hoy });
+    const parcial = await api.post(`/api/invoices/${f.datos.id}/confirm`, { amount: 50, method: 'Efectivo', paidOn: hoy });
+    assert.equal(parcial.datos.status, 'pending', 'un pago incompleto sigue pendiente');
+    assert.equal(Number(parcial.datos.balance), 70, 'la factura conserva el saldo por cobrar');
+    const listado = (await api.get('/api/invoices')).datos.find(item => item.id === f.datos.id);
+    assert.equal(Number(listado.paid_amount), 50, 'la lista muestra lo recibido');
+    assert.equal(Number(listado.balance_amount), 70, 'la lista muestra lo que falta');
+    assert.equal(Number((await api.get('/api/clients')).datos.find(item => item.id === c.datos.id).deuda_pendiente), 70, 'el expediente muestra sólo la deuda restante');
+    assert.equal((await api.get('/api/packages')).datos.filter(item => item.client_id === c.datos.id && item.kind === 'monthly').length, 1, 'la mensualidad queda disponible aunque el pago sea parcial');
+  });
+
+  test('el saldo se puede completar y luego corregir sin quitar las clases', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Corrección de pago', planId, cutoffDay: 15 });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad editable', amount: 120, dueOn: hoy });
+    await api.post(`/api/invoices/${f.datos.id}/confirm`, { amount: 50, method: 'Efectivo', paidOn: hoy });
+    const completa = await api.patch(`/api/invoices/${f.datos.id}/payment`, { amount: 120, method: 'Transferencia bancaria', paidOn: hoy });
+    assert.equal(completa.datos.invoice.status, 'confirmed', 'al completar pasa a confirmada');
+    assert.equal(Number(completa.datos.invoice.balance), 0);
+    const corregida = await api.patch(`/api/invoices/${f.datos.id}/payment`, { amount: 50, method: 'Efectivo', paidOn: hoy });
+    assert.equal(corregida.datos.invoice.status, 'pending', 'al corregirla vuelve a mostrar pago parcial');
+    assert.equal(Number(corregida.datos.invoice.balance), 70);
+    assert.equal((await api.get('/api/packages')).datos.filter(item => item.client_id === c.datos.id && item.kind === 'monthly').length, 1, 'corregir el cobro no revoca el saldo ni las clases');
+  });
+
   test('confirmar un paquete avisa que se activó, y no reavisa al reconfirmar', async () => {
     const c = await api.post('/api/clients', { fullName: 'Compra paquete', billingModel: 'package', standardPrice: 200, cutoffDay: 15 });
     const p = await api.post('/api/packages', { clientId: c.datos.id, totalSessions: 10, amount: 200, kind: 'package' });
