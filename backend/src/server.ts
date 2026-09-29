@@ -2590,39 +2590,64 @@ app.patch('/api/sessions/:id', { preHandler: requireStaff }, async (request, rep
   if (input.clientId) {
     const destino = await clienteAgendable(input.clientId, auth.sub);
     if (destino.error) return reply.code(destino.code).send({ error: destino.error });
+  }
+  const result = await sql.begin(async transaction => {
+    const [actual] = await transaction`
+      SELECT s.* FROM sessions s
+      JOIN clients c ON c.id = s.client_id
+      WHERE s.id = ${id} AND c.owner_id = ${auth.sub} AND s.status <> 'cancelled'
+      FOR UPDATE
+    `;
+    if (!actual) return { error: 'Sesión no encontrada o cancelada', code: 404 };
     // Una sesión ya completada descontó del saldo de quien la hizo; moverla a
     // otra persona dejaría ese descuento colgado del cliente equivocado.
-    const [actual] = await sql`
-      SELECT s.status FROM sessions s JOIN clients c ON c.id = s.client_id
-      WHERE s.id = ${id} AND c.owner_id = ${auth.sub}
-    `;
-    if (actual?.status === 'completed') {
-      return reply.code(409).send({ error: 'Esta sesión ya se marcó como realizada. Deshaz el cumplimiento antes de cambiar de cliente.' });
+    if (input.clientId && actual.status === 'completed') {
+      return { error: 'Esta sesión ya se marcó como realizada. Deshaz el cumplimiento antes de cambiar de cliente.', code: 409 };
     }
-  }
-  const [anterior] = await sql`
-    SELECT s.starts_at FROM sessions s JOIN clients c ON c.id = s.client_id
-    WHERE s.id = ${id} AND c.owner_id = ${auth.sub}
-  `;
-  const [session] = await sql`
-    UPDATE sessions s SET starts_at = ${input.startsAt}, duration_minutes = ${input.durationMinutes},
-      mode = ${input.mode}, notes = ${input.notes || null},
-      client_id = COALESCE(${input.clientId ?? null}, s.client_id),
-      google_sync_error = NULL, updated_at = now()
-    FROM clients c
-    WHERE s.id = ${id} AND c.id = s.client_id AND c.owner_id = ${auth.sub} AND s.status <> 'cancelled'
-    RETURNING s.*
-  `;
-  if (!session) return reply.code(404).send({ error: 'Sesión no encontrada o cancelada' });
-  // Correrla de hora dentro del mismo día no es reprogramar: es ajustar. Lo
-  // que cuenta es cambiarla de día, que es lo que el cliente pide cuando no
-  // puede venir.
-  if (anterior && diaEnPanama(anterior.starts_at) !== diaEnPanama(session.starts_at)) {
-    await sql`
-      INSERT INTO session_reschedules (session_id, client_id, from_starts_at, to_starts_at, origin)
-      VALUES (${session.id}, ${session.client_id}, ${anterior.starts_at}, ${session.starts_at}, 'moved')
+    const [session] = await transaction`
+      UPDATE sessions SET starts_at = ${input.startsAt}, duration_minutes = ${input.durationMinutes},
+        mode = ${input.mode}, notes = ${input.notes || null},
+        client_id = COALESCE(${input.clientId ?? null}, client_id),
+        google_sync_error = NULL, updated_at = now()
+      WHERE id = ${id}
+      RETURNING *
     `;
-  }
+    // Correrla de hora dentro del mismo día no es reprogramar: es ajustar. Lo
+    // que cuenta es cambiarla de día, que es lo que el cliente pide cuando no
+    // puede venir.
+    const seMovioDeDia = diaEnPanama(actual.starts_at) !== diaEnPanama(session.starts_at);
+    if (seMovioDeDia && actual.status === 'completed' && actual.package_debited && actual.package_id) {
+      // Mover directamente una clase ya realizada equivale a reprogramarla:
+      // la clase original deja de consumir el saldo y la nueva se cobrará al
+      // marcarla, en su fecha real.
+      await transaction`
+        UPDATE session_packages
+        SET used_sessions = GREATEST(0, used_sessions - 1),
+            status = CASE WHEN GREATEST(0, used_sessions - 1) >= total_sessions THEN 'exhausted' ELSE 'active' END
+        WHERE id = ${actual.package_id}
+      `;
+      const [desvinculada] = await transaction`
+        UPDATE sessions SET package_id = NULL, package_debited = false,
+          debited_group_id = NULL, updated_at = now()
+        WHERE id = ${id}
+        RETURNING *
+      `;
+      await transaction`
+        INSERT INTO session_reschedules (session_id, client_id, from_starts_at, to_starts_at, origin)
+        VALUES (${id}, ${actual.client_id}, ${actual.starts_at}, ${desvinculada.starts_at}, 'moved')
+      `;
+      return { session: desvinculada };
+    }
+    if (seMovioDeDia) {
+      await transaction`
+        INSERT INTO session_reschedules (session_id, client_id, from_starts_at, to_starts_at, origin)
+        VALUES (${id}, ${session.client_id}, ${actual.starts_at}, ${session.starts_at}, 'moved')
+      `;
+    }
+    return { session };
+  });
+  if ('error' in result) return reply.code(result.code || 400).send({ error: result.error });
+  const session = result.session;
   try { await syncSessionToGoogle(auth.sub, session.id); }
   catch (error) { app.log.warn({ err: error, sessionId: session.id }, 'Session updated but Google Calendar sync failed'); }
   const [updated] = await sql`SELECT * FROM sessions WHERE id = ${session.id}`;

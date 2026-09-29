@@ -2010,6 +2010,29 @@ describe('cuando cancela la entrenadora', () => {
     assert.equal(Number(saldo.used_sessions), 0, 'reprogramar devuelve la clase al saldo');
   });
 
+  test('mover de día una sesión realizada también devuelve el débito', async () => {
+    const plan = await api.post('/api/plans', { name: 'Mover realizada', billingModel: 'monthly', price: 280, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Movida después de entrenar', planId: plan.datos.id, cutoffDay: 1 });
+    const paquete = await api.post('/api/packages', {
+      clientId: c.datos.id, totalSessions: 8, amount: 280, kind: 'monthly', expiresOn: enDiasPa(21).iso
+    });
+    await api.post(`/api/invoices/${paquete.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: hoyPa() });
+    const original = new Date(Date.now() - 26 * 3600_000);
+    const lote = await api.post('/api/sessions/batch', {
+      clientId: c.datos.id, startsAt: [original.toISOString()], durationMinutes: 60, mode: 'Presencial'
+    });
+    const id = lote.datos.sesiones[0].id;
+    await api.patch(`/api/sessions/${id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    const nuevaFecha = new Date(Date.now() - 45 * 60_000);
+    const movida = await api.patch(`/api/sessions/${id}`, {
+      startsAt: nuevaFecha.toISOString(), durationMinutes: 60, mode: 'Presencial'
+    });
+    assert.equal(movida.estado, 200);
+    assert.equal(movida.datos.package_debited, false, 'mover la realizada la convierte en reprogramada sin débito');
+    const saldo = (await api.get('/api/packages')).datos.find(p => p.id === paquete.datos.id);
+    assert.equal(Number(saldo.used_sessions), 0, 'moverla de día devuelve la clase al saldo');
+  });
+
   test('el descuento baja el cobro del mes siguiente', async () => {
     // Corte a tres días vista para que la generación llegue a emitirlo.
     const corte = new Date(Date.now() + 3 * 24 * 3600_000).getDate();
