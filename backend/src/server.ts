@@ -3387,6 +3387,7 @@ app.get('/api/invoices', { preHandler: requireStaff }, async request => {
       i.external_status, i.notes, i.external_updated_at, i.billing_period, i.auto_generated,
       i.billed_for_client_id, c.full_name,
       beneficiario.full_name AS billed_for_name,
+      (SELECT count(*)::int FROM invoice_coverage cov WHERE cov.invoice_id = i.id) AS coverage_applied,
       -- La fecha desde la que corre la validez de un paquete: el pago real, no la
       -- emisión. Un cobro de Zoho no tiene confirmed_at pero sí un pago en
       -- invoice_payments, y anclar a la emisión dejaba el tope de 6 semanas en el
@@ -4418,6 +4419,114 @@ app.get('/api/compliance/by-month', { preHandler: requireStaff }, async request 
     GROUP BY 1, 2
   `;
   return { month, clients };
+});
+
+// Resumen mensual de agenda y cumplimiento para toda la clientela. La agenda
+// cuenta todas las sesiones que existen en el calendario, sin importar si son
+// mensualidad, paquete, crédito o sesión individual. El porcentaje sólo usa
+// sesiones resueltas: una sesión pasada todavía programada queda como
+// pendiente de marcar, no se convierte automáticamente en incumplimiento.
+app.get('/api/attendance/monthly', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const { month } = z.object({ month: z.string().regex(/^\d{4}-\d{2}$/) }).parse(request.query);
+  const [year, monthNumber] = month.split('-').map(Number);
+  const from = `${month}-01`;
+  const to = new Date(Date.UTC(year, monthNumber, 1)).toISOString().slice(0, 10);
+  const rows = await sql`
+    WITH scoped AS (
+      SELECT c.id AS client_id,
+        s.status AS session_status, s.cancellation_kind, s.cancelled_by,
+        COALESCE(s.completion_percent, 0)::int AS completion_percent,
+        (s.starts_at AT TIME ZONE 'America/Panama')::date AS session_day,
+        (
+          COALESCE(s.paused_hold, false)
+          OR EXISTS (
+            SELECT 1 FROM client_package_pauses pp
+            WHERE pp.client_id = c.id
+              AND (s.starts_at AT TIME ZONE 'America/Panama')::date >= pp.starts_on
+              AND (pp.resumed_on IS NULL OR (s.starts_at AT TIME ZONE 'America/Panama')::date < pp.resumed_on)
+          )
+        ) AS pausada
+      FROM clients c
+      LEFT JOIN sessions s ON s.client_id = c.id
+        AND s.starts_at >= ${from}::date AT TIME ZONE 'America/Panama'
+        AND s.starts_at < ${to}::date AT TIME ZONE 'America/Panama'
+      WHERE c.owner_id = ${auth.sub}
+    ), rollup AS (
+      SELECT client_id,
+        count(*) FILTER (WHERE session_status IS NOT NULL)::int AS agendadas,
+        count(*) FILTER (WHERE session_status = 'scheduled' AND NOT pausada AND session_day <= current_date)::int AS pendientes,
+        count(*) FILTER (WHERE session_status = 'scheduled' AND NOT pausada AND session_day > current_date)::int AS futuras,
+        count(*) FILTER (WHERE session_status = 'completed' AND NOT pausada)::int AS completadas,
+        count(*) FILTER (WHERE session_status = 'no_show' AND NOT pausada)::int AS no_show,
+        count(*) FILTER (WHERE session_status = 'cancelled' AND cancellation_kind = 'not_rescheduled'
+          AND COALESCE(cancelled_by, 'client') = 'client' AND NOT pausada)::int AS canceladas_cliente,
+        count(*) FILTER (WHERE session_status = 'cancelled' AND cancellation_kind = 'rescheduled')::int AS reprogramadas,
+        count(*) FILTER (WHERE session_status = 'cancelled' AND cancelled_by = 'trainer')::int AS canceladas_entrenadora,
+        count(*) FILTER (WHERE pausada)::int AS pausadas,
+        count(*) FILTER (WHERE NOT pausada AND (
+          session_status IN ('completed', 'no_show')
+          OR (session_status = 'cancelled' AND cancellation_kind = 'not_rescheduled'
+            AND COALESCE(cancelled_by, 'client') = 'client')
+        ))::int AS medibles,
+        COALESCE(sum(CASE WHEN NOT pausada AND (
+          session_status = 'completed'
+          OR session_status = 'no_show'
+          OR (session_status = 'cancelled' AND cancellation_kind = 'not_rescheduled'
+            AND COALESCE(cancelled_by, 'client') = 'client')
+        ) THEN completion_percent ELSE 0 END), 0)::int AS puntos_cumplimiento
+      FROM scoped
+      GROUP BY client_id
+    )
+    SELECT c.id AS client_id, c.full_name AS name, c.status, c.billing_model,
+      COALESCE(r.agendadas, 0)::int AS agendadas,
+      COALESCE(r.pendientes, 0)::int AS pendientes,
+      COALESCE(r.futuras, 0)::int AS futuras,
+      COALESCE(r.completadas, 0)::int AS completadas,
+      COALESCE(r.no_show, 0)::int AS no_show,
+      COALESCE(r.canceladas_cliente, 0)::int AS canceladas_cliente,
+      COALESCE(r.reprogramadas, 0)::int AS reprogramadas,
+      COALESCE(r.canceladas_entrenadora, 0)::int AS canceladas_entrenadora,
+      COALESCE(r.pausadas, 0)::int AS pausadas,
+      COALESCE(r.medibles, 0)::int AS medibles,
+      COALESCE(r.puntos_cumplimiento, 0)::int AS puntos_cumplimiento
+    FROM clients c LEFT JOIN rollup r ON r.client_id = c.id
+    WHERE c.owner_id = ${auth.sub}
+    ORDER BY c.full_name
+  `;
+  const clients = rows.map(row => {
+    const medibles = Number(row.medibles);
+    return {
+      clientId: row.client_id,
+      name: row.name,
+      status: row.status,
+      billingModel: row.billing_model,
+      agendadas: Number(row.agendadas),
+      pendientes: Number(row.pendientes),
+      futuras: Number(row.futuras),
+      completadas: Number(row.completadas),
+      noShow: Number(row.no_show),
+      canceladasCliente: Number(row.canceladas_cliente),
+      reprogramadas: Number(row.reprogramadas),
+      canceladasEntrenadora: Number(row.canceladas_entrenadora),
+      pausadas: Number(row.pausadas),
+      medibles,
+      compliancePercent: medibles ? Math.round(Number(row.puntos_cumplimiento) / medibles) : null
+    };
+  });
+  const sum = (key: 'agendadas' | 'pendientes' | 'futuras' | 'completadas' | 'noShow' | 'canceladasCliente' | 'reprogramadas' | 'canceladasEntrenadora' | 'pausadas' | 'medibles') => clients.reduce((total, client) => total + client[key], 0);
+  const medibles = sum('medibles');
+  const puntos = clients.reduce((total, client) => total + (client.compliancePercent === null ? 0 : client.compliancePercent * client.medibles), 0);
+  return {
+    month,
+    clients,
+    totals: {
+      agendadas: sum('agendadas'), pendientes: sum('pendientes'), futuras: sum('futuras'),
+      completadas: sum('completadas'), noShow: sum('noShow'), canceladasCliente: sum('canceladasCliente'),
+      reprogramadas: sum('reprogramadas'), canceladasEntrenadora: sum('canceladasEntrenadora'),
+      pausadas: sum('pausadas'), medibles, compliancePercent: medibles ? Math.round(puntos / medibles) : null
+    }
+  };
 });
 
 // ── Gastos ────────────────────────────────────────────────────────────────

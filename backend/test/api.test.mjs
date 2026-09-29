@@ -379,6 +379,9 @@ describe('la pareja que paga uno y entrenan los dos', () => {
     });
     assert.equal(aplicada.estado, 201);
 
+    const enLista = (await api.get('/api/invoices')).datos.find(item => item.id === factura.id);
+    assert.equal(Number(enLista.coverage_applied), 1, 'la lista de cobros debe indicar que ya tiene cobertura aplicada');
+
     const dividida = await api.post(`/api/invoices/${factura.id}/coverage`, {
       billingPeriod: String(factura.billing_period).slice(0, 10),
       entries: [{ clientId: eduardo, amount: 87.5, sessions: 12 }, { clientId: beatris, amount: 87.5, sessions: 12 }]
@@ -1756,6 +1759,54 @@ describe('avisar de las clases que se quedaron sin marcar', () => {
     const despues = (await api.get('/api/notifications')).datos.filter(n => n.type === 'pending');
     assert.ok(!despues.some(a => String(a.sessionId) === String(suelta.id)),
       'cancelarla es decidir: ya no hay nada que preguntar');
+  });
+});
+
+describe('reporte mensual de agenda y cumplimiento', () => {
+  test('incluye todas las sesiones y separa lo que sí mide al cliente', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Reporte mensual integral', billingModel: 'single', standardPrice: 30, cutoffDay: 1 });
+    const lote = await api.post('/api/sessions/batch', {
+      clientId: c.datos.id,
+      startsAt: [
+        '2026-09-05T13:00:00.000Z',
+        '2026-09-06T13:00:00.000Z',
+        '2026-09-07T13:00:00.000Z',
+        '2026-09-08T13:00:00.000Z',
+        '2026-09-09T13:00:00.000Z'
+      ],
+      durationMinutes: 60,
+      mode: 'Presencial'
+    });
+    const sesiones = lote.datos.sesiones.sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)));
+    await api.patch(`/api/sessions/${sesiones[0].id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    await api.patch(`/api/sessions/${sesiones[1].id}/compliance`, { outcome: 'no_show', completionPercent: 0 });
+    await api.delete(`/api/sessions/${sesiones[3].id}?by=trainer`);
+    await api.delete(`/api/sessions/${sesiones[4].id}?rescheduled=false`);
+
+    const { estado, datos } = await api.get('/api/attendance/monthly?month=2026-09');
+    assert.equal(estado, 200);
+    const fila = datos.clients.find(item => item.clientId === c.datos.id);
+    assert.ok(fila, 'el informe incluye al cliente aunque sea de clase suelta');
+    assert.deepEqual({
+      agendadas: fila.agendadas,
+      completadas: fila.completadas,
+      noShow: fila.noShow,
+      canceladasCliente: fila.canceladasCliente,
+      canceladasEntrenadora: fila.canceladasEntrenadora,
+      pendientes: fila.pendientes,
+      medibles: fila.medibles,
+      compliancePercent: fila.compliancePercent
+    }, {
+      agendadas: 5,
+      completadas: 1,
+      noShow: 1,
+      canceladasCliente: 1,
+      canceladasEntrenadora: 1,
+      pendientes: 1,
+      medibles: 3,
+      compliancePercent: 33
+    });
+    assert.ok(datos.totals.agendadas >= 5, 'los totales reúnen a toda la clientela');
   });
 });
 
