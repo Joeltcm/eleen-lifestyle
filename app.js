@@ -1,4 +1,4 @@
-const APP_VERSION = '205';
+const APP_VERSION = '206';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1037,11 +1037,16 @@ function renderAttendanceReport() {
     tile('Cumplimiento', t.compliancePercent === null ? '—' : `${t.compliancePercent}%`, `${t.medibles} sesiones medidas`),
     tile('Pausadas', t.pausadas, 'fuera de la métrica')
   ].join('');
-  const estado = client => client.status === 'active' ? 'Activo' : client.status === 'paused' ? 'En pausa' : 'Inactivo';
+  const estado = client => {
+    if (client.status === 'active') return { label: 'Activo', className: 'active' };
+    if (client.status === 'paused') return { label: 'En pausa', className: 'paused' };
+    return { label: 'Inactivo', className: 'inactive' };
+  };
   target.innerHTML = clients.map(client => {
     const noCumplio = client.noShow + client.canceladasCliente;
     const compliance = client.compliancePercent === null ? '—' : `${client.compliancePercent}%`;
-    return `<tr><td data-label="Cliente"><b>${escapeHtml(client.name)}</b><br><small class="attendance-client-status">${estado(client)}</small></td>
+    const estadoCliente = estado(client);
+    return `<tr><td data-label="Cliente"><b>${escapeHtml(client.name)}</b><br><small class="attendance-client-status attendance-status-${estadoCliente.className}">${estadoCliente.label}</small></td>
       <td data-label="Agendadas"><b>${client.agendadas}</b></td>
       <td data-label="Cumplió">${client.completadas}</td>
       <td data-label="No cumplió">${noCumplio}</td>

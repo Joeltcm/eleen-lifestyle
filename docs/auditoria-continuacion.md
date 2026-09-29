@@ -92,6 +92,19 @@ Rama: `fix/claridad-asistencia-pausas`
   clientes en pausa está visible.
 - Railway `/health` respondió `status: ok`.
 
+## Colores para el estado del cliente
+
+Rama: `feat/colores-estatus-asistencia`
+
+- La etiqueta bajo el nombre conserva el texto `Activo`, `En pausa` o
+  `Inactivo`.
+- Se añadió identificación visual: verde para activos, ámbar para pausados y
+  gris para inactivos.
+- No cambia filtros, métricas ni datos; es una mejora de lectura de la tabla.
+- Frontend actualizado de v205 a v206.
+
+Verificación pendiente: `npm run verify` y revisión visual antes de publicar.
+
 ## Filtros de estado en Asistencia
 
 Rama: `feat/filtros-estado-asistencia`
