@@ -103,7 +103,14 @@ Rama: `feat/colores-estatus-asistencia`
 - No cambia filtros, métricas ni datos; es una mejora de lectura de la tabla.
 - Frontend actualizado de v205 a v206.
 
-Verificación pendiente: `npm run verify` y revisión visual antes de publicar.
+### Publicación
+
+- `npm run verify` ✅
+- `main` actualizado con `4799d98`.
+- Frontend v206 publicado en Cloudflare Pages.
+- Producción verificada: la hoja de estilos contiene las etiquetas verde,
+  ámbar y gris para los estados.
+- Railway `/health` respondió `status: ok`.
 
 ## Filtros de estado en Asistencia
 
