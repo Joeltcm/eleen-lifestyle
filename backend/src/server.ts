@@ -4428,10 +4428,35 @@ app.get('/api/compliance/by-month', { preHandler: requireStaff }, async request 
 // pendiente de marcar, no se convierte automáticamente en incumplimiento.
 app.get('/api/attendance/monthly', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
-  const { month } = z.object({ month: z.string().regex(/^\d{4}-\d{2}$/) }).parse(request.query);
-  const [year, monthNumber] = month.split('-').map(Number);
-  const from = `${month}-01`;
-  const to = new Date(Date.UTC(year, monthNumber, 1)).toISOString().slice(0, 10);
+  const query = z.object({
+    month: z.string().regex(/^\d{4}-\d{2}$/).optional(),
+    from: z.string().date().optional(),
+    to: z.string().date().optional()
+  }).superRefine((value, context) => {
+    const customRange = value.from !== undefined || value.to !== undefined;
+    if (customRange && (!value.from || !value.to)) {
+      context.addIssue({ code: 'custom', path: ['from'], message: 'El rango requiere fecha inicial y final' });
+    }
+    if (!customRange && !value.month) {
+      context.addIssue({ code: 'custom', path: ['month'], message: 'Indica un mes o un rango de fechas' });
+    }
+    if (value.from && value.to && value.from > value.to) {
+      context.addIssue({ code: 'custom', path: ['to'], message: 'La fecha final no puede ser anterior a la inicial' });
+    }
+  }).parse(request.query);
+  const customRange = Boolean(query.from && query.to);
+  const month = query.month || null;
+  const from = customRange ? query.from! : `${month}-01`;
+  const toInclusive = customRange
+    ? query.to!
+    : (() => {
+        const [year, monthNumber] = month!.split('-').map(Number);
+        return new Date(Date.UTC(year, monthNumber, 0)).toISOString().slice(0, 10);
+      })();
+  const toExclusive = new Date(`${toInclusive}T00:00:00Z`);
+  toExclusive.setUTCDate(toExclusive.getUTCDate() + 1);
+  const to = toExclusive.toISOString().slice(0, 10);
+  const periodKey = customRange ? `range:${from}:${toInclusive}` : `month:${month}`;
   const rows = await sql`
     WITH scoped AS (
       SELECT c.id AS client_id,
@@ -4519,6 +4544,8 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async request =
   const puntos = clients.reduce((total, client) => total + (client.compliancePercent === null ? 0 : client.compliancePercent * client.medibles), 0);
   return {
     month,
+    period: { from, to: toInclusive },
+    periodKey,
     clients,
     totals: {
       agendadas: sum('agendadas'), pendientes: sum('pendientes'), futuras: sum('futuras'),

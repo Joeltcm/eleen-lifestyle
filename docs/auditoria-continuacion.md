@@ -92,6 +92,19 @@ Rama: `fix/claridad-asistencia-pausas`
   clientes en pausa está visible.
 - Railway `/health` respondió `status: ok`.
 
+## Rango personalizado en Asistencia
+
+Rama: `feat/rango-fechas-asistencia`
+
+- Asistencia conserva el selector de mes y añade `Desde`/`Hasta` para consultar
+  un período personalizado inclusivo.
+- El backend valida fechas completas, exige ambas fechas y rechaza rangos
+  invertidos; el mismo cálculo de pausas, pendientes, cancelaciones y
+  cumplimiento se aplica al rango solicitado.
+- `Mes actual` y `Limpiar` regresan al filtro mensual; los filtros de estado
+  siguen funcionando sobre el resultado visible.
+- Frontend actualizado de v206 a v207.
+
 ## Colores para el estado del cliente
 
 Rama: `feat/colores-estatus-asistencia`

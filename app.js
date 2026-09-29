@@ -1,4 +1,4 @@
-const APP_VERSION = '206';
+const APP_VERSION = '207';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -74,6 +74,8 @@ let billingAnalytics = null;
 let billingAnalyticsLoadingYear = null;
 let billingAnalyticsRequest = 0;
 let attendanceMonth = dateKey(today).slice(0, 7);
+let attendanceFrom = '';
+let attendanceTo = '';
 let attendanceReport = null;
 let attendanceReportLoading = false;
 let attendanceReportRequest = 0;
@@ -992,18 +994,25 @@ function renderBilling() {
 }
 function renderAttendanceReport() {
   const monthInput = document.getElementById('attendance-month');
+  const fromInput = document.getElementById('attendance-from');
+  const toInput = document.getElementById('attendance-to');
   const target = document.getElementById('attendance-table');
   const totals = document.getElementById('attendance-totals');
   const summary = document.getElementById('attendance-summary');
-  if (!monthInput || !target || !totals || !summary) return;
+  if (!monthInput || !fromInput || !toInput || !target || !totals || !summary) return;
   monthInput.value = attendanceMonth;
+  fromInput.value = attendanceFrom;
+  toInput.value = attendanceTo;
   document.querySelectorAll('[data-attendance-status]').forEach(input => {
     input.checked = Boolean(attendanceStatusFilters[input.value]);
   });
-  if (!attendanceReport || attendanceReport.month !== attendanceMonth) {
-    summary.textContent = attendanceReportLoading ? 'Calculando…' : 'Selecciona un mes para consultar la agenda.';
+  const requestedPeriodKey = attendanceFrom && attendanceTo
+    ? `range:${attendanceFrom}:${attendanceTo}`
+    : `month:${attendanceMonth}`;
+  if (!attendanceReport || attendanceReport.periodKey !== requestedPeriodKey) {
+    summary.textContent = attendanceReportLoading ? 'Calculando…' : 'Selecciona un mes o aplica un rango para consultar la agenda.';
     totals.innerHTML = '';
-    target.innerHTML = `<tr><td colspan="10" class="empty">${attendanceReportLoading ? 'Cargando agenda y cumplimiento…' : 'No hay datos cargados para este mes.'}</td></tr>`;
+    target.innerHTML = `<tr><td colspan="10" class="empty">${attendanceReportLoading ? 'Cargando agenda y cumplimiento…' : 'No hay datos cargados para este período.'}</td></tr>`;
     return;
   }
   const clients = attendanceReport.clients.filter(client => Boolean(attendanceStatusFilters[client.status]));
@@ -1027,7 +1036,10 @@ function renderAttendanceReport() {
   const pausedNote = pausedHidden
     ? ` · ${pausedHidden} ${pausedHidden === 1 ? 'cliente en pausa oculto' : 'clientes en pausa ocultos'}; activa “En pausa” para verlo${pausedHidden === 1 ? '' : 's'}`
     : '';
-  summary.textContent = `${clients.length} clientes · ${t.agendadas} clases en el calendario · ${t.medibles} sesiones medidas${pausedNote}`;
+  const periodLabel = attendanceReport.period?.from === attendanceReport.period?.to
+    ? fechaCorta(attendanceReport.period.from)
+    : `${fechaCorta(attendanceReport.period?.from)} al ${fechaCorta(attendanceReport.period?.to)}`;
+  summary.textContent = `${periodLabel} · ${clients.length} clientes · ${t.agendadas} clases en el calendario · ${t.medibles} sesiones medidas${pausedNote}`;
   const tile = (label, value, note = '') => `<article><span>${label}</span><strong>${value}</strong>${note ? `<small>${note}</small>` : ''}</article>`;
   totals.innerHTML = [
     tile('Clases agendadas', t.agendadas),
@@ -1058,14 +1070,23 @@ function renderAttendanceReport() {
       <td data-label="Cumplimiento"><strong class="attendance-percent">${compliance}</strong></td></tr>`;
   }).join('') || '<tr><td colspan="10" class="empty">No hay clientes en el expediente.</td></tr>';
 }
-async function loadAttendanceReport(month = attendanceMonth) {
-  attendanceMonth = month;
+async function loadAttendanceReport() {
+  const periodKey = attendanceFrom && attendanceTo
+    ? `range:${attendanceFrom}:${attendanceTo}`
+    : `month:${attendanceMonth}`;
+  const query = attendanceFrom && attendanceTo
+    ? `from=${encodeURIComponent(attendanceFrom)}&to=${encodeURIComponent(attendanceTo)}`
+    : `month=${encodeURIComponent(attendanceMonth)}`;
   const requestId = ++attendanceReportRequest;
   attendanceReportLoading = true;
   renderAttendanceReport();
   try {
-    const report = await api(`/api/attendance/monthly?month=${encodeURIComponent(month)}`);
-    if (requestId !== attendanceReportRequest || attendanceMonth !== month) return;
+    const report = await api(`/api/attendance/monthly?${query}`);
+    if (requestId !== attendanceReportRequest) return;
+    const currentPeriodKey = attendanceFrom && attendanceTo
+      ? `range:${attendanceFrom}:${attendanceTo}`
+      : `month:${attendanceMonth}`;
+    if (currentPeriodKey !== periodKey) return;
     attendanceReport = report;
     renderAttendanceReport();
   } catch (error) {
@@ -4279,11 +4300,33 @@ document.getElementById('billing-current-period').addEventListener('click', () =
 });
 document.getElementById('attendance-month')?.addEventListener('change', event => {
   attendanceMonth = event.target.value || dateKey(today).slice(0, 7);
+  attendanceFrom = '';
+  attendanceTo = '';
   attendanceReport = null;
   loadAttendanceReport();
 });
 document.getElementById('attendance-current')?.addEventListener('click', () => {
   attendanceMonth = dateKey(today).slice(0, 7);
+  attendanceFrom = '';
+  attendanceTo = '';
+  attendanceReport = null;
+  loadAttendanceReport();
+});
+document.getElementById('attendance-apply-range')?.addEventListener('click', () => {
+  const from = document.getElementById('attendance-from')?.value || '';
+  const to = document.getElementById('attendance-to')?.value || '';
+  if (!from || !to || from > to) {
+    toast('Selecciona un rango válido: la fecha final debe ser igual o posterior a la inicial.', true);
+    return;
+  }
+  attendanceFrom = from;
+  attendanceTo = to;
+  attendanceReport = null;
+  loadAttendanceReport();
+});
+document.getElementById('attendance-clear-range')?.addEventListener('click', () => {
+  attendanceFrom = '';
+  attendanceTo = '';
   attendanceReport = null;
   loadAttendanceReport();
 });

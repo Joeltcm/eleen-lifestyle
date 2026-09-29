@@ -1807,6 +1807,28 @@ describe('reporte mensual de agenda y cumplimiento', () => {
       compliancePercent: 33
     });
     assert.ok(datos.totals.agendadas >= 5, 'los totales reúnen a toda la clientela');
+
+    const rango = await api.get('/api/attendance/monthly?from=2026-09-05&to=2026-09-07');
+    assert.equal(rango.estado, 200);
+    assert.deepEqual(rango.datos.period, { from: '2026-09-05', to: '2026-09-07' });
+    assert.equal(rango.datos.periodKey, 'range:2026-09-05:2026-09-07');
+    const filaRango = rango.datos.clients.find(item => item.clientId === c.datos.id);
+    assert.deepEqual({
+      agendadas: filaRango.agendadas,
+      completadas: filaRango.completadas,
+      noShow: filaRango.noShow,
+      pendientes: filaRango.pendientes,
+      medibles: filaRango.medibles
+    }, {
+      agendadas: 3,
+      completadas: 1,
+      noShow: 1,
+      pendientes: 1,
+      medibles: 2
+    });
+
+    assert.equal((await api.get('/api/attendance/monthly?from=2026-09-08&to=2026-09-07')).estado, 400,
+      'rechaza rangos invertidos');
   });
 });
 
