@@ -66,3 +66,22 @@ activo. Se agrega un filtro reversible y se deja activado por defecto.
    totales del conjunto anterior.
 4. Confirmar que el cambio de versión invalida la caché sin afectar otras
    vistas.
+
+## Corrección posterior — claridad del reporte de Asistencia
+
+Rama: `fix/claridad-asistencia-pausas`
+
+- Se reemplazó el desglose ambiguo `no-show · canceló` por
+  **inasistencias · cancelaciones del cliente**.
+- Cuando no existen sesiones futuras se muestra **Sin sesiones futuras**, en
+  lugar de `0 futuras`.
+- Cuando `Solo activos` está marcado, el resumen informa cuántos clientes en
+  pausa quedaron fuera y cómo desactivar el filtro para revisarlos. Esto evita
+  que un caso como Juan de Diego desaparezca sin explicación.
+- Las pausas siguen fuera del cálculo de cumplimiento, conforme a la regla de
+  negocio; no se cambió el cálculo del backend.
+- Frontend actualizado de v202 a v203.
+
+Verificación pendiente: ejecutar `npm run verify`, revisar la vista con un
+cliente activo, uno en pausa y uno inactivo, y publicar solo después de esa
+revisión.
