@@ -898,13 +898,15 @@ function renderBilling() {
   };
   const corteSeleccionadoIds = new Set();
   data.packages.forEach(pack => {
-    if (pack.status !== 'confirmed' && pack.status !== 'pending') return;
     const vence = pack.expiresOn ? dateOnly(pack.expiresOn) : '';
     if (pack.kind === 'monthly') {
+      // El ciclo se muestra AUNQUE esté agotado: que el cliente consumió todas
+      // sus clases del ciclo es justo el dato del corte (Julio 10/10, Sally
+      // 16/16). El emparejamiento por rango ya deja fuera otros ciclos.
       const client = data.clients.find(item => item.id === pack.clientId);
       const ciclo = client ? cicloEnOffset(Number(client.cutoffDay) || 1, corteOffset) : null;
       if (ciclo && inicioCicloPaquete(pack) === ciclo.inicio && vence === ciclo.vence) corteSeleccionadoIds.add(pack.id);
-    } else if (corteOffset === 0 && vence && vence >= hoyStr) {
+    } else if (corteOffset === 0 && vence && vence >= hoyStr && (pack.status === 'confirmed' || pack.status === 'pending')) {
       // Los paquetes no mensuales (clases sueltas) no tienen corte: se muestran
       // sólo en el ciclo vigente mientras sigan vivos.
       corteSeleccionadoIds.add(pack.id);
@@ -919,8 +921,12 @@ function renderBilling() {
   if (corteLabelEl) corteLabelEl.textContent = mostrarHistorialPaquetes ? 'Historial completo' : corteLabel;
   const corteHoyBtn = document.getElementById('corte-hoy');
   if (corteHoyBtn) corteHoyBtn.classList.toggle('active-filter', corteOffset === 0 && !mostrarHistorialPaquetes);
-  const visiblesPaquetes = data.packages.filter(pack => (mostrarHistorialPaquetes || paqueteVigente(pack))
-    && (mostrarHistorialPaquetes || corteSeleccionadoIds.has(pack.id)));
+  // En modo corte se muestran TODOS los saldos del ciclo elegido, agotados
+  // incluidos (el corte es el filtro). "Ver historial" lista todos los saldos
+  // de todos los ciclos.
+  const visiblesPaquetes = mostrarHistorialPaquetes
+    ? data.packages.slice()
+    : data.packages.filter(pack => corteSeleccionadoIds.has(pack.id));
   document.getElementById('package-table').innerHTML = visiblesPaquetes.length ? visiblesPaquetes.map(pack => {
     const remaining = remainingSessions(pack);
     const state = pack.status === 'pending' ? 'Pendiente de pago' : remaining ? 'Activo' : 'Agotado';
