@@ -92,6 +92,22 @@ Rama: `fix/claridad-asistencia-pausas`
   clientes en pausa está visible.
 - Railway `/health` respondió `status: ok`.
 
+## Filtros de estado en Asistencia
+
+Rama: `feat/filtros-estado-asistencia`
+
+- Se reemplazó `Solo activos` por tres casillas independientes: `Activos`,
+  `En pausa` e `Inactivos`.
+- La vista por defecto muestra `Activos` y `En pausa`, para que expedientes
+  como el de Juan de Diego sean visibles sin incluir inactivos operativos.
+- `Inactivos` queda disponible bajo demanda.
+- El filtro recalcula la tabla y todas sus métricas usando únicamente los
+  estados seleccionados; no cambia el cálculo del backend.
+- Frontend actualizado de v204 a v205.
+
+Verificación pendiente: `npm run verify` y revisión de las combinaciones de
+casillas antes de publicar.
+
 ## Simplificación visual posterior — tabla de Asistencia
 
 Rama: `fix/asistencia-sin-avisos`
