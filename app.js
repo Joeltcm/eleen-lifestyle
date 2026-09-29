@@ -1,4 +1,4 @@
-const APP_VERSION = '201';
+const APP_VERSION = '202';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -77,7 +77,7 @@ let attendanceMonth = dateKey(today).slice(0, 7);
 let attendanceReport = null;
 let attendanceReportLoading = false;
 let attendanceReportRequest = 0;
-let attendanceOnlyActive = false;
+let attendanceOnlyActive = true;
 let calendarMode = 'week';
 let calendarCursor = new Date(today);
 calendarCursor.setHours(12, 0, 0, 0);
