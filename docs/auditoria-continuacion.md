@@ -92,6 +92,16 @@ Rama: `fix/claridad-asistencia-pausas`
   clientes en pausa está visible.
 - Railway `/health` respondió `status: ok`.
 
+## Filtro de cliente en Asistencia
+
+Rama: `feat/filtro-cliente-asistencia`
+
+- Asistencia incorpora búsqueda por nombre de cliente junto al mes y al rango
+  personalizado.
+- La búsqueda filtra la tabla, las tarjetas de métricas y el resumen sin
+  volver a consultar el backend; los filtros de estado siguen aplicando.
+- Frontend actualizado de v208 a v209.
+
 ## Filtro de cliente en Facturación y navegación móvil
 
 Rama: `feat/filtro-cliente-facturacion-mobile`

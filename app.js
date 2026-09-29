@@ -1,4 +1,4 @@
-const APP_VERSION = '208';
+const APP_VERSION = '209';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -77,6 +77,7 @@ let billingAnalyticsRequest = 0;
 let attendanceMonth = dateKey(today).slice(0, 7);
 let attendanceFrom = '';
 let attendanceTo = '';
+let attendanceClientFilter = '';
 let attendanceReport = null;
 let attendanceReportLoading = false;
 let attendanceReportRequest = 0;
@@ -1003,13 +1004,15 @@ function renderAttendanceReport() {
   const monthInput = document.getElementById('attendance-month');
   const fromInput = document.getElementById('attendance-from');
   const toInput = document.getElementById('attendance-to');
+  const clientFilterInput = document.getElementById('attendance-client-filter');
   const target = document.getElementById('attendance-table');
   const totals = document.getElementById('attendance-totals');
   const summary = document.getElementById('attendance-summary');
-  if (!monthInput || !fromInput || !toInput || !target || !totals || !summary) return;
+  if (!monthInput || !fromInput || !toInput || !clientFilterInput || !target || !totals || !summary) return;
   monthInput.value = attendanceMonth;
   fromInput.value = attendanceFrom;
   toInput.value = attendanceTo;
+  if (clientFilterInput.value !== attendanceClientFilter) clientFilterInput.value = attendanceClientFilter;
   document.querySelectorAll('[data-attendance-status]').forEach(input => {
     input.checked = Boolean(attendanceStatusFilters[input.value]);
   });
@@ -1022,7 +1025,9 @@ function renderAttendanceReport() {
     target.innerHTML = `<tr><td colspan="10" class="empty">${attendanceReportLoading ? 'Cargando agenda y cumplimiento…' : 'No hay datos cargados para este período.'}</td></tr>`;
     return;
   }
-  const clients = attendanceReport.clients.filter(client => Boolean(attendanceStatusFilters[client.status]));
+  const clientNeedle = attendanceClientFilter.trim().toLocaleLowerCase('es');
+  const clients = attendanceReport.clients.filter(client => Boolean(attendanceStatusFilters[client.status])
+    && (!clientNeedle || String(client.name || '').toLocaleLowerCase('es').includes(clientNeedle)));
   const sum = key => clients.reduce((total, client) => total + Number(client[key] || 0), 0);
   const medibles = sum('medibles');
   const weightedCompliance = clients.reduce((total, client) => (
@@ -1046,7 +1051,8 @@ function renderAttendanceReport() {
   const periodLabel = attendanceReport.period?.from === attendanceReport.period?.to
     ? fechaCorta(attendanceReport.period.from)
     : `${fechaCorta(attendanceReport.period?.from)} al ${fechaCorta(attendanceReport.period?.to)}`;
-  summary.textContent = `${periodLabel} · ${clients.length} clientes · ${t.agendadas} clases en el calendario · ${t.medibles} sesiones medidas${pausedNote}`;
+  const clientNote = clientNeedle ? ` · Cliente: ${attendanceClientFilter.trim()}` : '';
+  summary.textContent = `${periodLabel} · ${clients.length} clientes · ${t.agendadas} clases en el calendario · ${t.medibles} sesiones medidas${clientNote}${pausedNote}`;
   const tile = (label, value, note = '') => `<article><span>${label}</span><strong>${value}</strong>${note ? `<small>${note}</small>` : ''}</article>`;
   totals.innerHTML = [
     tile('Clases agendadas', t.agendadas),
@@ -4351,6 +4357,10 @@ document.querySelectorAll('[data-attendance-status]').forEach(input => input.add
   attendanceStatusFilters[event.target.value] = event.target.checked;
   renderAttendanceReport();
 }));
+document.getElementById('attendance-client-filter')?.addEventListener('input', event => {
+  attendanceClientFilter = event.target.value;
+  renderAttendanceReport();
+});
 document.getElementById('billing-load-more').addEventListener('click', () => { billingVisibleInvoices += 100; renderBilling(); });
 document.getElementById('show-zoho-invoices').addEventListener('click', () => {
   billingReturnState = { month: billingMonth, year: billingYear, source: billingSource };
