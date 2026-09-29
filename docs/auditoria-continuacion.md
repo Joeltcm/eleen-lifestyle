@@ -82,6 +82,12 @@ Rama: `fix/claridad-asistencia-pausas`
   negocio; no se cambió el cálculo del backend.
 - Frontend actualizado de v202 a v203.
 
-Verificación pendiente: ejecutar `npm run verify`, revisar la vista con un
-cliente activo, uno en pausa y uno inactivo, y publicar solo después de esa
-revisión.
+### Publicación
+
+- `npm run verify` ✅
+- `main` actualizado a `c5a7220`.
+- Frontend v203 publicado en Cloudflare Pages.
+- Despliegue verificado: `https://4911873b.eileen-lifestyle.pages.dev`.
+- Producción sirve `app.js?v=203`, la casilla aparece marcada y el aviso de
+  clientes en pausa está visible.
+- Railway `/health` respondió `status: ok`.
