@@ -133,11 +133,16 @@ Fecha: 2026-09-29 · base revisada: `main` en `7783a39`
   las suites pasó, incluyendo ciclos, familiares, concurrencia, asistencia,
   seguridad básica, portal y reprogramación local.
 
-### Publicación pendiente
+### Publicación
 
 - Backend-only; no requiere bump de frontend.
-- Después de `check`, `build` y la suite, publicar el commit en `main` para que
-  Railway lo despliegue automáticamente y verificar `/health`.
+- `npm run verify` ✅
+- Suite backend: `208/210`; las dos fallas son las pruebas antiguas de
+  `no_anticipado` con fechas fijas del 28-09-2026 ejecutadas el 29-09-2026.
+- Commit publicado en `main`: `6a83dad`.
+- Railway `/health` respondió `status: ok` y reportó Google Calendar
+  configurado. La consulta del estado detallado de Railway no estuvo disponible
+  temporalmente por un 503 de su OAuth CLI.
 
 ## Filtro de cliente en Asistencia
 
