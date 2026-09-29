@@ -1,4 +1,4 @@
-const APP_VERSION = '197';
+const APP_VERSION = '198';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -927,7 +927,34 @@ function renderBilling() {
   const visiblesPaquetes = mostrarHistorialPaquetes
     ? data.packages.slice()
     : data.packages.filter(pack => corteSeleccionadoIds.has(pack.id));
+  // Roster completo por corte: todo cliente mensual activo aparece en cada
+  // corte. Si su saldo de ese ciclo aún no abrió (los ciclos futuros abren en
+  // su fecha), se muestra una fila PROYECTADA con las sesiones esperadas del
+  // plan y el estado del cobro. Esto NO afecta que pueda entrenar: su ciclo
+  // vigente sí tiene saldo real (abre en el corte); las proyectadas son los
+  // próximos, sólo informativas.
+  if (!mostrarHistorialPaquetes) {
+    const dmy = s => (s ? `${s.slice(8, 10)}-${s.slice(5, 7)}-${s.slice(0, 4)}` : '');
+    const conSaldoMensual = new Set(visiblesPaquetes.filter(p => p.kind === 'monthly').map(p => p.clientId));
+    data.clients.filter(c => c.statusRaw === 'active' && c.billingModel === 'monthly' && !conSaldoMensual.has(c.id)).forEach(client => {
+      const ciclo = cicloEnOffset(Number(client.cutoffDay) || 1, corteOffset);
+      const factura = data.invoices.find(inv => inv.status !== 'void'
+        && (inv.billedForClientId === client.id || inv.clientId === client.id) && inv.due === ciclo.inicio);
+      const estadoProy = !factura ? 'Sin abrir' : factura.status === 'confirmed' ? 'Pagado' : 'Pendiente de pago';
+      visiblesPaquetes.push({
+        projected: true, clientId: client.id, client: client.name, kind: 'monthly',
+        label: `Mensualidad · ${dmy(ciclo.inicio)} – ${dmy(ciclo.vence)}`,
+        total: Number(client.monthlySessionTarget || client.sessionsIncluded || 0), used: 0,
+        expiresOn: ciclo.vence, abre: ciclo.inicio, estadoProy
+      });
+    });
+    visiblesPaquetes.sort((a, b) => String(a.client).localeCompare(String(b.client), 'es'));
+  }
   document.getElementById('package-table').innerHTML = visiblesPaquetes.length ? visiblesPaquetes.map(pack => {
+    if (pack.projected) {
+      const clase = pack.estadoProy === 'Pendiente de pago' ? 'pending' : pack.estadoProy === 'Pagado' ? 'confirmed' : '';
+      return `<tr class="pack-proyectada"><td data-label="Cliente"><b>${escapeHtml(pack.client)}</b></td><td data-label="Paquete">${escapeHtml(pack.label)}<br><small class="pack-origin">Proyectado · aún no abre</small></td><td data-label="Compradas">${pack.total || '—'}</td><td data-label="Usadas">0</td><td data-label="Disponibles"><strong class="session-balance">${pack.total || '—'}</strong></td><td data-label="Estado"><span class="payment-status ${clase}">${pack.estadoProy}</span><br><small>abre ${fechaCorta(pack.abre)}</small></td><td data-label="Cumplimiento">${cumplimientoCelda(pack)}</td><td data-label="Acciones"><small>—</small></td></tr>`;
+    }
     const remaining = remainingSessions(pack);
     const state = pack.status === 'pending' ? 'Pendiente de pago' : remaining ? 'Activo' : 'Agotado';
     const borrable = Number(pack.used) === 0
