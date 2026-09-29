@@ -577,10 +577,26 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     const c = await api.post('/api/clients', { fullName: 'Corte 15 paga 17', planId: plan.datos.id, cutoffDay: 15 });
     const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: '2026-09-30' });
     await api.post(`/api/invoices/${f.datos.id}/confirm`, { method: 'Efectivo', paidOn: '2026-09-17' });
-    const saldo = (await api.get('/api/packages')).datos.find(p => p.client_id === c.datos.id && p.kind === 'monthly');
+    const paquetes = await api.get('/api/packages');
+    assert.equal(paquetes.estado, 200, `la lista de saldos respondió ${JSON.stringify(paquetes)}`);
+    const saldo = paquetes.datos.find(p => p.client_id === c.datos.id && p.kind === 'monthly');
     assert.ok(saldo, 'el pago abre el saldo del ciclo');
     assert.equal(String(saldo.expires_on).slice(0, 10), '2026-10-15', 'vence el 15 (corte configurado), no el 17 (día de pago)');
     assert.match(saldo.label, /15-09-2026 – 15-10-2026/, 'la etiqueta muestra el ciclo del corte, no la fecha de pago');
+
+    // Un pago anticipado puede caer mucho antes del corte. Debe abrir el ciclo
+    // 28→28 que dice la factura, no un ciclo que empiece el día del pago.
+    const anticipado = await api.post('/api/clients', { fullName: 'Corte 28 paga anticipado', planId: plan.datos.id, cutoffDay: 28 });
+    const facturaAnticipada = await api.post('/api/invoices', {
+      clientId: anticipado.datos.id,
+      concept: 'Mensualidad anticipada',
+      amount: 175,
+      dueOn: '2026-09-28'
+    });
+    await api.post(`/api/invoices/${facturaAnticipada.datos.id}/confirm`, { method: 'Yappy', paidOn: '2026-09-02' });
+    const saldoAnticipado = (await api.get('/api/packages')).datos.find(p => p.client_id === anticipado.datos.id && p.kind === 'monthly');
+    assert.equal(String(saldoAnticipado.expires_on).slice(0, 10), '2026-10-28', 'un pago anticipado respeta el corte 28');
+    assert.match(saldoAnticipado.label, /28-09-2026 – 28-10-2026/, 'la etiqueta anticipada usa el rango del corte');
   });
 
   // Criterio de cierre (auditoría Codex): worker y paquete manual deben producir

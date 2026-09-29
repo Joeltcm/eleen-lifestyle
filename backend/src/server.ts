@@ -3422,7 +3422,7 @@ const coverageSchema = z.object({
 async function abrirCobertura(
   transaction: TransactionSql,
   ownerId: string,
-  invoice: { id: string; client_id: string; coverage_start: string | Date | null },
+  invoice: { id: string; client_id: string; coverage_start: string | Date | null; due_on?: string | Date | null },
   periodo: string,
   entries: { clientId: string; amount: number; sessions: number }[]
 ): Promise<{ abiertos: { clientId: string; fullName: string; sessions: number; packageId: string | null }[] } | { error: string; code: number }> {
@@ -3452,7 +3452,10 @@ async function abrirCobertura(
       // un pago del 17 con corte 15 cae en el ciclo 15→15, no 17→17. Se toma la
       // fecha real del pago para saber en qué ciclo cae, y el corte fija las
       // fronteras.
-      const referencia = invoice.coverage_start || periodo;
+      // El ciclo lo fija el corte de la factura, no el día en que se registró
+      // el pago. Un pago anticipado del día 2 para un corte 28 cubre 28→28,
+      // no 2→28 del mes siguiente.
+      const referencia = invoice.due_on || invoice.coverage_start || periodo;
       const { inicio: inicioCiclo, vence } = cicloDelCorte(referencia, Number(cliente.billing_cutoff_day) || 1);
       // Si esta persona ya tiene un saldo mensual vigente del ciclo (abierto al
       // asignar el plan o por la generación), no se abre otro: se reusa y se le
@@ -3531,7 +3534,7 @@ app.post('/api/invoices/:id/coverage', { preHandler: requireStaff }, async (requ
   const id = z.string().uuid().parse((request.params as { id: string }).id);
   const input = coverageSchema.parse(request.body);
   const [invoice] = await sql`
-    SELECT i.id, i.client_id, i.billed_for_client_id, i.auto_generated, i.amount, i.status, i.source_system,
+    SELECT i.id, i.client_id, i.billed_for_client_id, i.auto_generated, i.amount, i.status, i.source_system, i.due_on,
       COALESCE((SELECT min(ip.paid_on) FROM payment_allocations pa JOIN invoice_payments ip ON ip.id = pa.payment_id WHERE pa.invoice_id = i.id), i.issued_on, i.due_on) AS coverage_start
     FROM invoices i JOIN clients c ON c.id = i.client_id
     WHERE i.id = ${id} AND c.owner_id = ${auth.sub} AND i.status <> 'void'
@@ -3558,7 +3561,7 @@ app.post('/api/invoices/:id/coverage', { preHandler: requireStaff }, async (requ
   }
 
   const resultado = await sql.begin(async transaction => {
-    const abierta = await abrirCobertura(transaction, auth.sub, { id: invoice.id, client_id: invoice.client_id, coverage_start: invoice.coverage_start }, periodo, input.entries);
+    const abierta = await abrirCobertura(transaction, auth.sub, { id: invoice.id, client_id: invoice.client_id, coverage_start: invoice.coverage_start, due_on: invoice.due_on }, periodo, input.entries);
     // Aplicar una mensualidad a un cobro de Zoho pendiente lo salda también, igual
     // que en paquetes: cierra la deuda congelada de la migración sin paso extra.
     if (!('error' in abierta)) await saldarCobroZohoPendiente(transaction, { id: invoice.id as string, source_system: invoice.source_system as string | null, status: invoice.status as string, coverage_start: invoice.coverage_start as string | Date | null });
@@ -3845,7 +3848,7 @@ async function saveNativeInvoicePayment(ownerId: string, id: string, input: z.in
         .filter(fila => Number(fila.suggested_sessions) > 0)
         .map(fila => ({ clientId: fila.id as string, amount: Number(fila.suggested_amount), sessions: Number(fila.suggested_sessions) }));
       if (entries.length) {
-        const res = await abrirCobertura(transaction, ownerId, { id: invoice.id, client_id: invoice.client_id, coverage_start: input.paidOn }, periodo, entries);
+        const res = await abrirCobertura(transaction, ownerId, { id: invoice.id, client_id: invoice.client_id, coverage_start: input.paidOn, due_on: invoice.due_on }, periodo, entries);
         if (!('error' in res)) coberturaAutomatica = res.abiertos;
       }
     }
