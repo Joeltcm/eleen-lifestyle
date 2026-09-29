@@ -104,5 +104,11 @@ Rama: `fix/asistencia-sin-avisos`
 - No cambia ningún cálculo ni endpoint; solo se simplifica la presentación.
 - Frontend actualizado de v203 a v204.
 
-Verificación pendiente antes de publicar: `npm run verify` y revisión visual de
-la tabla con clientes activos, en pausa e inactivos.
+### Publicación
+
+- `npm run verify` ✅
+- `main` actualizado con `3eee63e`.
+- Frontend v204 publicado en Cloudflare Pages.
+- Producción verificada: sirve `app.js?v=204` sin los avisos retirados.
+- La casilla `Solo activos` continúa marcada por defecto.
+- Railway `/health` respondió `status: ok`.
