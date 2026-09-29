@@ -91,3 +91,18 @@ Rama: `fix/claridad-asistencia-pausas`
 - Producción sirve `app.js?v=203`, la casilla aparece marcada y el aviso de
   clientes en pausa está visible.
 - Railway `/health` respondió `status: ok`.
+
+## Simplificación visual posterior — tabla de Asistencia
+
+Rama: `fix/asistencia-sin-avisos`
+
+- Se retiraron los desgloses repetidos debajo de `Agendadas` y `No cumplió`.
+- Las tarjetas superiores conservan únicamente sus números principales.
+- Se mantiene el aviso del resumen sobre clientes en pausa ocultos por
+  `Solo activos`, porque ese dato sí evita que un expediente desaparezca sin
+  explicación.
+- No cambia ningún cálculo ni endpoint; solo se simplifica la presentación.
+- Frontend actualizado de v203 a v204.
+
+Verificación pendiente antes de publicar: `npm run verify` y revisión visual de
+la tabla con clientes activos, en pausa e inactivos.

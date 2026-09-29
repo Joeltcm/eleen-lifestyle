@@ -1,4 +1,4 @@
-const APP_VERSION = '202';
+const APP_VERSION = '204';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1033,9 +1033,9 @@ function renderAttendanceReport() {
   summary.textContent = `${clients.length} ${attendanceOnlyActive ? 'clientes activos' : 'clientes'} · ${t.agendadas} clases en el calendario · ${t.medibles} sesiones medidas${pausedNote}`;
   const tile = (label, value, note = '') => `<article><span>${label}</span><strong>${value}</strong>${note ? `<small>${note}</small>` : ''}</article>`;
   totals.innerHTML = [
-    tile('Clases agendadas', t.agendadas, t.futuras ? `${t.futuras} futuras` : 'Sin sesiones futuras'),
+    tile('Clases agendadas', t.agendadas),
     tile('Cumplidas', t.completadas),
-    tile('No cumplidas', t.noShow + t.canceladasCliente, `${t.noShow} ${t.noShow === 1 ? 'inasistencia' : 'inasistencias'} · ${t.canceladasCliente} ${t.canceladasCliente === 1 ? 'cancelación' : 'cancelaciones'} del cliente`),
+    tile('No cumplidas', t.noShow + t.canceladasCliente),
     tile('Pendientes de marcar', t.pendientes),
     tile('Cumplimiento', t.compliancePercent === null ? '—' : `${t.compliancePercent}%`, `${t.medibles} sesiones medidas`),
     tile('Pausadas', t.pausadas, 'fuera de la métrica')
@@ -1044,11 +1044,10 @@ function renderAttendanceReport() {
   target.innerHTML = clients.map(client => {
     const noCumplio = client.noShow + client.canceladasCliente;
     const compliance = client.compliancePercent === null ? '—' : `${client.compliancePercent}%`;
-    const futuras = client.futuras ? `${client.futuras} futuras` : 'Sin sesiones futuras';
     return `<tr><td data-label="Cliente"><b>${escapeHtml(client.name)}</b><br><small class="attendance-client-status">${estado(client)}</small></td>
-      <td data-label="Agendadas"><b>${client.agendadas}</b><br><small>${futuras}</small></td>
+      <td data-label="Agendadas"><b>${client.agendadas}</b></td>
       <td data-label="Cumplió">${client.completadas}</td>
-      <td data-label="No cumplió">${noCumplio}<br><small>${client.noShow} ${client.noShow === 1 ? 'inasistencia' : 'inasistencias'} · ${client.canceladasCliente} ${client.canceladasCliente === 1 ? 'cancelación' : 'cancelaciones'} del cliente</small></td>
+      <td data-label="No cumplió">${noCumplio}</td>
       <td data-label="Pendientes">${client.pendientes}</td>
       <td data-label="Reprogramadas">${client.reprogramadas}</td>
       <td data-label="Pausa">${client.pausadas}</td>
