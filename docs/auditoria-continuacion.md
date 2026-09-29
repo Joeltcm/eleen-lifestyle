@@ -92,6 +92,53 @@ Rama: `fix/claridad-asistencia-pausas`
   clientes en pausa está visible.
 - Railway `/health` respondió `status: ok`.
 
+## Auditoría integral y sincronización de reprogramaciones desde Google Calendar
+
+Fecha: 2026-09-29 · base revisada: `main` en `7783a39`
+
+### Corrección aplicada
+
+- Al mover una sesión a otro día desde Google Calendar, la sincronización ya
+  registra `session_reschedules(origin='moved')`, igual que moverla desde
+  Eileen.
+- Si la sesión ya estaba `completed` y había descontado un saldo, la misma
+  sincronización devuelve una clase al saldo, desvincula `package_id` y
+  `package_debited`, y registra el movimiento dentro de una transacción.
+- Mover sólo la hora dentro del mismo día sigue siendo un ajuste de agenda, no
+  una reprogramación contable.
+
+### Auditoría de flujos
+
+- Clientes/perfiles: ownership por `owner_id` revisado en rutas de expedientes,
+  planes, InBody, documentos, condiciones, pesos y pausas.
+- Facturación/saldos: revisados ciclos por corte, crédito, anticipado/no
+  anticipado, familiares, concurrencia, vencidos, excedentes y sesiones sueltas.
+- Agenda/asistencia: revisados horarios fijos indefinidos, bajas, pausas,
+  estados de sesión, marcado tardío, reprogramaciones y cumplimiento.
+- Seguridad: autenticación JWT, fuerza bruta, enlaces de acceso de un solo uso,
+  ownership, almacenamiento firmado y escapado HTML revisados.
+
+### Riesgos pendientes de la auditoría
+
+- El portal de cliente devuelve `busySlots` con fecha, hora y duración de
+  sesiones de otros clientes del mismo entrenador. Aunque no incluye nombres,
+  expone disponibilidad/agenda de terceros; debe ocultarse o agregarse antes
+  de considerarlo cerrado.
+- No existe una prueba automatizada que simule la respuesta de Google Calendar
+  y verifique el pull bidireccional completo; la ruta local de mover sesiones sí
+  tiene cobertura. Conviene añadirla para proteger OAuth, conflictos, borrado y
+  movimiento de sesiones cobradas.
+- La suite quedó en `208/210`: las dos fallas son las pruebas preexistentes de
+  `no_anticipado` en el borde de fecha, no causadas por este cambio. El resto de
+  las suites pasó, incluyendo ciclos, familiares, concurrencia, asistencia,
+  seguridad básica, portal y reprogramación local.
+
+### Publicación pendiente
+
+- Backend-only; no requiere bump de frontend.
+- Después de `check`, `build` y la suite, publicar el commit en `main` para que
+  Railway lo despliegue automáticamente y verificar `/health`.
+
 ## Filtro de cliente en Asistencia
 
 Rama: `feat/filtro-cliente-asistencia`

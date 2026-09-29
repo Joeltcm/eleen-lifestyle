@@ -282,19 +282,48 @@ async function pullGoogleChanges(ownerId: string, token: string, connection: Cal
     const diaPanama = (valor: Date | string) => new Intl.DateTimeFormat('en-CA', {
       timeZone: 'America/Panama', year: 'numeric', month: '2-digit', day: '2-digit'
     }).format(new Date(valor));
-    if (diaPanama(session.starts_at) !== diaPanama(startsAt)) {
+    const seMovioDeDia = diaPanama(session.starts_at) !== diaPanama(startsAt);
+    if (seMovioDeDia && session.status === 'completed' && session.package_debited && session.package_id) {
+      // Arrastrar en Google una clase ya realizada tiene el mismo significado
+      // que moverla desde Eileen: se reprograma y devuelve el débito al saldo.
+      // Antes sólo se cambiaba starts_at aquí, dejando la clase cobrada aunque
+      // el contador de reprogramaciones sí aumentara.
+      await sql.begin(async transaction => {
+        await transaction`
+          UPDATE session_packages
+          SET used_sessions = GREATEST(0, used_sessions - 1),
+              status = CASE WHEN GREATEST(0, used_sessions - 1) >= total_sessions THEN 'exhausted' ELSE 'active' END
+          WHERE id = ${session.package_id}
+        `;
+        const [desvinculada] = await transaction`
+          UPDATE sessions SET starts_at = ${startsAt.toISOString()}, duration_minutes = ${durationMinutes},
+            package_id = NULL, package_debited = false, debited_group_id = NULL,
+            google_event_link = ${event.htmlLink ? String(event.htmlLink) : session.google_event_link},
+            google_event_updated_at = ${eventUpdatedAt.toISOString()}, google_event_etag = ${event.etag ? String(event.etag) : null},
+            google_synced_at = now(), google_sync_error = NULL, updated_at = now()
+          WHERE id = ${session.id}
+          RETURNING starts_at
+        `;
+        await transaction`
+          INSERT INTO session_reschedules (session_id, client_id, from_starts_at, to_starts_at, origin)
+          VALUES (${session.id}, ${session.client_id}, ${session.starts_at}, ${desvinculada.starts_at}, 'moved')
+        `;
+      });
+    } else {
+      if (seMovioDeDia) {
+        await sql`
+          INSERT INTO session_reschedules (session_id, client_id, from_starts_at, to_starts_at, origin)
+          VALUES (${session.id}, ${session.client_id}, ${session.starts_at}, ${startsAt.toISOString()}, 'moved')
+        `;
+      }
       await sql`
-        INSERT INTO session_reschedules (session_id, client_id, from_starts_at, to_starts_at, origin)
-        VALUES (${session.id}, ${session.client_id}, ${session.starts_at}, ${startsAt.toISOString()}, 'moved')
+        UPDATE sessions SET starts_at = ${startsAt.toISOString()}, duration_minutes = ${durationMinutes},
+          google_event_link = ${event.htmlLink ? String(event.htmlLink) : session.google_event_link},
+          google_event_updated_at = ${eventUpdatedAt.toISOString()}, google_event_etag = ${event.etag ? String(event.etag) : null},
+          google_synced_at = now(), google_sync_error = NULL, updated_at = now()
+        WHERE id = ${session.id}
       `;
     }
-    await sql`
-      UPDATE sessions SET starts_at = ${startsAt.toISOString()}, duration_minutes = ${durationMinutes},
-        google_event_link = ${event.htmlLink ? String(event.htmlLink) : session.google_event_link},
-        google_event_updated_at = ${eventUpdatedAt.toISOString()}, google_event_etag = ${event.etag ? String(event.etag) : null},
-        google_synced_at = now(), google_sync_error = NULL, updated_at = now()
-      WHERE id = ${session.id}
-    `;
     if (scheduleChanged) updatedFromGoogle += 1;
     if (localDirty) conflictsResolved += 1;
   }
