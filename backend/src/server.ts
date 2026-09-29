@@ -1424,6 +1424,169 @@ app.post('/api/maintenance/fix-cycles', { preHandler: requireStaff }, async requ
   return { corregidos, noMensuales };
 });
 
+// Reconciliación segura de saldos mensuales. La vista previa es el modo por
+// defecto: permite revisar qué se corregiría sin tocar datos. Con `apply: true`
+// se ejecuta todo dentro de una transacción y cada operación es idempotente.
+//
+// Primero retira débitos que quedaron colgados de una sesión cancelada como
+// reprogramada (el bug de completed -> rescheduled). Después hace que
+// used_sessions diga lo mismo que las sesiones que realmente apuntan al saldo,
+// elimina sólo duplicados mensuales exactos sin clases usadas y recoge clases
+// elegibles que quedaron sin cobrar dentro de la ventana del saldo.
+const monthlyBillingReconciliationSchema = z.object({ apply: z.boolean().default(false) });
+app.post('/api/maintenance/reconcile-monthly-billing', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const { apply } = monthlyBillingReconciliationSchema.parse(request.body || {});
+  return sql.begin(async transaction => {
+    const ghosts = await transaction`
+      SELECT s.id AS session_id, s.client_id, s.package_id, c.full_name,
+        sp.label AS package_label
+      FROM sessions s
+      JOIN clients c ON c.id = s.client_id
+      JOIN session_packages sp ON sp.id = s.package_id AND sp.kind = 'monthly'
+      WHERE c.owner_id = ${auth.sub}
+        AND s.package_debited = true
+        AND s.status = 'cancelled'
+        AND s.cancellation_kind = 'rescheduled'
+      FOR UPDATE OF s, sp
+    `;
+
+    const duplicates = await transaction`
+      SELECT duplicate.id, duplicate.client_id, duplicate.label, duplicate.total_sessions,
+        duplicate.amount, duplicate.expires_on, c.full_name
+      FROM session_packages duplicate
+      JOIN clients c ON c.id = duplicate.client_id
+      WHERE c.owner_id = ${auth.sub}
+        AND duplicate.kind = 'monthly'
+        AND duplicate.status <> 'cancelled'
+        AND duplicate.used_sessions = 0
+        AND EXISTS (
+          SELECT 1 FROM session_packages keep
+          WHERE keep.client_id = duplicate.client_id
+            AND keep.id <> duplicate.id
+            AND keep.kind = 'monthly'
+            AND keep.status <> 'cancelled'
+            AND keep.used_sessions > 0
+            AND keep.label = duplicate.label
+            AND keep.total_sessions = duplicate.total_sessions
+            AND keep.amount = duplicate.amount
+            AND keep.expires_on IS NOT DISTINCT FROM duplicate.expires_on
+        )
+    `;
+
+    const snapshot = async () => transaction`
+      SELECT sp.id, sp.client_id, c.full_name, sp.label, sp.total_sessions,
+        sp.used_sessions, sp.status, sp.expires_on,
+        linked.linked_sessions,
+        eligible.eligible_sessions
+      FROM session_packages sp
+      JOIN clients c ON c.id = sp.client_id
+      LEFT JOIN LATERAL (
+        SELECT count(*)::int AS linked_sessions
+        FROM sessions s
+        WHERE s.package_id = sp.id AND s.package_debited = true
+      ) linked ON true
+      LEFT JOIN LATERAL (
+        SELECT count(*)::int AS eligible_sessions
+        FROM sessions s
+        WHERE s.client_id = sp.client_id AND s.package_debited = false
+          AND (
+            s.status IN ('completed', 'no_show')
+            OR (s.status = 'cancelled' AND s.cancellation_kind = 'not_rescheduled'
+              AND COALESCE(s.cancelled_by, 'client') = 'client')
+          )
+          AND s.starts_at > (sp.expires_on::date - interval '1 month')
+          AND s.starts_at < (sp.expires_on::date + interval '1 day')
+      ) eligible ON true
+      WHERE c.owner_id = ${auth.sub}
+        AND sp.kind = 'monthly'
+        AND sp.status <> 'cancelled'
+      ORDER BY c.full_name, sp.expires_on NULLS LAST, sp.created_at
+    `;
+
+    const antes = await snapshot();
+    if (!apply) {
+      return {
+        dryRun: true,
+        ghosts: ghosts.map(row => ({ sessionId: row.session_id, client: row.full_name, package: row.package_label })),
+        duplicatePackages: duplicates.map(row => ({ id: row.id, client: row.full_name, label: row.label })),
+        balances: antes.map(row => ({
+          id: row.id,
+          client: row.full_name,
+          label: row.label,
+          used: Number(row.used_sessions),
+          linked: Number(row.linked_sessions),
+          eligible: Number(row.eligible_sessions)
+        }))
+      };
+    }
+
+    for (const ghost of ghosts) {
+      await transaction`
+        UPDATE session_packages
+        SET used_sessions = GREATEST(0, used_sessions - 1),
+            status = CASE WHEN GREATEST(0, used_sessions - 1) >= total_sessions THEN 'exhausted' ELSE 'active' END
+        WHERE id = ${ghost.package_id}
+      `;
+      await transaction`
+        UPDATE sessions
+        SET package_id = NULL, package_debited = false, debited_group_id = NULL, updated_at = now()
+        WHERE id = ${ghost.session_id}
+      `;
+    }
+
+    for (const duplicate of duplicates) {
+      await transaction`DELETE FROM session_packages WHERE id = ${duplicate.id} AND used_sessions = 0`;
+    }
+
+    const balances = await transaction`
+      SELECT sp.id, sp.client_id, sp.expires_on, sp.total_sessions, sp.used_sessions, sp.status
+      FROM session_packages sp JOIN clients c ON c.id = sp.client_id
+      WHERE c.owner_id = ${auth.sub} AND sp.kind = 'monthly' AND sp.status <> 'cancelled'
+      ORDER BY sp.expires_on NULLS LAST, sp.created_at
+      FOR UPDATE OF sp
+    `;
+    const corrected: { id: string; from: number; to: number }[] = [];
+    let recovered = 0;
+    for (const balance of balances) {
+      const [linked] = await transaction`
+        SELECT count(*)::int AS count FROM sessions
+        WHERE package_id = ${balance.id} AND package_debited = true
+      `;
+      const linkedCount = Number(linked.count);
+      const currentUsed = Number(balance.used_sessions);
+      if (linkedCount > Number(balance.total_sessions)) {
+        // No se puede fabricar capacidad para un saldo que ya tiene más
+        // sesiones vinculadas que las contratadas. Se conserva para revisión.
+        continue;
+      }
+      if (linkedCount !== currentUsed || balance.status === 'exhausted' && linkedCount < Number(balance.total_sessions)) {
+        await transaction`
+          UPDATE session_packages
+          SET used_sessions = ${linkedCount},
+              status = CASE WHEN ${linkedCount} >= total_sessions THEN 'exhausted' ELSE 'active' END
+          WHERE id = ${balance.id}
+        `;
+        corrected.push({ id: balance.id as string, from: currentUsed, to: linkedCount });
+      }
+      if (balance.status !== 'cancelled' && linkedCount < Number(balance.total_sessions) && balance.expires_on) {
+        recovered += await cobrarClasesYaDadas(
+          transaction, balance.id as string, balance.client_id as string,
+          soloFecha(balance.expires_on)!, Number(balance.total_sessions) - linkedCount
+        );
+      }
+    }
+
+    return {
+      dryRun: false,
+      detachedRescheduledDebits: ghosts.length,
+      deletedDuplicateBalances: duplicates.length,
+      correctedBalances: corrected,
+      recoveredSessions: recovered
+    };
+  });
+});
+
 app.get('/api/clients/:clientId/balances', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const clientId = z.string().uuid().parse((request.params as { clientId: string }).clientId);
@@ -2685,87 +2848,114 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
   // del paso, y eso ensucia el saldo o el cobro.
   const compensa = consulta.resolution === 'discount' ? 'discount' : 'none';
 
-    const [session] = await sql`
-    UPDATE sessions s SET status = 'cancelled',
-      cancellation_kind = ${reprogramada ? 'rescheduled' : 'not_rescheduled'},
-      cancelled_by = ${laCancelaEllaSola ? 'trainer' : 'client'},
-      cancellation_resolution = ${laCancelaEllaSola ? compensa : (reprogramada ? 'none' : 'debit')}, updated_at = now()
-    FROM clients c WHERE s.id = ${id} AND c.id = s.client_id AND c.owner_id = ${auth.sub} AND s.status <> 'cancelled'
-    RETURNING s.*
-  `;
-  if (!session) return reply.code(404).send({ error: 'Sesión no encontrada o ya cancelada' });
-  // Cancelar pidiendo otro día es reprogramar; cancelar y perderla, no. Sólo
-  // la primera se cuenta, que es la distinción que la entrenadora ya hace en
-  // el diálogo y que hasta ahora no se guardaba en ninguna parte.
-  // El contador de reprogramaciones mide al cliente; lo que cancela ella no
-  // pinta ahí. Mezclarlos haría ilegible el único número que dice algo del
-  // cliente.
-  if (reprogramada && !laCancelaEllaSola) {
-    await sql`
-      INSERT INTO session_reschedules (session_id, client_id, from_starts_at, origin)
-      VALUES (${id}, ${session.client_id}, ${session.starts_at}, 'cancelled')
-    `;
-  }
-
-  // Si el cliente cancela y no solicita reprogramación, la clase contratada
-  // se consume igual. Sólo se descuenta el saldo vigente para la fecha de la
-  // sesión; una cancelación reprogramada conserva la clase para su nueva cita.
-  let compensacion: { tipo: string; detalle: string } | null = null;
-  if (!reprogramada && !laCancelaEllaSola) {
-    const [pack] = await sql`
-      SELECT id, total_sessions, used_sessions
-      FROM session_packages
-      WHERE client_id = ${session.client_id} AND status = 'active'
-        AND used_sessions < total_sessions
-        AND (expires_on IS NULL OR expires_on >= (${session.starts_at}::timestamptz AT TIME ZONE 'America/Panama')::date)
-      ORDER BY expires_on ASC NULLS LAST, purchased_on
-      LIMIT 1
+  const result = await sql.begin(async transaction => {
+    const [actual] = await transaction`
+      SELECT s.* FROM sessions s
+      JOIN clients c ON c.id = s.client_id
+      WHERE s.id = ${id} AND c.owner_id = ${auth.sub} AND s.status <> 'cancelled'
       FOR UPDATE
     `;
-    if (pack) {
-      const siguiente = Number(pack.used_sessions) + 1;
-      await sql`
-        UPDATE session_packages SET used_sessions = ${siguiente},
-          status = CASE WHEN ${siguiente} >= total_sessions THEN 'exhausted' ELSE 'active' END
-        WHERE id = ${pack.id}
-      `;
-      await sql`
-        UPDATE sessions SET package_id = ${pack.id}, package_debited = true,
-          debited_group_id = ${session.client_id}, updated_at = now()
-        WHERE id = ${id}
-      `;
-      compensacion = { tipo: 'debit', detalle: 'Una sesión descontada del plan contratado' };
-    }
-  }
+    if (!actual) return null;
 
-  // Cuando cancela ella, el cliente no pierde una clase del plan. Si se
-  // reprograma, la nueva sesión se marca normalmente y consume el saldo
-  // mensual/paquete que corresponda a su fecha; no se abre una bolsa aparte.
-  if (laCancelaEllaSola && compensa !== 'none') {
-    const [cliente] = await sql`
-      SELECT c.id, c.standard_price, COALESCE(p.sessions_included, c.monthly_session_target, 0)::int AS incluidas
-      FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id WHERE c.id = ${session.client_id}
+    // Una sesión ya completada consumió una clase. Si después se marca como
+    // reprogramada, deja de ser una clase consumida y ese débito debe revertirse
+    // dentro de la misma transacción que la cancelación. Antes sólo cambiaba el
+    // estado a "cancelled" y dejaba el vínculo con el saldo, creando los +1
+    // vivos de Michelle y Julieta.
+    if (reprogramada && actual.package_debited && actual.package_id) {
+      await transaction`
+        UPDATE session_packages
+        SET used_sessions = GREATEST(0, used_sessions - 1),
+            status = CASE WHEN GREATEST(0, used_sessions - 1) >= total_sessions THEN 'exhausted' ELSE 'active' END
+        WHERE id = ${actual.package_id}
+      `;
+    }
+
+    const [session] = await transaction`
+      UPDATE sessions SET status = 'cancelled',
+        cancellation_kind = ${reprogramada ? 'rescheduled' : 'not_rescheduled'},
+        cancelled_by = ${laCancelaEllaSola ? 'trainer' : 'client'},
+        cancellation_resolution = ${laCancelaEllaSola ? compensa : (reprogramada ? 'none' : 'debit')},
+        package_id = CASE WHEN ${reprogramada && Boolean(actual.package_debited)} THEN NULL ELSE package_id END,
+        package_debited = CASE WHEN ${reprogramada && Boolean(actual.package_debited)} THEN false ELSE package_debited END,
+        debited_group_id = CASE WHEN ${reprogramada && Boolean(actual.package_debited)} THEN NULL ELSE debited_group_id END,
+        updated_at = now()
+      WHERE id = ${id}
+      RETURNING *
     `;
-    if (compensa === 'discount') {
-      // El valor de la clase sale del plan; si no se puede deducir, se toma lo
-      // que venga en la petición. Un descuento de cero no es un descuento.
-      const porClase = Number(consulta.amount) > 0
-        ? Number(consulta.amount)
-        : (Number(cliente?.incluidas) > 0 ? Number(cliente.standard_price) / Number(cliente.incluidas) : 0);
-      if (porClase > 0) {
-        await sql`
-          INSERT INTO billing_credits (client_id, session_id, concept, amount)
-          VALUES (${session.client_id}, ${id},
-            ${`Clase no dada del ${new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'long', timeZone: 'America/Panama' }).format(new Date(session.starts_at as string))}`},
-            ${Math.round(porClase * 100) / 100})
+
+    // Cancelar pidiendo otro día es reprogramar; cancelar y perderla, no. Sólo
+    // la primera se cuenta, que es la distinción que la entrenadora ya hace en
+    // el diálogo y que hasta ahora no se guardaba en ninguna parte.
+    if (reprogramada && !laCancelaEllaSola) {
+      await transaction`
+        INSERT INTO session_reschedules (session_id, client_id, from_starts_at, origin)
+        VALUES (${id}, ${session.client_id}, ${session.starts_at}, 'cancelled')
+      `;
+    }
+
+    // Si el cliente cancela y no solicita reprogramación, la clase contratada
+    // se consume igual. Si ya estaba marcada como realizada, el débito existente
+    // se conserva: no se vuelve a cobrar una segunda vez.
+    let compensacion: { tipo: string; detalle: string } | null = null;
+    if (!reprogramada && !laCancelaEllaSola && !actual.package_debited) {
+      const [pack] = await transaction`
+        SELECT id, total_sessions, used_sessions
+        FROM session_packages
+        WHERE client_id = ${session.client_id} AND status = 'active'
+          AND used_sessions < total_sessions
+          AND (expires_on IS NULL OR expires_on >= (${session.starts_at}::timestamptz AT TIME ZONE 'America/Panama')::date)
+        ORDER BY expires_on ASC NULLS LAST, purchased_on
+        LIMIT 1
+        FOR UPDATE
+      `;
+      if (pack) {
+        const siguiente = Number(pack.used_sessions) + 1;
+        await transaction`
+          UPDATE session_packages SET used_sessions = ${siguiente},
+            status = CASE WHEN ${siguiente} >= total_sessions THEN 'exhausted' ELSE 'active' END
+          WHERE id = ${pack.id}
         `;
-        compensacion = { tipo: 'discount', detalle: `Descuento de ${porClase.toFixed(2)} para el próximo cobro` };
+        await transaction`
+          UPDATE sessions SET package_id = ${pack.id}, package_debited = true,
+            debited_group_id = ${session.client_id}, updated_at = now()
+          WHERE id = ${id}
+        `;
+        compensacion = { tipo: 'debit', detalle: 'Una sesión descontada del plan contratado' };
       }
     }
-  }
+
+    // Cuando cancela ella, el cliente no pierde una clase del plan. Si se
+    // reprograma, la nueva sesión se marca normalmente y consume el saldo
+    // mensual/paquete que corresponda a su fecha; no se abre una bolsa aparte.
+    if (laCancelaEllaSola && compensa !== 'none') {
+      const [cliente] = await transaction`
+        SELECT c.id, c.standard_price, COALESCE(p.sessions_included, c.monthly_session_target, 0)::int AS incluidas
+        FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id WHERE c.id = ${session.client_id}
+      `;
+      if (compensa === 'discount') {
+        // El valor de la clase sale del plan; si no se puede deducir, se toma lo
+        // que venga en la petición. Un descuento de cero no es un descuento.
+        const porClase = Number(consulta.amount) > 0
+          ? Number(consulta.amount)
+          : (Number(cliente?.incluidas) > 0 ? Number(cliente.standard_price) / Number(cliente.incluidas) : 0);
+        if (porClase > 0) {
+          await transaction`
+            INSERT INTO billing_credits (client_id, session_id, concept, amount)
+            VALUES (${session.client_id}, ${id},
+              ${`Clase no dada del ${new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'long', timeZone: 'America/Panama' }).format(new Date(session.starts_at as string))}`},
+              ${Math.round(porClase * 100) / 100})
+          `;
+          compensacion = { tipo: 'discount', detalle: `Descuento de ${porClase.toFixed(2)} para el próximo cobro` };
+        }
+      }
+    }
+    return { session, compensacion };
+  });
+  if (!result) return reply.code(404).send({ error: 'Sesión no encontrada o ya cancelada' });
   try { await cancelSessionInGoogle(auth.sub, id); }
   catch (error) { app.log.warn({ err: error, sessionId: id }, 'Session cancelled but Google Calendar deletion failed'); }
-  return { cancelled: true, session, compensacion };
+  return { cancelled: true, session: result.session, compensacion: result.compensacion };
 });
 // El resultado de una sesión es de tres estados, no de dos. Antes se deducía
 // de una casilla: desmarcarla equivalía a decir "no cumplió", así que quien la
