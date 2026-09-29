@@ -1,4 +1,4 @@
-const APP_VERSION = '195';
+const APP_VERSION = '196';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -33,27 +33,36 @@ let currentUser = null;
 let data = { clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, notifications: [], googleCalendar: { configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } } };
 let portalData = null;
 let mostrarHistorialPaquetes = false;
-let paquetesMes = '';
-// El control de paquetes abre en el ciclo vigente: es el saldo que Eileen
-// necesita revisar primero. El historial sigue disponible con el botón.
-let soloCorteActual = true;
-let cumplimientoPorCliente = {};
-async function cargarCumplimientoPaquetes() {
-  if (!paquetesMes) { cumplimientoPorCliente = {}; renderBilling(); return; }
-  try {
-    const r = await api(`/api/compliance/by-month?month=${paquetesMes}`);
-    cumplimientoPorCliente = {};
-    (r.clients || []).forEach(c => { cumplimientoPorCliente[c.client_id] = c; });
-  } catch { cumplimientoPorCliente = {}; }
-  renderBilling();
+// El control de paquetes navega por CORTE, no por mes calendario: 0 = corte
+// vigente de cada cliente, -1 = anterior, +1 = siguiente. Cada cliente se ve en
+// su propio ciclo, sin la ambigüedad de mapear cortes a meses.
+let corteOffset = 0;
+// El inicio del ciclo de un saldo mensual: del rango en la etiqueta o, de
+// respaldo, purchased_on. En yyyy-mm-dd para comparar. Los no mensuales no
+// tienen ciclo de corte, así que devuelven su fecha de compra.
+function inicioCicloPaquete(pack) {
+  if (pack.kind !== 'monthly') return pack.purchasedOn || '';
+  const match = String(pack.label || '').match(/(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})\s*[–-]\s*(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);
+  if (!match) return pack.purchasedOn || '';
+  return `${match[3]}-${String(match[2]).padStart(2, '0')}-${String(match[1]).padStart(2, '0')}`;
 }
-function cumplimientoCelda(clientId) {
-  if (!paquetesMes) return '<small class="pack-origin">Elige un mes</small>';
-  const c = cumplimientoPorCliente[clientId];
-  if (!c || !Number(c.total)) return '<small class="pack-origin">Sin clases</small>';
-  const pct = Number(c.percent);
+// Cumplimiento del CICLO del saldo (no de un mes calendario): las clases del
+// ciclo —posteriores al inicio y hasta el vencimiento— que descuentan
+// (realizadas, no presentadas, o canceladas por el cliente sin reprogramar) y
+// qué porcentaje se realizó. El día de inicio pertenece al ciclo anterior.
+function cumplimientoCelda(pack) {
+  const inicio = inicioCicloPaquete(pack);
+  const vence = pack.expiresOn ? dateOnly(pack.expiresOn) : '';
+  if (!inicio || !vence) return '<small class="pack-origin">Sin clases</small>';
+  const cuenta = s => s.status === 'completed' || s.status === 'no_show'
+    || (s.status === 'cancelled' && s.cancellationKind === 'not_rescheduled' && (!s.cancelledBy || s.cancelledBy === 'client'));
+  const elegibles = (data.sessions || []).filter(s => s.clientId === pack.clientId
+    && s.date > inicio && s.date <= vence && cuenta(s));
+  if (!elegibles.length) return '<small class="pack-origin">Sin clases</small>';
+  const realizadas = elegibles.filter(s => s.status === 'completed').length;
+  const pct = Math.round(realizadas / elegibles.length * 100);
   const color = pct >= 80 ? '#3f7d54' : pct >= 50 ? '#8a5a12' : '#8f3d2e';
-  return `<strong style="color:${color}">${pct}%</strong><br><small class="pack-origin">${c.completadas}/${c.total} clases</small>`;
+  return `<strong style="color:${color}">${pct}%</strong><br><small class="pack-origin">${realizadas}/${elegibles.length} clases</small>`;
 }
 let compliancePeriod = 'week';
 let billingMonth = String(today.getMonth() + 1);
@@ -820,7 +829,6 @@ function renderBilling() {
   document.getElementById('billing-month').value = billingMonth;
   document.getElementById('billing-month').disabled = billingYear === 'all';
   document.getElementById('billing-source').value = billingSource;
-  document.getElementById('toggle-corte-actual')?.classList.toggle('active-filter', soloCorteActual);
   const billingBack = document.getElementById('billing-back-from-zoho');
   if (billingBack) billingBack.hidden = billingSource !== 'zoho_invoice';
   const periodInvoices = billingPeriodInvoices();
@@ -868,61 +876,51 @@ function renderBilling() {
   // de pago). Los agotados y vencidos sin saldo son historial y se muestran con
   // "Ver historial", para que la lista no crezca sin fin con clientela fija.
   const paqueteVigente = pack => pack.status === 'pending' || remainingSessions(pack) > 0;
-  // Para mensualidades, el mes del control es el mes en que INICIA el ciclo,
-  // no el mes de vencimiento. El respaldo de la etiqueta permite leer saldos
-  // históricos creados antes de que el worker guardara purchased_on como el
-  // inicio real del ciclo.
-  const inicioCicloPaquete = pack => {
-    if (pack.kind !== 'monthly') return pack.purchasedOn || '';
-    const match = String(pack.label || '').match(/(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})\s*[–-]\s*(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);
-    if (!match) return pack.purchasedOn || '';
-    return `${match[3]}-${String(match[2]).padStart(2, '0')}-${String(match[1]).padStart(2, '0')}`;
-  };
-  const saldoEnMes = pack => {
-    if (!paquetesMes) return true;
-    return inicioCicloPaquete(pack).slice(0, 7) === paquetesMes;
-  };
-  // Filtro "Corte actual": para mensualidades compara el rango completo contra
-  // el ciclo vigente del expediente. No deduplica por cliente: un plan familiar
-  // puede tener dos saldos legítimos en el mismo rango.
+  // El control navega por CORTE (no por mes): para cada cliente se calcula su
+  // ciclo en el offset elegido y se muestran los saldos de ESE ciclo. No
+  // deduplica: un plan familiar puede tener dos saldos legítimos del mismo
+  // ciclo (Ernesto: familiar + propio).
   const hoyStr = dateKey(today);
-  const corteActualIds = new Set();
-  if (soloCorteActual) {
-    const diasEnMes = (year, month) => new Date(year, month + 1, 0).getDate();
-    const fechaCorte = (year, month, cutoff) => `${year}-${String(month + 1).padStart(2, '0')}-${String(Math.min(cutoff, diasEnMes(year, month))).padStart(2, '0')}`;
-    const retrocedeMes = (year, month) => month === 0 ? [year - 1, 11] : [year, month - 1];
-    const avanzaMes = (year, month) => month === 11 ? [year + 1, 0] : [year, month + 1];
-    const cicloActual = cutoff => {
-      const year = today.getFullYear(); const month = today.getMonth();
-      const corteEsteMes = fechaCorte(year, month, cutoff);
-      const inicio = hoyStr >= corteEsteMes ? corteEsteMes : (() => {
-        const [previousYear, previousMonth] = retrocedeMes(year, month);
-        return fechaCorte(previousYear, previousMonth, cutoff);
-      })();
-      const [inicioYear, inicioMonth] = inicio.split('-').map(Number);
-      const [nextYear, nextMonth] = avanzaMes(inicioYear, inicioMonth - 1);
-      return { inicio, vence: fechaCorte(nextYear, nextMonth, cutoff) };
-    };
-    const finCicloPorCliente = {};
-    data.packages.forEach(pack => {
-      if (pack.status !== 'confirmed' && pack.status !== 'pending') return;
-      const vence = pack.expiresOn ? dateOnly(pack.expiresOn) : '';
-      if (!vence || vence < hoyStr || pack.kind === 'monthly') return;
-      const actual = finCicloPorCliente[pack.clientId];
-      if (!actual || vence < actual) finCicloPorCliente[pack.clientId] = vence;
-    });
-    data.packages.forEach(pack => {
-      if (pack.status !== 'confirmed' && pack.status !== 'pending') return;
-      const vence = pack.expiresOn ? dateOnly(pack.expiresOn) : '';
-      if (pack.kind === 'monthly') {
-        const client = data.clients.find(item => item.id === pack.clientId);
-        const ciclo = client ? cicloActual(Number(client.cutoffDay) || 1) : null;
-        if (ciclo && inicioCicloPaquete(pack) === ciclo.inicio && vence === ciclo.vence) corteActualIds.add(pack.id);
-      } else if (vence && vence === finCicloPorCliente[pack.clientId]) corteActualIds.add(pack.id);
-    });
-  }
+  const diasEnMes = (year, month) => new Date(year, month + 1, 0).getDate();
+  const fechaCorte = (year, month, cutoff) => `${year}-${String(month + 1).padStart(2, '0')}-${String(Math.min(cutoff, diasEnMes(year, month))).padStart(2, '0')}`;
+  // El ciclo del cliente en un offset de cortes: 0 el vigente (el que contiene
+  // hoy), -1 el anterior, +1 el siguiente. El vigente empieza en el corte de
+  // este mes si ya pasó; si no, en el del mes anterior. clampa fin de mes.
+  const cicloEnOffset = (cutoff, offset) => {
+    let iy = today.getFullYear(); let im = today.getMonth();
+    if (hoyStr < fechaCorte(iy, im, cutoff)) im -= 1;
+    im += offset;
+    while (im > 11) { im -= 12; iy += 1; }
+    while (im < 0) { im += 12; iy -= 1; }
+    const inicio = fechaCorte(iy, im, cutoff);
+    let ny = iy; let nm = im + 1; if (nm > 11) { nm = 0; ny += 1; }
+    return { inicio, vence: fechaCorte(ny, nm, cutoff) };
+  };
+  const corteSeleccionadoIds = new Set();
+  data.packages.forEach(pack => {
+    if (pack.status !== 'confirmed' && pack.status !== 'pending') return;
+    const vence = pack.expiresOn ? dateOnly(pack.expiresOn) : '';
+    if (pack.kind === 'monthly') {
+      const client = data.clients.find(item => item.id === pack.clientId);
+      const ciclo = client ? cicloEnOffset(Number(client.cutoffDay) || 1, corteOffset) : null;
+      if (ciclo && inicioCicloPaquete(pack) === ciclo.inicio && vence === ciclo.vence) corteSeleccionadoIds.add(pack.id);
+    } else if (corteOffset === 0 && vence && vence >= hoyStr) {
+      // Los paquetes no mensuales (clases sueltas) no tienen corte: se muestran
+      // sólo en el ciclo vigente mientras sigan vivos.
+      corteSeleccionadoIds.add(pack.id);
+    }
+  });
+  const corteLabel = corteOffset === 0 ? 'Corte actual'
+    : corteOffset === -1 ? 'Corte anterior'
+    : corteOffset === 1 ? 'Próximo corte'
+    : corteOffset < 0 ? `${-corteOffset} cortes atrás`
+    : `${corteOffset} cortes adelante`;
+  const corteLabelEl = document.getElementById('corte-label');
+  if (corteLabelEl) corteLabelEl.textContent = mostrarHistorialPaquetes ? 'Historial completo' : corteLabel;
+  const corteHoyBtn = document.getElementById('corte-hoy');
+  if (corteHoyBtn) corteHoyBtn.classList.toggle('active-filter', corteOffset === 0 && !mostrarHistorialPaquetes);
   const visiblesPaquetes = data.packages.filter(pack => (mostrarHistorialPaquetes || paqueteVigente(pack))
-    && (soloCorteActual ? corteActualIds.has(pack.id) : saldoEnMes(pack)));
+    && (mostrarHistorialPaquetes || corteSeleccionadoIds.has(pack.id)));
   document.getElementById('package-table').innerHTML = visiblesPaquetes.length ? visiblesPaquetes.map(pack => {
     const remaining = remainingSessions(pack);
     const state = pack.status === 'pending' ? 'Pendiente de pago' : remaining ? 'Activo' : 'Agotado';
@@ -941,7 +939,7 @@ function renderBilling() {
     // entrena aunque pague días después, y esto lo deja a la vista sin bloquear.
     const pagoAviso = pack.pagoPendiente && pack.status === 'confirmed'
       ? '<br><small class="pack-adeuda">Pendiente de pago</small>' : '';
-    return `<tr><td data-label="Cliente"><b>${escapeHtml(pack.client)}</b></td><td data-label="Paquete">${escapeHtml(pack.label)}${pack.originInvoiceId ? `<br><small class="pack-origin">Salió del cobro ${escapeHtml(pack.originSource === 'zoho_invoice' ? 'Zoho ' : '')}${escapeHtml(pack.originNumber || pack.originConcept || 'sin número')}${pack.originDate ? ` · ${fechaCorta(pack.originDate)}` : ''}</small>` : ''}</td><td data-label="Compradas">${pack.total}</td><td data-label="Usadas">${pack.used}</td><td data-label="Disponibles"><strong class="session-balance">${remaining}</strong></td><td data-label="Estado"><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span><br><small>${pack.expiresOn ? `vence ${fechaCorta(pack.expiresOn)}` : 'sin vencimiento'}</small>${aviso}${pagoAviso}</td><td data-label="Cumplimiento">${cumplimientoCelda(pack.clientId)}</td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-editar-paquete="${pack.id}">Editar</button>${renovable}${borrable}</div><small>${pack.status === 'confirmed' && remaining ? 'Aquí se descuentan las clases' : '—'}</small></td></tr>`;
+    return `<tr><td data-label="Cliente"><b>${escapeHtml(pack.client)}</b></td><td data-label="Paquete">${escapeHtml(pack.label)}${pack.originInvoiceId ? `<br><small class="pack-origin">Salió del cobro ${escapeHtml(pack.originSource === 'zoho_invoice' ? 'Zoho ' : '')}${escapeHtml(pack.originNumber || pack.originConcept || 'sin número')}${pack.originDate ? ` · ${fechaCorta(pack.originDate)}` : ''}</small>` : ''}</td><td data-label="Compradas">${pack.total}</td><td data-label="Usadas">${pack.used}</td><td data-label="Disponibles"><strong class="session-balance">${remaining}</strong></td><td data-label="Estado"><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span><br><small>${pack.expiresOn ? `vence ${fechaCorta(pack.expiresOn)}` : 'sin vencimiento'}</small>${aviso}${pagoAviso}</td><td data-label="Cumplimiento">${cumplimientoCelda(pack)}</td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-editar-paquete="${pack.id}">Editar</button>${renovable}${borrable}</div><small>${pack.status === 'confirmed' && remaining ? 'Aquí se descuentan las clases' : '—'}</small></td></tr>`;
   }).join('') : `<tr><td colspan="8" class="empty">${data.packages.length ? 'No hay saldos con estos filtros. Cambia el mes o usa “Ver historial”.' : 'Aún no hay paquetes de sesiones.'}</td></tr>`;
   void ensureBillingAnalytics();
 }
@@ -4010,10 +4008,12 @@ document.addEventListener('click', event => {
     if (boton) boton.textContent = mostrarHistorialPaquetes ? 'Ver solo vigentes' : 'Ver historial';
     renderBilling();
   }
-  if (actionButton?.dataset.action === 'toggle-corte-actual') {
-    soloCorteActual = !soloCorteActual;
-    const boton = document.getElementById('toggle-corte-actual');
-    if (boton) boton.classList.toggle('active-filter', soloCorteActual);
+  if (actionButton?.dataset.action === 'corte-prev') { corteOffset -= 1; mostrarHistorialPaquetes = false; renderBilling(); }
+  if (actionButton?.dataset.action === 'corte-next') { corteOffset += 1; mostrarHistorialPaquetes = false; renderBilling(); }
+  if (actionButton?.dataset.action === 'corte-hoy') {
+    corteOffset = 0; mostrarHistorialPaquetes = false;
+    const bh = document.getElementById('toggle-package-history');
+    if (bh) bh.textContent = 'Ver historial';
     renderBilling();
   }
   if (invoicePdfButton) previewProtectedPdf(`/api/invoices/${invoicePdfButton.dataset.invoicePdf}/pdf`, `Comprobante ${invoicePdfButton.dataset.invoiceNumber}`, `comprobante-${invoicePdfButton.dataset.invoiceNumber}.pdf`);
@@ -4141,7 +4141,6 @@ const resetBillingList = () => { billingVisibleInvoices = 100; };
 document.getElementById('billing-month').addEventListener('change', event => { billingMonth = event.target.value; resetBillingList(); renderBilling(); notifyBillingPeriodChange(); });
 document.getElementById('billing-year').addEventListener('change', event => { billingYear = event.target.value; if (billingYear === 'all') billingMonth = 'all'; resetBillingList(); renderBilling(); notifyBillingPeriodChange(); });
 document.getElementById('billing-source').addEventListener('change', event => { billingSource = event.target.value; resetBillingList(); renderBilling(); });
-document.getElementById('package-month')?.addEventListener('change', event => { paquetesMes = event.target.value; cargarCumplimientoPaquetes(); });
 document.getElementById('billing-current-period').addEventListener('click', () => {
   billingMonth = String(today.getMonth() + 1); billingYear = String(today.getFullYear()); billingSource = 'all'; resetBillingList(); renderBilling(); notifyBillingPeriodChange();
 });
