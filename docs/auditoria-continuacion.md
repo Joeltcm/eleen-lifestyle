@@ -102,6 +102,16 @@ Rama: `feat/filtro-cliente-asistencia`
   volver a consultar el backend; los filtros de estado siguen aplicando.
 - Frontend actualizado de v208 a v209.
 
+### Publicación
+
+- `npm run verify` ✅
+- `main` actualizado a `c9c6acc`.
+- Frontend v209 publicado en Cloudflare Pages.
+- Despliegue verificado: `https://13d950c0.eileen-lifestyle.pages.dev` y dominio
+  principal sirviendo `version.json` v209, el filtro `Cliente` en Asistencia y
+  la navegación móvil de seis columnas.
+- Railway `/health` respondió `status: ok`.
+
 ## Filtro de cliente en Facturación y navegación móvil
 
 Rama: `feat/filtro-cliente-facturacion-mobile`
