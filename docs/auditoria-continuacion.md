@@ -105,6 +105,18 @@ Rama: `feat/rango-fechas-asistencia`
   siguen funcionando sobre el resultado visible.
 - Frontend actualizado de v206 a v207.
 
+### Publicación
+
+- `npm run verify` ✅
+- Suite backend: 208/210; las 2 fallas son las pruebas preexistentes de
+  `no_anticipado` dependientes del borde de fecha/harness, no del reporte de
+  Asistencia.
+- `main` actualizado a `02695ea`.
+- Frontend v207 publicado en Cloudflare Pages.
+- Despliegue verificado: `https://565dfbfb.eileen-lifestyle.pages.dev` y dominio
+  principal sirviendo `version.json` v207, `app.js?v=207` y `styles.css?v=207`.
+- Railway `/health` respondió `status: ok`.
+
 ## Colores para el estado del cliente
 
 Rama: `feat/colores-estatus-asistencia`
