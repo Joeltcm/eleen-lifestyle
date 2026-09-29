@@ -1,4 +1,4 @@
-const APP_VERSION = '198';
+const APP_VERSION = '199';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -3253,7 +3253,7 @@ async function applyInvoiceCoverage(id) {
       // La vigencia nace en la fecha real del pago (no en el día 1 del mes
       // elegido como referencia contable). Por ejemplo, un pago del 28/08
       // con corte 28 cubre del 28/08 al 28/09.
-      const inicio = coverageStart || `${form.elements.period.value}-01`;
+      const inicio = (coverageStart && String(coverageStart).slice(0, 10)) || `${form.elements.period.value}-01`;
       const ciclo = await api(`/api/billing/cycle?from=${inicio}&cutoffDay=${corteDeReferencia}`);
       pistaCiclo.textContent = `Cubre del ${ciclo.label.replace(' – ', ' al ')}, según el corte día ${corteDeReferencia}.`;
     } catch { pistaCiclo.textContent = ''; }
