@@ -1,4 +1,4 @@
-const APP_VERSION = '200';
+const APP_VERSION = '201';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -77,6 +77,7 @@ let attendanceMonth = dateKey(today).slice(0, 7);
 let attendanceReport = null;
 let attendanceReportLoading = false;
 let attendanceReportRequest = 0;
+let attendanceOnlyActive = false;
 let calendarMode = 'week';
 let calendarCursor = new Date(today);
 calendarCursor.setHours(12, 0, 0, 0);
@@ -991,19 +992,39 @@ function renderBilling() {
 }
 function renderAttendanceReport() {
   const monthInput = document.getElementById('attendance-month');
+  const activeFilter = document.getElementById('attendance-only-active');
   const target = document.getElementById('attendance-table');
   const totals = document.getElementById('attendance-totals');
   const summary = document.getElementById('attendance-summary');
   if (!monthInput || !target || !totals || !summary) return;
   monthInput.value = attendanceMonth;
+  if (activeFilter) activeFilter.checked = attendanceOnlyActive;
   if (!attendanceReport || attendanceReport.month !== attendanceMonth) {
     summary.textContent = attendanceReportLoading ? 'Calculando…' : 'Selecciona un mes para consultar la agenda.';
     totals.innerHTML = '';
     target.innerHTML = `<tr><td colspan="10" class="empty">${attendanceReportLoading ? 'Cargando agenda y cumplimiento…' : 'No hay datos cargados para este mes.'}</td></tr>`;
     return;
   }
-  const t = attendanceReport.totals;
-  summary.textContent = `${attendanceReport.clients.length} clientes · ${t.agendadas} clases en el calendario · ${t.medibles} sesiones medidas`;
+  const clients = attendanceOnlyActive
+    ? attendanceReport.clients.filter(client => client.status === 'active')
+    : attendanceReport.clients;
+  const sum = key => clients.reduce((total, client) => total + Number(client[key] || 0), 0);
+  const medibles = sum('medibles');
+  const weightedCompliance = clients.reduce((total, client) => (
+    total + (client.compliancePercent === null ? 0 : client.compliancePercent * client.medibles)
+  ), 0);
+  const t = {
+    agendadas: sum('agendadas'),
+    futuras: sum('futuras'),
+    completadas: sum('completadas'),
+    noShow: sum('noShow'),
+    canceladasCliente: sum('canceladasCliente'),
+    pendientes: sum('pendientes'),
+    pausadas: sum('pausadas'),
+    medibles,
+    compliancePercent: medibles ? Math.round(weightedCompliance / medibles) : null
+  };
+  summary.textContent = `${clients.length} ${attendanceOnlyActive ? 'clientes activos' : 'clientes'} · ${t.agendadas} clases en el calendario · ${t.medibles} sesiones medidas`;
   const tile = (label, value, note = '') => `<article><span>${label}</span><strong>${value}</strong>${note ? `<small>${note}</small>` : ''}</article>`;
   totals.innerHTML = [
     tile('Clases agendadas', t.agendadas, `${t.futuras} futuras`),
@@ -1014,7 +1035,7 @@ function renderAttendanceReport() {
     tile('Pausadas', t.pausadas, 'fuera de la métrica')
   ].join('');
   const estado = client => client.status === 'active' ? 'Activo' : client.status === 'paused' ? 'En pausa' : 'Inactivo';
-  target.innerHTML = attendanceReport.clients.map(client => {
+  target.innerHTML = clients.map(client => {
     const noCumplio = client.noShow + client.canceladasCliente;
     const compliance = client.compliancePercent === null ? '—' : `${client.compliancePercent}%`;
     return `<tr><td data-label="Cliente"><b>${escapeHtml(client.name)}</b><br><small class="attendance-client-status">${estado(client)}</small></td>
@@ -4257,6 +4278,10 @@ document.getElementById('attendance-current')?.addEventListener('click', () => {
   attendanceMonth = dateKey(today).slice(0, 7);
   attendanceReport = null;
   loadAttendanceReport();
+});
+document.getElementById('attendance-only-active')?.addEventListener('change', event => {
+  attendanceOnlyActive = event.target.checked;
+  renderAttendanceReport();
 });
 document.getElementById('billing-load-more').addEventListener('click', () => { billingVisibleInvoices += 100; renderBilling(); });
 document.getElementById('show-zoho-invoices').addEventListener('click', () => {
