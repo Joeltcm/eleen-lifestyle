@@ -1,4 +1,4 @@
-const APP_VERSION = '207';
+const APP_VERSION = '208';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -68,6 +68,7 @@ let compliancePeriod = 'week';
 let billingMonth = String(today.getMonth() + 1);
 let billingYear = String(today.getFullYear());
 let billingSource = 'all';
+let billingClientFilter = '';
 let billingReturnState = null;
 let billingVisibleInvoices = 100;
 let billingAnalytics = null;
@@ -323,7 +324,9 @@ const billingPeriodInvoices = () => data.invoices.filter(invoice => {
   const matchesYear = billingYear === 'all' || date.getFullYear() === Number(billingYear);
   const matchesMonth = billingMonth === 'all' || date.getMonth() + 1 === Number(billingMonth);
   const matchesSource = billingSource === 'all' || (billingSource === 'eileen' ? invoice.source !== 'zoho_invoice' : invoice.source === billingSource);
-  return matchesYear && matchesMonth && matchesSource;
+  const clientNeedle = billingClientFilter.trim().toLocaleLowerCase('es');
+  const matchesClient = !clientNeedle || String(invoice.client || '').toLocaleLowerCase('es').includes(clientNeedle);
+  return matchesYear && matchesMonth && matchesSource && matchesClient;
 }).sort((a, b) => invoicePeriodDate(b) - invoicePeriodDate(a));
 const remainingSessions = pack => Math.max(0, pack.total - pack.used);
 // El saldo de una mensualidad no se veía en ninguna parte: la ficha sólo
@@ -841,6 +844,8 @@ function renderBilling() {
   document.getElementById('billing-month').value = billingMonth;
   document.getElementById('billing-month').disabled = billingYear === 'all';
   document.getElementById('billing-source').value = billingSource;
+  const clientFilter = document.getElementById('billing-client-filter');
+  if (clientFilter && clientFilter.value !== billingClientFilter) clientFilter.value = billingClientFilter;
   const billingBack = document.getElementById('billing-back-from-zoho');
   if (billingBack) billingBack.hidden = billingSource !== 'zoho_invoice';
   const periodInvoices = billingPeriodInvoices();
@@ -859,7 +864,8 @@ function renderBilling() {
   document.getElementById('billing-period-title').textContent = periodTitle.charAt(0).toUpperCase() + periodTitle.slice(1);
   document.getElementById('billed-period-label').textContent = billingYear === 'all' ? 'Facturado en el histórico' : billingMonth === 'all' ? 'Facturado en el año' : 'Facturado en el mes';
   const sourceName = billingSource === 'zoho_invoice' ? 'Zoho Invoice' : billingSource === 'eileen' ? 'Eileen' : 'todos los orígenes';
-  document.getElementById('billing-table-summary').textContent = `${periodInvoices.length} factura${periodInvoices.length !== 1 ? 's' : ''} de ${sourceName} · Mostrando ${Math.min(visibleInvoices.length, periodInvoices.length)}`;
+  const clientFilterNote = billingClientFilter.trim() ? ` · Cliente: ${billingClientFilter.trim()}` : '';
+  document.getElementById('billing-table-summary').textContent = `${periodInvoices.length} factura${periodInvoices.length !== 1 ? 's' : ''} de ${sourceName}${clientFilterNote} · Mostrando ${Math.min(visibleInvoices.length, periodInvoices.length)}`;
   document.getElementById('month-billed').textContent = money.format(billed);
   const collectedTile = document.getElementById('billing-collected');
   if (collectedTile) collectedTile.textContent = money.format(collected);
@@ -4295,6 +4301,16 @@ const resetBillingList = () => { billingVisibleInvoices = 100; };
 document.getElementById('billing-month').addEventListener('change', event => { billingMonth = event.target.value; resetBillingList(); renderBilling(); notifyBillingPeriodChange(); });
 document.getElementById('billing-year').addEventListener('change', event => { billingYear = event.target.value; if (billingYear === 'all') billingMonth = 'all'; resetBillingList(); renderBilling(); notifyBillingPeriodChange(); });
 document.getElementById('billing-source').addEventListener('change', event => { billingSource = event.target.value; resetBillingList(); renderBilling(); });
+document.getElementById('billing-client-filter')?.addEventListener('input', event => {
+  billingClientFilter = event.target.value;
+  resetBillingList();
+  renderBilling();
+});
+document.getElementById('billing-client-clear')?.addEventListener('click', () => {
+  billingClientFilter = '';
+  resetBillingList();
+  renderBilling();
+});
 document.getElementById('billing-current-period').addEventListener('click', () => {
   billingMonth = String(today.getMonth() + 1); billingYear = String(today.getFullYear()); billingSource = 'all'; resetBillingList(); renderBilling(); notifyBillingPeriodChange();
 });

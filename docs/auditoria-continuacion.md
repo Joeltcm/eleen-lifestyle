@@ -92,6 +92,19 @@ Rama: `fix/claridad-asistencia-pausas`
   clientes en pausa está visible.
 - Railway `/health` respondió `status: ok`.
 
+## Filtro de cliente en Facturación y navegación móvil
+
+Rama: `feat/filtro-cliente-facturacion-mobile`
+
+- Facturas y cobros incorpora búsqueda por nombre de cliente, combinable con
+  mes, año y origen; el resumen, importes y tabla respetan el filtro.
+- Se añadió `Limpiar cliente` para volver a ver el período completo.
+- En pantallas móviles la navegación inferior pasa de cinco a seis columnas.
+  Antes Facturación saltaba a una segunda fila y su icono quedaba recortado en
+  iPhone; ahora todos los destinos permanecen en una sola fila y el icono
+  activo tiene mayor contraste.
+- Frontend actualizado de v207 a v208.
+
 ## Rango personalizado en Asistencia
 
 Rama: `feat/rango-fechas-asistencia`
