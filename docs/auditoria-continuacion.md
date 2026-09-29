@@ -47,10 +47,16 @@ activo. Se agrega un filtro reversible y se deja activado por defecto.
 
 ### Estado de publicación
 
-- PR #2 creada en GitHub.
-- Este registro se incluye para revisión posterior de Claude.
-- Pendiente de integrar a `main` y publicar frontend; producción no debe
-  considerarse actualizada hasta confirmar ambos pasos.
+- PR #2 integrada por fast-forward en `main`.
+- Commit publicado en `main`: `a3f4be0`.
+- Frontend v202 publicado en Cloudflare Pages.
+- URL de despliegue: `https://9be8c2cc.eileen-lifestyle.pages.dev`.
+- Producción verificada: la página sirve `app.js?v=202` y la casilla
+  `attendance-only-active` aparece marcada.
+- Railway respondió `/health` con `status: ok` y base de datos disponible.
+- El check remoto de GitHub seguía en ejecución al integrar; `npm run verify`
+  local estaba en verde. Claude debe revisar este punto cuando recupere
+  disponibilidad.
 
 ### Puntos para la auditoría posterior
 
