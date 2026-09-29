@@ -1,4 +1,4 @@
-const APP_VERSION = '194';
+const APP_VERSION = '195';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -868,35 +868,57 @@ function renderBilling() {
   // de pago). Los agotados y vencidos sin saldo son historial y se muestran con
   // "Ver historial", para que la lista no crezca sin fin con clientela fija.
   const paqueteVigente = pack => pack.status === 'pending' || remainingSessions(pack) > 0;
-  // Filtro por mes: saldos cuyo ciclo toca el mes elegido (comprado antes del
-  // fin del mes y aún vigente al inicio). Sin mes, no filtra.
-  const finMes = paquetesMes ? new Date(Date.UTC(Number(paquetesMes.slice(0, 4)), Number(paquetesMes.slice(5, 7)), 0)).toISOString().slice(0, 10) : '';
+  // Para mensualidades, el mes del control es el mes en que INICIA el ciclo,
+  // no el mes de vencimiento. El respaldo de la etiqueta permite leer saldos
+  // históricos creados antes de que el worker guardara purchased_on como el
+  // inicio real del ciclo.
+  const inicioCicloPaquete = pack => {
+    if (pack.kind !== 'monthly') return pack.purchasedOn || '';
+    const match = String(pack.label || '').match(/(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})\s*[–-]\s*(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);
+    if (!match) return pack.purchasedOn || '';
+    return `${match[3]}-${String(match[2]).padStart(2, '0')}-${String(match[1]).padStart(2, '0')}`;
+  };
   const saldoEnMes = pack => {
     if (!paquetesMes) return true;
-    const compra = pack.purchasedOn || '';
-    const vence = pack.expiresOn ? dateOnly(pack.expiresOn) : '';
-    return (!compra || compra <= finMes) && (!vence || vence >= `${paquetesMes}-01`);
+    return inicioCicloPaquete(pack).slice(0, 7) === paquetesMes;
   };
-  // Filtro "Corte actual": por cada cliente, el fin del ciclo en curso es el
-  // vencimiento más cercano de hoy en adelante. Luego se muestran TODOS sus
-  // saldos que vencen ese mismo día — así un cliente con cobertura familiar +
-  // un paquete propio del mismo ciclo (Ernesto: 8 de Francolini + 4 suyos) sale
-  // con los dos. Deja fuera los históricos y el ciclo siguiente ya generado.
+  // Filtro "Corte actual": para mensualidades compara el rango completo contra
+  // el ciclo vigente del expediente. No deduplica por cliente: un plan familiar
+  // puede tener dos saldos legítimos en el mismo rango.
   const hoyStr = dateKey(today);
   const corteActualIds = new Set();
   if (soloCorteActual) {
+    const diasEnMes = (year, month) => new Date(year, month + 1, 0).getDate();
+    const fechaCorte = (year, month, cutoff) => `${year}-${String(month + 1).padStart(2, '0')}-${String(Math.min(cutoff, diasEnMes(year, month))).padStart(2, '0')}`;
+    const retrocedeMes = (year, month) => month === 0 ? [year - 1, 11] : [year, month - 1];
+    const avanzaMes = (year, month) => month === 11 ? [year + 1, 0] : [year, month + 1];
+    const cicloActual = cutoff => {
+      const year = today.getFullYear(); const month = today.getMonth();
+      const corteEsteMes = fechaCorte(year, month, cutoff);
+      const inicio = hoyStr >= corteEsteMes ? corteEsteMes : (() => {
+        const [previousYear, previousMonth] = retrocedeMes(year, month);
+        return fechaCorte(previousYear, previousMonth, cutoff);
+      })();
+      const [inicioYear, inicioMonth] = inicio.split('-').map(Number);
+      const [nextYear, nextMonth] = avanzaMes(inicioYear, inicioMonth - 1);
+      return { inicio, vence: fechaCorte(nextYear, nextMonth, cutoff) };
+    };
     const finCicloPorCliente = {};
     data.packages.forEach(pack => {
       if (pack.status !== 'confirmed' && pack.status !== 'pending') return;
       const vence = pack.expiresOn ? dateOnly(pack.expiresOn) : '';
-      if (!vence || vence < hoyStr) return;
+      if (!vence || vence < hoyStr || pack.kind === 'monthly') return;
       const actual = finCicloPorCliente[pack.clientId];
       if (!actual || vence < actual) finCicloPorCliente[pack.clientId] = vence;
     });
     data.packages.forEach(pack => {
       if (pack.status !== 'confirmed' && pack.status !== 'pending') return;
       const vence = pack.expiresOn ? dateOnly(pack.expiresOn) : '';
-      if (vence && vence === finCicloPorCliente[pack.clientId]) corteActualIds.add(pack.id);
+      if (pack.kind === 'monthly') {
+        const client = data.clients.find(item => item.id === pack.clientId);
+        const ciclo = client ? cicloActual(Number(client.cutoffDay) || 1) : null;
+        if (ciclo && inicioCicloPaquete(pack) === ciclo.inicio && vence === ciclo.vence) corteActualIds.add(pack.id);
+      } else if (vence && vence === finCicloPorCliente[pack.clientId]) corteActualIds.add(pack.id);
     });
   }
   const visiblesPaquetes = data.packages.filter(pack => (mostrarHistorialPaquetes || paqueteVigente(pack))

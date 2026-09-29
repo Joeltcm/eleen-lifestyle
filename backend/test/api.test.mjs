@@ -18,6 +18,20 @@ const partesPanama = (d = new Date()) => {
 const hoyPa = () => partesPanama().iso;
 const enDiasPa = n => partesPanama(new Date(Date.now() + n * 24 * 3600_000));
 const mesActualPa = () => partesPanama().ym + '-01';
+const cicloCortePa = (referencia, cutoff) => {
+  const [year, month, day] = referencia.split('-').map(Number);
+  const daysInMonth = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const corte = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(Math.min(cutoff, daysInMonth(y, m))).padStart(2, '0')}`;
+  const currentCutoff = corte(year, month);
+  let startYear = year; let startMonth = month;
+  if (referencia < currentCutoff) {
+    if (startMonth === 1) { startYear -= 1; startMonth = 12; } else startMonth -= 1;
+  }
+  const inicio = corte(startYear, startMonth);
+  let endYear = startYear; let endMonth = startMonth + 1;
+  if (endMonth === 13) { endYear += 1; endMonth = 1; }
+  return { inicio, vence: corte(endYear, endMonth) };
+};
 
 before(async () => {
   servidor = await levantar();
@@ -220,8 +234,9 @@ describe('el saldo sale del plan sin tener que teclearlo', () => {
   let clientId;
   before(async () => {
     const plan = await api.post('/api/plans', { name: 'Mensual con saldo', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
-    // El corte se pone a tres días vista para que la generación lo alcance.
-    const dia = new Date(Date.now() + 3 * 24 * 3600_000).getDate();
+    // El corte de hoy garantiza que el ciclo vigente ya comenzó. La prueba no
+    // debe depender de que el próximo corte esté dentro de la ventana de 7 días.
+    const dia = partesPanama().d;
     const c = await api.post('/api/clients', { fullName: 'Hereda del plan', planId: plan.datos.id, cutoffDay: dia });
     clientId = c.datos.id;
   });
@@ -242,13 +257,11 @@ describe('el saldo sale del plan sin tener que teclearlo', () => {
     // El caso que se colaba: el cobro se emitió ayer, o llegó importado de
     // Zoho. Nunca vuelve a salir del INSERT de generación, así que su cliente
     // se quedaba sin saldo para siempre y nadie lo decía.
-    // A 25 días vista: fuera de la ventana de generación, que sólo emite
-    // cobros de la semana siguiente. El saldo no debe esperar a esa ventana,
-    // o el cliente entrena sin de dónde descontar durante tres semanas.
-    const dia = new Date(Date.now() + 25 * 24 * 3600_000);
-    const vence = dia.toISOString().slice(0, 10);
+    // El cobro ya existía y corresponde al ciclo vigente; no depende de que
+    // haya nacido en esta corrida del generador.
+    const vence = hoyPa();
     const plan = await api.post('/api/plans', { name: 'Mensual ya cobrada', billingModel: 'monthly', price: 150, sessionsIncluded: 8 });
-    const c = await api.post('/api/clients', { fullName: 'Cobro previo', planId: plan.datos.id, cutoffDay: dia.getDate() });
+    const c = await api.post('/api/clients', { fullName: 'Cobro previo', planId: plan.datos.id, cutoffDay: 15 });
     await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad de antes', amount: 150, dueOn: vence });
 
     await api.post('/api/billing/recurring/generate', {});
@@ -266,6 +279,24 @@ describe('el saldo sale del plan sin tener que teclearlo', () => {
     const factura = (await api.get('/api/invoices')).datos.find(i => i.id === p.datos.invoice_id);
     assert.equal(String(factura.billing_period).slice(0, 7), vence.slice(0, 7),
       'cubre el mes en que vence, no el mes en que se creó');
+  });
+
+  test('no abre el saldo futuro, pero sí el ciclo que empieza hoy', async () => {
+    const plan = await api.post('/api/plans', { name: 'Borde de apertura', billingModel: 'monthly', price: 150, sessionsIncluded: 8 });
+    const cutoff = partesPanama().d;
+    const clienteFuturo = await api.post('/api/clients', { fullName: 'Todavía no abre', planId: plan.datos.id, cutoffDay: 1 });
+    await api.post('/api/invoices', { clientId: clienteFuturo.datos.id, concept: 'Mensualidad futura', amount: 150, dueOn: enDiasPa(10).iso });
+    await api.post('/api/billing/recurring/generate', {});
+    assert.equal((await api.get('/api/packages')).datos.filter(p => p.client_id === clienteFuturo.datos.id).length, 0,
+      'un cobro futuro no debe abrir el próximo saldo');
+
+    const clienteActual = await api.post('/api/clients', { fullName: 'Abre al iniciar', planId: plan.datos.id, cutoffDay: cutoff });
+    await api.post('/api/invoices', { clientId: clienteActual.datos.id, concept: 'Mensualidad vigente', amount: 150, dueOn: hoyPa() });
+    await api.post('/api/billing/recurring/generate', {});
+    const saldo = (await api.get('/api/packages')).datos.find(p => p.client_id === clienteActual.datos.id);
+    assert.ok(saldo, 'el saldo abre cuando el ciclo comienza');
+    assert.equal(String(saldo.purchased_on).slice(0, 10), cicloCortePa(hoyPa(), cutoff).inicio,
+      'purchased_on guarda el inicio del ciclo, no el día de ejecución');
   });
 });
 
@@ -308,7 +339,7 @@ describe('la pareja que paga uno y entrenan los dos', () => {
   let eduardo, beatris;
   before(async () => {
     const plan = await api.post('/api/plans', { name: 'Mensualidad en pareja (por persona)', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
-    const corte = new Date(Date.now() + 4 * 24 * 3600_000).getDate();
+    const corte = partesPanama().d;
     const a = await api.post('/api/clients', { fullName: 'Eduardo', planId: plan.datos.id, cutoffDay: corte });
     const b = await api.post('/api/clients', { fullName: 'Beatris', planId: plan.datos.id, cutoffDay: corte });
     eduardo = a.datos.id; beatris = b.datos.id;
@@ -599,11 +630,9 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     assert.match(saldoAnticipado.label, /28-09-2026 – 28-10-2026/, 'la etiqueta anticipada usa el rango del corte');
   });
 
-  // Criterio de cierre (auditoría Codex): worker y paquete manual deben producir
-  // EXACTAMENTE el mismo rango, clampado al último día del mes, para cortes de
-  // fin de mes. Sumar un mes sin clampar desbordaba: un corte 31 en enero vencía
-  // el 3 de marzo, no el 28 de febrero. 2027 no es bisiesto (febrero = 28), y las
-  // fechas son futuras para que el worker las tome (due_on >= current_date).
+  // Criterio de cierre (auditoría Codex): el paquete manual conserva el mismo
+  // rango clampado que usa el worker. Los casos futuros también verifican la
+  // nueva regla: el worker puede ver el cobro, pero no abre todavía ese saldo.
   const casosDeCorte = [
     { corte: 15, due: '2027-01-15', vence: '2027-02-15' },
     { corte: 28, due: '2027-01-28', vence: '2027-02-28' },
@@ -620,23 +649,44 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
       const pm = (await api.get('/api/packages')).datos.find(p => p.id === manual.datos.id);
       assert.equal(String(pm.expires_on).slice(0, 10), vence, `paquete manual vence ${vence}`);
 
-      // Ruta worker (cobro con due futuro en el corte). Necesita plan para que
-      // la renovación sepa cuántas sesiones abrir (total_sessions > 0).
+      // Un cobro futuro no debe abrir el saldo antes del inicio del ciclo.
       const plan = await api.post('/api/plans', { name: `Plan ${corte} ${due}`, billingModel: 'monthly', price: 200, sessionsIncluded: 8 });
       const cw = await api.post('/api/clients', { fullName: `Worker ${corte} ${due}`, planId: plan.datos.id, cutoffDay: corte });
       const f = await api.post('/api/invoices', { clientId: cw.datos.id, concept: 'Mensualidad', amount: 200, dueOn: due });
-      // Si el corte cae en la ventana de hoy, el generador emite además el cobro
-      // del ciclo actual; DISTINCT ON procesa uno por corrida, así que se corre
-      // dos veces para que el cobro futuro también abra su saldo.
-      await api.post('/api/billing/recurring/generate', {});
       await api.post('/api/billing/recurring/generate', {});
       const pkgsCw = (await api.get('/api/packages')).datos.filter(p => p.client_id === cw.datos.id && p.kind === 'monthly');
-      const pw = pkgsCw.find(p => String(p.expires_on).slice(0, 10) === vence);
-      assert.ok(pw, `el worker abrió el saldo del ciclo futuro (vence ${vence}). pkgs=${JSON.stringify(pkgsCw.map(p => String(p.expires_on).slice(0, 10)))}`);
-      assert.equal(String(pw.expires_on).slice(0, 10), String(pm.expires_on).slice(0, 10), 'worker y paquete manual: mismo expires');
-      assert.equal(pw.label, pm.label, 'worker y paquete manual: misma etiqueta y rango de ciclo');
+      assert.equal(pkgsCw.some(p => String(p.expires_on).slice(0, 10) === vence), false,
+        `el worker no debe abrir el ciclo futuro: ${JSON.stringify(pkgsCw)}`);
     });
   }
+
+  test('worker y paquete manual comparten el ciclo vigente, incluido corte 31', async () => {
+    const corte = 31;
+    const due = hoyPa();
+    const plan = await api.post('/api/plans', { name: 'Worker vigente corte 31', billingModel: 'monthly', price: 200, sessionsIncluded: 8 });
+    const cw = await api.post('/api/clients', { fullName: 'Worker vigente', planId: plan.datos.id, cutoffDay: corte });
+    const f = await api.post('/api/invoices', { clientId: cw.datos.id, concept: 'Mensualidad', amount: 200, dueOn: due });
+    await api.post('/api/billing/recurring/generate', {});
+    const pw = (await api.get('/api/packages')).datos.find(p => p.client_id === cw.datos.id && p.kind === 'monthly');
+    const ciclo = cicloCortePa(due, corte);
+    assert.ok(pw, 'el worker abre el ciclo vigente');
+    assert.equal(String(pw.purchased_on).slice(0, 10), ciclo.inicio);
+    assert.equal(String(pw.expires_on).slice(0, 10), ciclo.vence);
+    assert.match(pw.label, new RegExp(`${ciclo.inicio.slice(8, 10)}-${ciclo.inicio.slice(5, 7)}-${ciclo.inicio.slice(0, 4)}.*${ciclo.vence.slice(8, 10)}-${ciclo.vence.slice(5, 7)}-${ciclo.vence.slice(0, 4)}`));
+    assert.ok(f.datos.id, 'conserva el cobro que originó la prueba');
+  });
+
+  test('no colapsa dos saldos legítimos del mismo ciclo familiar', async () => {
+    const plan = await api.post('/api/plans', { name: 'Dos líneas mismo ciclo', billingModel: 'monthly', price: 175, sessionsIncluded: 4 });
+    const c = await api.post('/api/clients', { fullName: 'Beneficiario con dos líneas', planId: plan.datos.id, cutoffDay: partesPanama().d });
+    const primera = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad propia', amount: 175, dueOn: hoyPa() });
+    const segunda = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad familiar', amount: 175, dueOn: hoyPa() });
+    await api.post('/api/billing/recurring/generate', {});
+    const saldos = (await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly');
+    assert.equal(saldos.length, 2, 'dos cobros del mismo ciclo pueden abrir dos saldos');
+    assert.deepEqual(saldos.map(p => p.origin_invoice_id).sort(), [primera.datos.id, segunda.datos.id].sort(),
+      'cada saldo conserva el cobro de su propia línea');
+  });
 
   test('las 4 rutas usan el mismo ciclo de corte (misma fuente de verdad)', async () => {
     // Cierra el criterio de la auditoría: asignación de plan, paquete manual y
@@ -680,14 +730,15 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     // las clases del ciclo cayendo en el saldo equivocado (caso Michelle).
     const plan = await api.post('/api/plans', { name: 'Auto corte 15', billingModel: 'monthly', price: 200, sessionsIncluded: 8 });
     const c = await api.post('/api/clients', { fullName: 'Auto corte quince', planId: plan.datos.id, cutoffDay: 15 });
-    // Un cobro con vencimiento en el corte 15; la renovación de saldo lo toma
-    // aunque no esté en la ventana de emisión de cobros.
-    await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 200, dueOn: '2026-10-15' });
+    // Un cobro vigente; la renovación de saldo usa el corte 15 aunque el pago
+    // se registre hoy, y no el día de ejecución como fecha de ciclo.
+    await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 200, dueOn: hoyPa() });
     await api.post('/api/billing/recurring/generate', {});
     const saldo = (await api.get('/api/packages')).datos.find(p => p.client_id === c.datos.id && p.kind === 'monthly');
     assert.ok(saldo, 'la renovación abre el saldo del cobro');
-    assert.equal(String(saldo.expires_on).slice(0, 10), '2026-11-15', 'vence el 15 (corte), no el 1° de noviembre');
-    assert.match(saldo.label, /15-10-2026 – 15-11-2026/, 'la etiqueta corre 15→15');
+    const ciclo = cicloCortePa(hoyPa(), 15);
+    assert.equal(String(saldo.expires_on).slice(0, 10), ciclo.vence, 'vence el 15 (corte), no el 1° de noviembre');
+    assert.equal(String(saldo.purchased_on).slice(0, 10), ciclo.inicio, 'inicia en el corte configurado');
   });
 
   test('el saldo también descuenta las clases que el cliente canceló y perdió', async () => {
@@ -731,16 +782,17 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     assert.equal(saldoOct.status, 'active', 'nace activo aunque no se haya pagado: entrena a crédito');
     assert.equal(saldoOct.origin_invoice_id, null, 'nace sin cobro: se cobra en su propio corte');
 
-    // Ciclo 2: el cobro del 28-oct salda ESE ciclo (el que ahora se cierra),
-    // enlazándose al saldo que vence el 28-oct; y abre el siguiente (vence 28-nov).
+    // El cobro del 28-oct todavía pertenece al próximo ciclo: hasta que llegue
+    // ese corte no se debe abrir ni enlazar el saldo futuro.
     const cobroOct = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 275, dueOn: '2026-10-28' });
     await api.post('/api/billing/recurring/generate', {});
     const trasDos = (await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly');
     const cerrado = trasDos.find(p => String(p.expires_on).slice(0, 10) === '2026-10-28');
     const nuevo = trasDos.find(p => String(p.expires_on).slice(0, 10) === '2026-11-28');
-    assert.equal(cerrado.origin_invoice_id, cobroOct.datos.id, 'el cobro del corte salda el ciclo que se cierra');
+    assert.equal(cerrado.origin_invoice_id, null, 'el cobro futuro aún no se enlaza al saldo');
     assert.equal(cerrado.status, 'active', 'ese saldo sigue activo: el cliente pudo entrenar a crédito');
-    assert.ok(nuevo && nuevo.status === 'active' && nuevo.origin_invoice_id === null, 'se abre el siguiente ciclo, activo y sin cobro');
+    assert.equal(nuevo, undefined, 'no se abre el siguiente ciclo antes de su corte');
+    assert.ok(cobroOct.datos.id, 'conserva el cobro futuro para enlazarlo cuando llegue el corte');
   });
 
   test('no anticipado: un cobro al corte se enlaza al saldo que vence ese día sin duplicarlo', async () => {
@@ -2034,8 +2086,9 @@ describe('cuando cancela la entrenadora', () => {
   });
 
   test('el descuento baja el cobro del mes siguiente', async () => {
-    // Corte a tres días vista para que la generación llegue a emitirlo.
-    const corte = new Date(Date.now() + 3 * 24 * 3600_000).getDate();
+    // El corte vigente ya comenzó; la prueba sólo depende de que el cobro
+    // actual se genere, no de adelantar el próximo ciclo.
+    const corte = partesPanama().d;
     const c = await api.post('/api/clients', { fullName: 'Le deben dos clases', planId, cutoffDay: corte });
     for (let i = 1; i <= 2; i += 1) {
       const cuando = new Date(Date.now() - i * 2 * 3600_000).toISOString();
@@ -2160,8 +2213,9 @@ describe('el saldo se renueva aunque no haya pagado, pero se avisa', () => {
   let clientId;
   before(async () => {
     const plan = await api.post('/api/plans', { name: 'Mensual que se renueva', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
-    // Corte a tres días vista, para que la generación llegue a emitir.
-    const corte = new Date(Date.now() + 3 * 24 * 3600_000).getDate();
+    // El ciclo vigente ya comenzó; la deuda pendiente no debe impedir que
+    // entrenen, pero tampoco debe adelantar el ciclo siguiente.
+    const corte = partesPanama().d;
     const c = await api.post('/api/clients', { fullName: 'No ha pagado aún', planId: plan.datos.id, cutoffDay: corte });
     clientId = c.datos.id;
   });
@@ -2718,9 +2772,9 @@ describe('un pagador que cubre a varias personas', () => {
   before(async () => {
     const p = await api.post('/api/plans', { name: 'Mensualidad familiar', billingModel: 'monthly', price: 120, sessionsIncluded: 8 });
     plan = p.datos.id;
-    // Corte dentro de la ventana de generación, no el día 1: con el 1 fijo la
-    // prueba sólo pasaba los primeros días del mes y fallaba sola el resto.
-    const corte = new Date(Date.now() + 3 * 24 * 3600_000).getDate();
+    // El corte vigente ya comenzó; el worker debe crear los cobros y saldos
+    // del grupo sin adelantar el ciclo siguiente.
+    const corte = partesPanama().d;
     const a = await api.post('/api/clients', { fullName: 'El que paga', planId: plan, cutoffDay: corte });
     const b = await api.post('/api/clients', { fullName: 'La esposa', planId: plan, cutoffDay: corte });
     const c = await api.post('/api/clients', { fullName: 'El yerno', planId: plan, cutoffDay: corte });

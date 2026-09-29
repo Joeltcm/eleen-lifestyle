@@ -328,8 +328,8 @@ async function generateRecurringInvoices(ownerId?: string) {
   // pasar por aquí, y su cliente se quedaba sin saldo para siempre sin que
   // nada lo dijera. El saldo es de quien entrena, no de quien paga: si la
   // mensualidad de la esposa la cubre el marido, las sesiones son de ella.
-  const pendientes = await sql`
-    SELECT DISTINCT ON (entrena) * FROM (
+  const candidatosPendientes = await sql`
+    SELECT * FROM (
       SELECT COALESCE(i.billed_for_client_id, i.client_id) AS entrena,
         i.id AS invoice_id, i.due_on, i.amount,
         COALESCE(i.billing_period, date_trunc('month', i.due_on)::date) AS billing_period,
@@ -357,7 +357,8 @@ async function generateRecurringInvoices(ownerId?: string) {
         -- emitir un cobro antes de tiempo, y un saldo no es un cobro. Son las
         -- sesiones de un cobro que ya está emitido, y hacerlas esperar a una
         -- semana antes del corte deja al cliente entrenando sin de dónde
-        -- descontar. Se toma el corte más cercano y sólo uno por persona.
+        -- descontar. Se procesan todos los cobros elegibles; la idempotencia
+        -- se resuelve por invoice_id para no borrar saldos familiares válidos.
         AND i.due_on >= current_date
         AND (${selectedOwner}::uuid IS NULL OR c.owner_id = ${selectedOwner}::uuid)
         AND NOT EXISTS (
@@ -372,6 +373,16 @@ async function generateRecurringInvoices(ownerId?: string) {
     WHERE q.total_sessions > 0
     ORDER BY entrena, due_on
   `;
+  // Un cobro puede existir hasta siete días antes de su vencimiento, pero eso
+  // no significa que el saldo deba nacer ya. El saldo abre cuando empieza el
+  // ciclo que representa. Así Sally (corte 1), Sandy y Julio (corte 31) no
+  // reciben el próximo ciclo mientras el vigente todavía está abierto; en el
+  // propio día de corte no queda hueco, porque el inicio es inclusivo.
+  const hoy = diaEnPanama(new Date());
+  const pendientes = candidatosPendientes.filter(cobro => {
+    const ciclo = cicloDelCorte(cobro.due_on as Date, Number(cobro.corte) || 1);
+    return ciclo.inicio <= hoy;
+  });
   for (const cobro of pendientes) {
     // El saldo del ciclo que EMPIEZA en el corte se abre para todos: el cliente
     // entrena aunque aún no haya pagado (a crédito). La diferencia de "no
@@ -390,10 +401,21 @@ async function generateRecurringInvoices(ownerId?: string) {
     const ciclo = cicloDelCorte(cobro.due_on as Date, Number(cobro.corte) || 1);
     await sql.begin(async transaction => {
       await lockBillingClient(transaction, cobro.entrena as string);
+      // Idempotencia por cobro, no por cliente ni por ciclo: un mismo ciclo
+      // puede tener más de un saldo legítimo (propio + familiar). En no
+      // anticipado el cobro queda ligado al saldo que cierra; si ya quedó
+      // ligado, esta corrida ya fue procesada.
+      const [yaProcesado] = await transaction`
+        SELECT id FROM session_packages
+        WHERE origin_invoice_id = ${cobro.invoice_id} AND status <> 'cancelled'
+        LIMIT 1
+      `;
+      if (yaProcesado) return;
       const [existente] = await transaction`
         SELECT id FROM session_packages
         WHERE client_id = ${cobro.entrena} AND kind = 'monthly'
           AND expires_on IS NOT NULL AND expires_on > ${soloFecha(cobro.due_on)}::date
+          AND origin_invoice_id = ${cobro.invoice_id}
           AND status <> 'cancelled'
         LIMIT 1
       `;
@@ -402,7 +424,7 @@ async function generateRecurringInvoices(ownerId?: string) {
       INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, origin_invoice_id, status)
       VALUES (${cobro.entrena},
         ${'Mensualidad · ' + rangoDelCiclo(ciclo.inicio, ciclo.vence)},
-        ${cobro.total_sessions}, ${cobro.amount}, ${ciclo.vence}::date, 'monthly', current_date,
+        ${cobro.total_sessions}, ${cobro.amount}, ${ciclo.vence}::date, 'monthly', ${ciclo.inicio}::date,
         -- Nace activo, y es la diferencia entre servir y no servir. Un saldo
         -- 'pending' no suma en las sesiones disponibles ni se descuenta al
         -- marcar la clase: el cliente entrenaba y su saldo no se movía. Se
