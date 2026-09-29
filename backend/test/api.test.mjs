@@ -2364,6 +2364,121 @@ describe('cumplimiento por cliente de un mes (Control de paquetes)', () => {
   });
 });
 
+describe('fronteras estrictas y excedentes de mensualidad', () => {
+  const marcar = async (ids, outcome = 'completed') => {
+    for (const id of ids) {
+      const respuesta = await api.patch(`/api/sessions/${id}/compliance`, {
+        outcome, completionPercent: outcome === 'completed' ? 100 : 0
+      });
+      assert.equal(respuesta.estado, 200, JSON.stringify(respuesta.datos));
+    }
+  };
+
+  test('las clases excedentes no desbordan al siguiente ciclo ni entran al cumplimiento', async () => {
+    const plan = await api.post('/api/plans', { name: 'Excedente sin familia', billingModel: 'monthly', price: 100, sessionsIncluded: 2 });
+    const c = await api.post('/api/clients', { fullName: 'Excedente sin familia', planId: plan.datos.id, cutoffDay: 1 });
+    const factura = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad septiembre', amount: 100, dueOn: hoyPa() });
+    const siguiente = await api.post('/api/packages', {
+      clientId: c.datos.id, totalSessions: 2, amount: 100, kind: 'monthly', dueOn: '2026-10-01'
+    });
+    await api.post('/api/billing/recurring/generate', {});
+
+    const fechas = [5, 10, 15, 20].map(d => `2026-09-${String(d).padStart(2, '0')}T14:00:00.000Z`);
+    const lote = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: fechas, durationMinutes: 60, mode: 'Presencial' });
+    await marcar(lote.datos.sesiones.slice(0, 2).map(s => s.id));
+    for (const sesion of lote.datos.sesiones.slice(2)) {
+      const respuesta = await api.delete(`/api/sessions/${sesion.id}`);
+      assert.equal(respuesta.estado, 200, JSON.stringify(respuesta.datos));
+    }
+
+    const sesiones = (await api.get('/api/sessions')).datos.filter(s => lote.datos.sesiones.some(x => x.id === s.id));
+    assert.equal(sesiones.filter(s => s.package_debited).length, 2, 'sólo las dos primeras consumen el ciclo');
+    assert.equal(sesiones.filter(s => !s.package_debited).length, 2, 'las dos excedentes quedan sin saldo');
+    const saldos = (await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly');
+    const actual = saldos.find(p => p.id !== siguiente.datos.id);
+    const futuro = saldos.find(p => p.id === siguiente.datos.id);
+    assert.ok(actual, 'existe el saldo del ciclo actual');
+    assert.equal(Number(actual.used_sessions), 2, 'el ciclo actual queda lleno');
+    assert.equal(Number(futuro.used_sessions), 0, 'el saldo siguiente permanece intacto');
+    assert.ok(factura.datos.id, 'conserva la factura del ciclo');
+
+    const porMes = await api.get('/api/compliance/by-month?month=2026-09');
+    const filaMes = porMes.datos.clients.find(x => x.client_id === c.datos.id);
+    assert.equal(Number(filaMes.total), 2, 'el cumplimiento ignora las clases excedentes');
+    assert.equal(Number(filaMes.completadas), 2);
+    assert.equal(Number(filaMes.percent), 100);
+    const resumen = await api.get('/api/compliance/summary?period=month');
+    const filaResumen = resumen.datos.clients.find(x => x.clientId === c.datos.id);
+    assert.equal(Number(filaResumen.activities), 2, 'los reportes también ignoran las excedentes');
+  });
+
+  test('la capacidad de líneas familiares se suma antes de marcar excedentes', async () => {
+    const plan = await api.post('/api/plans', { name: 'Excedente familiar', billingModel: 'monthly', price: 175, sessionsIncluded: 4 });
+    const c = await api.post('/api/clients', { fullName: 'Familia con capacidad conjunta', planId: plan.datos.id, cutoffDay: 1 });
+    const primera = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad propia', amount: 175, dueOn: hoyPa() });
+    const segunda = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad familiar', amount: 175, dueOn: hoyPa() });
+    await api.post('/api/billing/recurring/generate', {});
+
+    const fechas = Array.from({ length: 9 }, (_, i) => `2026-09-${String(5 + i).padStart(2, '0')}T14:00:00.000Z`);
+    const lote = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: fechas, durationMinutes: 60, mode: 'Presencial' });
+    await marcar(lote.datos.sesiones.map(s => s.id));
+
+    const sesiones = (await api.get('/api/sessions')).datos.filter(s => lote.datos.sesiones.some(x => x.id === s.id));
+    assert.equal(sesiones.filter(s => s.package_debited).length, 8, 'las dos líneas aportan cuatro clases cada una');
+    assert.equal(sesiones.filter(s => !s.package_debited).length, 1, 'sólo la novena es excedente');
+    const saldos = (await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly');
+    assert.equal(saldos.length, 2, 'las líneas familiares siguen siendo dos saldos');
+    assert.equal(saldos.reduce((total, p) => total + Number(p.used_sessions), 0), 8, 'la capacidad es la suma de los dos saldos');
+    assert.deepEqual(saldos.map(p => p.origin_invoice_id).sort(), [primera.datos.id, segunda.datos.id].sort());
+
+    const porMes = await api.get('/api/compliance/by-month?month=2026-09');
+    const fila = porMes.datos.clients.find(x => x.client_id === c.datos.id);
+    assert.equal(Number(fila.total), 8, 'el excedente familiar no baja el cumplimiento');
+  });
+
+  test('dentro de la capacidad el cobro y el cumplimiento no cambian', async () => {
+    const plan = await api.post('/api/plans', { name: 'Sin excedente', billingModel: 'monthly', price: 120, sessionsIncluded: 2 });
+    const c = await api.post('/api/clients', { fullName: 'Dentro de capacidad', planId: plan.datos.id, cutoffDay: 1 });
+    await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 120, dueOn: hoyPa() });
+    await api.post('/api/billing/recurring/generate', {});
+    const lote = await api.post('/api/sessions/batch', {
+      clientId: c.datos.id,
+      startsAt: ['2026-09-06T14:00:00.000Z', '2026-09-07T14:00:00.000Z'],
+      durationMinutes: 60, mode: 'Presencial'
+    });
+    await marcar(lote.datos.sesiones.map(s => s.id));
+
+    const sesiones = (await api.get('/api/sessions')).datos.filter(s => lote.datos.sesiones.some(x => x.id === s.id));
+    assert.ok(sesiones.every(s => s.package_debited), 'dentro de capacidad ambas clases se cobran');
+    const saldo = (await api.get('/api/packages')).datos.find(p => p.client_id === c.datos.id && p.kind === 'monthly');
+    assert.equal(Number(saldo.used_sessions), 2);
+    const porMes = await api.get('/api/compliance/by-month?month=2026-09');
+    const fila = porMes.datos.clients.find(x => x.client_id === c.datos.id);
+    assert.equal(Number(fila.total), 2);
+    assert.equal(Number(fila.percent), 100);
+  });
+
+  test('la clase del último día se cobra al ciclo que vence ese día', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Frontera de ciclo', billingModel: 'monthly', standardPrice: 100, cutoffDay: 28 });
+    const anterior = await api.post('/api/packages', {
+      clientId: c.datos.id, totalSessions: 1, amount: 100, kind: 'monthly', dueOn: '2026-08-28'
+    });
+    await api.post(`/api/invoices/${anterior.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-28' });
+    const siguiente = await api.post('/api/packages', {
+      clientId: c.datos.id, totalSessions: 1, amount: 100, kind: 'monthly', dueOn: '2026-09-28'
+    });
+    await api.post(`/api/invoices/${siguiente.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-09-28' });
+    const sesion = await api.post('/api/sessions/batch', {
+      clientId: c.datos.id, startsAt: ['2026-09-28T14:00:00.000Z'], durationMinutes: 60, mode: 'Presencial'
+    });
+    await marcar([sesion.datos.sesiones[0].id]);
+
+    const saldos = (await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly');
+    assert.equal(Number(saldos.find(p => p.id === anterior.datos.id).used_sessions), 1, 'cobra al saldo que vence hoy');
+    assert.equal(Number(saldos.find(p => p.id === siguiente.datos.id).used_sessions), 0, 'no salta al saldo del ciclo siguiente');
+  });
+});
+
 describe('informe mensual (cobros, gastos, finanzas)', () => {
   test('resume ingresos y gastos del mes y filtra por categoría', async () => {
     const c = await api.post('/api/clients', { fullName: 'Informe cliente', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });

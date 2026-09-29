@@ -1235,9 +1235,9 @@ app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) =
   // El paquete de clases vence a las 6 semanas del pago (tope de uso). La
   // mensualidad, en el próximo corte. Sin vencimiento, las sesiones no
   // caducarían nunca y se acumularían.
-  // Una sola referencia de día para el vencimiento y la fecha de compra: sin
-  // esto, purchased_on salía de current_date (Postgres) y el vencimiento de
-  // new Date() (Node, en UTC), y cerca de medianoche diferían un día.
+  // Una sola referencia de negocio para resolver el ciclo: sin esto, el
+  // vencimiento y purchased_on podían salir de relojes/zona horaria distintos
+  // y diferir un día cerca de medianoche.
   const refDia = input.dueOn || diaEnPanama(new Date());
   // La mensualidad usa la MISMA función de ciclo que el worker, la cobertura y
   // la asignación de plan (cicloDelCorte, que clampa el corte al último día del
@@ -1246,13 +1246,18 @@ app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) =
   const vence = input.expiresOn
     ? input.expiresOn
     : esCobroMensual ? cicloMensual!.vence : vencePaqueteDesde(refDia);
+  // En una mensualidad la compra puede registrarse tarde, pero el saldo sigue
+  // representando el ciclo del expediente. Guardar el día del pago aquí
+  // estrechaba artificialmente el ciclo y hacía que una clase del mismo mes,
+  // marcada un día antes de registrar el cobro, pareciera de otro ciclo.
+  const compradoEl = esCobroMensual ? cicloMensual!.inicio : refDia;
   const etiqueta = esCobroMensual
     ? `Mensualidad · ${rangoDelCiclo(cicloMensual!.inicio, vence || new Date())}`
     : `Paquete ${input.totalSessions} sesiones`;
 
   const pack = await sql.begin(async transaction => {
     await lockBillingClient(transaction, input.clientId);
-    const [created] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on) VALUES (${input.clientId}, ${etiqueta}, ${input.totalSessions}, ${input.amount}, ${vence}, ${input.kind}, ${refDia}::date) RETURNING *`;
+    const [created] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on) VALUES (${input.clientId}, ${etiqueta}, ${input.totalSessions}, ${input.amount}, ${vence}, ${input.kind}, ${compradoEl}::date) RETURNING *`;
     const [invoice] = await transaction`
       INSERT INTO invoices (client_id, package_id, concept, amount, due_on, issued_on, billing_period)
       VALUES (${input.clientId}, ${created.id}, ${concepto}, ${input.amount},
@@ -2963,16 +2968,7 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
     // se conserva: no se vuelve a cobrar una segunda vez.
     let compensacion: { tipo: string; detalle: string } | null = null;
     if (!reprogramada && !laCancelaEllaSola && !actual.package_debited) {
-      const [pack] = await transaction`
-        SELECT id, total_sessions, used_sessions
-        FROM session_packages
-        WHERE client_id = ${session.client_id} AND status = 'active'
-          AND used_sessions < total_sessions
-          AND (expires_on IS NULL OR expires_on >= (${session.starts_at}::timestamptz AT TIME ZONE 'America/Panama')::date)
-        ORDER BY expires_on ASC NULLS LAST, purchased_on
-        LIMIT 1
-        FOR UPDATE
-      `;
+      const pack = await seleccionarSaldoParaSesion(transaction, session.client_id as string, session.starts_at as Date | string);
       if (pack) {
         const siguiente = Number(pack.used_sessions) + 1;
         await transaction`
@@ -3046,6 +3042,40 @@ type SessionPackageBalance = {
   used_sessions: number | string;
 };
 
+// Devuelve el saldo que puede consumir una sesión en su fecha real. Para una
+// mensualidad, el día de corte compartido se resuelve a favor del ciclo que
+// vence ese día (el ciclo anterior); si no existe, el ciclo que empieza ese
+// día puede recibir la clase. Las clases sueltas y los paquetes conservan el
+// selector anterior: su vigencia no se convierte en un corte mensual.
+async function seleccionarSaldoParaSesion(
+  transaction: TransactionSql | typeof sql,
+  clientId: string,
+  startsAt: Date | string
+) {
+  const [pack] = await transaction`
+    SELECT sp.id, sp.label, sp.total_sessions, sp.used_sessions
+    FROM session_packages sp
+    JOIN clients c ON c.id = sp.client_id
+    WHERE sp.client_id = ${clientId} AND sp.status = 'active' AND sp.used_sessions < sp.total_sessions
+      AND (
+        (
+          COALESCE(sp.kind, 'package') = 'monthly'
+          AND c.billing_model = 'monthly'
+          AND sp.purchased_on IS NOT NULL AND sp.expires_on IS NOT NULL
+          AND sp.purchased_on <= (${startsAt}::timestamptz AT TIME ZONE 'America/Panama')::date
+          AND sp.expires_on >= (${startsAt}::timestamptz AT TIME ZONE 'America/Panama')::date
+        )
+        OR (
+          (COALESCE(sp.kind, 'package') <> 'monthly' OR c.billing_model <> 'monthly')
+          AND (sp.expires_on IS NULL OR sp.expires_on >= (${startsAt}::timestamptz AT TIME ZONE 'America/Panama')::date)
+        )
+      )
+    ORDER BY sp.expires_on ASC NULLS LAST, sp.purchased_on, sp.created_at, sp.id
+    LIMIT 1 FOR UPDATE
+  `;
+  return pack as SessionPackageBalance | undefined;
+}
+
 function sessionBillingNotice(pack: Record<string, unknown> | null | undefined, action: SessionBillingNotice['action']): SessionBillingNotice {
   if (!pack) {
     return {
@@ -3087,21 +3117,8 @@ async function recordSessionCompliance(id: string, ownerId: string, markedBy: st
       sessionStateConflict('No se puede marcar una sesión futura como realizada o no cumplida.');
     }
     const grupo = current.client_id as string;
-    const saldoParaSesion = async () => {
-      const [pack] = await transaction`
-        SELECT id, label, total_sessions, used_sessions
-        FROM session_packages
-        WHERE client_id = ${current.client_id} AND status = 'active' AND used_sessions < total_sessions
-          -- Una clase se cobra con el saldo que estaba vivo el día en que
-          -- ocurrió, aunque se marque después del corte.
-          AND (expires_on IS NULL OR expires_on >= (${current.starts_at}::timestamptz AT TIME ZONE 'America/Panama')::date)
-        ORDER BY expires_on ASC NULLS LAST, purchased_on
-        LIMIT 1 FOR UPDATE
-      `;
-      return pack as SessionPackageBalance | undefined;
-    };
     const descontarSaldo = async () => {
-      const pack = await saldoParaSesion();
+      const pack = await seleccionarSaldoParaSesion(transaction, current.client_id as string, current.starts_at as Date | string);
       if (!pack) return null;
       const nextUsed = Number(pack.used_sessions) + 1;
       const packageId = String(pack.id);
@@ -4355,14 +4372,46 @@ app.get('/api/compliance/by-month', { preHandler: requireStaff }, async request 
   const from = `${month}-01`;
   const to = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).toISOString().slice(0, 10);
   const clients = await sql`
+    WITH monthly_cycles AS (
+      SELECT client_id, purchased_on, expires_on, sum(total_sessions)::int AS capacity
+      FROM session_packages
+      WHERE kind = 'monthly' AND status <> 'cancelled'
+        AND purchased_on IS NOT NULL AND expires_on IS NOT NULL
+      GROUP BY client_id, purchased_on, expires_on
+    ), debit_candidates AS (
+      SELECT s.id,
+        row_number() OVER (
+          PARTITION BY s.client_id, mc.purchased_on, mc.expires_on
+          ORDER BY s.starts_at, s.id
+        )::int AS debit_order,
+        mc.capacity
+      FROM sessions s
+      JOIN clients c ON c.id = s.client_id
+      JOIN LATERAL (
+        SELECT mc.* FROM monthly_cycles mc
+        WHERE mc.client_id = s.client_id
+          AND mc.purchased_on <= (s.starts_at::timestamptz AT TIME ZONE 'America/Panama')::date
+          AND mc.expires_on >= (s.starts_at::timestamptz AT TIME ZONE 'America/Panama')::date
+        ORDER BY mc.expires_on ASC, mc.purchased_on ASC
+        LIMIT 1
+      ) mc ON true
+      WHERE c.owner_id = ${auth.sub} AND c.billing_model = 'monthly'
+        AND (
+          s.status IN ('completed', 'no_show')
+          OR (s.status = 'cancelled' AND s.cancellation_kind = 'not_rescheduled'
+            AND COALESCE(s.cancelled_by, 'client') = 'client')
+        )
+    )
     SELECT c.id AS client_id, c.full_name AS name,
       count(*)::int AS total,
       count(*) FILTER (WHERE s.status = 'completed')::int AS completadas,
       COALESCE(round(avg(COALESCE(CASE WHEN s.status = 'cancelled' THEN 0 ELSE s.completion_percent END, 0))), 0)::int AS percent
     FROM sessions s JOIN clients c ON c.id = s.client_id
+    LEFT JOIN debit_candidates exceso ON exceso.id = s.id AND exceso.debit_order > exceso.capacity
     WHERE c.owner_id = ${auth.sub}
       AND s.starts_at >= ${from}::date AND s.starts_at < (${to}::date + interval '1 day')
       AND s.starts_at <= now()
+      AND exceso.id IS NULL
       AND NOT (s.status = 'scheduled' AND (COALESCE(s.paused_hold, false) OR c.status = 'paused'))
       AND (s.status <> 'cancelled'
         OR (s.cancellation_kind = 'not_rescheduled' AND COALESCE(s.cancelled_by, 'client') = 'client'))
@@ -4520,7 +4569,36 @@ const reportStart = (period: z.infer<typeof reportPeriodSchema>) => {
 async function complianceRows(ownerId: string, period: z.infer<typeof reportPeriodSchema>, clientId?: string, startOverride?: string) {
   const start = startOverride || reportStart(period);
   return sql`
-    WITH activities AS (
+    WITH monthly_cycles AS (
+      SELECT client_id, purchased_on, expires_on, sum(total_sessions)::int AS capacity
+      FROM session_packages
+      WHERE kind = 'monthly' AND status <> 'cancelled'
+        AND purchased_on IS NOT NULL AND expires_on IS NOT NULL
+      GROUP BY client_id, purchased_on, expires_on
+    ), debit_candidates AS (
+      SELECT s.id,
+        row_number() OVER (
+          PARTITION BY s.client_id, mc.purchased_on, mc.expires_on
+          ORDER BY s.starts_at, s.id
+        )::int AS debit_order,
+        mc.capacity
+      FROM sessions s
+      JOIN clients c ON c.id = s.client_id
+      JOIN LATERAL (
+        SELECT mc.* FROM monthly_cycles mc
+        WHERE mc.client_id = s.client_id
+          AND mc.purchased_on <= (s.starts_at::timestamptz AT TIME ZONE 'America/Panama')::date
+          AND mc.expires_on >= (s.starts_at::timestamptz AT TIME ZONE 'America/Panama')::date
+        ORDER BY mc.expires_on ASC, mc.purchased_on ASC
+        LIMIT 1
+      ) mc ON true
+      WHERE c.owner_id = ${ownerId} AND c.billing_model = 'monthly'
+        AND (
+          s.status IN ('completed', 'no_show')
+          OR (s.status = 'cancelled' AND s.cancellation_kind = 'not_rescheduled'
+            AND COALESCE(s.cancelled_by, 'client') = 'client')
+        )
+    ), activities AS (
       SELECT c.id AS client_id, c.full_name, s.starts_at AS occurred_at, 'Sesión'::text AS source,
         COALESCE(r.title, CASE WHEN s.quick_logged THEN 'Entrenamiento presencial' ELSE 'Evaluación / seguimiento' END) AS activity,
         -- No presentarse cuenta como no hecha, igual que cancelar y no
@@ -4543,9 +4621,16 @@ async function complianceRows(ownerId: string, period: z.infer<typeof reportPeri
         AND NOT (s.status = 'scheduled' AND (COALESCE(s.paused_hold, false) OR c.status = 'paused'))
         -- Las canceladas entran sólo si nadie las reprogramó Y las canceló el
         -- cliente. Una clase que canceló la entrenadora no es un incumplimiento
-        -- de él: se le repone o se le descuenta, pero no se le apunta.
+      -- de él: se le repone o se le descuenta, pero no se le apunta.
         AND (s.status <> 'cancelled'
           OR (s.cancellation_kind = 'not_rescheduled' AND COALESCE(s.cancelled_by, 'client') = 'client'))
+        -- Una mensualidad no puede prestar capacidad al ciclo siguiente. Las
+        -- clases cobrables que llegan después de la capacidad del ciclo son
+        -- excedentes: no se cuentan en el cumplimiento.
+        AND NOT EXISTS (
+          SELECT 1 FROM debit_candidates exceso
+          WHERE exceso.id = s.id AND exceso.debit_order > exceso.capacity
+        )
       UNION ALL
       SELECT c.id AS client_id, c.full_name, rc.completed_on::timestamptz AS occurred_at, 'Rutina'::text AS source,
         r.title AS activity, 'completed'::text AS status, rc.completion_percent,
