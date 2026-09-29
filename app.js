@@ -325,7 +325,8 @@ const billingPeriodInvoices = () => data.invoices.filter(invoice => {
   const matchesMonth = billingMonth === 'all' || date.getMonth() + 1 === Number(billingMonth);
   const matchesSource = billingSource === 'all' || (billingSource === 'eileen' ? invoice.source !== 'zoho_invoice' : invoice.source === billingSource);
   const clientNeedle = billingClientFilter.trim().toLocaleLowerCase('es');
-  const matchesClient = !clientNeedle || String(invoice.client || '').toLocaleLowerCase('es').includes(clientNeedle);
+  const invoicePeople = `${invoice.client || ''} ${invoice.billedFor || ''}`.toLocaleLowerCase('es');
+  const matchesClient = !clientNeedle || invoicePeople.includes(clientNeedle);
   return matchesYear && matchesMonth && matchesSource && matchesClient;
 }).sort((a, b) => invoicePeriodDate(b) - invoicePeriodDate(a));
 const remainingSessions = pack => Math.max(0, pack.total - pack.used);
