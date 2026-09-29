@@ -2656,11 +2656,12 @@ app.patch('/api/sessions/:id', { preHandler: requireStaff }, async (request, rep
       WHERE id = ${id}
       RETURNING *
     `;
-    // Correrla de hora dentro del mismo día no es reprogramar: es ajustar. Lo
-    // que cuenta es cambiarla de día, que es lo que el cliente pide cuando no
-    // puede venir.
-    const seMovioDeDia = diaEnPanama(actual.starts_at) !== diaEnPanama(session.starts_at);
-    if (seMovioDeDia && actual.status === 'completed' && actual.package_debited && actual.package_id) {
+    // Cualquier cambio de inicio es una reprogramación: también moverla de hora
+    // dentro del mismo día cambia el compromiso de la agenda y debe quedar en
+    // el historial. El estado de la sesión se conserva: completed/cancelled/
+    // scheduled sigue significando lo mismo después del movimiento.
+    const seMovioDeHorario = new Date(actual.starts_at).getTime() !== new Date(session.starts_at).getTime();
+    if (seMovioDeHorario && actual.status === 'completed' && actual.package_debited && actual.package_id) {
       // Mover directamente una clase ya realizada equivale a reprogramarla:
       // la clase original deja de consumir el saldo y la nueva se cobrará al
       // marcarla, en su fecha real.
@@ -2682,7 +2683,7 @@ app.patch('/api/sessions/:id', { preHandler: requireStaff }, async (request, rep
       `;
       return { session: desvinculada };
     }
-    if (seMovioDeDia) {
+    if (seMovioDeHorario) {
       await transaction`
         INSERT INTO session_reschedules (session_id, client_id, from_starts_at, to_starts_at, origin)
         VALUES (${id}, ${session.client_id}, ${actual.starts_at}, ${session.starts_at}, 'moved')

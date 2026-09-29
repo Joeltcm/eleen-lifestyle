@@ -1911,12 +1911,12 @@ describe('cancelar y reprogramar se cuentan por separado', () => {
     assert.deepEqual(await conteo(), { reprogramaciones: 2, canceladas: 1 });
   });
 
-  test('pero correrla de hora dentro del mismo día no', async () => {
+  test('correrla de hora dentro del mismo día también cuenta', async () => {
     const s = await agendar(6);
     const masTarde = new Date(s.starts_at); masTarde.setUTCMinutes(masTarde.getUTCMinutes() + 90);
     await api.patch(`/api/sessions/${s.id}`, { startsAt: masTarde.toISOString(), durationMinutes: 60, mode: 'Presencial' });
     const despues = await conteo();
-    assert.equal(despues.reprogramaciones, 2, 'ajustar la hora no es reprogramar');
+    assert.equal(despues.reprogramaciones, 3, 'cualquier cambio de horario es una reprogramación');
   });
 });
 
@@ -2180,6 +2180,32 @@ describe('cuando cancela la entrenadora', () => {
     assert.equal(movida.datos.package_debited, false, 'mover la realizada la convierte en reprogramada sin débito');
     const saldo = (await api.get('/api/packages')).datos.find(p => p.id === paquete.datos.id);
     assert.equal(Number(saldo.used_sessions), 0, 'moverla de día devuelve la clase al saldo');
+  });
+
+  test('mover de hora una sesión realizada también la reprograma y devuelve el débito', async () => {
+    const plan = await api.post('/api/plans', { name: 'Mover hora realizada', billingModel: 'monthly', price: 280, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Movida de hora después de entrenar', planId: plan.datos.id, cutoffDay: 1 });
+    const paquete = await api.post('/api/packages', {
+      clientId: c.datos.id, totalSessions: 8, amount: 280, kind: 'monthly', expiresOn: enDiasPa(21).iso
+    });
+    await api.post(`/api/invoices/${paquete.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: hoyPa() });
+    const original = new Date(Date.now() - 26 * 3600_000);
+    const lote = await api.post('/api/sessions/batch', {
+      clientId: c.datos.id, startsAt: [original.toISOString()], durationMinutes: 60, mode: 'Presencial'
+    });
+    const id = lote.datos.sesiones[0].id;
+    await api.patch(`/api/sessions/${id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    const nuevaHora = new Date(original); nuevaHora.setUTCMinutes(nuevaHora.getUTCMinutes() + 90);
+    const movida = await api.patch(`/api/sessions/${id}`, {
+      startsAt: nuevaHora.toISOString(), durationMinutes: 60, mode: 'Presencial'
+    });
+    assert.equal(movida.estado, 200);
+    assert.equal(movida.datos.status, 'completed', 'moverla conserva que fue cumplida');
+    assert.equal(movida.datos.package_debited, false, 'moverla devuelve el débito aunque sólo cambie la hora');
+    const saldo = (await api.get('/api/packages')).datos.find(p => p.id === paquete.datos.id);
+    assert.equal(Number(saldo.used_sessions), 0, 'el saldo recupera la clase reprogramada');
+    const cliente = (await api.get('/api/clients')).datos.find(x => x.id === c.datos.id);
+    assert.equal(Number(cliente.reprogramaciones_ciclo), 1, 'el movimiento queda en el contador de reprogramaciones');
   });
 
   test('el descuento baja el cobro del mes siguiente', async () => {

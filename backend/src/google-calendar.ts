@@ -279,11 +279,8 @@ async function pullGoogleChanges(ownerId: string, token: string, connection: Cal
     // reprogramar, y hasta ahora no dejaba rastro: se movía la misma sesión y
     // no se cancelaba nada, así que el contador de reprogramaciones habría
     // dicho cero mientras la entrenadora movía citas todo el mes.
-    const diaPanama = (valor: Date | string) => new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'America/Panama', year: 'numeric', month: '2-digit', day: '2-digit'
-    }).format(new Date(valor));
-    const seMovioDeDia = diaPanama(session.starts_at) !== diaPanama(startsAt);
-    if (seMovioDeDia && session.status === 'completed' && session.package_debited && session.package_id) {
+    const seMovioDeHorario = startsAt.getTime() !== new Date(session.starts_at).getTime();
+    if (seMovioDeHorario && session.status === 'completed' && session.package_debited && session.package_id) {
       // Arrastrar en Google una clase ya realizada tiene el mismo significado
       // que moverla desde Eileen: se reprograma y devuelve el débito al saldo.
       // Antes sólo se cambiaba starts_at aquí, dejando la clase cobrada aunque
@@ -310,7 +307,7 @@ async function pullGoogleChanges(ownerId: string, token: string, connection: Cal
         `;
       });
     } else {
-      if (seMovioDeDia) {
+      if (seMovioDeHorario) {
         await sql`
           INSERT INTO session_reschedules (session_id, client_id, from_starts_at, to_starts_at, origin)
           VALUES (${session.id}, ${session.client_id}, ${session.starts_at}, ${startsAt.toISOString()}, 'moved')

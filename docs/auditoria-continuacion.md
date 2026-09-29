@@ -144,6 +144,24 @@ Fecha: 2026-09-29 · base revisada: `main` en `7783a39`
   configurado. La consulta del estado detallado de Railway no estuvo disponible
   temporalmente por un 503 de su OAuth CLI.
 
+## Reprogramación al cambiar también la hora
+
+Fecha: 2026-09-29
+
+- Se amplió la definición de reprogramación: cualquier cambio de `starts_at`,
+  incluso dentro del mismo día, crea un registro en `session_reschedules`.
+- El estado se conserva al mover la sesión: `completed` continúa cumplida,
+  `cancelled` continúa cancelada y `scheduled` continúa pendiente de marcar.
+- Si una sesión `completed` ya había descontado saldo, moverla por hora o por
+  día revierte el débito dentro de la misma transacción y permite que el nuevo
+  horario se cobre sólo cuando corresponda.
+- La misma regla se aplica al editar desde Eileen y al recibir cambios desde
+  Google Calendar.
+- Regresión añadida: mover una sesión cumplida sólo de hora devuelve el saldo,
+  conserva `completed` e incrementa reprogramaciones.
+- Verificación: `npm run verify` ✅; suite `209/211`, con las dos fallas
+  conocidas de `no_anticipado` por fechas fijas antiguas.
+
 ## Filtro de cliente en Asistencia
 
 Rama: `feat/filtro-cliente-asistencia`
