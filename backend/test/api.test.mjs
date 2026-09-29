@@ -17,6 +17,11 @@ const partesPanama = (d = new Date()) => {
 };
 const hoyPa = () => partesPanama().iso;
 const enDiasPa = n => partesPanama(new Date(Date.now() + n * 24 * 3600_000));
+const desplazarDiasPa = (fecha, dias) => {
+  const base = new Date(`${fecha}T12:00:00-05:00`);
+  base.setUTCDate(base.getUTCDate() + dias);
+  return partesPanama(base).iso;
+};
 const mesActualPa = () => partesPanama().ym + '-01';
 const cicloCortePa = (referencia, cutoff) => {
   const [year, month, day] = referencia.split('-').map(Number);
@@ -798,43 +803,54 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     // y su cobro del corte cae sobre el ciclo que se CIERRA (las clases que ya
     // dio), no sobre el nuevo. El flujo anticipado (default) no cambia.
     const plan = await api.post('/api/plans', { name: 'Mensual no anticipado', billingModel: 'monthly', price: 275, sessionsIncluded: 10 });
-    const c = await api.post('/api/clients', { fullName: 'Paga al final', planId: plan.datos.id, cutoffDay: 28, paymentMode: 'no_anticipado' });
-    // Ciclo 1: el cobro del 28-sep abre el saldo del ciclo que empieza (vence
-    // 28-oct), activo y SIN cobro enlazado.
-    await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 275, dueOn: '2026-09-28' });
+    // La fecha de referencia se captura una sola vez: la prueba conserva el
+    // mismo escenario en cualquier día, sin depender de 2026-09-28.
+    const fechaReferencia = hoyPa();
+    const cutoff = Number(fechaReferencia.slice(8, 10));
+    const cicloActual = cicloCortePa(fechaReferencia, cutoff);
+    const cicloSiguiente = cicloCortePa(cicloActual.vence, cutoff);
+    const c = await api.post('/api/clients', { fullName: 'Paga al final', planId: plan.datos.id, cutoffDay: cutoff, paymentMode: 'no_anticipado' });
+    // El cobro del corte actual abre el saldo del ciclo que empieza hoy,
+    // activo y SIN cobro enlazado.
+    await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 275, dueOn: fechaReferencia });
     await api.post('/api/billing/recurring/generate', {});
     const trasUno = (await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly');
-    const saldoOct = trasUno.find(p => String(p.expires_on).slice(0, 10) === '2026-10-28');
-    assert.ok(saldoOct, 'se abre el saldo del ciclo nuevo (vence 28-oct)');
-    assert.equal(saldoOct.status, 'active', 'nace activo aunque no se haya pagado: entrena a crédito');
-    assert.equal(saldoOct.origin_invoice_id, null, 'nace sin cobro: se cobra en su propio corte');
+    const saldoSiguiente = trasUno.find(p => String(p.expires_on).slice(0, 10) === cicloActual.vence);
+    assert.ok(saldoSiguiente, `se abre el saldo del ciclo actual (vence ${cicloActual.vence})`);
+    assert.equal(saldoSiguiente.status, 'active', 'nace activo aunque no se haya pagado: entrena a crédito');
+    assert.equal(saldoSiguiente.origin_invoice_id, null, 'nace sin cobro: se cobra en su propio corte');
 
-    // El cobro del 28-oct todavía pertenece al próximo ciclo: hasta que llegue
+    // El cobro del próximo corte todavía pertenece al ciclo futuro: hasta que llegue
     // ese corte no se debe abrir ni enlazar el saldo futuro.
-    const cobroOct = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 275, dueOn: '2026-10-28' });
+    const cobroFuturo = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 275, dueOn: cicloActual.vence });
     await api.post('/api/billing/recurring/generate', {});
     const trasDos = (await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly');
-    const cerrado = trasDos.find(p => String(p.expires_on).slice(0, 10) === '2026-10-28');
-    const nuevo = trasDos.find(p => String(p.expires_on).slice(0, 10) === '2026-11-28');
+    const cerrado = trasDos.find(p => String(p.expires_on).slice(0, 10) === cicloActual.vence);
+    const nuevo = trasDos.find(p => String(p.expires_on).slice(0, 10) === cicloSiguiente.vence);
     assert.equal(cerrado.origin_invoice_id, null, 'el cobro futuro aún no se enlaza al saldo');
     assert.equal(cerrado.status, 'active', 'ese saldo sigue activo: el cliente pudo entrenar a crédito');
     assert.equal(nuevo, undefined, 'no se abre el siguiente ciclo antes de su corte');
-    assert.ok(cobroOct.datos.id, 'conserva el cobro futuro para enlazarlo cuando llegue el corte');
+    assert.ok(cobroFuturo.datos.id, 'conserva el cobro futuro para enlazarlo cuando llegue el corte');
   });
 
   test('no anticipado: un cobro al corte se enlaza al saldo que vence ese día sin duplicarlo', async () => {
+    const fechaReferencia = hoyPa();
+    const cutoff = Number(fechaReferencia.slice(8, 10));
+    const fechaAnterior = desplazarDiasPa(fechaReferencia, -1);
+    const cicloAnterior = cicloCortePa(fechaAnterior, cutoff);
+    const cicloActual = cicloCortePa(fechaReferencia, cutoff);
     const c = await api.post('/api/clients', {
       fullName: 'Cobro enlazado al cierre', billingModel: 'monthly', standardPrice: 275,
-      cutoffDay: 28, paymentMode: 'no_anticipado'
+      cutoffDay: cutoff, paymentMode: 'no_anticipado'
     });
     assert.equal(c.estado, 201, JSON.stringify(c.datos));
 
     // Saldo del ciclo que se cierra hoy: nace por un cobro anterior y queda
     // activo para que el cliente pueda entrenar a crédito.
     const anterior = await api.post('/api/packages', {
-      clientId: c.datos.id, totalSessions: 10, amount: 275, kind: 'monthly', dueOn: '2026-08-28'
+      clientId: c.datos.id, totalSessions: 10, amount: 275, kind: 'monthly', dueOn: cicloAnterior.inicio
     });
-    await api.post(`/api/invoices/${anterior.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-20' });
+    await api.post(`/api/invoices/${anterior.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: fechaAnterior });
     const entrenamiento = await api.post('/api/sessions/batch', {
       clientId: c.datos.id,
       startsAt: [new Date(Date.now() - 15 * 60_000).toISOString()],
@@ -851,16 +867,16 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     await api.delete(`/api/invoices/${anterior.datos.invoice_id}/permanent?force=true`);
 
     const cobro = await api.post('/api/invoices', {
-      clientId: c.datos.id, concept: 'Mensualidad septiembre', amount: 275, dueOn: '2026-09-28'
+      clientId: c.datos.id, concept: 'Mensualidad actual', amount: 275, dueOn: fechaReferencia
     });
     await api.post('/api/billing/recurring/generate', {});
 
     const saldos = (await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly');
-    const cierre = saldos.find(p => String(p.expires_on).slice(0, 10) === '2026-09-28');
-    const nuevo = saldos.find(p => String(p.expires_on).slice(0, 10) === '2026-10-28');
+    const cierre = saldos.find(p => String(p.expires_on).slice(0, 10) === cicloActual.inicio);
+    const nuevo = saldos.find(p => String(p.expires_on).slice(0, 10) === cicloActual.vence);
     assert.equal(cierre.origin_invoice_id, cobro.datos.id, 'el cobro queda ligado al saldo que cierra en el corte');
     assert.ok(nuevo && nuevo.origin_invoice_id === null, 'el saldo nuevo nace sin duplicar el cobro');
-    assert.equal(saldos.filter(p => String(p.expires_on).slice(0, 10) === '2026-09-28').length, 1,
+    assert.equal(saldos.filter(p => String(p.expires_on).slice(0, 10) === cicloActual.inicio).length, 1,
       'el cobro no abre un segundo saldo del ciclo que se cierra');
   });
 
