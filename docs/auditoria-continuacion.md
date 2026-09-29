@@ -105,8 +105,14 @@ Rama: `feat/filtros-estado-asistencia`
   estados seleccionados; no cambia el cálculo del backend.
 - Frontend actualizado de v204 a v205.
 
-Verificación pendiente: `npm run verify` y revisión de las combinaciones de
-casillas antes de publicar.
+### Publicación
+
+- `npm run verify` ✅
+- `main` actualizado con `6cd4d68`.
+- Frontend v205 publicado en Cloudflare Pages.
+- Producción verificada: `Activos` y `En pausa` aparecen seleccionados por
+  defecto; `Inactivos` aparece disponible pero desmarcado.
+- Railway `/health` respondió `status: ok`.
 
 ## Simplificación visual posterior — tabla de Asistencia
 
