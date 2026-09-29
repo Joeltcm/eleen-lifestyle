@@ -361,14 +361,6 @@ async function generateRecurringInvoices(ownerId?: string) {
         -- se resuelve por invoice_id para no borrar saldos familiares válidos.
         AND i.due_on >= current_date
         AND (${selectedOwner}::uuid IS NULL OR c.owner_id = ${selectedOwner}::uuid)
-        AND NOT EXISTS (
-          SELECT 1 FROM session_packages sp
-          WHERE sp.client_id = COALESCE(i.billed_for_client_id, i.client_id) AND sp.kind = 'monthly'
-            -- Estricto (>): un saldo del ciclo anterior que vence justo el día de
-            -- corte (expires_on = due_on) no debe bloquear el saldo del ciclo
-            -- nuevo. Sólo bloquea uno que se extiende más allá del corte.
-            AND sp.expires_on IS NOT NULL AND sp.expires_on > i.due_on
-        )
     ) q
     WHERE q.total_sessions > 0
     ORDER BY entrena, due_on
@@ -411,36 +403,61 @@ async function generateRecurringInvoices(ownerId?: string) {
         LIMIT 1
       `;
       if (yaProcesado) return;
-      const [existente] = await transaction`
+      // La asignación de un plan puede haber abierto ya este mismo ciclo sin
+      // cobro de origen. En ese caso se reutiliza y se enlaza al cobro. Sólo
+      // se considera el rango exacto del ciclo: un saldo de otro origen (por
+      // ejemplo, otra línea familiar) sigue siendo paralelo y no se absorbe.
+      const [saldoDelPlan] = await transaction`
         SELECT id FROM session_packages
         WHERE client_id = ${cobro.entrena} AND kind = 'monthly'
-          AND expires_on IS NOT NULL AND expires_on > ${soloFecha(cobro.due_on)}::date
-          AND origin_invoice_id = ${cobro.invoice_id}
-          AND status <> 'cancelled'
-        LIMIT 1
+          AND purchased_on = ${ciclo.inicio}::date
+          AND expires_on = ${ciclo.vence}::date
+          AND origin_invoice_id IS NULL AND status = 'active'
+        ORDER BY created_at DESC LIMIT 1 FOR UPDATE
       `;
-      if (existente) return;
-      const [abierto] = await transaction`
-      INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, origin_invoice_id, status)
-      VALUES (${cobro.entrena},
-        ${'Mensualidad · ' + rangoDelCiclo(ciclo.inicio, ciclo.vence)},
-        ${cobro.total_sessions}, ${cobro.amount}, ${ciclo.vence}::date, 'monthly', ${ciclo.inicio}::date,
-        -- Nace activo, y es la diferencia entre servir y no servir. Un saldo
-        -- 'pending' no suma en las sesiones disponibles ni se descuenta al
-        -- marcar la clase: el cliente entrenaba y su saldo no se movía. Se
-        -- activaba al confirmar el cobro asociado, pero éste no lo tiene —y
-        -- los cobros que vienen de Zoho no pasan por esa confirmación—, así
-        -- que se habría quedado dormido para siempre.
-        --
-        -- La mensualidad se paga por adelantado y el cobro ya está emitido:
-        -- las clases del ciclo son suyas. Si no lo fueran, el cumplimiento
-        -- mediría mal a quien sí entrenó, que es peor que cobrar tarde.
-        -- No anticipado: el saldo nuevo nace SIN cobro (se cobra en su corte).
-        ${noAnticipado ? null : cobro.invoice_id}, 'active')
-      RETURNING id
-      `;
-      await cobrarClasesYaDadas(transaction, abierto.id as string, cobro.entrena as string,
-      ciclo.vence, Number(cobro.total_sessions));
+      if (saldoDelPlan) {
+        // En no_anticipado el cobro actual paga el ciclo que cierra hoy, pero
+        // el saldo del ciclo nuevo ya lo abrió la asignación del plan. Se
+        // reutiliza sin enlazarlo a este cobro ni volver a cobrar sus clases.
+        if (!noAnticipado) {
+          await transaction`
+            UPDATE session_packages SET origin_invoice_id = ${cobro.invoice_id}
+            WHERE id = ${saldoDelPlan.id}
+          `;
+          return;
+        }
+      } else {
+        const [existente] = await transaction`
+          SELECT id FROM session_packages
+          WHERE client_id = ${cobro.entrena} AND kind = 'monthly'
+            AND expires_on IS NOT NULL AND expires_on > ${soloFecha(cobro.due_on)}::date
+            AND origin_invoice_id = ${cobro.invoice_id}
+            AND status <> 'cancelled'
+          LIMIT 1
+        `;
+        if (existente) return;
+        const [abierto] = await transaction`
+        INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on, kind, purchased_on, origin_invoice_id, status)
+        VALUES (${cobro.entrena},
+          ${'Mensualidad · ' + rangoDelCiclo(ciclo.inicio, ciclo.vence)},
+          ${cobro.total_sessions}, ${cobro.amount}, ${ciclo.vence}::date, 'monthly', ${ciclo.inicio}::date,
+          -- Nace activo, y es la diferencia entre servir y no servir. Un saldo
+          -- 'pending' no suma en las sesiones disponibles ni se descuenta al
+          -- marcar la clase: el cliente entrenaba y su saldo no se movía. Se
+          -- activaba al confirmar el cobro asociado, pero éste no lo tiene —y
+          -- los cobros que vienen de Zoho no pasan por esa confirmación—, así
+          -- que se habría quedado dormido para siempre.
+          --
+          -- La mensualidad se paga por adelantado y el cobro ya está emitido:
+          -- las clases del ciclo son suyas. Si no lo fueran, el cumplimiento
+          -- mediría mal a quien sí entrenó, que es peor que cobrar tarde.
+          -- No anticipado: el saldo nuevo nace SIN cobro (se cobra en su corte).
+          ${noAnticipado ? null : cobro.invoice_id}, 'active')
+        RETURNING id
+        `;
+        await cobrarClasesYaDadas(transaction, abierto.id as string, cobro.entrena as string,
+          ciclo.vence, Number(cobro.total_sessions));
+      }
       if (noAnticipado) {
       // El cobro salda el ciclo que se CERRÓ en el corte: se enlaza al saldo que
       // vence justo en due_on (el que el cliente acaba de terminar a crédito) para

@@ -688,6 +688,30 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
       'cada saldo conserva el cobro de su propia línea');
   });
 
+  test('reutiliza y enlaza el saldo abierto por el plan al cobrar el mismo ciclo', async () => {
+    const corte = partesPanama().d;
+    const plan = await api.post('/api/plans', { name: 'Plan con cobro posterior', billingModel: 'monthly', price: 175, sessionsIncluded: 4 });
+    const c = await api.post('/api/clients', { fullName: 'Plan sin origen de cobro', billingModel: 'single', standardPrice: 25, cutoffDay: corte });
+    await api.patch(`/api/clients/${c.datos.id}/plan`, { planId: plan.datos.id, cutoffDay: corte });
+
+    const ciclo = cicloCortePa(hoyPa(), corte);
+    const antes = (await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly');
+    assert.equal(antes.length, 1, 'asignar el plan abre un solo saldo del ciclo');
+    assert.equal(String(antes[0].purchased_on).slice(0, 10), ciclo.inicio);
+    assert.equal(String(antes[0].expires_on).slice(0, 10), ciclo.vence);
+    assert.equal(antes[0].origin_invoice_id, null, 'el saldo del plan aún no tiene cobro de origen');
+
+    const factura = await api.post('/api/invoices', {
+      clientId: c.datos.id, concept: 'Mensualidad del ciclo', amount: 175, dueOn: hoyPa()
+    });
+    await api.post('/api/billing/recurring/generate', {});
+
+    const saldos = (await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly');
+    assert.equal(saldos.length, 1, 'el cobro recurrente no debe duplicar el saldo del plan');
+    assert.equal(saldos[0].id, antes[0].id, 'se reutiliza el saldo que ya existía');
+    assert.equal(saldos[0].origin_invoice_id, factura.datos.id, 'el saldo queda enlazado al cobro recurrente');
+  });
+
   test('las 4 rutas usan el mismo ciclo de corte (misma fuente de verdad)', async () => {
     // Cierra el criterio de la auditoría: asignación de plan, paquete manual y
     // confirmación de pago producen el MISMO ciclo (inicio, expires y etiqueta).
