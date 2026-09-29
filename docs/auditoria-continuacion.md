@@ -105,6 +105,16 @@ Rama: `feat/filtro-cliente-facturacion-mobile`
   activo tiene mayor contraste.
 - Frontend actualizado de v207 a v208.
 
+### Publicación
+
+- `npm run verify` ✅
+- `main` actualizado a `d5e2e60`.
+- Frontend v208 publicado en Cloudflare Pages.
+- Despliegue verificado: `https://17fb9682.eileen-lifestyle.pages.dev` y dominio
+  principal sirviendo `version.json` v208, el filtro de cliente y la navegación
+  móvil de seis columnas.
+- Railway `/health` respondió `status: ok`.
+
 ## Rango personalizado en Asistencia
 
 Rama: `feat/rango-fechas-asistencia`
