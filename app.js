@@ -1,4 +1,4 @@
-const APP_VERSION = '210';
+const APP_VERSION = '211';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -976,7 +976,8 @@ function renderBilling() {
     });
     visiblesPaquetes.sort((a, b) => String(a.client).localeCompare(String(b.client), 'es'));
   }
-  document.getElementById('package-table').innerHTML = visiblesPaquetes.length ? visiblesPaquetes.map(pack => {
+  const packageTable = document.getElementById('package-table');
+  if (packageTable) packageTable.innerHTML = visiblesPaquetes.length ? visiblesPaquetes.map(pack => {
     if (pack.projected) {
       const clase = pack.estadoProy === 'Pendiente de pago' ? 'pending' : pack.estadoProy === 'Pagado' ? 'confirmed' : '';
       return `<tr class="pack-proyectada"><td data-label="Cliente"><b>${escapeHtml(pack.client)}</b></td><td data-label="Paquete">${escapeHtml(pack.label)}<br><small class="pack-origin">Proyectado · aún no abre</small></td><td data-label="Compradas">${pack.total || '—'}</td><td data-label="Usadas">0</td><td data-label="Disponibles"><strong class="session-balance">${pack.total || '—'}</strong></td><td data-label="Estado"><span class="payment-status ${clase}">${pack.estadoProy}</span><br><small>abre ${fechaCorta(pack.abre)}</small></td><td data-label="Cumplimiento">${cumplimientoCelda(pack)}</td><td data-label="Acciones"><small>—</small></td></tr>`;
@@ -3503,7 +3504,7 @@ function applyInvoicePackage(id) {
     // abrir otro. El caso típico es un paquete que quedó pendiente y en vez de
     // marcarlo pagado desde "Editar" se aplica otro cobro, dejando dos saldos.
     const vivo = (data.packages || []).find(p => p.clientId === destinatarioId && p.status !== 'expired' && p.kind === 'package');
-    if (vivo && !confirm(`${destinatarioNombre} ya tiene un paquete (${remainingSessions(vivo)} disponibles, ${vivo.status === 'pending' ? 'pendiente de pago' : 'activo'}).\n\nAbrir otro dejaría dos saldos. Si solo querías marcar el existente como pagado, cancela y usa Paquetes → Editar → Cobro: Pagado.\n\n¿Abrir un paquete nuevo de todas formas?`)) return;
+    if (vivo && !confirm(`${destinatarioNombre} ya tiene un paquete (${remainingSessions(vivo)} disponibles, ${vivo.status === 'pending' ? 'pendiente de pago' : 'activo'}).\n\nAbrir otro dejaría dos saldos. Si solo querías marcar el existente como pagado, cancela y corrige el cobro desde el expediente del cliente.\n\n¿Abrir un paquete nuevo de todas formas?`)) return;
     if (!confirmarGuardado(`Abrir un paquete de ${sesiones} clases para ${destinatarioNombre}\nVálido hasta ${datos.get('expiresOn')}`)) return;
     try {
       event.target.classList.add('loading-state');
@@ -3637,6 +3638,27 @@ function balancesSection(target, client) {
       button.onclick = () => renovarPaquete({ id: saldo.id, client: client.name, label: saldo.label, total: Number(saldo.total_sessions), used: Number(saldo.used_sessions), amount: Number(saldo.amount), kind: saldo.kind });
     });
   }).catch(error => { if (target.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; });
+}
+
+function clientBillingSection(client) {
+  const deuda = Number(client.deudaPendiente || 0);
+  const credito = Number(client.creditoPendiente || 0);
+  const facturas = data.invoices
+    .filter(invoice => invoice.status !== 'void' && (invoice.clientId === client.id || invoice.billedForClientId === client.id))
+    .sort((a, b) => String(b.due || b.issued || '').localeCompare(String(a.due || a.issued || '')))
+    .slice(0, 6);
+  const estado = deuda > 0
+    ? `<span class="payment-status pending">Morosidad · ${money.format(deuda)}</span>`
+    : '<span class="payment-status confirmed">Al día</span>';
+  const filas = facturas.length ? facturas.map(invoice => {
+    const saldo = Number(invoice.balance || 0);
+    const etiqueta = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'pending' ? (invoice.paidAmount > 0 ? 'Pago parcial' : 'Pendiente') : 'Anulada';
+    const detalle = invoice.billedForClientId === client.id && invoice.clientId !== client.id
+      ? `Pagador: ${invoice.client}`
+      : invoice.clientId !== client.id ? `Cubre a ${client.name}` : '';
+    return `<div class="client-invoice-row"><div><b>${escapeHtml(invoice.concept)}</b><small>${fechaCorta(invoice.due)} · ${money.format(invoice.amount)}${saldo > 0 ? ` · saldo ${money.format(saldo)}` : ''}${detalle ? ` · ${escapeHtml(detalle)}` : ''}</small></div><span class="payment-status ${invoice.status === 'confirmed' ? 'confirmed' : 'pending'}">${etiqueta}</span></div>`;
+  }).join('') : '<p class="empty">No hay cobros registrados para este cliente.</p>';
+  return `<p class="eyebrow" style="margin-top:20px">FACTURACIÓN Y COBROS</p><div class="client-billing-summary"><article><span>Estado</span><strong>${estado}</strong></article><article><span>Saldo pendiente</span><strong class="${deuda > 0 ? 'due' : ''}">${money.format(deuda)}</strong></article><article><span>Crédito disponible</span><strong class="${credito > 0 ? 'credit' : ''}">${money.format(credito)}</strong></article></div><div class="client-invoice-list">${filas}</div>`;
 }
 
 function reschedulePackage(saldo, client) {
@@ -3949,7 +3971,7 @@ function clientDetail(id) {
     : `${client.planName || 'Mensualidad'} · ${money.format(client.plan)} al mes · corte día ${client.cutoffDay}`;
   const box = document.createElement('div');
   const reviewNotice = client.inbodyReviews.length ? `<button class="secondary wide-button" id="review-inbody">Revisar ${client.inbodyReviews.length} evaluación${client.inbodyReviews.length > 1 ? 'es' : ''} pendiente${client.inbodyReviews.length > 1 ? 's' : ''}</button>` : '';
-  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${escapeHtml(client.name)}</h2><p style="color:#6f7b75;margin-top:-12px">${escapeHtml(client.goal)}<br>${commercialDescription}${notaPago}</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">CAMBIO DESDE LA MEDICIÓN ANTERIOR</p>${inbodyComparison(inbody)}<p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th>vs. anterior</th><th></th></tr></thead><tbody>${inbody.history.slice().reverse().map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td class="delta-cell">${reading.delta ? `${deltaChip('weight', reading.delta.weight)}${deltaChip('smm', reading.delta.smm)}${deltaChip('pbf', reading.delta.pbf)}` : '<span class="delta neutral">primera</span>'}</td><td>${reading.documentId ? `<button class="secondary session-use" data-view-inbody="${reading.documentId}" data-inbody-client="${client.id}">Ver reporte</button>` : ''}<button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">SALDO DE SESIONES</p><div id="client-balances"><p class="empty">Cargando saldos…</p></div><p class="eyebrow" style="margin-top:20px">ASISTENCIA MENSUAL</p><div id="client-attendance"><p class="empty">Calculando cumplimiento…</p></div><p class="eyebrow" style="margin-top:20px">LESIONES Y PADECIMIENTOS</p><div id="client-conditions"><p class="empty">Cargando expediente clínico…</p></div><p class="eyebrow" style="margin-top:20px">FOTOS DE PROGRESO</p><div id="client-photos"><p class="empty">Cargando fotos…</p></div><p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="client-report">Informe de cumplimiento</button><button class="secondary" id="portal-link">${client.portalActive ? 'Enviar enlace de acceso' : 'Activar portal con enlace'}</button><button class="secondary" id="portal-access">${client.portalActive ? 'Poner contraseña a mano' : 'Activar con contraseña'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
+  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${escapeHtml(client.name)}</h2><p style="color:#6f7b75;margin-top:-12px">${escapeHtml(client.goal)}<br>${commercialDescription}${notaPago}</p>${clientBillingSection(client)}${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">CAMBIO DESDE LA MEDICIÓN ANTERIOR</p>${inbodyComparison(inbody)}<p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th>vs. anterior</th><th></th></tr></thead><tbody>${inbody.history.slice().reverse().map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td class="delta-cell">${reading.delta ? `${deltaChip('weight', reading.delta.weight)}${deltaChip('smm', reading.delta.smm)}${deltaChip('pbf', reading.delta.pbf)}` : '<span class="delta neutral">primera</span>'}</td><td>${reading.documentId ? `<button class="secondary session-use" data-view-inbody="${reading.documentId}" data-inbody-client="${client.id}">Ver reporte</button>` : ''}<button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">SALDO DE SESIONES</p><div id="client-balances"><p class="empty">Cargando saldos…</p></div><p class="eyebrow" style="margin-top:20px">ASISTENCIA MENSUAL</p><div id="client-attendance"><p class="empty">Calculando cumplimiento…</p></div><p class="eyebrow" style="margin-top:20px">LESIONES Y PADECIMIENTOS</p><div id="client-conditions"><p class="empty">Cargando expediente clínico…</p></div><p class="eyebrow" style="margin-top:20px">FOTOS DE PROGRESO</p><div id="client-photos"><p class="empty">Cargando fotos…</p></div><p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="client-report">Informe de cumplimiento</button><button class="secondary" id="portal-link">${client.portalActive ? 'Enviar enlace de acceso' : 'Activar portal con enlace'}</button><button class="secondary" id="portal-access">${client.portalActive ? 'Poner contraseña a mano' : 'Activar con contraseña'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
   openModal(box); const pauseButton = document.createElement('button'); pauseButton.className = 'secondary wide-button'; pauseButton.textContent = client.pauseId ? 'Reanudar paquete' : 'Pausar paquete'; box.querySelector('.detail-actions').appendChild(pauseButton); pauseButton.onclick = async () => { try { if (client.pauseId) { await api(`/api/client-pauses/${client.pauseId}/resume`, { method: 'POST' }); toast('Paquete reactivado y vencimiento extendido'); await loadData(); renderAll(); modal.close(); clientDetail(client.id); } else pausePackageDialog(client); } catch (error) { toast(error.message, true); } }; document.getElementById('open-scan').onclick = () => inbodyImport(client); document.getElementById('edit-client-contact').onclick = () => editClient(client); document.getElementById('edit-client-plan').onclick = () => clientPlanEditor(client); document.getElementById('portal-access').onclick = () => portalAccessEditor(client); document.getElementById('portal-link').onclick = () => portalAccessLink(client); document.getElementById('client-report').onclick = () => complianceReport(client); document.getElementById('delete-client').onclick = () => deleteResource(`/api/clients/${client.id}`, `¿Eliminar a ${client.name}? También se eliminarán sus documentos, sesiones y cobros asociados.`, 'Cliente eliminado');
   if (inbody) {
     const summary = box.querySelector('.metrics');
@@ -4068,7 +4090,7 @@ document.querySelectorAll('.nav-link').forEach(link => link.addEventListener('cl
 document.querySelectorAll('[data-view-go]').forEach(button => button.addEventListener('click', event => {
   event.preventDefault(); navigate(button.dataset.viewGo);
 }));
-// Sub-pestañas del área financiera: Cobros / Finanzas / Planes / Paquetes / Gastos.
+// Sub-pestañas del área financiera: Cobros / Finanzas / Planes / Gastos.
 // Cada dataset en su propia pantalla, para no amontonar todo en una sola página
 // —sobre todo en el teléfono—. Finanzas y Gastos se pintan al abrir su pestaña.
 function activarSubtab(nombre) {

@@ -78,6 +78,61 @@ Rama: `fix/claridad-asistencia-pausas`
 - Cuando `Solo activos` está marcado, el resumen informa cuántos clientes en
   pausa quedaron fuera y cómo desactivar el filtro para revisarlos. Esto evita
   que un caso como Juan de Diego desaparezca sin explicación.
+
+## Ronda actual — flujo de cobro y expediente del cliente
+
+Rama: `feature/flujo-cobro-y-perfil`
+
+### Motivo
+
+La aplicación ya aplicaba automáticamente los cobros confirmados a la
+mensualidad o al paquete correspondiente, pero la pantalla no lo explicaba con
+suficiente claridad. Además, el panel operativo de **Control de paquetes**
+duplicaba la consulta de saldos y podía hacer pensar que era necesario aplicar
+manualmente un cobro después de confirmarlo.
+
+### Cambios importantes
+
+- `index.html`
+  - Se retiró la pestaña y tabla operativa **Paquetes** de Facturación.
+  - Se conservan los saldos y acciones dentro del expediente de cada cliente.
+  - Cobros muestra una nota visible: confirmar un pago completo o parcial abre
+    automáticamente el saldo; pagar tarde no bloquea las clases; el monto se
+    corrige desde **Editar pago**.
+- `app.js`
+  - El expediente del cliente incorpora estado de facturación, morosidad,
+    crédito disponible y los cobros recientes.
+  - Los cobros familiares muestran el pagador cuando el registro cubre a otro
+    beneficiario.
+  - Se mantiene la señal visual **Cobertura aplicada** / **Paquete aplicado**.
+  - La lógica de saldos existente se conserva; sólo se evita intentar pintar
+    una tabla cuyo panel ya no forma parte de la navegación.
+- `styles.css`
+  - Se añadieron estilos para la explicación del flujo, resumen de deuda y
+    crédito, y lista de cobros del expediente.
+- `app.js`, `sw.js`, `version.json`, `index.html`
+  - PWA actualizada a versión `211` para invalidar caché y mostrar los cambios.
+
+### Reglas de negocio preservadas
+
+- El cliente puede entrenar aunque el pago esté pendiente o se registre tarde.
+- Confirmar un cobro no crea un segundo movimiento manual: aplica el saldo de
+  forma idempotente según el plan, paquete o beneficiario familiar.
+- Editar pago queda disponible para corregir pagos parciales o montos declarados
+  por error.
+- Asistencia continúa siendo la consulta de sesiones, cumplimiento,
+  cancelaciones y reprogramaciones; Facturación conserva pagos y morosidad.
+
+### Auditoría posterior solicitada a Claude
+
+1. Confirmar en producción que la pestaña **Paquetes** ya no aparece en
+   Facturación y que los saldos siguen visibles en el perfil del cliente.
+2. Confirmar que un cobro confirmado o parcial muestra la aplicación correcta y
+   que **Editar pago** permite corregir el monto sin bloquear el entrenamiento.
+3. Revisar perfiles nuevos, mensuales, paquetes, clases individuales y casos
+   familiares (pagador/beneficiario), incluyendo dashboard y estado de cuenta.
+4. Verificar que la PWA sirve `app.js?v=211` y que los filtros de Asistencia
+   siguen activos por defecto.
 - Las pausas siguen fuera del cálculo de cumplimiento, conforme a la regla de
   negocio; no se cambió el cálculo del backend.
 - Frontend actualizado de v202 a v203.
