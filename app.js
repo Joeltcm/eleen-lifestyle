@@ -1,4 +1,4 @@
-const APP_VERSION = '216';
+const APP_VERSION = '217';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -4916,7 +4916,7 @@ function renderPortal() {
   if (periodLabel) periodLabel.textContent = period.kind === 'cutoff' ? `${period.label} · día ${client.billing_cutoff_day}` : period.label;
   if (periodDates) periodDates.textContent = `${fechaCorta(period.from)} al ${fechaCorta(period.to)}`;
   if (periodCutoffButton) {
-    periodCutoffButton.textContent = portalPeriodMode === 'cutoff' ? 'Corte seleccionado ✓' : 'Ver corte actual';
+    periodCutoffButton.textContent = portalPeriodMode === 'cutoff' ? 'Volver al mes' : 'Ver corte actual';
     periodCutoffButton.classList.toggle('active-filter', portalPeriodMode === 'cutoff');
   }
   if (periodPrevious) periodPrevious.textContent = portalPeriodMode === 'cutoff' ? '‹ Corte anterior' : '‹ Mes anterior';
@@ -5033,7 +5033,7 @@ document.getElementById('portal-period-month')?.addEventListener('change', event
   renderPortal();
 });
 document.getElementById('portal-period-cutoff')?.addEventListener('click', () => {
-  portalPeriodMode = 'cutoff';
+  portalPeriodMode = portalPeriodMode === 'cutoff' ? 'month' : 'cutoff';
   portalCutOffset = 0;
   renderPortal();
 });
