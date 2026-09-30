@@ -2803,7 +2803,6 @@ function financeDashboard(rango = 'meses:12', mount = null) {
 // Zoho entraron como facturas sueltas: el cliente pagó pero la app no le
 // reconoce sesiones disponibles.
 
-
 // Gastos: la otra mitad de las finanzas. En lista y no en tabla, por el
 // teléfono.
 function expensesManager(desde = null, hasta = null, mount = null) {
@@ -2990,42 +2989,6 @@ async function expenseCategories(rango) {
       try { await api(`/api/expense-categories/${b.dataset.borrarCategoria}`, { method: 'DELETE' }); toast('Categoría eliminada'); expenseCategories(rango); }
       catch (error) { toast(error.message, true); }
     };
-  });
-}
-
-// Editar un saldo desde el control de paquetes. Antes sólo se podía borrar —y
-// sólo si no tenía uso—, así que un error al teclear las sesiones obligaba a
-// rehacer el cobro entero.
-function packageEditor(pack) {
-  const box = document.createElement('div');
-  box.innerHTML = `<p class="eyebrow">CONTROL DE PAQUETES</p><h2>Editar saldo</h2>
-    <p class="form-summary">${escapeHtml(pack.client)}</p>
-    <form id="paquete-form">
-      <label>Etiqueta<input name="label" required minlength="2" maxlength="120" value="${escapeHtml(pack.label)}" /></label>
-      <div class="form-row">
-        <label>Sesiones contratadas<input name="totalSessions" type="number" min="1" max="400" required value="${pack.total}" /></label>
-        <label>Sesiones usadas<input name="usedSessions" type="number" min="0" max="400" required value="${pack.used}" /></label>
-      </div>
-      <label>Vence<input name="expiresOn" type="date" value="${dateOnly(pack.expiresOn)}" /><small>Vacío = sin vencimiento.</small></label>
-      <label>Cobro<select name="markPaid"><option value="paid"${pack.status !== 'pending' ? ' selected' : ''}>Pagado</option><option value="pending"${pack.status === 'pending' ? ' selected' : ''}>Pendiente de pago</option></select><small>Márcalo pagado si el dinero ya entró por otro cobro (p. ej. Zoho). No genera un cobro nuevo.</small></label>
-      <button class="primary wide-button">Guardar cambios</button>
-    </form>`;
-  openModal(box);
-  document.getElementById('paquete-form').addEventListener('submit', async event => {
-    event.preventDefault();
-    const values = new FormData(event.target);
-    const total = Number(values.get('totalSessions'));
-    const usadas = Number(values.get('usedSessions'));
-    // Se avisa aquí además de en el servidor: es un error de dedo frecuente y
-    // no hace falta un viaje a la API para decirlo.
-    if (usadas > total) return toast('Las sesiones usadas no pueden superar las contratadas', true);
-    try {
-      event.target.classList.add('loading-state');
-      await api(`/api/packages/${pack.id}`, { method: 'PATCH', body: {
-        label: values.get('label'), totalSessions: total, usedSessions: usadas, expiresOn: values.get('expiresOn') || null, markPaid: values.get('markPaid') === 'paid'
-      } });
-      await loadData(); renderAll(); modal.close(); toast('Saldo actualizado');
-    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
 
