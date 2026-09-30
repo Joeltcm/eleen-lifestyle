@@ -1,4 +1,4 @@
-const APP_VERSION = '219';
+const APP_VERSION = '220';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -5003,9 +5003,13 @@ function renderPortal() {
   const ownSessions = new Map(portalData.sessions.map(item => [item.id, portalSession(item)]));
   renderPortalCalendar(ownSessions);
   document.getElementById('portal-plan').innerHTML = `<span class="commercial-label ${client.billing_model === 'package' ? 'package-label' : ''}">${client.billing_model === 'package' ? 'Paquete' : 'Mensualidad'}</span><div><h3>${escapeHtml(client.plan_name || 'Plan personalizado')}</h3><p>${money.format(Number(client.standard_price))}${client.billing_model === 'monthly' ? ` · corte día ${client.billing_cutoff_day}` : ` · ${client.sessions_included || 0} sesiones`}</p></div>`;
-  const pendingInvoices = periodInvoices.filter(invoice => invoice.status === 'pending');
+  // La vista Pagos es un historial independiente del período del dashboard:
+  // aquí deben aparecer todos los cobros del cliente, no sólo los del mes o
+  // corte que esté seleccionado para las métricas.
+  const historyInvoices = (portalData.invoices || []).slice().sort((a, b) => new Date(b.issued_on || b.due_on) - new Date(a.issued_on || a.due_on));
+  const pendingInvoices = historyInvoices.filter(invoice => invoice.status === 'pending');
   document.getElementById('portal-pending-payment').innerHTML = pendingInvoices.length ? `<div class="portal-payment-alert"><strong>Pago pendiente</strong><span>${pendingInvoices.length === 1 ? `Tienes 1 factura pendiente por ${money.format(Number(pendingInvoices[0].balance || pendingInvoices[0].amount))}.` : `Tienes ${pendingInvoices.length} facturas pendientes por ${money.format(pendingInvoices.reduce((sum, invoice) => sum + Number(invoice.balance || invoice.amount), 0))}.`}</span></div>` : '<div class="portal-payment-ok">No tienes pagos pendientes.</div>';
-  const invoicesSorted = periodInvoices.slice().sort((a, b) => new Date(b.issued_on || b.due_on) - new Date(a.issued_on || a.due_on));
+  const invoicesSorted = historyInvoices;
   const invoiceDate = invoice => { const raw = invoice.issued_on || invoice.due_on; return raw ? new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeZone: 'America/Panama' }).format(new Date(`${String(raw).slice(0, 10)}T12:00:00-05:00`)) : '—'; };
   document.getElementById('portal-invoices').innerHTML = invoicesSorted.length ? invoicesSorted.map(invoice => `<tr><td><b>${escapeHtml(invoice.concept)}</b>${invoice.invoice_number ? `<br><small>${escapeHtml(invoice.invoice_number)}</small>` : ''}</td><td>${invoiceDate(invoice)}</td><td>${money.format(Number(invoice.amount))}</td><td><span class="payment-status ${invoice.status}">${invoice.status === 'confirmed' ? 'Pagada' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'}</span></td><td><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoice_number || invoice.id.slice(0, 8))}">Ver PDF</button></td></tr>`).join('') : '<tr><td colspan="5" class="empty">No hay facturas registradas.</td></tr>';
   const portalCount = document.getElementById('portal-notification-count'); portalCount.textContent = portalData.notifications.length; portalCount.hidden = !portalData.notifications.length;
