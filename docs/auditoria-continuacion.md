@@ -511,3 +511,16 @@ Rama: `feature/flujo-cobro-y-perfil`
   en cero.
 - Frontend actualizado a v218 y publicado en producción; `version.json`
   devuelve `218`.
+
+### Historial completo y coherencia visual del portal
+
+- La vista `Pagos` del portal dejó de limitarse al período seleccionado y ahora
+  muestra el historial completo de cobros del cliente, ordenado del más reciente
+  al más antiguo. El aviso de pago pendiente también considera todo el historial.
+- Rutinas, Agenda, Pagos e Informes ahora comparten la jerarquía de Progreso:
+  títulos Fraunces, textos DM Sans, tarjetas blancas con el mismo radio y sombra,
+  controles táctiles consistentes y mejor contraste en tablas, agenda y reportes.
+- Se añadieron títulos visibles por vista (`Mis rutinas`, `Mi agenda`, `Pagos e
+  historial` y `Mis informes`) sin cambiar los flujos ni las métricas.
+- Frontend actualizado localmente a v221. La suite completa queda en `214/214`;
+  todavía no se publicó este cambio.
