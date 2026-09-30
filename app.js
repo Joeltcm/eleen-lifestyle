@@ -1,4 +1,4 @@
-const APP_VERSION = '227';
+const APP_VERSION = '228';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -355,7 +355,7 @@ const avanceDelMes = clientId => {
 // hasta ahora los dos se veían igual: como una agenda con huecos.
 const movimientosDelCiclo = client => {
   const partes = [];
-  if (client.reprogramaciones) partes.push(`${client.reprogramaciones} reprogramada${client.reprogramaciones === 1 ? '' : 's'}`);
+  if (client.reprogramaciones) partes.push(`${client.reprogramaciones} reprogramación${client.reprogramaciones === 1 ? '' : 'es'} pedida${client.reprogramaciones === 1 ? '' : 's'} en el ciclo`);
   if (client.canceladas) partes.push(`${client.canceladas} perdida${client.canceladas === 1 ? '' : 's'}`);
   if (client.canceladasPorElla) partes.push(`${client.canceladasPorElla} cancelada${client.canceladasPorElla === 1 ? '' : 's'} por ti`);
   // El crédito pendiente va aparte del "este mes": no caduca con el ciclo,
@@ -506,7 +506,7 @@ function renderDashboard() {
   const noInbody = data.clients.filter(client => !client.inbody && clientesActivos.has(client.id)).map(client => `<div class="alert-item"><b>${escapeHtml(client.name)}</b><span>Sin evaluación InBody registrada.</span></div>`).join('');
   const cobrosPendientes = data.invoices.filter(item => item.status === 'pending' && item.source !== 'zoho_invoice' && clientesActivos.has(item.clientId)).length;
   document.getElementById('alerts').innerHTML = `${noInbody || '<div class="alert-item"><b>Todo al día</b><span>No hay alertas de seguimiento.</span></div>'}<div class="alert-item"><b>${cobrosPendientes} ${cobrosPendientes === 1 ? 'cobro pendiente' : 'cobros pendientes'}</b><span>Revisa pagos y comprobantes.</span></div>`;
-  document.getElementById('compliance-list').innerHTML = data.compliance.clients.length ? data.compliance.clients.map(client => `<div class="compliance-row"><span class="initials">${escapeHtml(initials(client.name))}</span><div><b>${escapeHtml(client.name)}</b><small>${client.completed} de ${client.activities} actividades con avance${client.late ? ` · ${client.late} fuera de fecha` : ''}${client.missed ? ` · ${client.missed} sin hacer` : ''}${avanceDelMes(client.clientId)}</small><span class="compliance-track"><i style="width:${client.compliancePercent}%"></i></span></div><strong>${client.compliancePercent}%</strong></div>`).join('') : '<p class="empty">Aún no hay entrenamientos vencidos en este período.</p>';
+  document.getElementById('compliance-list').innerHTML = data.compliance.clients.length ? data.compliance.clients.map(client => `<div class="compliance-row"><span class="initials">${escapeHtml(initials(client.name))}</span><div><b>${escapeHtml(client.name)}</b><small>${client.completed} de ${client.activities} clases${client.missed ? ` · ${client.missed} sin hacer` : ''}${avanceDelMes(client.clientId)}</small><span class="compliance-track"><i style="width:${client.compliancePercent}%"></i></span></div><strong>${client.compliancePercent}%</strong></div>`).join('') : '<p class="empty">Aún no hay clases vencidas en este período.</p>';
   const notificationCount = document.getElementById('notification-count'); notificationCount.textContent = data.notifications.length; notificationCount.hidden = !data.notifications.length;
 }
 // Los inactivos aparte y al final. Mezclados alfabéticamente obligaban a leer
@@ -1841,7 +1841,7 @@ function cancelSessionDialog(sesion) {
   const preguntarQuien = () => {
     const historial = cliente && (cliente.reprogramaciones || cliente.canceladas)
       ? `<p class="conflict-warn">Este mes lleva ${[
-          cliente.reprogramaciones ? `<b>${cliente.reprogramaciones}</b> reprogramada${cliente.reprogramaciones === 1 ? '' : 's'}` : null,
+          cliente.reprogramaciones ? `<b>${cliente.reprogramaciones}</b> reprogramación${cliente.reprogramaciones === 1 ? '' : 'es'} pedida${cliente.reprogramaciones === 1 ? '' : 's'}` : null,
           cliente.canceladas ? `<b>${cliente.canceladas}</b> perdida${cliente.canceladas === 1 ? '' : 's'}` : null
         ].filter(Boolean).join(' y ')}.</p>` : '';
     box.innerHTML = `${cabecera}${historial}
@@ -3591,9 +3591,10 @@ async function recalculateCreditInvoice(id) {
     const preview = await api(`/api/invoices/${id}/recalculate`, { method: 'POST', body: { apply: false } });
     const cambio = Number(preview.difference || 0);
     const signo = cambio > 0 ? '+' : '';
+    const estado = value => value === 'confirmed' ? 'Confirmada' : value === 'pending' ? 'Pendiente' : value === 'void' ? 'Anulada' : String(value || '—');
     const mensaje = `Recalcular factura de crédito\n\n` +
-      `Antes: ${money.format(Number(preview.previousAmount || 0))} · ${preview.previousStatus}\n` +
-      `Después: ${money.format(Number(preview.newAmount || 0))} · ${preview.newStatus}\n` +
+      `Antes: ${money.format(Number(preview.previousAmount || 0))} · ${estado(preview.previousStatus)}\n` +
+      `Después: ${money.format(Number(preview.newAmount || 0))} · ${estado(preview.newStatus)}\n` +
       `Diferencia: ${signo}${money.format(cambio)}\n\n` +
       (cambio > 0
         ? 'Si aumenta, quedará pendiente por la diferencia.'
@@ -3870,26 +3871,26 @@ function renderComplianceReport(seleccion) {
   api(`/api/compliance/report?${params.toString()}`).then(informe => {
     if (!target?.isConnected || !modal.open) return;
     ultimoInformeAsistencia = informe;
-    const comparativa = informe.clients.map(c => `<tr><td data-label="Cliente"><b>${escapeHtml(c.name)}</b><br><small>${fechaCorta(c.from)} – ${fechaCorta(c.to)}</small></td><td data-label="%">${pctChip(c.compliancePercent)}</td><td data-label="Act.">${c.activities}</td><td data-label="Cumpl.">${c.completed}</td><td data-label="Tarde">${c.late}</td><td data-label="Sin hacer">${c.missed}</td></tr>`).join('');
+    const comparativa = informe.clients.map(c => `<tr><td data-label="Cliente"><b>${escapeHtml(c.name)}</b><br><small>${fechaCorta(c.from)} – ${fechaCorta(c.to)}</small></td><td data-label="%">${pctChip(c.compliancePercent)}</td><td data-label="Clases">${c.activities}</td><td data-label="Cumpl.">${c.completed}</td><td data-label="Sin hacer">${c.missed}</td></tr>`).join('');
     const detalle = informe.clients.map(c => {
-      const filas = c.monthly.length ? c.monthly.map(m => `<tr><td>${attendanceMonthLabel(m.month)}</td><td>${m.activities || '—'}</td><td>${m.completed || '—'}</td><td>${m.late || '—'}</td><td>${m.missed || '—'}</td><td>${pctChip(m.compliancePercent)}</td></tr>`).join('') : '<tr><td colspan="6" class="empty">Sin actividad en el período.</td></tr>';
-      return `<div class="report-client-detail"><h3>${escapeHtml(c.name)}</h3>${c.monthly.length ? complianceChartSvg(c.monthly) : ''}<div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Mes</th><th>Act.</th><th>Cumpl.</th><th>Tarde</th><th>Sin hacer</th><th>%</th></tr></thead><tbody>${filas}</tbody></table></div></div>`;
+      const filas = c.monthly.length ? c.monthly.map(m => `<tr><td>${attendanceMonthLabel(m.month)}</td><td>${m.activities || '—'}</td><td>${m.completed || '—'}</td><td>${m.missed || '—'}</td><td>${pctChip(m.compliancePercent)}</td></tr>`).join('') : '<tr><td colspan="5" class="empty">Sin actividad en el período.</td></tr>';
+      return `<div class="report-client-detail"><h3>${escapeHtml(c.name)}</h3>${c.monthly.length ? complianceChartSvg(c.monthly) : ''}<div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Mes</th><th>Clases</th><th>Cumpl.</th><th>Sin hacer</th><th>%</th></tr></thead><tbody>${filas}</tbody></table></div></div>`;
     }).join('');
     target.innerHTML = `<p class="eyebrow" style="margin-top:8px">COMPARATIVA ${informe.mode === 'cycle' ? '· CICLO ACTUAL' : '· RANGO'}</p>
-      <div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Cliente</th><th>%</th><th>Act.</th><th>Cumpl.</th><th>Tarde</th><th>Sin hacer</th></tr></thead><tbody>${comparativa}</tbody></table></div>
+      <div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Cliente</th><th>%</th><th>Clases</th><th>Cumpl.</th><th>Sin hacer</th></tr></thead><tbody>${comparativa}</tbody></table></div>
       <button class="secondary wide-button" id="report-csv" style="margin-top:12px">Exportar CSV ↓</button>
       <p class="eyebrow" style="margin-top:22px">DETALLE MES A MES</p>${detalle}
-      <p class="section-note">Cumplir tarde cuenta 100% (se marca "fuera de fecha"); solo lo que nunca se hizo cuenta 0%. Las sesiones de un cliente en pausa no cuentan.</p>`;
+      <p class="section-note">Las clases pendientes, futuras, pausadas y canceladas por la entrenadora no forman parte de la métrica.</p>`;
     document.getElementById('report-csv').onclick = () => exportarInformeCsv();
   }).catch(error => { if (target?.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; });
 }
 function exportarInformeCsv() {
   if (!ultimoInformeAsistencia) return;
   const esc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
-  const lineas = [['Cliente', 'Desde', 'Hasta', 'Mes', 'Actividades', 'Completadas', 'Fuera de fecha', 'Sin hacer', '% cumplimiento']];
+  const lineas = [['Cliente', 'Desde', 'Hasta', 'Mes', 'Clases', 'Completadas', 'Sin hacer', '% cumplimiento']];
   for (const c of ultimoInformeAsistencia.clients) {
-    lineas.push([c.name, c.from, c.to, 'TOTAL', c.activities, c.completed, c.late, c.missed, c.compliancePercent ?? '']);
-    for (const m of c.monthly) lineas.push([c.name, c.from, c.to, m.month, m.activities, m.completed, m.late, m.missed, m.compliancePercent ?? '']);
+    lineas.push([c.name, c.from, c.to, 'TOTAL', c.activities, c.completed, c.missed, c.compliancePercent ?? '']);
+    for (const m of c.monthly) lineas.push([c.name, c.from, c.to, m.month, m.activities, m.completed, m.missed, m.compliancePercent ?? '']);
   }
   const csv = '﻿' + lineas.map(f => f.map(esc).join(',')).join('\r\n');
   const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
@@ -4964,8 +4965,9 @@ function portalAttendanceReport(sessions = portalPeriodSessions()) {
     || (item.status === 'cancelled' && item.cancellation_kind === 'not_rescheduled' && (item.cancelled_by || 'client') === 'client')).length;
   const reprogrammed = past.filter(item => item.reprogramada).length;
   const pending = past.filter(item => item.status === 'scheduled').length;
-  const denominator = completed + cancelled;
-  const percent = denominator ? Math.round(completed / denominator * 100) : 0;
+  const denominator = measured.length;
+  const points = measured.reduce((sum, item) => sum + (item.status === 'completed' ? Number(item.completion_percent || 0) : 0), 0);
+  const percent = denominator ? Math.round(points / denominator) : 0;
   const cancelledPercent = denominator ? Math.round(cancelled / denominator * 100) : 0;
   const rows = past.slice().sort((a, b) => new Date(b.starts_at) - new Date(a.starts_at)).slice(0, 30).map(item => {
     const estado = item.reprogramada ? 'Reprogramada' : item.credit_charge ? 'Cancelación cobrada' : item.status === 'completed' ? 'Asistió' : item.status === 'cancelled' || item.status === 'no_show' ? 'Cancelada' : 'Pendiente';

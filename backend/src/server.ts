@@ -875,7 +875,10 @@ app.get('/api/clients', { preHandler: requireStaff }, async request => {
   return sql`
     SELECT c.*, p.name AS plan_name, p.sessions_included, p.validity_days,
       COALESCE((SELECT sum(total_sessions - used_sessions) FROM session_packages sp WHERE sp.client_id = c.id AND sp.status = 'active' AND (sp.expires_on IS NULL OR sp.expires_on >= current_date)), 0)::integer AS available_sessions,
-      -- Movimientos del ciclo en curso, separados. Cancelar y perder la clase
+      -- Movimientos del ciclo en curso, separados. Este contador cuenta los
+      -- eventos por sr.created_at (cuando se pidió la reprogramación), mientras
+      -- que Asistencia cuenta sesiones por starts_at. No son la misma métrica.
+      -- Cancelar y perder la clase
       -- no es lo mismo que pedir otro día: lo primero mide el cumplimiento del
       -- cliente, lo segundo el desgaste de la agenda. Juntos no dicen nada.
       (SELECT count(*)::int FROM session_reschedules sr
@@ -4619,7 +4622,7 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async (request,
     WITH scoped AS (
       SELECT c.id AS client_id,
         s.status AS session_status, s.cancellation_kind, s.cancelled_by,
-        COALESCE(s.completion_percent, 0)::int AS completion_percent,
+        ${complianceCompletionExpression()} AS completion_percent,
         (s.starts_at AT TIME ZONE 'America/Panama')::date AS session_day,
         (
           EXISTS (
@@ -4874,8 +4877,7 @@ async function complianceRows(ownerId: string, period: z.infer<typeof reportPeri
     SELECT c.id AS client_id, c.full_name, s.starts_at AS occurred_at, 'Sesión'::text AS source,
       COALESCE(r.title, CASE WHEN s.quick_logged THEN 'Entrenamiento presencial' ELSE 'Evaluación / seguimiento' END) AS activity,
       CASE WHEN s.status IN ('cancelled', 'no_show') THEN 'missed' ELSE s.status END AS status,
-      ${complianceCompletionExpression()} AS completion_percent,
-      false AS late
+      ${complianceCompletionExpression()} AS completion_percent
     FROM sessions s
     JOIN clients c ON c.id = s.client_id
     LEFT JOIN routines r ON r.id = s.routine_id
@@ -4890,25 +4892,21 @@ async function complianceRows(ownerId: string, period: z.infer<typeof reportPeri
 app.get('/api/compliance/summary', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser; const query = z.object({ period: reportPeriodSchema.default('week') }).parse(request.query);
   const rows = await complianceRows(auth.sub, query.period);
-  const clients = new Map<string, { clientId: string; name: string; total: number; sum: number; completed: number; late: number; missed: number }>();
+  const clients = new Map<string, { clientId: string; name: string; total: number; sum: number; completed: number; missed: number }>();
   for (const row of rows) {
-    const current = clients.get(row.client_id) || { clientId: row.client_id, name: row.full_name, total: 0, sum: 0, completed: 0, late: 0, missed: 0 };
+    const current = clients.get(row.client_id) || { clientId: row.client_id, name: row.full_name, total: 0, sum: 0, completed: 0, missed: 0 };
     current.total += 1; current.sum += Number(row.completion_percent);
     if (Number(row.completion_percent) > 0) current.completed += 1;
-    if (row.late) current.late += 1;
     if (row.status === 'missed') current.missed += 1;
     clients.set(row.client_id, current);
   }
   const clientSummaries = [...clients.values()].map(item => ({
     clientId: item.clientId, name: item.name, activities: item.total, completed: item.completed,
-    // Puntualidad aparte del porcentaje: quien cumple siempre tarde no debe
-    // verse igual que quien no cumple, pero tampoco igual que quien es puntual.
-    late: item.late, missed: item.missed,
+    missed: item.missed,
     compliancePercent: item.total ? Math.round(item.sum / item.total) : 0
   })).sort((a, b) => b.compliancePercent - a.compliancePercent || a.name.localeCompare(b.name));
   return {
     period: query.period, activities: rows.length,
-    late: rows.filter(row => row.late).length,
     missed: rows.filter(row => row.status === 'missed').length,
     compliancePercent: rows.length ? Math.round(rows.reduce((sum, row) => sum + Number(row.completion_percent), 0) / rows.length) : 0,
     clients: clientSummaries
@@ -4928,11 +4926,11 @@ async function complianceMonthly(ownerId: string, clientId: string | undefined, 
   desde.setUTCMonth(desde.getUTCMonth() - (months - 1));
   const filas = await complianceRows(ownerId, 'year', clientId, desde.toISOString());
 
-  const porMes = new Map<string, { month: string; activities: number; completed: number; late: number; missed: number; suma: number }>();
+  const porMes = new Map<string, { month: string; activities: number; completed: number; missed: number; suma: number }>();
   for (let i = 0; i < months; i += 1) {
     const fecha = new Date(Date.UTC(desde.getUTCFullYear(), desde.getUTCMonth() + i, 1));
     const clave = `${fecha.getUTCFullYear()}-${String(fecha.getUTCMonth() + 1).padStart(2, '0')}`;
-    porMes.set(clave, { month: clave, activities: 0, completed: 0, late: 0, missed: 0, suma: 0 });
+    porMes.set(clave, { month: clave, activities: 0, completed: 0, missed: 0, suma: 0 });
   }
   for (const fila of filas) {
     const fecha = new Date(fila.occurred_at as string);
@@ -4941,14 +4939,13 @@ async function complianceMonthly(ownerId: string, clientId: string | undefined, 
     if (!mes) continue;
     mes.activities += 1; mes.suma += Number(fila.completion_percent);
     if (Number(fila.completion_percent) > 0) mes.completed += 1;
-    if (fila.late) mes.late += 1;
     if (fila.status === 'missed') mes.missed += 1;
   }
   // Un mes sin actividad devuelve null, no 0%: no es lo mismo "no entrenó
   // nada" que "no había nada que medir", y pintar un cero hundiría la gráfica
   // por meses en los que el cliente ni siquiera estaba activo.
   return [...porMes.values()].map(mes => ({
-    month: mes.month, activities: mes.activities, completed: mes.completed, late: mes.late, missed: mes.missed,
+    month: mes.month, activities: mes.activities, completed: mes.completed, missed: mes.missed,
     compliancePercent: mes.activities ? Math.round(mes.suma / mes.activities) : null
   }));
 }
@@ -4968,7 +4965,6 @@ app.get('/api/compliance/monthly', { preHandler: requireStaff }, async (request,
     clientId: query.clientId || null,
     promedio: conDatos.length ? Math.round(conDatos.reduce((suma, mes) => suma + (mes.compliancePercent || 0), 0) / conDatos.length) : null,
     totalActividades: timeline.reduce((suma, mes) => suma + mes.activities, 0),
-    totalTardias: timeline.reduce((suma, mes) => suma + mes.late, 0),
     totalIncumplidas: timeline.reduce((suma, mes) => suma + mes.missed, 0)
   };
 });
@@ -4976,16 +4972,15 @@ app.get('/api/compliance/monthly', { preHandler: requireStaff }, async (request,
 // Informe de asistencia flexible: 1 a 4 clientes (o todos), por rango de fechas
 // propio o por el ciclo de facturación vigente de cada cliente. Devuelve una
 // comparativa (un resumen por cliente) y el detalle mes a mes de cada uno.
-type FilaCumplimiento = { client_id: unknown; occurred_at: unknown; completion_percent: unknown; late: unknown; status: unknown };
+type FilaCumplimiento = { client_id: unknown; occurred_at: unknown; completion_percent: unknown; status: unknown };
 function resumenCumplimiento(filas: FilaCumplimiento[]) {
-  let activities = 0, completed = 0, late = 0, missed = 0, suma = 0;
+  let activities = 0, completed = 0, missed = 0, suma = 0;
   for (const f of filas) {
     activities += 1; suma += Number(f.completion_percent);
     if (Number(f.completion_percent) > 0) completed += 1;
-    if (f.late) late += 1;
     if (f.status === 'missed') missed += 1;
   }
-  return { activities, completed, late, missed, compliancePercent: activities ? Math.round(suma / activities) : null };
+  return { activities, completed, missed, compliancePercent: activities ? Math.round(suma / activities) : null };
 }
 function cumplimientoPorMes(filas: FilaCumplimiento[]) {
   const meses = new Map<string, FilaCumplimiento[]>();
@@ -5047,7 +5042,6 @@ app.get('/api/compliance/report.pdf', { preHandler: requireStaff }, async (reque
   const resumen = {
     promedio: conDatos.length ? Math.round(conDatos.reduce((suma, mes) => suma + (mes.compliancePercent || 0), 0) / conDatos.length) : null,
     totalActividades: timeline.reduce((suma, mes) => suma + mes.activities, 0),
-    totalTardias: timeline.reduce((suma, mes) => suma + mes.late, 0),
     totalIncumplidas: timeline.reduce((suma, mes) => suma + mes.missed, 0)
   };
   const nombre = client ? String(client.full_name).replace(/\s+/g, '-').toLowerCase() : 'todos';

@@ -291,15 +291,14 @@ export function compliancePdf(client: PdfRecord | null, resumen: PdfRecord, time
   return pdfBuffer(document => {
     const desde = timeline[0]?.month || '';
     const hasta = timeline[timeline.length - 1]?.month || '';
-    brandHeader(document, 'Informe de cumplimiento', `${desde} al ${hasta} · Entrenamientos y rutinas`);
+    brandHeader(document, 'Informe de cumplimiento', `${desde} al ${hasta} · Clases`);
     infoPair(document, 'Cliente', clean(client ? client.full_name : 'Todos los clientes'), 42, document.y, 245);
     infoPair(document, 'Emitido', date(new Date()), 310, document.y, 245);
     document.y += 48;
 
     summaryBoxes(document, [
       { label: 'Cumplimiento promedio', value: resumen.promedio === null ? 'Sin datos' : `${resumen.promedio}%` },
-      { label: 'Actividades', value: String(resumen.totalActividades) },
-      { label: 'Fuera de fecha', value: String(resumen.totalTardias) },
+      { label: 'Clases', value: String(resumen.totalActividades) },
       { label: 'Sin hacer', value: String(resumen.totalIncumplidas) }
     ]);
 
@@ -309,9 +308,8 @@ export function compliancePdf(client: PdfRecord | null, resumen: PdfRecord, time
 
     table(document, [
       { label: 'Mes', key: 'month', width: 96 },
-      { label: 'Actividades', key: 'activities', width: 90, align: 'right' },
+      { label: 'Clases', key: 'activities', width: 90, align: 'right' },
       { label: 'Cumplidas', key: 'completed', width: 90, align: 'right' },
-      { label: 'Fuera de fecha', key: 'late', width: 100, align: 'right' },
       { label: 'Sin hacer', key: 'missed', width: 80, align: 'right' },
       { label: 'Cumplimiento', key: 'compliancePercent', width: 95, align: 'right',
         format: value => (value === null ? 'Sin actividad' : `${value}%`) }
@@ -319,7 +317,7 @@ export function compliancePdf(client: PdfRecord | null, resumen: PdfRecord, time
 
     document.moveDown(1);
     document.font('Helvetica').fontSize(8).fillColor(colors.muted).text(
-      'Cumplir fuera de fecha cuenta como cumplido. Sólo lo que venció sin hacerse cuenta como incumplimiento.',
+      'Las clases pendientes, futuras, pausadas y canceladas por la entrenadora no forman parte de la métrica.',
       42, document.y, { width: 511 });
   });
 }

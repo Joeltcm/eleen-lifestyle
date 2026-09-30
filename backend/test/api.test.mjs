@@ -1,9 +1,11 @@
 import test, { after, before, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import postgres from 'postgres';
 import { CREDENCIALES, SETUP_TOKEN, cliente, levantar } from './harness.mjs';
 
 let servidor;
 let api;
+let db;
 
 // Fechas de NEGOCIO en horario de Panamá. La BD corre en America/Panama, así
 // que "hoy"/"este mes" deben construirse en esa zona: hacerlo con toISOString()
@@ -48,9 +50,10 @@ const cicloCortePa = (referencia, cutoff) => {
 before(async () => {
   servidor = await levantar();
   api = cliente(servidor.base);
+  db = postgres(servidor.databaseUrl, { connection: { TimeZone: 'America/Panama' } });
 }, { timeout: 90_000 });
 
-after(async () => { await servidor?.parar(); });
+after(async () => { await db?.end({ timeout: 1 }).catch(() => {}); await servidor?.parar(); });
 
 describe('migraciones y arranque', () => {
   test('la base vacía queda utilizable y el servicio responde', async () => {
@@ -942,6 +945,14 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     const normalInvoice = await api.post('/api/invoices', { clientId: normal.datos.id, concept: 'Clase suelta', amount: 25, dueOn: hoyPa() });
     assert.equal((await api.post(`/api/invoices/${normalInvoice.datos.id}/recalculate`, {})).estado, 404,
       'la acción sólo existe para facturas locales de crédito');
+
+    const [otroDueño] = await db`INSERT INTO users (email, password_hash, full_name, role) VALUES ('otro-dueño@prueba.test', 'no-se-usara', 'Otro dueño', 'admin') RETURNING id`;
+    const [clienteAjeno] = await db`INSERT INTO clients (owner_id, full_name, billing_model, standard_price, billing_cutoff_day, payment_mode, credit_session_price)
+      VALUES (${otroDueño.id}, 'Cliente de otro dueño', 'monthly', 25, 15, 'no_anticipado', 25) RETURNING id`;
+    const [facturaAjena] = await db`INSERT INTO invoices (client_id, concept, amount, due_on)
+      VALUES (${clienteAjeno.id}, 'Sesiones a crédito', 25, ${hoyPa()}) RETURNING id`;
+    assert.equal((await api.post(`/api/invoices/${facturaAjena.id}/recalculate`, {})).estado, 404,
+      'una factura de otro dueño no se puede recalcular');
   });
 
   test('la mensualidad familiar se abre aunque el dependiente ya tenga cobertura de otro cobro (clases extra)', async () => {
@@ -2175,6 +2186,29 @@ describe('cumplimiento canónico contra el calendario completo', () => {
     assert.equal(fila.pendientes, 0);
     assert.equal(fila.futuras, 0);
     assert.equal(futura.datos.id != null, true);
+  });
+
+  test('una cumplida que después se cancela deja de puntuar en todas las métricas', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Cumplida luego cancelada', billingModel: 'single', standardPrice: 25, cutoffDay: 15 });
+    const sesion = await api.post('/api/sessions', {
+      clientId: c.datos.id, startsAt: new Date(Date.now() - 2 * 3600_000).toISOString(), durationMinutes: 60, mode: 'Presencial'
+    });
+    await api.patch(`/api/sessions/${sesion.datos.id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    await api.delete(`/api/sessions/${sesion.datos.id}?rescheduled=false&by=client`);
+
+    const mes = mesActualPa().slice(0, 7);
+    const asistencia = await api.get(`/api/attendance/monthly?month=${mes}`);
+    const fila = asistencia.datos.clients.find(item => item.clientId === c.datos.id);
+    assert.deepEqual({ medibles: fila.medibles, completadas: fila.completadas, canceladasCliente: fila.canceladasCliente, compliancePercent: fila.compliancePercent },
+      { medibles: 1, completadas: 0, canceladasCliente: 1, compliancePercent: 0 });
+
+    const byMonth = await api.get(`/api/compliance/by-month?month=${mes}`);
+    const mensual = byMonth.datos.clients.find(item => item.client_id === c.datos.id);
+    assert.deepEqual({ total: Number(mensual.total), percent: Number(mensual.percent) }, { total: 1, percent: 0 });
+
+    const resumen = await api.get('/api/compliance/summary?period=week');
+    const resumenCliente = resumen.datos.clients.find(item => item.clientId === c.datos.id);
+    assert.deepEqual({ activities: resumenCliente.activities, compliancePercent: resumenCliente.compliancePercent }, { activities: 1, compliancePercent: 0 });
   });
 });
 
