@@ -241,36 +241,32 @@ type FacturaCredito = {
   amount: string | number;
   paid_amount: string | number;
   standard_price: string | number;
+  credit_session_price: string | number | null;
   target_sessions: string | number;
   billing_cutoff_day: string | number;
 };
 
-// El no anticipado no cobra una bolsa fija: cobra lo que se impartió durante
-// el ciclo, con un mínimo mensual. El corte sigue siendo la frontera —el pago
-// no mueve las fechas— y las clases extra no se pierden ni se pasan al ciclo
-// siguiente.
+// El no anticipado no cobra una bolsa fija: cobra las sesiones realmente
+// impartidas durante el ciclo. Una cancelación del cliente sólo entra cuando
+// Eileen la marca explícitamente como cobrable; no_show sigue afectando el
+// cumplimiento, pero no crea un cargo automático. El corte sigue siendo la
+// frontera —el pago no mueve las fechas— y el cliente puede seguir entrenando
+// aunque la factura esté pendiente.
 function cicloQueCierraEn(dueOn: Date | string, cutoffDay: number) {
   const referencia = mediodiaEnPanama(dueOn);
   referencia.setUTCDate(referencia.getUTCDate() - 1);
   return cicloDelCorte(referencia, cutoffDay);
 }
 
-function clasesCreditoLineItems(base: number, target: number, billable: number) {
-  const extra = Math.max(0, billable - target);
-  const rate = target > 0 ? base / target : 0;
-  const items = [{
-    name: `Mínimo mensual · ${target} clases`,
+function clasesCreditoLineItems(rows: Array<{ starts_at: Date | string; credit_charge: boolean }>, rate: number) {
+  return rows.map(row => ({
+    name: `${row.credit_charge ? 'Cancelación cobrada' : 'Sesión'} · ${new Intl.DateTimeFormat('es-PA', {
+      day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Panama'
+    }).format(new Date(row.starts_at))}`,
     quantity: 1,
-    rate: Number(base.toFixed(2)),
-    item_total: Number(base.toFixed(2))
-  }];
-  if (extra > 0) items.push({
-    name: `${extra} clase${extra === 1 ? '' : 's'} excedente${extra === 1 ? '' : 's'}`,
-    quantity: extra,
     rate: Number(rate.toFixed(2)),
-    item_total: Number((extra * rate).toFixed(2))
-  });
-  return items;
+    item_total: Number(rate.toFixed(2))
+  }));
 }
 
 async function recalcularFacturasNoAnticipadas(ownerId?: string) {
@@ -278,54 +274,51 @@ async function recalcularFacturasNoAnticipadas(ownerId?: string) {
     SELECT i.id, i.client_id, i.billed_for_client_id, i.due_on, i.status, i.amount,
       COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id),
         CASE WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END, 0)::numeric AS paid_amount,
-      c.standard_price, c.billing_cutoff_day,
+      c.standard_price, c.credit_session_price, c.billing_cutoff_day,
       COALESCE(c.monthly_session_target, p.sessions_included, 0)::integer AS target_sessions
     FROM invoices i
     JOIN clients c ON c.id = COALESCE(i.billed_for_client_id, i.client_id)
     LEFT JOIN service_plans p ON p.id = c.plan_id
     WHERE c.payment_mode = 'no_anticipado' AND c.billing_model = 'monthly'
       AND i.status <> 'void' AND i.source_system IS NULL
-      AND (i.auto_generated = true OR lower(i.concept) LIKE '%mensual%')
+      AND (i.auto_generated = true OR lower(i.concept) LIKE '%mensual%' OR lower(i.concept) LIKE '%sesiones a crédito%')
       AND (${ownerId || null}::uuid IS NULL OR c.owner_id = ${ownerId || null}::uuid)
   ` as unknown as FacturaCredito[];
 
   let updated = 0;
   for (const factura of facturas) {
-    const base = Number(factura.standard_price);
+    const base = Number(factura.credit_session_price || 25);
     const target = Number(factura.target_sessions);
-    if (!(base > 0 && target > 0)) continue;
+    if (!(base > 0)) continue;
     const cycle = cicloQueCierraEn(factura.due_on, Number(factura.billing_cutoff_day) || 1);
-    const [conteo] = await sql`
-      SELECT count(*)::integer AS billable_sessions
+    const sesiones = await sql`
+      SELECT s.starts_at, s.credit_charge
       FROM sessions s
       WHERE s.client_id = ${factura.billed_for_client_id || factura.client_id}
         AND (s.starts_at AT TIME ZONE 'America/Panama')::date > ${cycle.inicio}::date
         AND (s.starts_at AT TIME ZONE 'America/Panama')::date <= ${cycle.vence}::date
-        AND (
-          s.status IN ('completed', 'no_show')
+        AND (s.status = 'completed'
           OR (s.status = 'cancelled' AND s.cancellation_kind = 'not_rescheduled'
-            AND COALESCE(s.cancelled_by, 'client') = 'client')
-        )
-    `;
-    const billable = Number(conteo?.billable_sessions || 0);
-    const extra = Math.max(0, billable - target);
-    const amount = Number((base + extra * (base / target)).toFixed(2));
+            AND COALESCE(s.cancelled_by, 'client') = 'client' AND s.credit_charge = true))
+      ORDER BY s.starts_at
+    ` as unknown as Array<{ starts_at: Date | string; credit_charge: boolean }>;
+    const billable = sesiones.length;
+    const amount = Number((billable * base).toFixed(2));
     const paidAmount = Number(factura.paid_amount || 0);
-    const lineItems = clasesCreditoLineItems(base, target, billable);
-    const concept = `Mensualidad a crédito · ${billable} clases · ${(soloFecha(factura.due_on) || '').slice(0, 7).replace('-', '/')}`;
-    if (Math.abs(Number(factura.amount) - amount) < 0.005) continue;
+    const lineItems = clasesCreditoLineItems(sesiones, base);
+    const concept = `Sesiones a crédito · ${billable} clase${billable === 1 ? '' : 's'} · ${(soloFecha(factura.due_on) || '').slice(0, 7).replace('-', '/')}`;
     await sql.begin(async transaction => {
       await transaction`
         UPDATE invoices i SET amount = ${amount}, subtotal = ${amount},
           concept = ${concept}, line_items = ${transaction.json(lineItems)},
           balance = GREATEST(${amount}::numeric - ${paidAmount}::numeric, 0),
-          status = CASE WHEN ${paidAmount}::numeric >= ${amount}::numeric - 0.01
+          status = CASE WHEN ${amount}::numeric = 0 OR ${paidAmount}::numeric >= ${amount}::numeric - 0.01
             THEN 'confirmed' ELSE 'pending' END
         WHERE i.id = ${factura.id} AND i.status <> 'void'
       `;
     });
     updated += 1;
-    app.log.info({ invoiceId: factura.id, cycle, billable, target, amount }, 'Factura de crédito recalculada');
+    app.log.info({ invoiceId: factura.id, cycle, billable, target, rate: base, amount }, 'Factura de crédito recalculada');
   }
   return updated;
 }
@@ -345,7 +338,7 @@ async function generateRecurringInvoices(ownerId?: string) {
       SELECT COALESCE(c.billing_responsible_client_id, c.id) AS client_id,
         c.id AS billed_for_client_id, c.full_name AS billed_for_name,
         (c.billing_responsible_client_id IS NOT NULL) AS la_paga_otro,
-        c.owner_id, c.standard_price AS amount,
+        c.owner_id, CASE WHEN c.payment_mode = 'no_anticipado' THEN 0 ELSE c.standard_price END AS amount,
         COALESCE(p.name, 'Mensualidad') AS plan_name, periods.billing_period,
         make_date(
           extract(year FROM periods.billing_period)::integer,
@@ -458,6 +451,7 @@ async function generateRecurringInvoices(ownerId?: string) {
         -- descontar. Se procesan todos los cobros elegibles; la idempotencia
         -- se resuelve por invoice_id para no borrar saldos familiares válidos.
         AND i.due_on >= current_date
+        AND c.payment_mode <> 'no_anticipado'
         AND (${selectedOwner}::uuid IS NULL OR c.owner_id = ${selectedOwner}::uuid)
     ) q
     WHERE q.total_sessions > 0
@@ -474,14 +468,10 @@ async function generateRecurringInvoices(ownerId?: string) {
     return ciclo.inicio <= hoy;
   });
   for (const cobro of pendientes) {
-    // El saldo del ciclo que EMPIEZA en el corte se abre para todos: el cliente
-    // entrena aunque aún no haya pagado (a crédito). La diferencia de "no
-    // anticipado" (Julio) es que ese saldo nuevo NACE SIN cobro enlazado —su
-    // cobro llega en su propio corte, más adelante— y el cobro de ahora salda el
-    // ciclo que se CIERRA en el corte (las clases que ya dio), enlazándose al
-    // saldo que vence justo en due_on. El flujo anticipado no cambia: su cobro es
-    // de este saldo nuevo (prepago).
-    const noAnticipado = cobro.payment_mode === 'no_anticipado';
+    // El saldo del ciclo que EMPIEZA en el corte se abre para el flujo
+    // anticipado: el cliente puede entrenar aunque todavía no haya pagado.
+    // Los clientes a crédito no llegan a este conjunto: su factura se
+    // recalcula con las sesiones reales y no tienen una bolsa anticipada.
     // El ciclo del saldo se ancla al DÍA DE CORTE del cliente con la MISMA
     // función que las demás rutas (cicloDelCorte, que clampa al último día del
     // mes). Es la única fuente de verdad del ciclo: sumar un mes sin clampar
@@ -492,9 +482,7 @@ async function generateRecurringInvoices(ownerId?: string) {
     await sql.begin(async transaction => {
       await lockBillingClient(transaction, cobro.entrena as string);
       // Idempotencia por cobro, no por cliente ni por ciclo: un mismo ciclo
-      // puede tener más de un saldo legítimo (propio + familiar). En no
-      // anticipado el cobro queda ligado al saldo que cierra; si ya quedó
-      // ligado, esta corrida ya fue procesada.
+      // puede tener más de un saldo legítimo (propio + familiar).
       const [yaProcesado] = await transaction`
         SELECT id FROM session_packages
         WHERE origin_invoice_id = ${cobro.invoice_id} AND status <> 'cancelled'
@@ -514,16 +502,11 @@ async function generateRecurringInvoices(ownerId?: string) {
         ORDER BY created_at DESC LIMIT 1 FOR UPDATE
       `;
       if (saldoDelPlan) {
-        // En no_anticipado el cobro actual paga el ciclo que cierra hoy, pero
-        // el saldo del ciclo nuevo ya lo abrió la asignación del plan. Se
-        // reutiliza sin enlazarlo a este cobro ni volver a cobrar sus clases.
-        if (!noAnticipado) {
-          await transaction`
-            UPDATE session_packages SET origin_invoice_id = ${cobro.invoice_id}
-            WHERE id = ${saldoDelPlan.id}
-          `;
-          return;
-        }
+        await transaction`
+          UPDATE session_packages SET origin_invoice_id = ${cobro.invoice_id}
+          WHERE id = ${saldoDelPlan.id}
+        `;
+        return;
       } else {
         const [existente] = await transaction`
           SELECT id FROM session_packages
@@ -549,25 +532,11 @@ async function generateRecurringInvoices(ownerId?: string) {
           -- La mensualidad se paga por adelantado y el cobro ya está emitido:
           -- las clases del ciclo son suyas. Si no lo fueran, el cumplimiento
           -- mediría mal a quien sí entrenó, que es peor que cobrar tarde.
-          -- No anticipado: el saldo nuevo nace SIN cobro (se cobra en su corte).
-          ${noAnticipado ? null : cobro.invoice_id}, 'active')
+          ${cobro.invoice_id}, 'active')
         RETURNING id
         `;
         await cobrarClasesYaDadas(transaction, abierto.id as string, cobro.entrena as string,
           ciclo.vence, Number(cobro.total_sessions));
-      }
-      if (noAnticipado) {
-      // El cobro salda el ciclo que se CERRÓ en el corte: se enlaza al saldo que
-      // vence justo en due_on (el que el cliente acaba de terminar a crédito) para
-      // que ESE muestre "pago pendiente". No toca su estado: el saldo sigue activo
-      // y descontando clases —entrena a crédito— hasta que se registre el pago.
-        await transaction`UPDATE session_packages SET origin_invoice_id = ${cobro.invoice_id}
-        WHERE id = (
-          SELECT id FROM session_packages
-          WHERE client_id = ${cobro.entrena} AND kind = 'monthly'
-            AND expires_on = ${soloFecha(cobro.due_on)}::date AND origin_invoice_id IS NULL
-          ORDER BY created_at DESC LIMIT 1
-          )`;
       }
     });
   }
@@ -871,6 +840,10 @@ const clientSchema = z.object({
   // Vacío llega como '' desde el formulario y significa "sin meta pactada".
   monthlySessionTarget: z.union([z.literal(''), z.null(), z.coerce.number().int().min(1).max(31)]).optional()
     .transform(value => (value === '' || value === undefined ? null : value)),
+  // Tarifa por sesión para clientes que entrenan a crédito. Vacío conserva la
+  // tarifa guardada al editar; al crear, el valor pactado de Julio es $25.
+  creditSessionPrice: z.union([z.literal(''), z.null(), z.coerce.number().positive().max(10000)]).optional()
+    .transform(value => (value === '' || value === undefined ? null : value)),
   // Quién paga por este cliente. Vacío = paga él mismo.
   billingResponsibleClientId: z.union([z.literal(''), z.null(), z.string().uuid()]).optional()
     .transform(value => (value === '' || value === undefined ? null : value)),
@@ -935,8 +908,8 @@ app.post('/api/clients', { preHandler: requireStaff }, async (request, reply) =>
     const standardPrice = selectedPlan ? Number(selectedPlan.price) : input.standardPrice;
     const packageSessions = selectedPlan?.sessions_included || input.packageSessions;
     const [client] = await transaction`
-      INSERT INTO clients (owner_id, full_name, email, phone, goal, notes, billing_model, standard_price, plan_id, billing_cutoff_day, payment_mode)
-      VALUES (${auth.sub}, ${input.fullName}, ${input.email || null}, ${input.phone || null}, ${input.goal || null}, ${input.notes || null}, ${billingModel}, ${standardPrice}, ${selectedPlan?.id || null}, ${input.cutoffDay}, ${input.paymentMode}) RETURNING *
+      INSERT INTO clients (owner_id, full_name, email, phone, goal, notes, billing_model, standard_price, plan_id, billing_cutoff_day, payment_mode, credit_session_price)
+      VALUES (${auth.sub}, ${input.fullName}, ${input.email || null}, ${input.phone || null}, ${input.goal || null}, ${input.notes || null}, ${billingModel}, ${standardPrice}, ${selectedPlan?.id || null}, ${input.cutoffDay}, ${input.paymentMode}, ${input.creditSessionPrice ?? (input.paymentMode === 'no_anticipado' ? 25 : null)}) RETURNING *
     `;
     if (billingModel === 'monthly') {
       // Las sesiones del plan mensual son la meta contra la que se mide el
@@ -960,7 +933,7 @@ app.post('/api/clients', { preHandler: requireStaff }, async (request, reply) =>
 app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const input = clientSchema.pick({ fullName: true, email: true, phone: true, goal: true, notes: true, monthlySessionTarget: true, billingResponsibleClientId: true, status: true, cutoffDay: true, paymentMode: true }).parse(request.body);
+  const input = clientSchema.pick({ fullName: true, email: true, phone: true, goal: true, notes: true, monthlySessionTarget: true, creditSessionPrice: true, billingResponsibleClientId: true, status: true, cutoffDay: true, paymentMode: true }).parse(request.body);
   // cutoffDay lleva .default(1) en el esquema, así que si no viene en el cuerpo
   // llega valiendo 1: editar sólo el nombre habría movido el día de cobro al
   // primero de mes sin avisar. Se mira si venía de verdad.
@@ -968,6 +941,7 @@ app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, repl
   // Igual que cutoffDay: paymentMode tiene .default('anticipado'), así que si no
   // viene en el cuerpo no debe pisar la modalidad ya guardada.
   const tocaModalidad = 'paymentMode' in (request.body as Record<string, unknown>);
+  const tocaTarifaCredito = 'creditSessionPrice' in (request.body as Record<string, unknown>);
   // El pagador debe ser otro cliente de la misma entrenadora, y no puede
   // apuntarse a sí mismo ni encadenar: quien paga por alguien no puede a su vez
   // tener pagador, o el saldo quedaría en un tercero imposible de rastrear.
@@ -984,7 +958,7 @@ app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, repl
     const [antes] = await transaction`SELECT status FROM clients WHERE id = ${id} AND owner_id = ${auth.sub} FOR UPDATE`;
     if (!antes) return null;
 
-    const [client] = await transaction`UPDATE clients SET full_name = ${input.fullName}, email = ${input.email || null}, phone = ${input.phone || null}, goal = ${input.goal || null}, notes = ${input.notes || null}, monthly_session_target = ${input.monthlySessionTarget ?? null}, billing_responsible_client_id = ${input.billingResponsibleClientId ?? null}, status = COALESCE(${input.status ?? null}, status),
+    const [client] = await transaction`UPDATE clients SET full_name = ${input.fullName}, email = ${input.email || null}, phone = ${input.phone || null}, goal = ${input.goal || null}, notes = ${input.notes || null}, monthly_session_target = ${input.monthlySessionTarget ?? null}, credit_session_price = CASE WHEN ${tocaTarifaCredito} THEN ${input.creditSessionPrice ?? null} WHEN ${tocaModalidad} AND ${input.paymentMode} = 'no_anticipado' AND credit_session_price IS NULL THEN 25 ELSE credit_session_price END, billing_responsible_client_id = ${input.billingResponsibleClientId ?? null}, status = COALESCE(${input.status ?? null}, status),
       billing_cutoff_day = CASE WHEN ${tocaCorte} THEN ${input.cutoffDay}::int ELSE billing_cutoff_day END,
       payment_mode = CASE WHEN ${tocaModalidad} THEN ${input.paymentMode} ELSE payment_mode END, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
 
@@ -2861,15 +2835,18 @@ app.post('/api/client-pauses/:id/resume', { preHandler: requireStaff }, async (r
 
 // Editar una cancelación recalcula el efecto de saldo sin crear descuentos o
 // débitos duplicados. Las compensaciones ya aplicadas quedan protegidas.
-const cancellationEditSchema = z.object({ cancelledBy: z.enum(['client', 'trainer']), rescheduled: z.boolean(), resolution: z.enum(['discount', 'none', 'debit']).optional(), amount: z.coerce.number().positive().optional() });
+const cancellationEditSchema = z.object({ cancelledBy: z.enum(['client', 'trainer']), rescheduled: z.boolean(), resolution: z.enum(['discount', 'none', 'debit']).optional(), creditCharge: z.boolean().optional(), amount: z.coerce.number().positive().optional() });
 app.patch('/api/sessions/:id/cancellation', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const input = cancellationEditSchema.parse(request.body); const resolution = input.resolution || (input.cancelledBy === 'client' && !input.rescheduled ? 'debit' : 'none');
+  const input = cancellationEditSchema.parse(request.body);
+  const requestedResolution = input.resolution || (input.cancelledBy === 'client' && !input.rescheduled ? 'debit' : 'none');
+  if (input.creditCharge && (input.cancelledBy !== 'client' || input.rescheduled)) return reply.code(400).send({ error: 'Sólo una cancelación del cliente no reprogramada puede cobrarse a crédito.' });
+  const resolution = requestedResolution;
   if (input.rescheduled && resolution !== 'none') return reply.code(400).send({ error: 'Una sesión reprogramada no puede descontar ni generar compensación.' });
   if (input.cancelledBy === 'client' && !input.rescheduled && !['debit', 'none'].includes(resolution)) return reply.code(400).send({ error: 'Para una cancelación del cliente solo se permite descontar la clase o dejarla sin efecto.' });
   if (input.cancelledBy === 'trainer' && resolution === 'debit') return reply.code(400).send({ error: 'Una cancelación de la entrenadora no puede descontar una clase del cliente.' });
   const result = await sql.begin(async transaction => {
-    const [session] = await transaction`SELECT s.*, c.owner_id FROM sessions s JOIN clients c ON c.id = s.client_id WHERE s.id = ${id} AND c.owner_id = ${auth.sub} FOR UPDATE`;
+    const [session] = await transaction`SELECT s.*, c.owner_id, c.payment_mode FROM sessions s JOIN clients c ON c.id = s.client_id WHERE s.id = ${id} AND c.owner_id = ${auth.sub} FOR UPDATE`;
     if (!session || session.status !== 'cancelled') return { error: 'La sesión no está cancelada', code: 409 };
     if (session.cancellation_makeup_package_id) return { error: 'Esta compensación ya creó un paquete de reposición; edítala manualmente para no duplicar clases.', code: 409 };
     if (session.package_debited && session.package_id) {
@@ -2881,6 +2858,9 @@ app.patch('/api/sessions/:id/cancellation', { preHandler: requireStaff }, async 
       if (credit?.applied_invoice_id) return { error: 'El descuento ya fue aplicado a una factura; no se puede revertir automáticamente.', code: 409 };
       await transaction`DELETE FROM billing_credits WHERE session_id = ${id} AND applied_invoice_id IS NULL`;
     }
+    const isCreditClient = session.payment_mode === 'no_anticipado';
+    if (isCreditClient && resolution === 'debit') return { error: 'Los clientes a crédito no descuentan una bolsa; decide si se cobra la cancelación.', code: 400 };
+    const creditCharge = Boolean(isCreditClient && input.cancelledBy === 'client' && !input.rescheduled && input.creditCharge);
     if (input.cancelledBy === 'client' && !input.rescheduled && resolution === 'debit') {
       const [pack] = await transaction`SELECT id, total_sessions, used_sessions FROM session_packages WHERE client_id = ${session.client_id} AND status = 'active' AND used_sessions < total_sessions AND (expires_on IS NULL OR expires_on >= (${session.starts_at}::timestamptz AT TIME ZONE 'America/Panama')::date) ORDER BY expires_on ASC NULLS LAST, purchased_on LIMIT 1 FOR UPDATE`;
       if (pack) { const used = Number(pack.used_sessions) + 1; await transaction`UPDATE session_packages SET used_sessions = ${used}, status = CASE WHEN ${used} >= total_sessions THEN 'exhausted' ELSE 'active' END WHERE id = ${pack.id}`; await transaction`UPDATE sessions SET package_id = ${pack.id}, package_debited = true, debited_group_id = ${session.client_id} WHERE id = ${id}`; }
@@ -2890,11 +2870,12 @@ app.patch('/api/sessions/:id/cancellation', { preHandler: requireStaff }, async 
       const amount = input.amount || (Number(client?.included) ? Number(client.standard_price) / Number(client.included) : 0);
       if (amount > 0) await transaction`INSERT INTO billing_credits (client_id, session_id, concept, amount) VALUES (${session.client_id}, ${id}, 'Clase cancelada por la entrenadora', ${Math.round(amount * 100) / 100})`;
     }
-    const [updated] = await transaction`UPDATE sessions SET cancellation_kind = ${input.rescheduled ? 'rescheduled' : 'not_rescheduled'}, cancelled_by = ${input.cancelledBy}, cancellation_resolution = ${resolution}, cancellation_edited_at = now(), updated_at = now() WHERE id = ${id} RETURNING *`;
-    await transaction`INSERT INTO session_cancellation_edits (session_id, editor_user_id, previous_cancelled_by, previous_cancellation_kind, previous_resolution, new_cancelled_by, new_cancellation_kind, new_resolution) VALUES (${id}, ${auth.sub}, ${session.cancelled_by || null}, ${session.cancellation_kind || null}, ${session.cancellation_resolution || null}, ${input.cancelledBy}, ${input.rescheduled ? 'rescheduled' : 'not_rescheduled'}, ${resolution})`;
+    const [updated] = await transaction`UPDATE sessions SET cancellation_kind = ${input.rescheduled ? 'rescheduled' : 'not_rescheduled'}, cancelled_by = ${input.cancelledBy}, cancellation_resolution = ${isCreditClient ? 'none' : resolution}, credit_charge = ${creditCharge}, cancellation_edited_at = now(), updated_at = now() WHERE id = ${id} RETURNING *`;
+    await transaction`INSERT INTO session_cancellation_edits (session_id, editor_user_id, previous_cancelled_by, previous_cancellation_kind, previous_resolution, previous_credit_charge, new_cancelled_by, new_cancellation_kind, new_resolution, new_credit_charge) VALUES (${id}, ${auth.sub}, ${session.cancelled_by || null}, ${session.cancellation_kind || null}, ${session.cancellation_resolution || null}, ${Boolean(session.credit_charge)}, ${input.cancelledBy}, ${input.rescheduled ? 'rescheduled' : 'not_rescheduled'}, ${isCreditClient ? 'none' : resolution}, ${creditCharge})`;
     return { session: updated };
   });
   if ('error' in result) return reply.code(result.code || 400).send({ error: result.error });
+  await recalcularFacturasNoAnticipadas(auth.sub);
   return result;
 });
 
@@ -3011,7 +2992,7 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
   const reprogramada = (request.query as { rescheduled?: string }).rescheduled === 'true';
   // Quién cancela cambia a quién se le cobra la falta. Por omisión, el
   // cliente: es como se contaron todas las anteriores.
-  const consulta = request.query as { by?: string; resolution?: string; amount?: string };
+  const consulta = request.query as { by?: string; resolution?: string; amount?: string; creditCharge?: string };
   const laCancelaEllaSola = consulta.by === 'trainer';
   // 'none' es una respuesta legítima: puede que lo hable con el cliente y
   // decida después, o que no haya nada que compensar. Obligarla a elegir entre
@@ -3021,12 +3002,14 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
 
   const result = await sql.begin(async transaction => {
     const [actual] = await transaction`
-      SELECT s.* FROM sessions s
+      SELECT s.*, c.payment_mode, COALESCE(c.credit_session_price, 25) AS credit_session_price FROM sessions s
       JOIN clients c ON c.id = s.client_id
       WHERE s.id = ${id} AND c.owner_id = ${auth.sub} AND s.status <> 'cancelled'
       FOR UPDATE
     `;
     if (!actual) return null;
+    const esCredito = actual.payment_mode === 'no_anticipado';
+    const cobraCancelacionCredito = Boolean(esCredito && !reprogramada && !laCancelaEllaSola && consulta.creditCharge === 'true');
 
     // Una sesión ya completada consumió una clase. Si después se marca como
     // reprogramada, deja de ser una clase consumida y ese débito debe revertirse
@@ -3046,7 +3029,8 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
       UPDATE sessions SET status = 'cancelled',
         cancellation_kind = ${reprogramada ? 'rescheduled' : 'not_rescheduled'},
         cancelled_by = ${laCancelaEllaSola ? 'trainer' : 'client'},
-        cancellation_resolution = ${laCancelaEllaSola ? compensa : (reprogramada ? 'none' : 'debit')},
+        cancellation_resolution = ${laCancelaEllaSola || reprogramada || esCredito ? 'none' : 'debit'},
+        credit_charge = ${cobraCancelacionCredito},
         package_id = CASE WHEN ${reprogramada && Boolean(actual.package_debited)} THEN NULL ELSE package_id END,
         package_debited = CASE WHEN ${reprogramada && Boolean(actual.package_debited)} THEN false ELSE package_debited END,
         debited_group_id = CASE WHEN ${reprogramada && Boolean(actual.package_debited)} THEN NULL ELSE debited_group_id END,
@@ -3069,7 +3053,7 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
     // se consume igual. Si ya estaba marcada como realizada, el débito existente
     // se conserva: no se vuelve a cobrar una segunda vez.
     let compensacion: { tipo: string; detalle: string } | null = null;
-    if (!reprogramada && !laCancelaEllaSola && !actual.package_debited) {
+    if (!reprogramada && !laCancelaEllaSola && !esCredito && !actual.package_debited) {
       const pack = await seleccionarSaldoParaSesion(transaction, session.client_id as string, session.starts_at as Date | string);
       if (pack) {
         const siguiente = Number(pack.used_sessions) + 1;
@@ -3085,6 +3069,9 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
         `;
         compensacion = { tipo: 'debit', detalle: 'Una sesión descontada del plan contratado' };
       }
+    }
+    if (cobraCancelacionCredito) {
+      compensacion = { tipo: 'credit_charge', detalle: `Cancelación registrada para cobro a $${Number(actual.credit_session_price || 25).toFixed(2)} por sesión` };
     }
 
     // Cuando cancela ella, el cliente no pierde una clase del plan. Si se
@@ -3117,6 +3104,7 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
   if (!result) return reply.code(404).send({ error: 'Sesión no encontrada o ya cancelada' });
   try { await cancelSessionInGoogle(auth.sub, id); }
   catch (error) { app.log.warn({ err: error, sessionId: id }, 'Session cancelled but Google Calendar deletion failed'); }
+  await recalcularFacturasNoAnticipadas(auth.sub);
   return { cancelled: true, session: result.session, compensacion: result.compensacion };
 });
 // El resultado de una sesión es de tres estados, no de dos. Antes se deducía
@@ -3159,6 +3147,7 @@ async function seleccionarSaldoParaSesion(
     FROM session_packages sp
     JOIN clients c ON c.id = sp.client_id
     WHERE sp.client_id = ${clientId} AND sp.status = 'active' AND sp.used_sessions < sp.total_sessions
+      AND c.payment_mode <> 'no_anticipado'
       AND (
         (
           COALESCE(sp.kind, 'package') = 'monthly'
@@ -3482,14 +3471,13 @@ function sendPdf(reply: any, buffer: Buffer, fileName: string) {
 
 app.get('/api/invoices', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
-  // Sin source_payload ni line_items: son el JSON crudo que devolvió Zoho por
-  // cada factura y el desglose de líneas. Nadie los lee en la lista y hacían
-  // que 1.400 facturas pesaran 3,6 MB, que se descargan enteros cada vez que
-  // se refresca cualquier cosa.
+  // Sin source_payload: es el JSON crudo que devolvió Zoho por cada factura y
+  // no se necesita para la lista. line_items sí se devuelve: las facturas a
+  // crédito deben mostrar qué sesiones y qué cancelaciones se cobraron.
   return sql`
     SELECT i.id, i.client_id, i.package_id, i.concept, i.amount, i.currency, i.due_on, i.status,
       i.payment_method, i.payment_reference, i.confirmed_at, i.created_at, i.source_system,
-      i.external_id, i.invoice_number, i.issued_on, i.subtotal, i.tax_total, i.balance,
+      i.external_id, i.invoice_number, i.issued_on, i.subtotal, i.tax_total, i.balance, i.line_items,
       i.external_status, i.notes, i.external_updated_at, i.billing_period, i.auto_generated,
       i.billed_for_client_id, c.full_name,
       beneficiario.full_name AS billed_for_name,
@@ -5451,7 +5439,7 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
   const [invoices, routines, sessions, busySlots, assessments, completions, exercises, packages, credits, weightLogs] = await Promise.all([
     sql`
-      SELECT id, concept, amount, currency, due_on, status, payment_method, invoice_number, issued_on,
+      SELECT id, concept, amount, currency, due_on, status, payment_method, invoice_number, issued_on, line_items,
         -- Lo que de verdad falta por pagar. La columna balance sólo la mantiene
         -- Zoho; en un cobro nacido aquí vale 0 por omisión, y el portal la
         -- sumaba tal cual: un cliente con su mensualidad sin pagar veía
@@ -5463,7 +5451,7 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
       FROM invoices WHERE client_id = ${client.id} ORDER BY COALESCE(issued_on, due_on) DESC
     `,
     sql`SELECT ra.id AS assignment_id, ra.due_on, r.id, r.title, r.description, r.sessions_per_week, r.exercises FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id WHERE ra.client_id = ${client.id} AND ra.active = true AND (ra.ends_on IS NULL OR ra.ends_on >= current_date) ORDER BY ra.starts_on DESC`,
-    sql`SELECT s.id, s.routine_id, s.starts_at, s.duration_minutes, s.mode, s.status, s.cancellation_kind, s.cancelled_by, s.completion_percent, r.title AS routine_title, EXISTS (SELECT 1 FROM session_reschedules sr WHERE sr.session_id = s.id AND sr.origin = 'moved') AS reprogramada FROM sessions s LEFT JOIN routines r ON r.id = s.routine_id WHERE s.client_id = ${client.id} AND s.starts_at >= now() - interval '1 year' ORDER BY s.starts_at`,
+    sql`SELECT s.id, s.routine_id, s.starts_at, s.duration_minutes, s.mode, s.status, s.cancellation_kind, s.cancelled_by, s.credit_charge, s.completion_percent, r.title AS routine_title, EXISTS (SELECT 1 FROM session_reschedules sr WHERE sr.session_id = s.id AND sr.origin = 'moved') AS reprogramada FROM sessions s LEFT JOIN routines r ON r.id = s.routine_id WHERE s.client_id = ${client.id} AND s.starts_at >= now() - interval '1 year' ORDER BY s.starts_at`,
     sql`SELECT s.id, s.starts_at, s.duration_minutes, (s.client_id = ${client.id}) AS is_mine FROM sessions s JOIN clients c ON c.id = s.client_id WHERE c.owner_id = ${client.owner_id} AND s.status <> 'cancelled' AND s.starts_at BETWEEN now() - interval '60 days' AND now() + interval '90 days' ORDER BY s.starts_at`,
     sql`SELECT tested_at, values FROM inbody_assessments WHERE client_id = ${client.id} AND extraction_status = 'ready' ORDER BY tested_at`,
     sql`SELECT routine_id, completed_on, completion_percent FROM routine_completions WHERE client_id = ${client.id} AND completed_on >= current_date - interval '1 year' ORDER BY completed_on`,
@@ -5481,6 +5469,7 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
       SELECT id, label, kind, total_sessions, used_sessions, expires_on, purchased_on, status
       FROM session_packages
       WHERE client_id = ${client.id} AND status <> 'cancelled'
+        AND NOT (${client.payment_mode} = 'no_anticipado' AND kind = 'monthly')
       ORDER BY purchased_on DESC, expires_on DESC NULLS LAST
       LIMIT 120
     `,
@@ -5496,6 +5485,7 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   const profile = {
     id: client.id, full_name: client.full_name, email: client.email, goal: client.goal, status: client.status,
     billing_model: client.billing_model, standard_price: client.standard_price, billing_cutoff_day: client.billing_cutoff_day,
+    payment_mode: client.payment_mode, credit_session_price: client.credit_session_price,
     plan_name: client.plan_name, sessions_included: client.sessions_included, validity_days: client.validity_days
   };
   // El portal necesita conocer los intervalos ocupados para que el cliente

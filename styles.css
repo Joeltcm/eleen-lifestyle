@@ -607,8 +607,12 @@ button.active-filter{background:#2f6f4f;color:#fff;border-color:#2f6f4f}
 .portal-slot.mine{border-left:4px solid #c47f9d;background:#fff8fb}
 .portal-slot time b,.portal-slot>div b{font-size:13px}
 .portal-slot time span,.portal-slot>div span{font-size:11px}
+.portal-session-status{display:block;grid-column:3;color:#766b71;font-size:11px;font-weight:600;text-align:right}
+.portal-session-status.reprogramada{color:#765687}
+.portal-session-status.cobrada{color:#9b5d35}
 
 /* Pagos e informes */
+.invoice-line-detail{display:inline-block;margin-top:4px;color:#8b596f;line-height:1.45}
 #portal-plan{margin-bottom:18px;padding:21px 22px;border:0;border-radius:18px;background:linear-gradient(120deg,#fff,#fbf2f6);box-shadow:0 8px 24px #6d4a5910}
 #portal-plan h3{font:600 22px/1.15 Fraunces;letter-spacing:-.4px;color:#493a41}
 #portal-plan p{font-size:13px}
@@ -648,6 +652,7 @@ button.active-filter{background:#2f6f4f;color:#fff;border-color:#2f6f4f}
   .portal-view:not(#portal-dashboard)>.card,#portal-calendar-list,#portal-billing>.card,.portal-report-section{padding:18px}
   .portal-routines{grid-template-columns:1fr}
   .portal-slot{grid-template-columns:120px minmax(0,1fr);gap:12px}
+  .portal-session-status{grid-column:1/-1;text-align:left}
   .portal-slot .portal-session-form{grid-column:1/-1}
   .portal-report-section .card-head{align-items:flex-start;flex-direction:column}
   .portal-report-period{text-align:left}

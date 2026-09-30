@@ -1,4 +1,4 @@
-const APP_VERSION = '224';
+const APP_VERSION = '225';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -233,7 +233,7 @@ const sessionFromApi = item => {
     packageId: item.package_id || '', packageLabel: item.charged_package_label || '',
     packageUsed: item.charged_package_used == null ? null : Number(item.charged_package_used),
     packageTotal: item.charged_package_total == null ? null : Number(item.charged_package_total),
-    cancelledBy: item.cancelled_by || '', cancellationKind: item.cancellation_kind || '', cancellationResolution: item.cancellation_resolution || '', pausedHold: Boolean(item.paused_hold),
+    cancelledBy: item.cancelled_by || '', cancellationKind: item.cancellation_kind || '', cancellationResolution: item.cancellation_resolution || '', creditCharge: Boolean(item.credit_charge), pausedHold: Boolean(item.paused_hold),
     googleSynced: Boolean(item.google_event_id), googleEventLink: item.google_event_link || '',
     googleSyncError: item.google_sync_error || ''
   };
@@ -292,9 +292,9 @@ async function loadData() {
     });
     const latest = history.at(-1);
     const inbodyReviews = clientAssessments.filter(item => item.extraction_status === 'review');
-    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), reprogramaciones: Number(client.reprogramaciones_ciclo || 0), canceladas: Number(client.canceladas_ciclo || 0), canceladasPorElla: Number(client.canceladas_por_ella_ciclo || 0), creditoPendiente: Number(client.credito_pendiente || 0), deudaPendiente: Number(client.deuda_pendiente || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paymentMode: client.payment_mode || 'anticipado', paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), pauseId: client.active_pause_id || null, pauseStartedOn: client.pause_started_on || null, pauseReason: client.pause_reason || '', status: { active: 'Activo', paused: 'En pausa', inactive: 'Inactivo' }[client.status] || 'Inactivo', statusRaw: client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
+    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), creditSessionPrice: client.payment_mode === 'no_anticipado' ? Number(client.credit_session_price || 25) : null, reprogramaciones: Number(client.reprogramaciones_ciclo || 0), canceladas: Number(client.canceladas_ciclo || 0), canceladasPorElla: Number(client.canceladas_por_ella_ciclo || 0), creditoPendiente: Number(client.credito_pendiente || 0), deudaPendiente: Number(client.deuda_pendiente || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paymentMode: client.payment_mode || 'anticipado', paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), pauseId: client.active_pause_id || null, pauseStartedOn: client.pause_started_on || null, pauseReason: client.pause_reason || '', status: { active: 'Activo', paused: 'En pausa', inactive: 'Inactivo' }[client.status] || 'Inactivo', statusRaw: client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
   });
-  data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, billedForSpecified: Boolean(item.auto_generated && item.billed_for_client_id != null), billedForClientId: item.billed_for_client_id || item.client_id, billedFor: item.billed_for_name || item.full_name, packageId: item.package_id || null, coverageApplied: Number(item.coverage_applied || 0), concept: item.concept, amount: Number(item.amount), paidAmount: Number(item.paid_amount || 0), balance: Number(item.balance_amount ?? (item.source_system ? item.balance : item.status === 'pending' ? item.amount : 0)), due: dateOnly(item.due_on), issued: dateOnly(item.issued_on || item.due_on), billingPeriod: item.billing_period ? dateOnly(item.billing_period) : dateOnly(item.due_on), paidOn: item.confirmed_at ? String(item.confirmed_at).slice(0, 10) : '', method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '', autoGenerated: item.auto_generated || false, coverageStart: item.coverage_start ? dateOnly(item.coverage_start) : '' }));
+  data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, billedForSpecified: Boolean(item.auto_generated && item.billed_for_client_id != null), billedForClientId: item.billed_for_client_id || item.client_id, billedFor: item.billed_for_name || item.full_name, packageId: item.package_id || null, coverageApplied: Number(item.coverage_applied || 0), lineItems: Array.isArray(item.line_items) ? item.line_items : [], concept: item.concept, amount: Number(item.amount), paidAmount: Number(item.paid_amount || 0), balance: Number(item.balance_amount ?? (item.source_system ? item.balance : item.status === 'pending' ? item.amount : 0)), due: dateOnly(item.due_on), issued: dateOnly(item.issued_on || item.due_on), billingPeriod: item.billing_period ? dateOnly(item.billing_period) : dateOnly(item.due_on), paidOn: item.confirmed_at ? String(item.confirmed_at).slice(0, 10) : '', method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '', autoGenerated: item.auto_generated || false, coverageStart: item.coverage_start ? dateOnly(item.coverage_start) : '' }));
   data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, kind: item.kind, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), expiresOn: item.expires_on || '', status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired', originInvoiceId: item.origin_invoice_id || null, originNumber: item.origin_invoice_number || '', originConcept: item.origin_concept || '', originSource: item.origin_source || '', originStatus: item.origin_status || '', originDate: item.origin_date ? dateOnly(item.origin_date) : '', renovacionPendiente: item.renovacion_pendiente || false, vencidoConSaldo: item.vencido_con_saldo || false, pagoPendiente: item.pago_pendiente || false, purchasedOn: item.purchased_on ? dateOnly(item.purchased_on) : '' }));
   data.sessions = sessions.map(sessionFromApi);
   data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: (item.assigned_client_ids || []).length, assignedClientIds: item.assigned_client_ids || [], sessions: item.sessions_per_week, dueOn: item.due_on || null, exercises: item.exercises || [] }));
@@ -744,6 +744,7 @@ function renderCalendar() {
         </summary>
         ${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}
         ${session.packageLabel && session.packageId ? `<small class="session-charge">Descontada de «${escapeHtml(session.packageLabel)}»${session.packageUsed != null && session.packageTotal != null ? ` · quedan ${Math.max(0, session.packageTotal - session.packageUsed)}` : ''}</small>` : ''}
+        ${session.creditCharge ? '<small class="session-charge">Cancelación cobrada · crédito por sesión</small>' : session.status === 'cancelled' && session.cancellationKind === 'not_rescheduled' && session.cancelledBy === 'client' && data.clients.find(c => c.id === session.clientId)?.paymentMode === 'no_anticipado' ? '<small class="session-charge">Cancelación del cliente · sin cobro</small>' : ''}
         ${session.status === 'cancelled'
           ? `<div class="session-management"><button type="button" class="secondary" data-reactivar-sesion="${session.id}">Reactivar</button><button type="button" class="secondary" data-edit-cancellation="${session.id}">Editar cancelación</button><button type="button" class="secondary" data-purge-session="${session.id}">Quitar de la agenda</button></div>`
           : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button><button type="button" class="secondary" data-cancel-session="${session.id}">Cancelar</button><button type="button" class="secondary" data-purge-session="${session.id}">Eliminar</button>${sessionComplianceForm(session)}</div>`}
@@ -1315,7 +1316,7 @@ function newClient() {
 }
 function editClient(client) {
   const box = document.createElement('div');
-  box.innerHTML = `<form id="edit-client-form"><p class="eyebrow">CONTACTO Y EXPEDIENTE</p><h2>Editar cliente</h2><label>Nombre completo<input name="fullName" required value="${escapeHtml(client.name)}" /></label><label>Correo electrónico<input name="email" type="email" value="${escapeHtml(client.email)}" /></label><label>Teléfono<input name="phone" value="${escapeHtml(client.phone)}" /></label><label>Meta principal<input name="goal" value="${escapeHtml(client.goal)}" /></label><label>Sesiones esperadas al mes<input name="monthlySessionTarget" type="number" min="1" max="31" value="${client.monthlySessionTarget ?? ''}" placeholder="Sin meta pactada" /><small>Cambiarlo aplica desde el próximo corte; el saldo del ciclo en curso no se modifica.</small></label><label>Quién paga<select name="billingResponsibleClientId" id="client-payer"><option value="">Paga por sí mismo</option></select><small>Plan familiar: el saldo de sesiones y los cobros van a nombre de quien paga. El progreso y la asistencia siguen siendo de cada uno.</small></label><p class="section-note">Meta contra la cual se mide el cumplimiento mensual. Déjala vacía para derivarla del paquete o de la rutina activa.</p><label>Notas privadas<textarea name="notes" rows="3">${escapeHtml(client.notes)}</textarea></label><label>Plan comercial<select name="planId" id="edit-client-plan"></select><small>Cambiarlo actualiza su precio, su membresía y su meta de sesiones.</small></label><label>Día de corte<input name="cutoffDay" type="number" min="1" max="31" required value="${client.cutoffDay}" /><small>El día del mes en que se le cobra la mensualidad.</small></label><label>Modalidad de pago<select name="paymentMode"><option value="anticipado"${client.paymentMode !== 'no_anticipado' ? ' selected' : ''}>Anticipado (paga por adelantado)</option><option value="no_anticipado"${client.paymentMode === 'no_anticipado' ? ' selected' : ''}>No anticipado (entrena y paga al final)</option></select><small>No anticipado: entrena a crédito y su cobro queda como pago pendiente hasta que lo registres. El saldo de sesiones se abre igual.</small></label><label>Estado<select name="status">${[['active', 'Activo'], ['paused', 'En pausa'], ['inactive', 'Inactivo']].map(([valor, texto]) => `<option value="${valor}"${client.statusRaw === valor ? ' selected' : ''}>${texto}</option>`).join('')}</select><small>Un cliente inactivo conserva su expediente, su historial y sus cobros, pero desaparece de la agenda y de los listados del día a día.</small></label><button class="primary wide-button">Guardar cambios</button>
+  box.innerHTML = `<form id="edit-client-form"><p class="eyebrow">CONTACTO Y EXPEDIENTE</p><h2>Editar cliente</h2><label>Nombre completo<input name="fullName" required value="${escapeHtml(client.name)}" /></label><label>Correo electrónico<input name="email" type="email" value="${escapeHtml(client.email)}" /></label><label>Teléfono<input name="phone" value="${escapeHtml(client.phone)}" /></label><label>Meta principal<input name="goal" value="${escapeHtml(client.goal)}" /></label><label>Sesiones esperadas al mes<input name="monthlySessionTarget" type="number" min="1" max="31" value="${client.monthlySessionTarget ?? ''}" placeholder="Sin meta pactada" /><small>Cambiarlo aplica desde el próximo corte; el saldo del ciclo en curso no se modifica.</small></label><label>Quién paga<select name="billingResponsibleClientId" id="client-payer"><option value="">Paga por sí mismo</option></select><small>Plan familiar: el saldo de sesiones y los cobros van a nombre de quien paga. El progreso y la asistencia siguen siendo de cada uno.</small></label><p class="section-note">Meta contra la cual se mide el cumplimiento mensual. Déjala vacía para derivarla del paquete o de la rutina activa.</p><label>Notas privadas<textarea name="notes" rows="3">${escapeHtml(client.notes)}</textarea></label><label>Plan comercial<select name="planId" id="edit-client-plan"></select><small>Cambiarlo actualiza su precio, su membresía y su meta de sesiones.</small></label><label>Día de corte<input name="cutoffDay" type="number" min="1" max="31" required value="${client.cutoffDay}" /><small>El día del mes en que se le cobra la mensualidad.</small></label><label>Modalidad de pago<select name="paymentMode"><option value="anticipado"${client.paymentMode !== 'no_anticipado' ? ' selected' : ''}>Anticipado (paga por adelantado)</option><option value="no_anticipado"${client.paymentMode === 'no_anticipado' ? ' selected' : ''}>No anticipado (entrena y paga al final)</option></select><small>No anticipado: cobra sólo las sesiones impartidas a la tarifa pactada. El cliente puede entrenar aunque la factura esté pendiente.</small></label>${client.paymentMode === 'no_anticipado' ? `<label>Tarifa por sesión a crédito<input name="creditSessionPrice" type="number" min="0.01" step="0.01" value="${client.creditSessionPrice || 25}" /><small>Se usa para clientes no anticipados, como Julio. Las cancelaciones cobrables aparecen detalladas en la factura.</small></label>` : ''}<label>Estado<select name="status">${[['active', 'Activo'], ['paused', 'En pausa'], ['inactive', 'Inactivo']].map(([valor, texto]) => `<option value="${valor}"${client.statusRaw === valor ? ' selected' : ''}>${texto}</option>`).join('')}</select><small>Un cliente inactivo conserva su expediente, su historial y sus cobros, pero desaparece de la agenda y de los listados del día a día.</small></label><button class="primary wide-button">Guardar cambios</button>
     <button type="button" class="secondary wide-button" id="borrar-expediente">Eliminar expediente</button>
     <p class="section-note">Para expedientes duplicados o creados por error. Se lleva su historial, mediciones, documentos y cobros. Si simplemente dejó de entrenar, ponlo Inactivo.</p></form>`;
   openModal(box);
@@ -1835,6 +1836,8 @@ function cancelSessionDialog(sesion) {
     <p class="form-summary"><b>${escapeHtml(sesion.client)}</b><br>${sesion.date} · ${sesion.time}</p>`;
 
   const porClase = cliente && cliente.sessionsIncluded > 0 ? cliente.plan / cliente.sessionsIncluded : 0;
+  const esCredito = cliente?.paymentMode === 'no_anticipado';
+  const tarifaCredito = Number(cliente?.creditSessionPrice || 25);
 
   const preguntarQuien = () => {
     const historial = cliente && (cliente.reprogramaciones || cliente.canceladas)
@@ -1858,10 +1861,20 @@ function cancelSessionDialog(sesion) {
       <p style="color:#6f7b75">La cancela el cliente. ¿Va a reponerla?</p>
       <button class="secondary wide-button" id="cancelar-reprogramada">Se reprogramará a otro día</button>
       <p class="section-note">No afecta el cumplimiento: contará la sesión nueva. Suma a sus reprogramaciones del mes.</p>
-      <button class="secondary wide-button" id="cancelar-perdida">No se reprograma</button>
-      <p class="section-note">Cuenta como sesión incumplida y baja su porcentaje.</p>`;
+      ${!esCredito ? `<button class="secondary wide-button" id="cancelar-perdida">No se reprograma</button>
+      <p class="section-note">Cuenta como sesión incumplida y baja su porcentaje.</p>` : ''}
+      ${esCredito ? `<p style="color:#6f7b75">Como entrena a crédito, Eileen decide si esta cancelación se cobra.</p>
+        <button class="secondary wide-button" id="cancelar-cobrada">Cancelar y cobrar ${money.format(tarifaCredito)}</button>
+        <p class="section-note">Aparecerá como “Cancelación cobrada” en la factura y en tu portal.</p>
+        <button class="secondary wide-button" id="cancelar-sin-cobro">Cancelar sin cobro</button>
+        <p class="section-note">Se registra en asistencia, pero no genera cargo.</p>` : ''}`;
     box.querySelector('#cancelar-reprogramada').onclick = () => cancelar({ reprogramada: true, quien: 'client' });
-    box.querySelector('#cancelar-perdida').onclick = () => cancelar({ reprogramada: false, quien: 'client' });
+    const cancelarPerdida = box.querySelector('#cancelar-perdida');
+    if (cancelarPerdida) cancelarPerdida.onclick = () => cancelar({ reprogramada: false, quien: 'client' });
+    if (esCredito) {
+      box.querySelector('#cancelar-cobrada').onclick = () => cancelar({ reprogramada: false, quien: 'client', creditCharge: true });
+      box.querySelector('#cancelar-sin-cobro').onclick = () => cancelar({ reprogramada: false, quien: 'client', creditCharge: false });
+    }
   };
 
   const preguntarCompensacion = () => {
@@ -1882,15 +1895,16 @@ function cancelSessionDialog(sesion) {
     box.querySelector('#compensar-nada').onclick = () => cancelar({ reprogramada: false, quien: 'trainer', compensa: 'none' });
   };
 
-  const cancelar = async ({ reprogramada, quien, compensa }) => {
+  const cancelar = async ({ reprogramada, quien, compensa, creditCharge = false }) => {
     const resumen = quien === 'trainer'
       ? `Cancelar la clase de ${sesion.client}\n${compensa === 'discount' ? `Descuento de ${money.format(porClase)} al próximo cobro`
           : compensa === 'none' ? 'Sin reposición ni descuento' : 'Queda una clase por reponer'}`
-      : `Cancelar la clase de ${sesion.client}\n${reprogramada ? 'Se reprogramará' : 'No se reprograma: cuenta como incumplida'}`;
+      : `Cancelar la clase de ${sesion.client}\n${reprogramada ? 'Se reprogramará' : creditCharge ? `No se reprograma: se cobrará ${money.format(tarifaCredito)}` : 'No se reprograma: sin cobro adicional'}`;
     if (!confirmarGuardado(resumen)) return;
     try {
       const partes = [`rescheduled=${reprogramada}`, `by=${quien}`];
       if (compensa) partes.push(`resolution=${compensa}`);
+      if (creditCharge) partes.push('creditCharge=true');
       const r = await api(`/api/sessions/${sesion.id}?${partes.join('&')}`, { method: 'DELETE' });
       await loadData(); renderAll(); modal.close();
       toast(r.compensacion ? `Cancelada · ${r.compensacion.detalle}` : (reprogramada ? 'Cancelada para reprogramar' : 'Cancelada · cuenta como incumplida'));
@@ -1903,14 +1917,17 @@ function cancelSessionDialog(sesion) {
 
 function editCancellationDialog(sesion) {
   const box = document.createElement('div');
+  const cliente = data.clients.find(c => c.id === sesion.clientId);
+  const esCredito = cliente?.paymentMode === 'no_anticipado';
+  const tarifaCredito = Number(cliente?.creditSessionPrice || 25);
   const by = sesion.cancelledBy || 'client';
-  const res = sesion.cancellationResolution || (sesion.cancellationKind === 'rescheduled' ? 'none' : by === 'client' ? 'debit' : 'none');
+  const res = esCredito ? 'none' : (sesion.cancellationResolution || (sesion.cancellationKind === 'rescheduled' ? 'none' : by === 'client' ? 'debit' : 'none'));
   const resolution = res === 'makeup' ? 'none' : res;
-  box.innerHTML = `<form id="edit-cancellation-form"><p class="eyebrow">AGENDA</p><h2>Editar cancelación</h2><p class="form-summary"><b>${escapeHtml(sesion.client)}</b><br>${sesion.date} · ${sesion.time}</p><label>Quién canceló<select name="by"><option value="client" ${by === 'client' ? 'selected' : ''}>El cliente</option><option value="trainer" ${by === 'trainer' ? 'selected' : ''}>La entrenadora</option></select></label><label>¿Se reprogramó?<select name="rescheduled"><option value="false" ${sesion.cancellationKind !== 'rescheduled' ? 'selected' : ''}>No, perdió la clase</option><option value="true" ${sesion.cancellationKind === 'rescheduled' ? 'selected' : ''}>Sí, se reprogramará</option></select></label><label>Resolución<select name="resolution"><option value="debit" ${resolution === 'debit' ? 'selected' : ''}>Descontar del paquete</option><option value="none" ${resolution === 'none' ? 'selected' : ''}>Sin reposición ni descuento</option><option value="discount" ${resolution === 'discount' ? 'selected' : ''}>Crédito para próximo cobro</option></select></label><p class="section-note">La sesión nueva, si se reprograma, consumirá el saldo mensual o paquete que corresponda a su fecha. No se crean saldos de reposición.</p><button class="primary wide-button">Guardar cambios</button></form>`;
+  box.innerHTML = `<form id="edit-cancellation-form"><p class="eyebrow">AGENDA</p><h2>Editar cancelación</h2><p class="form-summary"><b>${escapeHtml(sesion.client)}</b><br>${sesion.date} · ${sesion.time}</p><label>Quién canceló<select name="by"><option value="client" ${by === 'client' ? 'selected' : ''}>El cliente</option><option value="trainer" ${by === 'trainer' ? 'selected' : ''}>La entrenadora</option></select></label><label>¿Se reprogramó?<select name="rescheduled"><option value="false" ${sesion.cancellationKind !== 'rescheduled' ? 'selected' : ''}>No, perdió la clase</option><option value="true" ${sesion.cancellationKind === 'rescheduled' ? 'selected' : ''}>Sí, se reprogramará</option></select></label>${esCredito ? `<label class="completion-check"><input type="checkbox" name="creditCharge" ${sesion.creditCharge ? 'checked' : ''} /> <span>Cobrar cancelación (${money.format(tarifaCredito)})</span></label><p class="section-note">Sólo aplica si la canceló el cliente y no se reprograma. Se mostrará en la factura y el portal.</p>` : `<label>Resolución<select name="resolution"><option value="debit" ${resolution === 'debit' ? 'selected' : ''}>Descontar del paquete</option><option value="none" ${resolution === 'none' ? 'selected' : ''}>Sin reposición ni descuento</option><option value="discount" ${resolution === 'discount' ? 'selected' : ''}>Crédito para próximo cobro</option></select></label>`}<p class="section-note">La sesión nueva, si se reprograma, consumirá el saldo mensual o paquete que corresponda a su fecha. No se crean saldos de reposición.</p><button class="primary wide-button">Guardar cambios</button></form>`;
   openModal(box, true);
   box.querySelector('form').addEventListener('submit', async event => {
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); button.disabled = true;
-    try { await api(`/api/sessions/${sesion.id}/cancellation`, { method: 'PATCH', body: { cancelledBy: form.elements.by.value, rescheduled: form.elements.rescheduled.value === 'true', resolution: form.elements.resolution.value } }); await loadData(); renderAll(); modal.close(); toast('Cancelación actualizada'); }
+    try { await api(`/api/sessions/${sesion.id}/cancellation`, { method: 'PATCH', body: { cancelledBy: form.elements.by.value, rescheduled: form.elements.rescheduled.value === 'true', resolution: form.elements.resolution?.value || 'none', creditCharge: Boolean(form.elements.creditCharge?.checked) } }); await loadData(); renderAll(); modal.close(); toast('Cancelación actualizada'); }
     catch (error) { toast(error.message, true); button.disabled = false; }
   });
 }
@@ -4023,6 +4040,8 @@ function clientDetail(id) {
     ? `${client.planName || pack?.label || `Paquete ${client.sessionsIncluded || 0} sesiones`} · ${pack ? remainingSessions(pack) : client.sessionsIncluded || 0} disponibles · ${money.format(client.plan)}`
     : client.billingModel === 'single'
     ? `${client.planName || 'Sesiones individuales'} · ${money.format(client.plan)} por sesión`
+    : client.paymentMode === 'no_anticipado'
+    ? `Crédito · ${money.format(client.creditSessionPrice || 25)} por sesión · corte día ${client.cutoffDay}`
     : `${client.planName || 'Mensualidad'} · ${money.format(client.plan)} al mes · corte día ${client.cutoffDay}`;
   const box = document.createElement('div');
   const reviewNotice = client.inbodyReviews.length ? `<button class="secondary wide-button" id="review-inbody">Revisar ${client.inbodyReviews.length} evaluación${client.inbodyReviews.length > 1 ? 'es' : ''} pendiente${client.inbodyReviews.length > 1 ? 's' : ''}</button>` : '';
@@ -4632,7 +4651,18 @@ const portalNavigate = (id, { replace = false } = {}) => {
   const target = portalViewIds.has(id) ? id : 'portal-dashboard'; portalView(target);
   if (window.location.hash !== `#${target}`) window.history[replace ? 'replaceState' : 'pushState'](null, '', `#${target}`);
 };
-const portalSession = item => ({ id: item.id, startsAt: new Date(item.starts_at), status: item.status, completionPercent: Number(item.completion_percent || 0), routine: item.routine_title || 'Evaluación / seguimiento', mode: item.mode });
+const portalSession = item => ({
+  id: item.id,
+  startsAt: new Date(item.starts_at),
+  status: item.status,
+  completionPercent: Number(item.completion_percent || 0),
+  routine: item.routine_title || 'Evaluación / seguimiento',
+  mode: item.mode,
+  cancellationKind: item.cancellation_kind || '',
+  cancelledBy: item.cancelled_by || '',
+  creditCharge: Boolean(item.credit_charge),
+  reprogramada: Boolean(item.reprogramada)
+});
 const monthLabel = date => new Intl.DateTimeFormat('es-PA', { month: 'short' }).format(date).replace('.', '');
 const portalDaysInMonth = (year, month) => new Date(year, month + 1, 0).getDate();
 const portalCutoffDate = (year, month, cutoff) => `${year}-${String(month + 1).padStart(2, '0')}-${String(Math.min(cutoff, portalDaysInMonth(year, month))).padStart(2, '0')}`;
@@ -4730,7 +4760,20 @@ function startOfWeek(fecha) {
 function portalSlotCard(slot, ownSessions) {
   const date = new Date(slot.starts_at);
   const own = slot.is_mine ? ownSessions.get(slot.id) : null;
-  return `<article class="portal-slot ${own ? 'mine' : 'busy'}"><time><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric', month: 'short' }).format(date)}</b><span>${new Intl.DateTimeFormat('es-PA', { hour: 'numeric', minute: '2-digit' }).format(date)}</span></time><div><b>${own ? escapeHtml(own.routine) : 'Ocupado'}</b><span>${own ? escapeHtml(own.mode) : 'Horario no disponible'}</span></div>${own ? `<form data-portal-session="${own.id}" class="portal-session-form"><label class="completion-check"><input name="completed" type="checkbox" ${own.status === 'completed' ? 'checked' : ''} /><span>Cumplí</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${own.status === 'completed' ? own.completionPercent || 100 : 0}" /><span>%</span></label><button class="secondary">Guardar</button></form>` : ''}</article>`;
+  const isCancelled = own && (own.status === 'cancelled' || own.status === 'no_show');
+  const resultLabel = own?.reprogramada
+    ? 'Reprogramada'
+    : own?.creditCharge
+      ? `Cancelación cobrada · ${money.format(Number(portalData.client?.credit_session_price || 25))}`
+      : own?.status === 'no_show'
+        ? 'No asistió · cuenta como cancelada'
+        : own?.cancelledBy === 'client'
+          ? 'Cancelada por el cliente · sin cobro'
+          : 'Cancelada por la entrenadora';
+  const form = own && !isCancelled
+    ? `<form data-portal-session="${own.id}" class="portal-session-form"><label class="completion-check"><input name="completed" type="checkbox" ${own.status === 'completed' ? 'checked' : ''} /><span>Cumplí</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${own.status === 'completed' ? own.completionPercent || 100 : 0}" /><span>%</span></label><button class="secondary">Guardar</button></form>`
+    : isCancelled ? `<small class="portal-session-status ${own.reprogramada ? 'reprogramada' : own.creditCharge ? 'cobrada' : ''}">${escapeHtml(resultLabel)}</small>` : '';
+  return `<article class="portal-slot ${own ? 'mine' : 'busy'}"><time><b>${new Intl.DateTimeFormat('es-PA', { weekday: 'short', day: 'numeric', month: 'short' }).format(date)}</b><span>${new Intl.DateTimeFormat('es-PA', { hour: 'numeric', minute: '2-digit' }).format(date)}</span></time><div><b>${own ? escapeHtml(own.routine) : 'Ocupado'}</b><span>${own ? escapeHtml(own.mode) : 'Horario no disponible'}</span></div>${form}</article>`;
 }
 
 function renderPortalCalendar(ownSessions) {
@@ -4893,7 +4936,11 @@ function portalAttendanceReport(sessions = portalPeriodSessions()) {
   const denominator = completed + cancelled;
   const percent = denominator ? Math.round(completed / denominator * 100) : 0;
   const cancelledPercent = denominator ? Math.round(cancelled / denominator * 100) : 0;
-  const rows = past.slice().sort((a, b) => new Date(b.starts_at) - new Date(a.starts_at)).slice(0, 30).map(item => `<tr><td data-label="Fecha">${new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeZone: 'America/Panama' }).format(new Date(item.starts_at))}</td><td data-label="Hora">${new Intl.DateTimeFormat('es-PA', { timeStyle: 'short', timeZone: 'America/Panama' }).format(new Date(item.starts_at))}</td><td data-label="Sesión">${escapeHtml(item.routine_title || 'Entrenamiento')}</td><td data-label="Estado"><span class="payment-status ${item.status}">${item.status === 'completed' ? 'Asistió' : item.status === 'cancelled' || item.status === 'no_show' ? 'Cancelada' : 'Pendiente'}</span></td></tr>`).join('');
+  const rows = past.slice().sort((a, b) => new Date(b.starts_at) - new Date(a.starts_at)).slice(0, 30).map(item => {
+    const estado = item.reprogramada ? 'Reprogramada' : item.credit_charge ? 'Cancelación cobrada' : item.status === 'completed' ? 'Asistió' : item.status === 'cancelled' || item.status === 'no_show' ? 'Cancelada' : 'Pendiente';
+    const detalle = item.credit_charge ? ` · ${money.format(Number(portalData.client?.credit_session_price || 25))}` : '';
+    return `<tr><td data-label="Fecha">${new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeZone: 'America/Panama' }).format(new Date(item.starts_at))}</td><td data-label="Hora">${new Intl.DateTimeFormat('es-PA', { timeStyle: 'short', timeZone: 'America/Panama' }).format(new Date(item.starts_at))}</td><td data-label="Sesión">${escapeHtml(item.routine_title || 'Entrenamiento')}</td><td data-label="Estado"><span class="payment-status ${item.status}">${estado}${detalle}</span></td></tr>`;
+  }).join('');
   return `<section class="portal-report-section"><div class="card-head"><div><h3>Asistencia y cancelaciones</h3><p>${period.label} · ${fechaCorta(period.from)} al ${fechaCorta(period.to)}</p></div><span class="portal-report-period"><b>${completed}/${denominator || 0} · ${percent}% cumplimiento</b><small>${cancelled}/${denominator || 0} · ${cancelledPercent}% cancelaciones</small></span></div><div class="portal-report-stats"><article><strong>${completed}</strong><span>Asistencias</span></article><article><strong>${cancelled}</strong><span>Cancelaciones cliente</span></article><article><strong>${reprogrammed}</strong><span>Reprogramadas</span></article><article><strong>${pending}</strong><span>Pendientes</span></article></div><div class="table-wrap"><table class="stack-mobile portal-attendance-table"><thead><tr><th>Fecha</th><th>Hora</th><th>Sesión</th><th>Estado</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">Todavía no hay sesiones registradas en este período.</td></tr>'}</tbody></table></div></section>`;
 }
 function renderPortalReports() {
@@ -5010,7 +5057,7 @@ function renderPortal() {
   document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(routine => { const todayCompletion = portalData.routineCompletions.find(item => item.routine_id === routine.id && item.completed_on === dateKey(today)); return `<article class="card portal-routine-card"><div class="card-head"><div><h3>${escapeHtml(routine.title)}</h3><p>${escapeHtml(routine.description || '')} · ${routine.sessions_per_week} veces por semana</p>${routine.due_on ? `<p class="routine-due${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? 'Venció el' : 'Para cumplirla antes del'} ${fechaCorta(routine.due_on)}</p>` : ''}</div></div><div class="exercise-preview">${portalExerciseRows(routine.exercises || [])}</div><form data-portal-routine="${routine.id}" class="portal-completion-form"><label class="completion-check"><input name="completed" type="checkbox" ${todayCompletion && Number(todayCompletion.completion_percent) > 0 ? 'checked' : ''} /><span>Entrenamiento realizado hoy</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${Number(todayCompletion?.completion_percent || 100)}" /><span>% completado</span></label><button class="primary">Guardar cumplimiento</button></form></article>`; }).join('') : '<p class="empty">La entrenadora todavía no te ha asignado una rutina.</p>';
   const ownSessions = new Map(portalData.sessions.map(item => [item.id, portalSession(item)]));
   renderPortalCalendar(ownSessions);
-  document.getElementById('portal-plan').innerHTML = `<span class="commercial-label ${client.billing_model === 'package' ? 'package-label' : ''}">${client.billing_model === 'package' ? 'Paquete' : 'Mensualidad'}</span><div><h3>${escapeHtml(client.plan_name || 'Plan personalizado')}</h3><p>${money.format(Number(client.standard_price))}${client.billing_model === 'monthly' ? ` · corte día ${client.billing_cutoff_day}` : ` · ${client.sessions_included || 0} sesiones`}</p></div>`;
+  document.getElementById('portal-plan').innerHTML = `<span class="commercial-label ${client.billing_model === 'package' ? 'package-label' : ''}">${client.payment_mode === 'no_anticipado' ? 'Crédito por sesión' : client.billing_model === 'package' ? 'Paquete' : 'Mensualidad'}</span><div><h3>${escapeHtml(client.plan_name || 'Plan personalizado')}</h3><p>${client.payment_mode === 'no_anticipado' ? `${money.format(Number(client.credit_session_price || 25))} por sesión · corte día ${client.billing_cutoff_day}` : `${money.format(Number(client.standard_price))}${client.billing_model === 'monthly' ? ` · corte día ${client.billing_cutoff_day}` : ` · ${client.sessions_included || 0} sesiones`}`}</p></div>`;
   // La vista Pagos es un historial independiente del período del dashboard:
   // aquí deben aparecer todos los cobros del cliente, no sólo los del mes o
   // corte que esté seleccionado para las métricas.
@@ -5019,7 +5066,7 @@ function renderPortal() {
   document.getElementById('portal-pending-payment').innerHTML = pendingInvoices.length ? `<div class="portal-payment-alert"><strong>Pago pendiente</strong><span>${pendingInvoices.length === 1 ? `Tienes 1 factura pendiente por ${money.format(Number(pendingInvoices[0].balance || pendingInvoices[0].amount))}.` : `Tienes ${pendingInvoices.length} facturas pendientes por ${money.format(pendingInvoices.reduce((sum, invoice) => sum + Number(invoice.balance || invoice.amount), 0))}.`}</span></div>` : '<div class="portal-payment-ok">No tienes pagos pendientes.</div>';
   const invoicesSorted = historyInvoices;
   const invoiceDate = invoice => { const raw = invoice.issued_on || invoice.due_on; return raw ? new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeZone: 'America/Panama' }).format(new Date(`${String(raw).slice(0, 10)}T12:00:00-05:00`)) : '—'; };
-  document.getElementById('portal-invoices').innerHTML = invoicesSorted.length ? invoicesSorted.map(invoice => `<tr><td data-label="Concepto"><b>${escapeHtml(invoice.concept)}</b>${invoice.invoice_number ? `<br><small>${escapeHtml(invoice.invoice_number)}</small>` : ''}</td><td data-label="Fecha">${invoiceDate(invoice)}</td><td data-label="Monto">${money.format(Number(invoice.amount))}</td><td data-label="Estado"><span class="payment-status ${invoice.status}">${invoice.status === 'confirmed' ? 'Pagada' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'}</span></td><td data-label="Comprobante"><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoice_number || invoice.id.slice(0, 8))}">Ver PDF</button></td></tr>`).join('') : '<tr><td colspan="5" class="empty">No hay facturas registradas.</td></tr>';
+  document.getElementById('portal-invoices').innerHTML = invoicesSorted.length ? invoicesSorted.map(invoice => { const lines = (invoice.line_items || invoice.lineItems || []).map(line => `${escapeHtml(line.name || 'Sesión')} · ${money.format(Number(line.item_total || line.amount || 0))}`).join('<br>'); const estado = Number(invoice.amount) === 0 ? 'Sin cargo' : invoice.status === 'confirmed' ? 'Pagada' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'; return `<tr><td data-label="Concepto"><b>${escapeHtml(invoice.concept)}</b>${lines ? `<br><small class="invoice-line-detail">${lines}</small>` : ''}${invoice.invoice_number ? `<br><small>${escapeHtml(invoice.invoice_number)}</small>` : ''}</td><td data-label="Fecha">${invoiceDate(invoice)}</td><td data-label="Monto">${money.format(Number(invoice.amount))}</td><td data-label="Estado"><span class="payment-status ${invoice.status}">${estado}</span></td><td data-label="Comprobante"><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoice_number || invoice.id.slice(0, 8))}">Ver PDF</button></td></tr>`; }).join('') : '<tr><td colspan="5" class="empty">No hay facturas registradas.</td></tr>';
   const portalCount = document.getElementById('portal-notification-count'); portalCount.textContent = portalData.notifications.length; portalCount.hidden = !portalData.notifications.length;
 }
 async function loadPortalData() {
