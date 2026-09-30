@@ -35,38 +35,6 @@ let portalData = null;
 let portalPeriodMode = 'month';
 let portalPeriodMonth = dateKey(today).slice(0, 7);
 let portalCutOffset = 0;
-let mostrarHistorialPaquetes = false;
-// El control de paquetes navega por CORTE, no por mes calendario: 0 = corte
-// vigente de cada cliente, -1 = anterior, +1 = siguiente. Cada cliente se ve en
-// su propio ciclo, sin la ambigüedad de mapear cortes a meses.
-let corteOffset = 0;
-// El inicio del ciclo de un saldo mensual: del rango en la etiqueta o, de
-// respaldo, purchased_on. En yyyy-mm-dd para comparar. Los no mensuales no
-// tienen ciclo de corte, así que devuelven su fecha de compra.
-function inicioCicloPaquete(pack) {
-  if (pack.kind !== 'monthly') return pack.purchasedOn || '';
-  const match = String(pack.label || '').match(/(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})\s*[–-]\s*(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);
-  if (!match) return pack.purchasedOn || '';
-  return `${match[3]}-${String(match[2]).padStart(2, '0')}-${String(match[1]).padStart(2, '0')}`;
-}
-// Cumplimiento del CICLO del saldo (no de un mes calendario): las clases del
-// ciclo —posteriores al inicio y hasta el vencimiento— que descuentan
-// (realizadas, no presentadas, o canceladas por el cliente sin reprogramar) y
-// qué porcentaje se realizó. El día de inicio pertenece al ciclo anterior.
-function cumplimientoCelda(pack) {
-  const inicio = inicioCicloPaquete(pack);
-  const vence = pack.expiresOn ? dateOnly(pack.expiresOn) : '';
-  if (!inicio || !vence) return '<small class="pack-origin">Sin clases</small>';
-  const cuenta = s => s.status === 'completed' || s.status === 'no_show'
-    || (s.status === 'cancelled' && s.cancellationKind === 'not_rescheduled' && (!s.cancelledBy || s.cancelledBy === 'client'));
-  const elegibles = (data.sessions || []).filter(s => s.clientId === pack.clientId
-    && s.date > inicio && s.date <= vence && cuenta(s));
-  if (!elegibles.length) return '<small class="pack-origin">Sin clases</small>';
-  const realizadas = elegibles.filter(s => s.status === 'completed').length;
-  const pct = Math.round(realizadas / elegibles.length * 100);
-  const color = pct >= 80 ? '#3f7d54' : pct >= 50 ? '#8a5a12' : '#8f3d2e';
-  return `<strong style="color:${color}">${pct}%</strong><br><small class="pack-origin">${realizadas}/${elegibles.length} clases</small>`;
-}
 let compliancePeriod = 'week';
 let billingMonth = String(today.getMonth() + 1);
 let billingYear = String(today.getFullYear());
@@ -913,109 +881,6 @@ function renderBilling() {
     return `<tr><td data-label="Cliente"><b>${escapeHtml(invoice.client)}</b>${notaPagador}</td><td data-label="Concepto">${origen}<br>${concept}</td><td data-label="Vence">${fechaCorta(invoice.due)}</td><td data-label="Método">${invoice.method === 'pending' ? '—' : escapeHtml(invoice.method)}</td><td data-label="Monto">${money.format(invoice.amount)}${invoice.balance > 0 && invoice.balance !== invoice.amount ? `<br><small>Saldo ${money.format(invoice.balance)}</small>` : ''}</td><td data-label="Estado"><span class="payment-status ${invoice.status}">${label}</span></td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoiceNumber || invoice.id.slice(0, 8))}">Ver PDF</button>${recalcularFactura}${aplicarMensualidad}${aplicarPaquete}${invoice.status === 'pending' && local ? `<button class="secondary session-use" data-confirm-invoice="${invoice.id}">${parcial ? 'Registrar saldo' : 'Confirmar pago'}</button><button class="secondary session-use" data-edit-invoice="${invoice.id}">Editar</button><button class="secondary session-use" data-delete-invoice="${invoice.id}">Anular</button><button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar</button>` : ''}${invoice.status === 'void' && local ? `<button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar definitivamente</button>` : ''}${invoice.status === 'confirmed' && local ? `<button class="secondary session-use" data-edit-payment="${invoice.id}">Editar pago</button><button class="secondary session-use" data-purge-invoice="${invoice.id}">Borrar definitivamente</button>` : ''}</div></td></tr>`;
   }).join('') : '<tr><td colspan="7" class="empty">No hay facturas con estos filtros.</td></tr>';
   const loadMore = document.getElementById('billing-load-more'); loadMore.hidden = visibleInvoices.length >= periodInvoices.length; loadMore.textContent = `Mostrar más facturas (${periodInvoices.length - visibleInvoices.length} restantes)`;
-  // Por defecto sólo los saldos vigentes (con sesiones disponibles o pendientes
-  // de pago). Los agotados y vencidos sin saldo son historial y se muestran con
-  // "Ver historial", para que la lista no crezca sin fin con clientela fija.
-  const paqueteVigente = pack => pack.status === 'pending' || remainingSessions(pack) > 0;
-  // El control navega por CORTE (no por mes): para cada cliente se calcula su
-  // ciclo en el offset elegido y se muestran los saldos de ESE ciclo. No
-  // deduplica: un plan familiar puede tener dos saldos legítimos del mismo
-  // ciclo (Ernesto: familiar + propio).
-  const hoyStr = dateKey(today);
-  const diasEnMes = (year, month) => new Date(year, month + 1, 0).getDate();
-  const fechaCorte = (year, month, cutoff) => `${year}-${String(month + 1).padStart(2, '0')}-${String(Math.min(cutoff, diasEnMes(year, month))).padStart(2, '0')}`;
-  // El ciclo del cliente en un offset de cortes: 0 el vigente (el que contiene
-  // hoy), -1 el anterior, +1 el siguiente. El vigente empieza en el corte de
-  // este mes si ya pasó; si no, en el del mes anterior. clampa fin de mes.
-  const cicloEnOffset = (cutoff, offset) => {
-    let iy = today.getFullYear(); let im = today.getMonth();
-    if (hoyStr < fechaCorte(iy, im, cutoff)) im -= 1;
-    im += offset;
-    while (im > 11) { im -= 12; iy += 1; }
-    while (im < 0) { im += 12; iy -= 1; }
-    const inicio = fechaCorte(iy, im, cutoff);
-    let ny = iy; let nm = im + 1; if (nm > 11) { nm = 0; ny += 1; }
-    return { inicio, vence: fechaCorte(ny, nm, cutoff) };
-  };
-  const corteSeleccionadoIds = new Set();
-  data.packages.forEach(pack => {
-    const vence = pack.expiresOn ? dateOnly(pack.expiresOn) : '';
-    if (pack.kind === 'monthly') {
-      // El ciclo se muestra AUNQUE esté agotado: que el cliente consumió todas
-      // sus clases del ciclo es justo el dato del corte (Julio 10/10, Sally
-      // 16/16). El emparejamiento por rango ya deja fuera otros ciclos.
-      const client = data.clients.find(item => item.id === pack.clientId);
-      const ciclo = client ? cicloEnOffset(Number(client.cutoffDay) || 1, corteOffset) : null;
-      if (ciclo && inicioCicloPaquete(pack) === ciclo.inicio && vence === ciclo.vence) corteSeleccionadoIds.add(pack.id);
-    } else if (corteOffset === 0 && vence && vence >= hoyStr && (pack.status === 'confirmed' || pack.status === 'pending')) {
-      // Los paquetes no mensuales (clases sueltas) no tienen corte: se muestran
-      // sólo en el ciclo vigente mientras sigan vivos.
-      corteSeleccionadoIds.add(pack.id);
-    }
-  });
-  const corteLabel = corteOffset === 0 ? 'Corte actual'
-    : corteOffset === -1 ? 'Corte anterior'
-    : corteOffset === 1 ? 'Próximo corte'
-    : corteOffset < 0 ? `${-corteOffset} cortes atrás`
-    : `${corteOffset} cortes adelante`;
-  const corteLabelEl = document.getElementById('corte-label');
-  if (corteLabelEl) corteLabelEl.textContent = mostrarHistorialPaquetes ? 'Historial completo' : corteLabel;
-  const corteHoyBtn = document.getElementById('corte-hoy');
-  if (corteHoyBtn) corteHoyBtn.classList.toggle('active-filter', corteOffset === 0 && !mostrarHistorialPaquetes);
-  // En modo corte se muestran TODOS los saldos del ciclo elegido, agotados
-  // incluidos (el corte es el filtro). "Ver historial" lista todos los saldos
-  // de todos los ciclos.
-  const visiblesPaquetes = mostrarHistorialPaquetes
-    ? data.packages.slice()
-    : data.packages.filter(pack => corteSeleccionadoIds.has(pack.id));
-  // Roster completo por corte: todo cliente mensual activo aparece en cada
-  // corte. Si su saldo de ese ciclo aún no abrió (los ciclos futuros abren en
-  // su fecha), se muestra una fila PROYECTADA con las sesiones esperadas del
-  // plan y el estado del cobro. Esto NO afecta que pueda entrenar: su ciclo
-  // vigente sí tiene saldo real (abre en el corte); las proyectadas son los
-  // próximos, sólo informativas.
-  if (!mostrarHistorialPaquetes) {
-    const dmy = s => (s ? `${s.slice(8, 10)}-${s.slice(5, 7)}-${s.slice(0, 4)}` : '');
-    const conSaldoMensual = new Set(visiblesPaquetes.filter(p => p.kind === 'monthly').map(p => p.clientId));
-    data.clients.filter(c => c.statusRaw === 'active' && c.billingModel === 'monthly' && !conSaldoMensual.has(c.id)).forEach(client => {
-      const ciclo = cicloEnOffset(Number(client.cutoffDay) || 1, corteOffset);
-      const factura = data.invoices.find(inv => inv.status !== 'void'
-        && (inv.billedForClientId === client.id || inv.clientId === client.id) && inv.due === ciclo.inicio);
-      const estadoProy = !factura ? 'Sin abrir' : factura.status === 'confirmed' ? 'Pagado' : 'Pendiente de pago';
-      visiblesPaquetes.push({
-        projected: true, clientId: client.id, client: client.name, kind: 'monthly',
-        label: `Mensualidad · ${dmy(ciclo.inicio)} – ${dmy(ciclo.vence)}`,
-        total: Number(client.monthlySessionTarget || client.sessionsIncluded || 0), used: 0,
-        expiresOn: ciclo.vence, abre: ciclo.inicio, estadoProy
-      });
-    });
-    visiblesPaquetes.sort((a, b) => String(a.client).localeCompare(String(b.client), 'es'));
-  }
-  const packageTable = document.getElementById('package-table');
-  if (packageTable) packageTable.innerHTML = visiblesPaquetes.length ? visiblesPaquetes.map(pack => {
-    if (pack.projected) {
-      const clase = pack.estadoProy === 'Pendiente de pago' ? 'pending' : pack.estadoProy === 'Pagado' ? 'confirmed' : '';
-      return `<tr class="pack-proyectada"><td data-label="Cliente"><b>${escapeHtml(pack.client)}</b></td><td data-label="Paquete">${escapeHtml(pack.label)}<br><small class="pack-origin">Proyectado · aún no abre</small></td><td data-label="Compradas">${pack.total || '—'}</td><td data-label="Usadas">0</td><td data-label="Disponibles"><strong class="session-balance">${pack.total || '—'}</strong></td><td data-label="Estado"><span class="payment-status ${clase}">${pack.estadoProy}</span><br><small>abre ${fechaCorta(pack.abre)}</small></td><td data-label="Cumplimiento">${cumplimientoCelda(pack)}</td><td data-label="Acciones"><small>—</small></td></tr>`;
-    }
-    const remaining = remainingSessions(pack);
-    const state = pack.status === 'pending' ? 'Pendiente de pago' : remaining ? 'Activo' : 'Agotado';
-    const borrable = Number(pack.used) === 0
-      ? `<button class="secondary session-use" data-borrar-paquete="${pack.id}">Eliminar</button>` : '';
-    // La renovación es sólo para paquetes de clases (la mensualidad se renueva
-    // sola al cobrar). Se ofrece mientras el paquete esté vivo o recién vencido.
-    const renovable = pack.kind === 'package' && pack.status !== 'pending'
-      ? `<button class="secondary session-use" data-renovar-paquete="${pack.id}">Renovar</button>` : '';
-    const aviso = pack.vencidoConSaldo
-      ? `<br><small class="pack-vencido">Vencido · ${remaining} ${remaining === 1 ? 'clase perdida' : 'clases perdidas'}</small>`
-      : pack.renovacionPendiente
-        ? '<br><small class="pack-renovar">Renovación pendiente</small>'
-        : '';
-    // El saldo está activo y usable, pero su cobro sigue sin pagarse: el cliente
-    // entrena aunque pague días después, y esto lo deja a la vista sin bloquear.
-    const pagoAviso = pack.pagoPendiente && pack.status === 'confirmed'
-      ? '<br><small class="pack-adeuda">Pendiente de pago</small>' : '';
-    return `<tr><td data-label="Cliente"><b>${escapeHtml(pack.client)}</b></td><td data-label="Paquete">${escapeHtml(pack.label)}${pack.originInvoiceId ? `<br><small class="pack-origin">Salió del cobro ${escapeHtml(pack.originSource === 'zoho_invoice' ? 'Zoho ' : '')}${escapeHtml(pack.originNumber || pack.originConcept || 'sin número')}${pack.originDate ? ` · ${fechaCorta(pack.originDate)}` : ''}</small>` : ''}</td><td data-label="Compradas">${pack.total}</td><td data-label="Usadas">${pack.used}</td><td data-label="Disponibles"><strong class="session-balance">${remaining}</strong></td><td data-label="Estado"><span class="payment-status ${pack.status === 'confirmed' && remaining ? 'confirmed' : ''}">${state}</span><br><small>${pack.expiresOn ? `vence ${fechaCorta(pack.expiresOn)}` : 'sin vencimiento'}</small>${aviso}${pagoAviso}</td><td data-label="Cumplimiento">${cumplimientoCelda(pack)}</td><td data-label="Acciones"><div class="invoice-actions"><button class="secondary session-use" data-editar-paquete="${pack.id}">Editar</button>${renovable}${borrable}</div><small>${pack.status === 'confirmed' && remaining ? 'Aquí se descuentan las clases' : '—'}</small></td></tr>`;
-  }).join('') : `<tr><td colspan="8" class="empty">${data.packages.length ? `No hay saldos en este corte${corteOffset > 0 ? ' (el ciclo aún no abre)' : ''}. Usa las flechas o “Ver historial”.` : 'Aún no hay paquetes de sesiones.'}</td></tr>`;
   void ensureBillingAnalytics();
 }
 function attendanceClientMatches() {
@@ -4294,31 +4159,9 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'informe-mensual') informeMensual();
   if (actionButton?.dataset.action === 'account-statement') financialReportDialog('account-statement');
   if (actionButton?.dataset.action === 'accounts-receivable') financialReportDialog('accounts-receivable');
-  if (actionButton?.dataset.action === 'toggle-package-history') {
-    mostrarHistorialPaquetes = !mostrarHistorialPaquetes;
-    const boton = document.getElementById('toggle-package-history');
-    if (boton) boton.textContent = mostrarHistorialPaquetes ? 'Ver solo vigentes' : 'Ver historial';
-    renderBilling();
-  }
-  if (actionButton?.dataset.action === 'corte-prev') { corteOffset -= 1; mostrarHistorialPaquetes = false; renderBilling(); }
-  if (actionButton?.dataset.action === 'corte-next') { corteOffset += 1; mostrarHistorialPaquetes = false; renderBilling(); }
-  if (actionButton?.dataset.action === 'corte-hoy') {
-    corteOffset = 0; mostrarHistorialPaquetes = false;
-    const bh = document.getElementById('toggle-package-history');
-    if (bh) bh.textContent = 'Ver historial';
-    renderBilling();
-  }
   if (invoicePdfButton) previewProtectedPdf(`/api/invoices/${invoicePdfButton.dataset.invoicePdf}/pdf`, `Comprobante ${invoicePdfButton.dataset.invoiceNumber}`, `comprobante-${invoicePdfButton.dataset.invoiceNumber}.pdf`);
   if (editSessionButton) editSessionSchedule(data.sessions.find(session => session.id === editSessionButton.dataset.editSession));
   if (event.target.dataset.editPlan) planEditor(data.plans.find(plan => plan.id === event.target.dataset.editPlan));
-  if (event.target.dataset.editarPaquete) {
-    const pack = data.packages.find(item => item.id === event.target.dataset.editarPaquete);
-    if (pack) packageEditor(pack);
-  }
-  if (event.target.dataset.renovarPaquete) {
-    const pack = data.packages.find(item => item.id === event.target.dataset.renovarPaquete);
-    if (pack) renovarPaquete(pack);
-  }
   if (event.target.dataset.client) clientDetail(event.target.dataset.client);
   if (event.target.dataset.editClient) editClient(data.clients.find(client => client.id === event.target.dataset.editClient));
   if (event.target.dataset.editRoutine) newRoutine(data.routines.find(routine => routine.id === event.target.dataset.editRoutine));
