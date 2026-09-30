@@ -83,6 +83,7 @@ let attendanceReportLoading = false;
 let attendanceReportRequest = 0;
 let attendanceStatusFilters = { active: true, paused: true, inactive: false };
 let attendanceCurrentCutOnly = false;
+let attendanceCutOffset = 0;
 let calendarMode = 'week';
 let calendarCursor = new Date(today);
 calendarCursor.setHours(12, 0, 0, 0);
@@ -1014,10 +1015,13 @@ function attendanceCutClient() {
 }
 function attendancePeriodKey() {
   const cutoffClient = attendanceCurrentCutOnly ? attendanceCutClient() : null;
-  if (cutoffClient) return `cutoff:${cutoffClient.id}`;
+  if (cutoffClient) return `cutoff:${cutoffClient.id}:${attendanceCutOffset}`;
   return attendanceFrom && attendanceTo
     ? `range:${attendanceFrom}:${attendanceTo}`
     : `month:${attendanceMonth}`;
+}
+function attendanceCutPosition() {
+  return attendanceCutOffset ? `Corte anterior · ${attendanceCutOffset}` : 'Corte vigente';
 }
 function renderAttendanceReport() {
   const monthInput = document.getElementById('attendance-month');
@@ -1028,6 +1032,13 @@ function renderAttendanceReport() {
   const target = document.getElementById('attendance-table');
   const totals = document.getElementById('attendance-totals');
   const summary = document.getElementById('attendance-summary');
+  const periodHighlight = document.getElementById('attendance-period-highlight');
+  const periodKind = document.getElementById('attendance-period-kind');
+  const periodDates = document.getElementById('attendance-period-dates');
+  const periodDetail = document.getElementById('attendance-period-detail');
+  const cutNav = document.getElementById('attendance-cut-nav');
+  const cutPosition = document.getElementById('attendance-cut-position');
+  const cutNext = document.getElementById('attendance-cut-next');
   if (!monthInput || !fromInput || !toInput || !clientFilterInput || !currentCutInput || !target || !totals || !summary) return;
   monthInput.value = attendanceMonth;
   fromInput.value = attendanceFrom;
@@ -1041,6 +1052,8 @@ function renderAttendanceReport() {
   });
   const requestedPeriodKey = attendancePeriodKey();
   if (!attendanceReport || attendanceReport.periodKey !== requestedPeriodKey) {
+    if (periodHighlight) periodHighlight.hidden = true;
+    if (cutNav) cutNav.hidden = true;
     summary.textContent = attendanceReportLoading ? 'Calculando…' : 'Selecciona un mes o aplica un rango para consultar la agenda.';
     totals.innerHTML = '';
     target.innerHTML = `<tr><td colspan="10" class="empty">${attendanceReportLoading ? 'Cargando agenda y cumplimiento…' : 'No hay datos cargados para este período.'}</td></tr>`;
@@ -1073,8 +1086,19 @@ function renderAttendanceReport() {
     ? fechaCorta(attendanceReport.period.from)
     : `${fechaCorta(attendanceReport.period?.from)} al ${fechaCorta(attendanceReport.period?.to)}`;
   const clientNote = clientNeedle ? ` · Cliente: ${attendanceClientFilter.trim()}` : '';
-  const cutNote = attendanceCurrentCutOnly && cutClient ? ` · Corte vigente (día ${cutClient.cutoffDay})` : '';
+  const cutNote = attendanceCurrentCutOnly && cutClient ? ` · ${attendanceCutPosition()} (día ${cutClient.cutoffDay})` : '';
   summary.textContent = `${periodLabel} · ${clients.length} clientes · ${t.agendadas} clases en el calendario · ${t.medibles} sesiones medidas${clientNote}${cutNote}${pausedNote}`;
+  if (periodHighlight) {
+    periodHighlight.hidden = false;
+    if (periodKind) periodKind.textContent = attendanceCurrentCutOnly ? attendanceCutPosition() : attendanceFrom && attendanceTo ? 'Rango personalizado' : 'Mes consultado';
+    if (periodDates) periodDates.textContent = periodLabel;
+    if (periodDetail) periodDetail.textContent = attendanceCurrentCutOnly && cutClient
+      ? `${cutClient.name} · día de corte ${cutClient.cutoffDay} · datos del expediente`
+      : 'Las métricas se calculan con las sesiones del período seleccionado';
+    if (cutNav) cutNav.hidden = !attendanceCurrentCutOnly || !cutClient;
+    if (cutPosition) cutPosition.textContent = attendanceCutPosition();
+    if (cutNext) cutNext.disabled = attendanceCutOffset === 0;
+  }
   const tile = (label, value, note = '') => `<article><span>${label}</span><strong>${value}</strong>${note ? `<small>${note}</small>` : ''}</article>`;
   totals.innerHTML = [
     tile('Clases agendadas', t.agendadas),
@@ -1109,10 +1133,11 @@ async function loadAttendanceReport() {
   const cutoffClient = attendanceCurrentCutOnly ? attendanceCutClient() : null;
   if (attendanceCurrentCutOnly && !cutoffClient) {
     attendanceCurrentCutOnly = false;
+    attendanceCutOffset = 0;
   }
   const periodKey = attendancePeriodKey();
   const query = cutoffClient
-    ? `cutoffClientId=${encodeURIComponent(cutoffClient.id)}`
+    ? `cutoffClientId=${encodeURIComponent(cutoffClient.id)}&cutoffOffset=${attendanceCutOffset}`
     : attendanceFrom && attendanceTo
       ? `from=${encodeURIComponent(attendanceFrom)}&to=${encodeURIComponent(attendanceTo)}`
       : `month=${encodeURIComponent(attendanceMonth)}`;
@@ -4376,6 +4401,7 @@ document.getElementById('attendance-month')?.addEventListener('change', event =>
   attendanceFrom = '';
   attendanceTo = '';
   attendanceCurrentCutOnly = false;
+  attendanceCutOffset = 0;
   attendanceReport = null;
   loadAttendanceReport();
 });
@@ -4384,6 +4410,7 @@ document.getElementById('attendance-current')?.addEventListener('click', () => {
   attendanceFrom = '';
   attendanceTo = '';
   attendanceCurrentCutOnly = false;
+  attendanceCutOffset = 0;
   attendanceReport = null;
   loadAttendanceReport();
 });
@@ -4397,6 +4424,7 @@ document.getElementById('attendance-apply-range')?.addEventListener('click', () 
   attendanceFrom = from;
   attendanceTo = to;
   attendanceCurrentCutOnly = false;
+  attendanceCutOffset = 0;
   attendanceReport = null;
   loadAttendanceReport();
 });
@@ -4404,6 +4432,7 @@ document.getElementById('attendance-clear-range')?.addEventListener('click', () 
   attendanceFrom = '';
   attendanceTo = '';
   attendanceCurrentCutOnly = false;
+  attendanceCutOffset = 0;
   attendanceReport = null;
   loadAttendanceReport();
 });
@@ -4413,7 +4442,7 @@ document.querySelectorAll('[data-attendance-status]').forEach(input => input.add
 }));
 document.getElementById('attendance-client-filter')?.addEventListener('input', event => {
   attendanceClientFilter = event.target.value;
-  if (attendanceCurrentCutOnly && !attendanceCutClient()) attendanceCurrentCutOnly = false;
+  if (attendanceCurrentCutOnly && !attendanceCutClient()) { attendanceCurrentCutOnly = false; attendanceCutOffset = 0; }
   if (attendanceCurrentCutOnly) {
     attendanceReport = null;
     loadAttendanceReport();
@@ -4423,11 +4452,25 @@ document.getElementById('attendance-current-cut')?.addEventListener('change', ev
   if (event.target.checked && !attendanceCutClient()) {
     event.target.checked = false;
     attendanceCurrentCutOnly = false;
+    attendanceCutOffset = 0;
     toast('Escribe un cliente único para consultar su corte vigente.', true);
     renderAttendanceReport();
     return;
   }
   attendanceCurrentCutOnly = event.target.checked;
+  if (!attendanceCurrentCutOnly) attendanceCutOffset = 0;
+  attendanceReport = null;
+  loadAttendanceReport();
+});
+document.getElementById('attendance-cut-previous')?.addEventListener('click', () => {
+  if (!attendanceCurrentCutOnly || !attendanceCutClient()) return;
+  attendanceCutOffset += 1;
+  attendanceReport = null;
+  loadAttendanceReport();
+});
+document.getElementById('attendance-cut-next')?.addEventListener('click', () => {
+  if (!attendanceCurrentCutOnly || attendanceCutOffset === 0 || !attendanceCutClient()) return;
+  attendanceCutOffset -= 1;
   attendanceReport = null;
   loadAttendanceReport();
 });

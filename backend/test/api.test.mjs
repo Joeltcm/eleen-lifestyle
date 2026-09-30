@@ -1895,13 +1895,26 @@ describe('reporte mensual de agenda y cumplimiento', () => {
 
     const { estado, datos } = await api.get(`/api/attendance/monthly?cutoffClientId=${c.datos.id}`);
     assert.equal(estado, 200);
-    assert.deepEqual(datos.cutoff, { clientId: c.datos.id, day: cutoffDay });
+    assert.deepEqual(datos.cutoff, { clientId: c.datos.id, day: cutoffDay, offset: 0 });
     assert.deepEqual(datos.period, { from: actual.inicio, to: actual.vence });
-    assert.equal(datos.periodKey, `cutoff:${c.datos.id}`);
+    assert.equal(datos.periodKey, `cutoff:${c.datos.id}:0`);
     const fila = datos.clients.find(item => item.clientId === c.datos.id);
     assert.deepEqual({ agendadas: fila.agendadas, completadas: fila.completadas, medibles: fila.medibles, compliancePercent: fila.compliancePercent }, {
       agendadas: 2, completadas: 1, medibles: 1, compliancePercent: 100
     });
+
+    const anteriorReport = await api.get(`/api/attendance/monthly?cutoffClientId=${c.datos.id}&cutoffOffset=1`);
+    assert.equal(anteriorReport.estado, 200);
+    assert.deepEqual(anteriorReport.datos.cutoff, { clientId: c.datos.id, day: cutoffDay, offset: 1 });
+    assert.deepEqual(anteriorReport.datos.period, { from: anterior.inicio, to: anterior.vence });
+    assert.equal(anteriorReport.datos.periodKey, `cutoff:${c.datos.id}:1`);
+    const filaAnterior = anteriorReport.datos.clients.find(item => item.clientId === c.datos.id);
+    assert.deepEqual({
+      agendadas: filaAnterior.agendadas,
+      completadas: filaAnterior.completadas,
+      medibles: filaAnterior.medibles,
+      compliancePercent: filaAnterior.compliancePercent
+    }, { agendadas: 1, completadas: 1, medibles: 1, compliancePercent: 100 });
   });
 });
 

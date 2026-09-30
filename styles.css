@@ -503,3 +503,22 @@ button.active-filter{background:#2f6f4f;color:#fff;border-color:#2f6f4f}
 .client-invoice-row small{display:block;margin-top:3px;color:var(--muted);font-size:10px}
 .client-invoice-row .payment-status{justify-self:end}
 @media(max-width:600px){.billing-flow-note{align-items:stretch;flex-direction:column}.billing-flow-note .applied-pill{align-self:flex-start}.client-billing-summary{grid-template-columns:1fr}.client-billing-summary article{border-left:0;border-top:1px solid var(--line);padding:8px}.client-billing-summary article:first-child{border-top:0}.client-invoice-row{grid-template-columns:1fr}.client-invoice-row .payment-status{justify-self:start}}
+
+/* Asistencia: el ciclo consultado debe ser evidente y las tarjetas deben
+   conservar sus etiquetas legibles en pantallas estrechas. */
+.attendance-period-highlight{display:flex;align-items:center;justify-content:space-between;gap:18px;margin:0 0 18px;padding:16px 18px;border:1px solid #e1c4d1;border-left:5px solid #a86682;border-radius:12px;background:linear-gradient(120deg,#fff7fa,#f7edf3)}
+.attendance-period-highlight>div:first-child{min-width:0}
+.attendance-period-highlight span{display:block;color:#95627a;font:700 10px 'DM Sans';text-transform:uppercase;letter-spacing:.12em}
+.attendance-period-highlight strong{display:block;margin-top:4px;color:#463941;font:600 clamp(22px,3vw,32px) Fraunces;line-height:1.1}
+.attendance-period-highlight small{display:block;margin-top:5px;color:#81767c;font-size:11px}
+.attendance-cut-nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.attendance-cut-nav span{display:inline-block;min-width:100px;text-align:center;color:#6f4e60;font-size:11px;font-weight:700}
+.attendance-cut-nav button{padding:8px 10px;font-size:11px;white-space:nowrap}
+.attendance-cut-nav button:disabled{opacity:.45;cursor:not-allowed}
+.attendance-metrics{grid-template-columns:repeat(6,minmax(0,1fr))}
+.attendance-metrics article{min-width:0}
+.attendance-metrics article>*{position:relative;z-index:1}
+.attendance-metrics article>span{min-height:30px;padding-right:30px;line-height:1.25}
+.attendance-metrics article strong{white-space:nowrap}
+@media(max-width:900px){.attendance-period-highlight{align-items:flex-start;flex-direction:column}.attendance-cut-nav{justify-content:flex-start}.attendance-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:560px){.attendance-period-highlight{padding:14px}.attendance-period-highlight strong{font-size:24px}.attendance-cut-nav{width:100%;justify-content:space-between}.attendance-cut-nav button{flex:1}.attendance-cut-nav span{min-width:0}.attendance-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}

@@ -397,3 +397,22 @@ Rama: `feature/flujo-cobro-y-perfil`
 - Suite backend: `214/214` ✅ sobre bases temporales limpias.
 - Se preservaron los archivos locales no relacionados (`003_progress_photo_metadata.sql`,
   `graphify-out/` y `worktrees/`).
+
+## Período visible y navegación de cortes en Asistencia
+
+Rama: `feature/flujo-cobro-y-perfil`
+
+- El reporte de Asistencia ahora muestra de forma destacada las fechas exactas
+  del período consultado y aclara que el día de corte proviene del expediente.
+- Con un cliente único y `Solo corte vigente` activo, aparecen controles para
+  ir al corte anterior y regresar al siguiente. El backend calcula cada ciclo
+  con el `billing_cutoff_day` del cliente, respetando los bordes 28/30/31 y
+  febrero; no se usa una resta fija de días.
+- La navegación mantiene el mismo cálculo de sesiones, pausas, cancelaciones,
+  reprogramaciones y cumplimiento. El `Control de paquetes` no es la fuente
+  de las métricas: el origen de asistencia son las sesiones del calendario;
+  ambos reportes comparten el día de corte del expediente.
+- Se corrigió el layout responsive de las seis tarjetas para evitar que las
+  etiquetas se monten o queden recortadas en pantallas estrechas.
+- Se añadió una regresión para el corte anterior y se conserva la prueba del
+  corte vigente.

@@ -3628,6 +3628,18 @@ function cicloDelCorte(referencia: string | Date, diaDeCorte: number): { inicio:
   return { inicio: inicio.toISOString().slice(0, 10), vence: vence.toISOString().slice(0, 10) };
 }
 
+// Permite consultar ciclos anteriores sin restar una cantidad fija de días;
+// eso conserva correctamente los cortes 28/30/31 y el ajuste de febrero.
+function cicloDelCorteDesplazado(referencia: string | Date, diaDeCorte: number, desplazamiento: number): { inicio: string; vence: string } {
+  let ciclo = cicloDelCorte(referencia, diaDeCorte);
+  for (let i = 0; i < desplazamiento; i += 1) {
+    const referenciaAnterior = mediodiaEnPanama(ciclo.inicio);
+    referenciaAnterior.setUTCDate(referenciaAnterior.getUTCDate() - 1);
+    ciclo = cicloDelCorte(referenciaAnterior, diaDeCorte);
+  }
+  return ciclo;
+}
+
 async function coberturaDeCobro(ownerId: string, invoiceId: string) {
   const [invoice] = await sql`
     SELECT i.id, i.client_id, i.billed_for_client_id, i.concept, i.amount, i.due_on, i.billing_period, i.status,
@@ -4456,7 +4468,8 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async (request,
     month: z.string().regex(/^\d{4}-\d{2}$/).optional(),
     from: z.string().date().optional(),
     to: z.string().date().optional(),
-    cutoffClientId: z.string().uuid().optional()
+    cutoffClientId: z.string().uuid().optional(),
+    cutoffOffset: z.coerce.number().int().min(0).max(120).default(0)
   }).superRefine((value, context) => {
     const customRange = value.from !== undefined || value.to !== undefined;
     if (customRange && (!value.from || !value.to)) {
@@ -4471,7 +4484,7 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async (request,
   }).parse(request.query);
   const customRange = Boolean(query.from && query.to);
   const month = query.month || null;
-  let cutoffCycle: { clientId: string; day: number; from: string; to: string } | null = null;
+  let cutoffCycle: { clientId: string; day: number; offset: number; from: string; to: string } | null = null;
   if (query.cutoffClientId) {
     const [cutoffClient] = await sql`
       SELECT id, billing_cutoff_day
@@ -4480,8 +4493,8 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async (request,
     `;
     if (!cutoffClient) return reply.code(404).send({ error: 'Cliente no encontrado' });
     const day = Number(cutoffClient.billing_cutoff_day) || 1;
-    const ciclo = cicloDelCorte(new Date(), day);
-    cutoffCycle = { clientId: cutoffClient.id, day, from: ciclo.inicio, to: ciclo.vence };
+    const ciclo = cicloDelCorteDesplazado(new Date(), day, query.cutoffOffset);
+    cutoffCycle = { clientId: cutoffClient.id, day, offset: query.cutoffOffset, from: ciclo.inicio, to: ciclo.vence };
   }
   const from = cutoffCycle?.from || (customRange ? query.from! : `${month}-01`);
   const toInclusive = cutoffCycle?.to || (customRange
@@ -4494,7 +4507,7 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async (request,
   toExclusive.setUTCDate(toExclusive.getUTCDate() + 1);
   const to = toExclusive.toISOString().slice(0, 10);
   const periodKey = cutoffCycle
-    ? `cutoff:${cutoffCycle.clientId}`
+    ? `cutoff:${cutoffCycle.clientId}:${cutoffCycle.offset}`
     : customRange ? `range:${from}:${toInclusive}` : `month:${month}`;
   const rows = await sql`
     WITH scoped AS (
@@ -4585,7 +4598,7 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async (request,
   const puntos = clients.reduce((total, client) => total + (client.compliancePercent === null ? 0 : client.compliancePercent * client.medibles), 0);
   return {
     month,
-    cutoff: cutoffCycle ? { clientId: cutoffCycle.clientId, day: cutoffCycle.day } : null,
+    cutoff: cutoffCycle ? { clientId: cutoffCycle.clientId, day: cutoffCycle.day, offset: cutoffCycle.offset } : null,
     period: { from, to: toInclusive },
     periodKey,
     clients,
