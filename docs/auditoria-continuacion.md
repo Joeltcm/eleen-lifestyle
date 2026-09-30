@@ -493,3 +493,11 @@ Rama: `feature/flujo-cobro-y-perfil`
 - Commit `7e7ad4e` publicado en `main`; Railway responde `status: ok`.
 - PWA v216 publicada en `https://eileen-lifestyle.pages.dev/`.
 - Verificación en producción: `version.json` devuelve `216`.
+
+### Corrección posterior: alternar corte y mes
+
+- El botón del portal que activa `Corte actual` ahora es reversible: cambia a
+  `Volver al mes` y restaura el mes seleccionado al pulsarlo de nuevo.
+- Al regresar al mes se reinicia el desplazamiento de cortes, evitando que el
+  portal conserve silenciosamente un corte anterior.
+- Frontend actualizado a v217 y verificado en producción.
