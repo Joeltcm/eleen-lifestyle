@@ -454,8 +454,7 @@ Rama: `feature/flujo-cobro-y-perfil`
   medibles · porcentaje`, con tipografía mayor y barras más fáciles de leer.
 - Se mejoró también la lectura de los estados y mensajes de composición
   corporal en pantallas estrechas.
-- Frontend preparado como v215; pendiente de publicación hasta confirmar el
-  siguiente deploy.
+- Frontend preparado como v216 y publicado en Cloudflare Pages.
 
 ## Reprogramación, estados finales y métricas visibles
 
@@ -488,3 +487,9 @@ Rama: `feature/flujo-cobro-y-perfil`
 - `git diff --check` ✅
 - Suite backend: `214/214` ✅, incluyendo la regresión de una sesión movida que
   después termina cumplida y otra que termina cancelada por el cliente.
+
+### Publicación
+
+- Commit `7e7ad4e` publicado en `main`; Railway responde `status: ok`.
+- PWA v216 publicada en `https://eileen-lifestyle.pages.dev/`.
+- Verificación en producción: `version.json` devuelve `216`.
