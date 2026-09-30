@@ -1872,6 +1872,37 @@ describe('reporte mensual de agenda y cumplimiento', () => {
     assert.equal((await api.get('/api/attendance/monthly?from=2026-09-08&to=2026-09-07')).estado, 400,
       'rechaza rangos invertidos');
   });
+
+  test('filtra el corte vigente de un cliente y recalcula su cumplimiento', async () => {
+    const cutoffDay = 15;
+    const c = await api.post('/api/clients', { fullName: 'Filtro corte vigente', billingModel: 'single', standardPrice: 30, cutoffDay });
+    const actual = cicloCortePa(hoyPa(), cutoffDay);
+    const anterior = cicloCortePa(desplazarDiasPa(actual.inicio, -1), cutoffDay);
+    const at13 = fecha => new Date(`${fecha}T13:00:00-05:00`).toISOString();
+    const lote = await api.post('/api/sessions/batch', {
+      clientId: c.datos.id,
+      startsAt: [at13(desplazarDiasPa(actual.inicio, 1)), at13(actual.vence), at13(desplazarDiasPa(anterior.inicio, 1))],
+      durationMinutes: 60,
+      mode: 'Presencial'
+    });
+    const fechaActual = desplazarDiasPa(actual.inicio, 1);
+    const fechaAnterior = desplazarDiasPa(anterior.inicio, 1);
+    const sesionActual = lote.datos.sesiones.find(s => String(s.starts_at).slice(0, 10) === fechaActual);
+    const sesionAnterior = lote.datos.sesiones.find(s => String(s.starts_at).slice(0, 10) === fechaAnterior);
+    assert.ok(sesionActual && sesionAnterior, 'crea sesiones en ambos ciclos');
+    await api.patch(`/api/sessions/${sesionActual.id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    await api.patch(`/api/sessions/${sesionAnterior.id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+
+    const { estado, datos } = await api.get(`/api/attendance/monthly?cutoffClientId=${c.datos.id}`);
+    assert.equal(estado, 200);
+    assert.deepEqual(datos.cutoff, { clientId: c.datos.id, day: cutoffDay });
+    assert.deepEqual(datos.period, { from: actual.inicio, to: actual.vence });
+    assert.equal(datos.periodKey, `cutoff:${c.datos.id}`);
+    const fila = datos.clients.find(item => item.clientId === c.datos.id);
+    assert.deepEqual({ agendadas: fila.agendadas, completadas: fila.completadas, medibles: fila.medibles, compliancePercent: fila.compliancePercent }, {
+      agendadas: 2, completadas: 1, medibles: 1, compliancePercent: 100
+    });
+  });
 });
 
 describe('con dos saldos, se gasta el que vence antes', () => {

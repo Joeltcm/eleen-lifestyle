@@ -373,3 +373,27 @@ Rama: `feature/cobro-auto-aplicado`
 - Suite backend: `213/213` ✅ sobre bases temporales limpias.
 - Sin cambios en `main` ni despliegue de producción; pendiente de revisión de
   Claude antes de publicar.
+
+## Filtro de asistencia por corte vigente
+
+Rama: `feature/flujo-cobro-y-perfil`
+
+- Se añadió la casilla `Solo corte vigente` en Asistencia.
+- La casilla se habilita únicamente al seleccionar un cliente único; al
+  activarla, el backend calcula el ciclo vigente con el día de corte guardado
+  en el expediente de ese cliente.
+- El rango mostrado, las sesiones, el cumplimiento y las métricas se
+  recalculan usando exclusivamente ese ciclo. `Mes actual` permanece como
+  acceso rápido independiente.
+- Se conserva la navegación mensual, el rango personalizado, el buscador de
+  cliente y los filtros de estado.
+- Se añadió una prueba de ciclo vigente que verifica fechas, aislamiento por
+  cliente y porcentaje de cumplimiento.
+- Frontend actualizado de v211 a v212.
+
+### Validación antes de publicar
+
+- Backend: `check` y `build` ✅
+- Suite backend: `214/214` ✅ sobre bases temporales limpias.
+- Se preservaron los archivos locales no relacionados (`003_progress_photo_metadata.sql`,
+  `graphify-out/` y `worktrees/`).

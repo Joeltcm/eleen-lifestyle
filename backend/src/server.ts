@@ -4450,18 +4450,19 @@ app.get('/api/compliance/by-month', { preHandler: requireStaff }, async request 
 // mensualidad, paquete, crédito o sesión individual. El porcentaje sólo usa
 // sesiones resueltas: una sesión pasada todavía programada queda como
 // pendiente de marcar, no se convierte automáticamente en incumplimiento.
-app.get('/api/attendance/monthly', { preHandler: requireStaff }, async request => {
+app.get('/api/attendance/monthly', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const query = z.object({
     month: z.string().regex(/^\d{4}-\d{2}$/).optional(),
     from: z.string().date().optional(),
-    to: z.string().date().optional()
+    to: z.string().date().optional(),
+    cutoffClientId: z.string().uuid().optional()
   }).superRefine((value, context) => {
     const customRange = value.from !== undefined || value.to !== undefined;
     if (customRange && (!value.from || !value.to)) {
       context.addIssue({ code: 'custom', path: ['from'], message: 'El rango requiere fecha inicial y final' });
     }
-    if (!customRange && !value.month) {
+    if (!customRange && !value.month && !value.cutoffClientId) {
       context.addIssue({ code: 'custom', path: ['month'], message: 'Indica un mes o un rango de fechas' });
     }
     if (value.from && value.to && value.from > value.to) {
@@ -4470,17 +4471,31 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async request =
   }).parse(request.query);
   const customRange = Boolean(query.from && query.to);
   const month = query.month || null;
-  const from = customRange ? query.from! : `${month}-01`;
-  const toInclusive = customRange
+  let cutoffCycle: { clientId: string; day: number; from: string; to: string } | null = null;
+  if (query.cutoffClientId) {
+    const [cutoffClient] = await sql`
+      SELECT id, billing_cutoff_day
+      FROM clients
+      WHERE id = ${query.cutoffClientId} AND owner_id = ${auth.sub}
+    `;
+    if (!cutoffClient) return reply.code(404).send({ error: 'Cliente no encontrado' });
+    const day = Number(cutoffClient.billing_cutoff_day) || 1;
+    const ciclo = cicloDelCorte(new Date(), day);
+    cutoffCycle = { clientId: cutoffClient.id, day, from: ciclo.inicio, to: ciclo.vence };
+  }
+  const from = cutoffCycle?.from || (customRange ? query.from! : `${month}-01`);
+  const toInclusive = cutoffCycle?.to || (customRange
     ? query.to!
     : (() => {
         const [year, monthNumber] = month!.split('-').map(Number);
         return new Date(Date.UTC(year, monthNumber, 0)).toISOString().slice(0, 10);
-      })();
+      })());
   const toExclusive = new Date(`${toInclusive}T00:00:00Z`);
   toExclusive.setUTCDate(toExclusive.getUTCDate() + 1);
   const to = toExclusive.toISOString().slice(0, 10);
-  const periodKey = customRange ? `range:${from}:${toInclusive}` : `month:${month}`;
+  const periodKey = cutoffCycle
+    ? `cutoff:${cutoffCycle.clientId}`
+    : customRange ? `range:${from}:${toInclusive}` : `month:${month}`;
   const rows = await sql`
     WITH scoped AS (
       SELECT c.id AS client_id,
@@ -4501,6 +4516,7 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async request =
         AND s.starts_at >= ${from}::date AT TIME ZONE 'America/Panama'
         AND s.starts_at < ${to}::date AT TIME ZONE 'America/Panama'
       WHERE c.owner_id = ${auth.sub}
+        AND (${cutoffCycle?.clientId ?? null}::uuid IS NULL OR c.id = ${cutoffCycle?.clientId ?? null}::uuid)
     ), rollup AS (
       SELECT client_id,
         count(*) FILTER (WHERE session_status IS NOT NULL)::int AS agendadas,
@@ -4541,6 +4557,7 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async request =
       COALESCE(r.puntos_cumplimiento, 0)::int AS puntos_cumplimiento
     FROM clients c LEFT JOIN rollup r ON r.client_id = c.id
     WHERE c.owner_id = ${auth.sub}
+      AND (${cutoffCycle?.clientId ?? null}::uuid IS NULL OR c.id = ${cutoffCycle?.clientId ?? null}::uuid)
     ORDER BY c.full_name
   `;
   const clients = rows.map(row => {
@@ -4568,6 +4585,7 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async request =
   const puntos = clients.reduce((total, client) => total + (client.compliancePercent === null ? 0 : client.compliancePercent * client.medibles), 0);
   return {
     month,
+    cutoff: cutoffCycle ? { clientId: cutoffCycle.clientId, day: cutoffCycle.day } : null,
     period: { from, to: toInclusive },
     periodKey,
     clients,

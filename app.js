@@ -1,4 +1,4 @@
-const APP_VERSION = '211';
+const APP_VERSION = '212';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -82,6 +82,7 @@ let attendanceReport = null;
 let attendanceReportLoading = false;
 let attendanceReportRequest = 0;
 let attendanceStatusFilters = { active: true, paused: true, inactive: false };
+let attendanceCurrentCutOnly = false;
 let calendarMode = 'week';
 let calendarCursor = new Date(today);
 calendarCursor.setHours(12, 0, 0, 0);
@@ -1003,25 +1004,42 @@ function renderBilling() {
   }).join('') : `<tr><td colspan="8" class="empty">${data.packages.length ? `No hay saldos en este corte${corteOffset > 0 ? ' (el ciclo aún no abre)' : ''}. Usa las flechas o “Ver historial”.` : 'Aún no hay paquetes de sesiones.'}</td></tr>`;
   void ensureBillingAnalytics();
 }
+function attendanceClientMatches() {
+  const needle = attendanceClientFilter.trim().toLocaleLowerCase('es');
+  return data.clients.filter(client => !needle || String(client.name || '').toLocaleLowerCase('es').includes(needle));
+}
+function attendanceCutClient() {
+  const matches = attendanceClientMatches();
+  return matches.length === 1 ? matches[0] : null;
+}
+function attendancePeriodKey() {
+  const cutoffClient = attendanceCurrentCutOnly ? attendanceCutClient() : null;
+  if (cutoffClient) return `cutoff:${cutoffClient.id}`;
+  return attendanceFrom && attendanceTo
+    ? `range:${attendanceFrom}:${attendanceTo}`
+    : `month:${attendanceMonth}`;
+}
 function renderAttendanceReport() {
   const monthInput = document.getElementById('attendance-month');
   const fromInput = document.getElementById('attendance-from');
   const toInput = document.getElementById('attendance-to');
   const clientFilterInput = document.getElementById('attendance-client-filter');
+  const currentCutInput = document.getElementById('attendance-current-cut');
   const target = document.getElementById('attendance-table');
   const totals = document.getElementById('attendance-totals');
   const summary = document.getElementById('attendance-summary');
-  if (!monthInput || !fromInput || !toInput || !clientFilterInput || !target || !totals || !summary) return;
+  if (!monthInput || !fromInput || !toInput || !clientFilterInput || !currentCutInput || !target || !totals || !summary) return;
   monthInput.value = attendanceMonth;
   fromInput.value = attendanceFrom;
   toInput.value = attendanceTo;
   if (clientFilterInput.value !== attendanceClientFilter) clientFilterInput.value = attendanceClientFilter;
+  const cutClient = attendanceCutClient();
+  currentCutInput.checked = attendanceCurrentCutOnly;
+  currentCutInput.disabled = !cutClient;
   document.querySelectorAll('[data-attendance-status]').forEach(input => {
     input.checked = Boolean(attendanceStatusFilters[input.value]);
   });
-  const requestedPeriodKey = attendanceFrom && attendanceTo
-    ? `range:${attendanceFrom}:${attendanceTo}`
-    : `month:${attendanceMonth}`;
+  const requestedPeriodKey = attendancePeriodKey();
   if (!attendanceReport || attendanceReport.periodKey !== requestedPeriodKey) {
     summary.textContent = attendanceReportLoading ? 'Calculando…' : 'Selecciona un mes o aplica un rango para consultar la agenda.';
     totals.innerHTML = '';
@@ -1055,7 +1073,8 @@ function renderAttendanceReport() {
     ? fechaCorta(attendanceReport.period.from)
     : `${fechaCorta(attendanceReport.period?.from)} al ${fechaCorta(attendanceReport.period?.to)}`;
   const clientNote = clientNeedle ? ` · Cliente: ${attendanceClientFilter.trim()}` : '';
-  summary.textContent = `${periodLabel} · ${clients.length} clientes · ${t.agendadas} clases en el calendario · ${t.medibles} sesiones medidas${clientNote}${pausedNote}`;
+  const cutNote = attendanceCurrentCutOnly && cutClient ? ` · Corte vigente (día ${cutClient.cutoffDay})` : '';
+  summary.textContent = `${periodLabel} · ${clients.length} clientes · ${t.agendadas} clases en el calendario · ${t.medibles} sesiones medidas${clientNote}${cutNote}${pausedNote}`;
   const tile = (label, value, note = '') => `<article><span>${label}</span><strong>${value}</strong>${note ? `<small>${note}</small>` : ''}</article>`;
   totals.innerHTML = [
     tile('Clases agendadas', t.agendadas),
@@ -1087,21 +1106,23 @@ function renderAttendanceReport() {
   }).join('') || '<tr><td colspan="10" class="empty">No hay clientes en el expediente.</td></tr>';
 }
 async function loadAttendanceReport() {
-  const periodKey = attendanceFrom && attendanceTo
-    ? `range:${attendanceFrom}:${attendanceTo}`
-    : `month:${attendanceMonth}`;
-  const query = attendanceFrom && attendanceTo
-    ? `from=${encodeURIComponent(attendanceFrom)}&to=${encodeURIComponent(attendanceTo)}`
-    : `month=${encodeURIComponent(attendanceMonth)}`;
+  const cutoffClient = attendanceCurrentCutOnly ? attendanceCutClient() : null;
+  if (attendanceCurrentCutOnly && !cutoffClient) {
+    attendanceCurrentCutOnly = false;
+  }
+  const periodKey = attendancePeriodKey();
+  const query = cutoffClient
+    ? `cutoffClientId=${encodeURIComponent(cutoffClient.id)}`
+    : attendanceFrom && attendanceTo
+      ? `from=${encodeURIComponent(attendanceFrom)}&to=${encodeURIComponent(attendanceTo)}`
+      : `month=${encodeURIComponent(attendanceMonth)}`;
   const requestId = ++attendanceReportRequest;
   attendanceReportLoading = true;
   renderAttendanceReport();
   try {
     const report = await api(`/api/attendance/monthly?${query}`);
     if (requestId !== attendanceReportRequest) return;
-    const currentPeriodKey = attendanceFrom && attendanceTo
-      ? `range:${attendanceFrom}:${attendanceTo}`
-      : `month:${attendanceMonth}`;
+    const currentPeriodKey = attendancePeriodKey();
     if (currentPeriodKey !== periodKey) return;
     attendanceReport = report;
     renderAttendanceReport();
@@ -4354,6 +4375,7 @@ document.getElementById('attendance-month')?.addEventListener('change', event =>
   attendanceMonth = event.target.value || dateKey(today).slice(0, 7);
   attendanceFrom = '';
   attendanceTo = '';
+  attendanceCurrentCutOnly = false;
   attendanceReport = null;
   loadAttendanceReport();
 });
@@ -4361,6 +4383,7 @@ document.getElementById('attendance-current')?.addEventListener('click', () => {
   attendanceMonth = dateKey(today).slice(0, 7);
   attendanceFrom = '';
   attendanceTo = '';
+  attendanceCurrentCutOnly = false;
   attendanceReport = null;
   loadAttendanceReport();
 });
@@ -4373,12 +4396,14 @@ document.getElementById('attendance-apply-range')?.addEventListener('click', () 
   }
   attendanceFrom = from;
   attendanceTo = to;
+  attendanceCurrentCutOnly = false;
   attendanceReport = null;
   loadAttendanceReport();
 });
 document.getElementById('attendance-clear-range')?.addEventListener('click', () => {
   attendanceFrom = '';
   attendanceTo = '';
+  attendanceCurrentCutOnly = false;
   attendanceReport = null;
   loadAttendanceReport();
 });
@@ -4388,7 +4413,23 @@ document.querySelectorAll('[data-attendance-status]').forEach(input => input.add
 }));
 document.getElementById('attendance-client-filter')?.addEventListener('input', event => {
   attendanceClientFilter = event.target.value;
-  renderAttendanceReport();
+  if (attendanceCurrentCutOnly && !attendanceCutClient()) attendanceCurrentCutOnly = false;
+  if (attendanceCurrentCutOnly) {
+    attendanceReport = null;
+    loadAttendanceReport();
+  } else renderAttendanceReport();
+});
+document.getElementById('attendance-current-cut')?.addEventListener('change', event => {
+  if (event.target.checked && !attendanceCutClient()) {
+    event.target.checked = false;
+    attendanceCurrentCutOnly = false;
+    toast('Escribe un cliente único para consultar su corte vigente.', true);
+    renderAttendanceReport();
+    return;
+  }
+  attendanceCurrentCutOnly = event.target.checked;
+  attendanceReport = null;
+  loadAttendanceReport();
 });
 document.getElementById('billing-load-more').addEventListener('click', () => { billingVisibleInvoices += 100; renderBilling(); });
 document.getElementById('show-zoho-invoices').addEventListener('click', () => {
