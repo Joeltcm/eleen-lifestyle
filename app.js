@@ -1,4 +1,4 @@
-const APP_VERSION = '225';
+const APP_VERSION = '226';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1067,7 +1067,7 @@ function renderAttendanceReport() {
     if (cutNav) cutNav.hidden = true;
     summary.textContent = attendanceReportLoading ? 'Calculando…' : 'Selecciona un mes o aplica un rango para consultar la agenda.';
     totals.innerHTML = '';
-    target.innerHTML = `<tr><td colspan="10" class="empty">${attendanceReportLoading ? 'Cargando agenda y cumplimiento…' : 'No hay datos cargados para este período.'}</td></tr>`;
+    target.innerHTML = `<tr><td colspan="9" class="empty">${attendanceReportLoading ? 'Cargando agenda y cumplimiento…' : 'No hay datos cargados para este período.'}</td></tr>`;
     return;
   }
   const clientNeedle = attendanceClientFilter.trim().toLocaleLowerCase('es');
@@ -1084,7 +1084,6 @@ function renderAttendanceReport() {
     completadas: sum('completadas'),
     noShow: sum('noShow'),
     canceladasCliente: sum('canceladasCliente'),
-    pendientes: sum('pendientes'),
     pausadas: sum('pausadas'),
     medibles,
     compliancePercent: medibles ? Math.round(weightedCompliance / medibles) : null
@@ -1115,7 +1114,6 @@ function renderAttendanceReport() {
     tile('Clases agendadas', t.agendadas),
     tile('Cumplidas', t.completadas),
     tile('Cancelaciones cliente', t.canceladasCliente, t.noShow ? `${t.noShow} no asistió` : ''),
-    tile('Pendientes de marcar', t.pendientes),
     tile('Cumplimiento', t.compliancePercent === null ? '—' : `${t.compliancePercent}%`, `${t.medibles} sesiones medidas`),
     tile('Pausadas', t.pausadas, 'fuera de la métrica')
   ].join('');
@@ -1131,13 +1129,12 @@ function renderAttendanceReport() {
       <td data-label="Agendadas"><b>${client.agendadas}</b></td>
       <td data-label="Cumplió">${client.completadas}</td>
       <td data-label="Canceló cliente">${client.canceladasCliente}</td>
-      <td data-label="Pendientes">${client.pendientes}</td>
       <td data-label="Reprogramadas">${client.reprogramadas}</td>
       <td data-label="Pausa">${client.pausadas}</td>
       <td data-label="Canceló Eileen">${client.canceladasEntrenadora}</td>
       <td data-label="Medibles">${client.medibles}</td>
       <td data-label="Cumplimiento"><strong class="attendance-percent">${compliance}</strong></td></tr>`;
-  }).join('') || '<tr><td colspan="10" class="empty">No hay clientes en el expediente.</td></tr>';
+  }).join('') || '<tr><td colspan="9" class="empty">No hay clientes en el expediente.</td></tr>';
 }
 async function loadAttendanceReport() {
   const cutoffClient = attendanceCurrentCutOnly ? attendanceCutClient() : null;

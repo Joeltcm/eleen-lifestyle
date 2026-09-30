@@ -533,6 +533,10 @@ button.active-filter{background:#2f6f4f;color:#fff;border-color:#2f6f4f}
 @media(max-width:900px){.attendance-period-highlight{align-items:flex-start;flex-direction:column}.attendance-cut-nav{justify-content:flex-start}.attendance-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:560px){.attendance-period-highlight{padding:14px}.attendance-period-highlight strong{font-size:24px}.attendance-cut-nav{width:100%;justify-content:space-between}.attendance-cut-nav button{flex:1}.attendance-cut-nav span{min-width:0}.attendance-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
 
+/* Asistencia: cinco métricas ocupan la fila completa; en móvil conservamos
+   los cortes responsivos definidos arriba. */
+@media(min-width:901px){.attendance-metrics{grid-template-columns:repeat(5,minmax(0,1fr))}}
+
 /* Portal: los datos de progreso deben leerse de un vistazo, especialmente
    saldo, deuda y el detalle numerador/denominador del gráfico. */
 .portal-metrics article>span{font-size:13px;font-weight:600;color:#6d5e65}
