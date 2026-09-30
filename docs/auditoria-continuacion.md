@@ -501,3 +501,13 @@ Rama: `feature/flujo-cobro-y-perfil`
 - Al regresar al mes se reinicia el desplazamiento de cortes, evitando que el
   portal conserve silenciosamente un corte anterior.
 - Frontend actualizado a v217 y verificado en producción.
+
+### Corrección de datos por corte en el portal
+
+- El portal ahora traduce explícitamente el ciclo del expediente (`inicio` →
+  `from`, `vence` → `to`) antes de filtrar sesiones, saldos y cobros.
+- Esto corrige el caso de clientes con corte distinto al día 1: el rango del
+  corte vuelve a mostrar fechas y las tarjetas dejan de quedar artificialmente
+  en cero.
+- Frontend actualizado a v218 y publicado en producción; `version.json`
+  devuelve `218`.
