@@ -12,6 +12,7 @@ import { createDownloadUrl, createUploadUrl, deleteObject, downloadObject, stora
 import { extractInBodyDocument, extractInBodyImage, inbodyAnalysisReady, inbodyAnalysisSetup, prepareInBodyImage, validateExtraction, validateInBodyValues } from './inbody-analysis.js';
 import { registerZohoRoutes } from './zoho-routes.js';
 import { cancelSessionInGoogle, registerGoogleCalendarRoutes, removeSessionFromGoogle, syncSessionToGoogle } from './google-calendar.js';
+import { scheduleWasMoved } from './session-reschedule.js';
 import { routineSuggestionsReady, suggestRoutine } from './routine-suggestions.js';
 import { accountStatementPdf, accountsReceivablePdf, compliancePdf, invoicePdf, monthlyFinancePdf } from './billing-reports.js';
 
@@ -291,6 +292,11 @@ async function recalcularFacturasNoAnticipadas(ownerId?: string) {
     const target = Number(factura.target_sessions);
     if (!(base > 0)) continue;
     const cycle = cicloQueCierraEn(factura.due_on, Number(factura.billing_cutoff_day) || 1);
+    // Once a credit invoice has been paid and its cycle has closed, its amount
+    // is an accounting record. A later calendar correction must not silently
+    // rewrite what Eileen already collected; changing a closed invoice is an
+    // explicit staff action, outside this automatic reconciliation.
+    if (factura.status === 'confirmed' && cycle.vence < diaEnPanama(new Date())) continue;
     const sesiones = await sql`
       SELECT s.starts_at, s.credit_charge
       FROM sessions s
@@ -2735,7 +2741,7 @@ app.patch('/api/sessions/:id', { preHandler: requireStaff }, async (request, rep
     // dentro del mismo día cambia el compromiso de la agenda y debe quedar en
     // el historial. El estado de la sesión se conserva: completed/cancelled/
     // scheduled sigue significando lo mismo después del movimiento.
-    const seMovioDeHorario = new Date(actual.starts_at).getTime() !== new Date(session.starts_at).getTime();
+    const seMovioDeHorario = scheduleWasMoved(actual.starts_at, session.starts_at);
     if (seMovioDeHorario && actual.status === 'completed' && actual.package_debited && actual.package_id) {
       // Mover directamente una clase ya realizada equivale a reprogramarla:
       // la clase original deja de consumir el saldo y la nueva se cobrará al
@@ -4496,46 +4502,14 @@ app.get('/api/compliance/by-month', { preHandler: requireStaff }, async request 
   const from = `${month}-01`;
   const to = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).toISOString().slice(0, 10);
   const clients = await sql`
-    WITH monthly_cycles AS (
-      SELECT client_id, purchased_on, expires_on, sum(total_sessions)::int AS capacity
-      FROM session_packages
-      WHERE kind = 'monthly' AND status <> 'cancelled'
-        AND purchased_on IS NOT NULL AND expires_on IS NOT NULL
-      GROUP BY client_id, purchased_on, expires_on
-    ), debit_candidates AS (
-      SELECT s.id,
-        row_number() OVER (
-          PARTITION BY s.client_id, mc.purchased_on, mc.expires_on
-          ORDER BY s.starts_at, s.id
-        )::int AS debit_order,
-        mc.capacity
-      FROM sessions s
-      JOIN clients c ON c.id = s.client_id
-      JOIN LATERAL (
-        SELECT mc.* FROM monthly_cycles mc
-        WHERE mc.client_id = s.client_id
-          AND mc.purchased_on <= (s.starts_at::timestamptz AT TIME ZONE 'America/Panama')::date
-          AND mc.expires_on >= (s.starts_at::timestamptz AT TIME ZONE 'America/Panama')::date
-        ORDER BY mc.expires_on ASC, mc.purchased_on ASC
-        LIMIT 1
-      ) mc ON true
-      WHERE c.owner_id = ${auth.sub} AND c.billing_model = 'monthly'
-        AND (
-          s.status IN ('completed', 'no_show')
-          OR (s.status = 'cancelled' AND s.cancellation_kind = 'not_rescheduled'
-            AND COALESCE(s.cancelled_by, 'client') = 'client')
-        )
-    )
     SELECT c.id AS client_id, c.full_name AS name,
       count(*)::int AS total,
       count(*) FILTER (WHERE s.status = 'completed')::int AS completadas,
       COALESCE(round(avg(COALESCE(CASE WHEN s.status = 'cancelled' THEN 0 ELSE s.completion_percent END, 0))), 0)::int AS percent
     FROM sessions s JOIN clients c ON c.id = s.client_id
-    LEFT JOIN debit_candidates exceso ON exceso.id = s.id AND exceso.debit_order > exceso.capacity
     WHERE c.owner_id = ${auth.sub}
       AND s.starts_at >= ${from}::date AND s.starts_at < (${to}::date + interval '1 day')
       AND s.starts_at <= now()
-      AND exceso.id IS NULL
       AND NOT (s.status = 'scheduled' AND (COALESCE(s.paused_hold, false) OR c.status = 'paused'))
       AND (s.status <> 'cancelled'
         OR (s.cancellation_kind = 'not_rescheduled' AND COALESCE(s.cancelled_by, 'client') = 'client'))
@@ -4602,8 +4576,13 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async (request,
         s.status AS session_status, s.cancellation_kind, s.cancelled_by,
         COALESCE(s.completion_percent, 0)::int AS completion_percent,
         (s.starts_at AT TIME ZONE 'America/Panama')::date AS session_day,
-        EXISTS (
-          SELECT 1 FROM session_reschedules sr WHERE sr.session_id = s.id AND sr.origin = 'moved'
+        (
+          EXISTS (
+            SELECT 1 FROM session_reschedules sr WHERE sr.session_id = s.id AND sr.origin = 'moved'
+          ) OR (
+            s.status = 'cancelled' AND s.cancellation_kind = 'rescheduled'
+            AND COALESCE(s.cancelled_by, 'client') = 'client'
+          )
         ) AS reprogramada,
         (
           COALESCE(s.paused_hold, false)
@@ -4616,8 +4595,11 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async (request,
         ) AS pausada
       FROM clients c
       LEFT JOIN sessions s ON s.client_id = c.id
-        AND s.starts_at >= ${from}::date AT TIME ZONE 'America/Panama'
-        AND s.starts_at < ${to}::date AT TIME ZONE 'America/Panama'
+        AND ${cutoffCycle
+          ? sql`(s.starts_at AT TIME ZONE 'America/Panama')::date > ${from}::date
+              AND (s.starts_at AT TIME ZONE 'America/Panama')::date <= ${toInclusive}::date`
+          : sql`s.starts_at >= ${from}::date AT TIME ZONE 'America/Panama'
+              AND s.starts_at < ${to}::date AT TIME ZONE 'America/Panama'`}
       WHERE c.owner_id = ${auth.sub}
         AND (${cutoffCycle?.clientId ?? null}::uuid IS NULL OR c.id = ${cutoffCycle?.clientId ?? null}::uuid)
     ), rollup AS (
@@ -4850,36 +4832,7 @@ const reportStart = (period: z.infer<typeof reportPeriodSchema>) => {
 async function complianceRows(ownerId: string, period: z.infer<typeof reportPeriodSchema>, clientId?: string, startOverride?: string) {
   const start = startOverride || reportStart(period);
   return sql`
-    WITH monthly_cycles AS (
-      SELECT client_id, purchased_on, expires_on, sum(total_sessions)::int AS capacity
-      FROM session_packages
-      WHERE kind = 'monthly' AND status <> 'cancelled'
-        AND purchased_on IS NOT NULL AND expires_on IS NOT NULL
-      GROUP BY client_id, purchased_on, expires_on
-    ), debit_candidates AS (
-      SELECT s.id,
-        row_number() OVER (
-          PARTITION BY s.client_id, mc.purchased_on, mc.expires_on
-          ORDER BY s.starts_at, s.id
-        )::int AS debit_order,
-        mc.capacity
-      FROM sessions s
-      JOIN clients c ON c.id = s.client_id
-      JOIN LATERAL (
-        SELECT mc.* FROM monthly_cycles mc
-        WHERE mc.client_id = s.client_id
-          AND mc.purchased_on <= (s.starts_at::timestamptz AT TIME ZONE 'America/Panama')::date
-          AND mc.expires_on >= (s.starts_at::timestamptz AT TIME ZONE 'America/Panama')::date
-        ORDER BY mc.expires_on ASC, mc.purchased_on ASC
-        LIMIT 1
-      ) mc ON true
-      WHERE c.owner_id = ${ownerId} AND c.billing_model = 'monthly'
-        AND (
-          s.status IN ('completed', 'no_show')
-          OR (s.status = 'cancelled' AND s.cancellation_kind = 'not_rescheduled'
-            AND COALESCE(s.cancelled_by, 'client') = 'client')
-        )
-    ), activities AS (
+    WITH activities AS (
       SELECT c.id AS client_id, c.full_name, s.starts_at AS occurred_at, 'Sesión'::text AS source,
         COALESCE(r.title, CASE WHEN s.quick_logged THEN 'Entrenamiento presencial' ELSE 'Evaluación / seguimiento' END) AS activity,
         -- No presentarse cuenta como no hecha, igual que cancelar y no
@@ -4905,13 +4858,6 @@ async function complianceRows(ownerId: string, period: z.infer<typeof reportPeri
       -- de él: se le repone o se le descuenta, pero no se le apunta.
         AND (s.status <> 'cancelled'
           OR (s.cancellation_kind = 'not_rescheduled' AND COALESCE(s.cancelled_by, 'client') = 'client'))
-        -- Una mensualidad no puede prestar capacidad al ciclo siguiente. Las
-        -- clases cobrables que llegan después de la capacidad del ciclo son
-        -- excedentes: no se cuentan en el cumplimiento.
-        AND NOT EXISTS (
-          SELECT 1 FROM debit_candidates exceso
-          WHERE exceso.id = s.id AND exceso.debit_order > exceso.capacity
-        )
       UNION ALL
       SELECT c.id AS client_id, c.full_name, rc.completed_on::timestamptz AS occurred_at, 'Rutina'::text AS source,
         r.title AS activity, 'completed'::text AS status, rc.completion_percent,
@@ -5451,7 +5397,12 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
       FROM invoices WHERE client_id = ${client.id} ORDER BY COALESCE(issued_on, due_on) DESC
     `,
     sql`SELECT ra.id AS assignment_id, ra.due_on, r.id, r.title, r.description, r.sessions_per_week, r.exercises FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id WHERE ra.client_id = ${client.id} AND ra.active = true AND (ra.ends_on IS NULL OR ra.ends_on >= current_date) ORDER BY ra.starts_on DESC`,
-    sql`SELECT s.id, s.routine_id, s.starts_at, s.duration_minutes, s.mode, s.status, s.cancellation_kind, s.cancelled_by, s.credit_charge, s.completion_percent, r.title AS routine_title, EXISTS (SELECT 1 FROM session_reschedules sr WHERE sr.session_id = s.id AND sr.origin = 'moved') AS reprogramada FROM sessions s LEFT JOIN routines r ON r.id = s.routine_id WHERE s.client_id = ${client.id} AND s.starts_at >= now() - interval '1 year' ORDER BY s.starts_at`,
+    sql`SELECT s.id, s.routine_id, s.starts_at, s.duration_minutes, s.mode, s.status, s.cancellation_kind, s.cancelled_by, s.credit_charge, s.completion_percent,
+      r.title AS routine_title,
+      (EXISTS (SELECT 1 FROM session_reschedules sr WHERE sr.session_id = s.id AND sr.origin = 'moved')
+        OR (s.status = 'cancelled' AND s.cancellation_kind = 'rescheduled' AND COALESCE(s.cancelled_by, 'client') = 'client')) AS reprogramada
+      FROM sessions s LEFT JOIN routines r ON r.id = s.routine_id
+      WHERE s.client_id = ${client.id} AND s.starts_at >= now() - interval '1 year' ORDER BY s.starts_at`,
     sql`SELECT s.id, s.starts_at, s.duration_minutes, (s.client_id = ${client.id}) AS is_mine FROM sessions s JOIN clients c ON c.id = s.client_id WHERE c.owner_id = ${client.owner_id} AND s.status <> 'cancelled' AND s.starts_at BETWEEN now() - interval '60 days' AND now() + interval '90 days' ORDER BY s.starts_at`,
     sql`SELECT tested_at, values FROM inbody_assessments WHERE client_id = ${client.id} AND extraction_status = 'ready' ORDER BY tested_at`,
     sql`SELECT routine_id, completed_on, completion_percent FROM routine_completions WHERE client_id = ${client.id} AND completed_on >= current_date - interval '1 year' ORDER BY completed_on`,

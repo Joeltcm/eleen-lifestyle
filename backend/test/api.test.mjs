@@ -22,6 +22,7 @@ const desplazarDiasPa = (fecha, dias) => {
   base.setUTCDate(base.getUTCDate() + dias);
   return partesPanama(base).iso;
 };
+const instantePa = (fecha, hora) => new Date(`${fecha}T${hora}:00-05:00`).toISOString();
 const mesActualPa = () => partesPanama().ym + '-01';
 const cicloCortePa = (referencia, cutoff) => {
   const [year, month, day] = referencia.split('-').map(Number);
@@ -854,6 +855,34 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     assert.equal(Number(actualizada.amount), 25, 'el cobro se recalcula desde la sesión realizada');
   });
 
+  test('una factura de crédito pagada no cambia al corregir un ciclo cerrado', async () => {
+    const plan = await api.post('/api/plans', { name: 'Crédito congelable', billingModel: 'monthly', price: 275, sessionsIncluded: 10 });
+    const c = await api.post('/api/clients', {
+      fullName: 'Factura de crédito congelada', planId: plan.datos.id, cutoffDay: 15,
+      paymentMode: 'no_anticipado', creditSessionPrice: 25
+    });
+    const dueOn = desplazarDiasPa(hoyPa(), -20);
+    const diaClase = desplazarDiasPa(dueOn, -1);
+    const primera = await api.post('/api/sessions/batch', {
+      clientId: c.datos.id, startsAt: [instantePa(diaClase, '10:00')], durationMinutes: 60, mode: 'Presencial'
+    });
+    await api.patch(`/api/sessions/${primera.datos.sesiones[0].id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    const factura = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Sesiones a crédito', amount: 25, dueOn });
+    await api.post(`/api/invoices/${factura.datos.id}/confirm`, { method: 'Efectivo', paidOn: dueOn });
+    const antes = (await api.get('/api/invoices')).datos.find(item => item.id === factura.datos.id);
+    assert.equal(Number(antes.amount), 25);
+    assert.equal(antes.status, 'confirmed');
+
+    const segunda = await api.post('/api/sessions/batch', {
+      clientId: c.datos.id, startsAt: [instantePa(diaClase, '12:00')], durationMinutes: 60, mode: 'Presencial'
+    });
+    await api.patch(`/api/sessions/${segunda.datos.sesiones[0].id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    await api.post('/api/billing/recurring/generate', {});
+    const despues = (await api.get('/api/invoices')).datos.find(item => item.id === factura.datos.id);
+    assert.equal(Number(despues.amount), 25, 'el recálculo automático no reescribe un ciclo cerrado pagado');
+    assert.equal(despues.status, 'confirmed', 'el estado pagado permanece confirmado');
+  });
+
   test('la mensualidad familiar se abre aunque el dependiente ya tenga cobertura de otro cobro (clases extra)', async () => {
     const pagador = await api.post('/api/clients', { fullName: 'Paga por el grupo', billingModel: 'monthly', standardPrice: 900, cutoffDay: 15 });
     const dep = await api.post('/api/clients', { fullName: 'Dependiente con extra', billingModel: 'monthly', standardPrice: 240, cutoffDay: 15 });
@@ -912,6 +941,8 @@ describe('informe de asistencia flexible', () => {
     const segundaMovida = new Date(otra); segundaMovida.setUTCMinutes(segundaMovida.getUTCMinutes() + 45);
     await api.patch(`/api/sessions/${segunda.datos.sesiones[0].id}`, { startsAt: segundaMovida.toISOString(), durationMinutes: 60, mode: 'Presencial' });
     await api.delete(`/api/sessions/${segunda.datos.sesiones[0].id}?rescheduled=false&by=client`);
+    const tercera = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: [new Date(Date.now() - 30 * 3600_000).toISOString()], durationMinutes: 60, mode: 'Presencial' });
+    await api.delete(`/api/sessions/${tercera.datos.sesiones[0].id}?rescheduled=true&by=client`);
 
     const desde = new Date(Date.now() - 7 * 24 * 3600_000).toISOString().slice(0, 10);
     const hasta = new Date().toISOString().slice(0, 10);
@@ -923,7 +954,7 @@ describe('informe de asistencia flexible', () => {
 
     const mensual = await api.get(`/api/attendance/monthly?month=${hoyPa().slice(0, 7)}`);
     const fila = mensual.datos.clients.find(item => item.clientId === c.datos.id);
-    assert.equal(fila.reprogramadas, 2, 'cada sesión movida se cuenta una sola vez como reprogramada');
+    assert.equal(fila.reprogramadas, 3, 'una sesión movida o cancelada para reprogramar se cuenta una sola vez');
     assert.equal(fila.completadas, 1, 'la reprogramada cumplida conserva su resultado');
     assert.equal(fila.canceladasCliente, 1, 'la reprogramada cancelada conserva la cancelación del cliente');
     assert.equal(fila.medibles, 2, 'los dos resultados finales entran una sola vez en la métrica');
@@ -933,6 +964,31 @@ describe('informe de asistencia flexible', () => {
 
     const cinco = await api.get('/api/compliance/report?mode=cycle&clientIds=a,b,c,d,e');
     assert.equal(cinco.estado, 400, 'no permite más de 4 clientes');
+  });
+
+  test('el filtro por corte excluye el día de inicio y conserva el día de vencimiento', async () => {
+    const cutoff = 30;
+    const c = await api.post('/api/clients', { fullName: 'Frontera asistencia', billingModel: 'single', standardPrice: 25, cutoffDay: cutoff });
+    const vigente = cicloCortePa(hoyPa(), cutoff);
+    const actual = cicloCortePa(desplazarDiasPa(vigente.inicio, -1), cutoff);
+    const inicio = await api.post('/api/sessions/batch', {
+      clientId: c.datos.id, startsAt: [instantePa(actual.inicio, '12:00')], durationMinutes: 60, mode: 'Presencial'
+    });
+    const fin = await api.post('/api/sessions/batch', {
+      clientId: c.datos.id, startsAt: [instantePa(actual.vence, '12:00')], durationMinutes: 60, mode: 'Presencial'
+    });
+    await api.patch(`/api/sessions/${inicio.datos.sesiones[0].id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    await api.patch(`/api/sessions/${fin.datos.sesiones[0].id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+
+    const actualReport = await api.get(`/api/attendance/monthly?cutoffClientId=${c.datos.id}&cutoffOffset=1`);
+    const actualFila = actualReport.datos.clients.find(row => row.clientId === c.datos.id);
+    assert.equal(actualReport.datos.period.from, actual.inicio);
+    assert.equal(actualReport.datos.period.to, actual.vence);
+    assert.equal(actualFila.agendadas, 1, 'el día de inicio pertenece al ciclo anterior');
+
+    const anteriorReport = await api.get(`/api/attendance/monthly?cutoffClientId=${c.datos.id}&cutoffOffset=2`);
+    const anteriorFila = anteriorReport.datos.clients.find(row => row.clientId === c.datos.id);
+    assert.equal(anteriorFila.agendadas, 1, 'el día de inicio aparece únicamente en el ciclo anterior');
   });
 });
 
@@ -1289,7 +1345,7 @@ describe('cobertura end-to-end de facturación y modalidad de pago', () => {
 
     const aplicado = await api.post('/api/maintenance/reconcile-monthly-billing', { apply: true });
     assert.equal(aplicado.estado, 200);
-    assert.equal(aplicado.datos.recoveredSessions, 1);
+    assert.equal(aplicado.datos.recoveredSessions, 2, 'la reconciliación recupera las clases pendientes del saldo sin aplicar un recorte');
     let saldo = (await api.get('/api/packages')).datos.find(p => p.id === paquete.datos.id);
     assert.equal(Number(saldo.used_sessions), 1);
 
@@ -2665,6 +2721,15 @@ describe('pausar la mensualidad', () => {
     const congeladas = (await api.get('/api/sessions')).datos.filter(s => s.client_id === clientId && s.paused_hold);
     assert.equal(congeladas.length, 1, 'la sesión futura queda reservada en pausa');
   });
+
+  test('el reporte mensual muestra la pausa pero la excluye del cumplimiento', async () => {
+    const sesiones = (await api.get('/api/sessions')).datos.filter(s => s.client_id === clientId && s.paused_hold);
+    const mes = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Panama', year: 'numeric', month: '2-digit' }).format(new Date(sesiones[0].starts_at));
+    const reporte = await api.get(`/api/attendance/monthly?month=${mes}`);
+    const fila = reporte.datos.clients.find(x => x.clientId === clientId);
+    assert.equal(fila.pausadas, 1, 'la sesión congelada queda visible como pausada');
+    assert.equal(fila.medibles, 0, 'una sesión en pausa no baja el cumplimiento');
+  });
 });
 
 describe('cumplimiento por cliente de un mes (Control de paquetes)', () => {
@@ -2693,26 +2758,25 @@ describe('fronteras estrictas y excedentes de mensualidad', () => {
     }
   };
 
-  test('las clases excedentes no desbordan al siguiente ciclo ni entran al cumplimiento', async () => {
+  test('las clases excedentes no desbordan al siguiente ciclo pero sí entran al cumplimiento', async () => {
     const plan = await api.post('/api/plans', { name: 'Excedente sin familia', billingModel: 'monthly', price: 100, sessionsIncluded: 2 });
     const c = await api.post('/api/clients', { fullName: 'Excedente sin familia', planId: plan.datos.id, cutoffDay: 1 });
     const factura = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad septiembre', amount: 100, dueOn: hoyPa() });
     const siguiente = await api.post('/api/packages', {
-      clientId: c.datos.id, totalSessions: 2, amount: 100, kind: 'monthly', dueOn: '2026-10-01'
+      clientId: c.datos.id, totalSessions: 2, amount: 100, kind: 'monthly', dueOn: desplazarDiasPa(hoyPa(), 35)
     });
     await api.post('/api/billing/recurring/generate', {});
 
-    const fechas = [5, 10, 15, 20].map(d => `2026-09-${String(d).padStart(2, '0')}T14:00:00.000Z`);
+    const diaPrueba = desplazarDiasPa(hoyPa(), -1);
+    const fechas = [10, 11, 12, 13].map(h => instantePa(diaPrueba, `${String(h).padStart(2, '0')}:00`));
     const lote = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: fechas, durationMinutes: 60, mode: 'Presencial' });
-    await marcar(lote.datos.sesiones.slice(0, 2).map(s => s.id));
-    for (const sesion of lote.datos.sesiones.slice(2)) {
-      const respuesta = await api.delete(`/api/sessions/${sesion.id}`);
-      assert.equal(respuesta.estado, 200, JSON.stringify(respuesta.datos));
-    }
+    await marcar(lote.datos.sesiones.slice(0, 3).map(s => s.id));
+    const cancelada = await api.delete(`/api/sessions/${lote.datos.sesiones[3].id}`);
+    assert.equal(cancelada.estado, 200, JSON.stringify(cancelada.datos));
 
     const sesiones = (await api.get('/api/sessions')).datos.filter(s => lote.datos.sesiones.some(x => x.id === s.id));
     assert.equal(sesiones.filter(s => s.package_debited).length, 2, 'sólo las dos primeras consumen el ciclo');
-    assert.equal(sesiones.filter(s => !s.package_debited).length, 2, 'las dos excedentes quedan sin saldo');
+    assert.equal(sesiones.filter(s => !s.package_debited).length, 2, 'la excedente marcada y la cancelada quedan sin saldo');
     const saldos = (await api.get('/api/packages')).datos.filter(p => p.client_id === c.datos.id && p.kind === 'monthly');
     const actual = saldos.find(p => p.id !== siguiente.datos.id);
     const futuro = saldos.find(p => p.id === siguiente.datos.id);
@@ -2721,14 +2785,23 @@ describe('fronteras estrictas y excedentes de mensualidad', () => {
     assert.equal(Number(futuro.used_sessions), 0, 'el saldo siguiente permanece intacto');
     assert.ok(factura.datos.id, 'conserva la factura del ciclo');
 
-    const porMes = await api.get('/api/compliance/by-month?month=2026-09');
+    const porMes = await api.get(`/api/compliance/by-month?month=${diaPrueba.slice(0, 7)}`);
     const filaMes = porMes.datos.clients.find(x => x.client_id === c.datos.id);
-    assert.equal(Number(filaMes.total), 2, 'el cumplimiento ignora las clases excedentes');
-    assert.equal(Number(filaMes.completadas), 2);
-    assert.equal(Number(filaMes.percent), 100);
+    assert.equal(Number(filaMes.total), 4, 'el cumplimiento usa todo el calendario resuelto');
+    assert.equal(Number(filaMes.completadas), 3);
+    assert.equal(Number(filaMes.percent), 75);
     const resumen = await api.get('/api/compliance/summary?period=month');
     const filaResumen = resumen.datos.clients.find(x => x.clientId === c.datos.id);
-    assert.equal(Number(filaResumen.activities), 2, 'los reportes también ignoran las excedentes');
+    assert.equal(Number(filaResumen.activities), 4, 'los reportes usan las mismas clases excedentes');
+    assert.equal(Number(filaResumen.completed), 3);
+    assert.equal(Number(filaResumen.compliancePercent), 75);
+    const asistencia = await api.get(`/api/attendance/monthly?month=${diaPrueba.slice(0, 7)}`);
+    const filaAsistencia = asistencia.datos.clients.find(x => x.clientId === c.datos.id);
+    assert.equal(filaAsistencia.medibles, 4);
+    assert.equal(filaAsistencia.compliancePercent, 75, 'Asistencia comparte el mismo porcentaje');
+    const reporte = await api.get(`/api/compliance/report?mode=range&clientIds=${c.datos.id}&from=${diaPrueba}&to=${diaPrueba}`);
+    assert.equal(reporte.datos.clients[0].activities, 4);
+    assert.equal(reporte.datos.clients[0].compliancePercent, 75, 'el informe comparte el mismo porcentaje');
   });
 
   test('la capacidad de líneas familiares se suma antes de marcar excedentes', async () => {
@@ -2738,7 +2811,8 @@ describe('fronteras estrictas y excedentes de mensualidad', () => {
     const segunda = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad familiar', amount: 175, dueOn: hoyPa() });
     await api.post('/api/billing/recurring/generate', {});
 
-    const fechas = Array.from({ length: 9 }, (_, i) => `2026-09-${String(5 + i).padStart(2, '0')}T14:00:00.000Z`);
+    const diaPrueba = desplazarDiasPa(hoyPa(), -1);
+    const fechas = Array.from({ length: 9 }, (_, i) => instantePa(diaPrueba, `${String(8 + i).padStart(2, '0')}:00`));
     const lote = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: fechas, durationMinutes: 60, mode: 'Presencial' });
     await marcar(lote.datos.sesiones.map(s => s.id));
 
@@ -2750,9 +2824,9 @@ describe('fronteras estrictas y excedentes de mensualidad', () => {
     assert.equal(saldos.reduce((total, p) => total + Number(p.used_sessions), 0), 8, 'la capacidad es la suma de los dos saldos');
     assert.deepEqual(saldos.map(p => p.origin_invoice_id).sort(), [primera.datos.id, segunda.datos.id].sort());
 
-    const porMes = await api.get('/api/compliance/by-month?month=2026-09');
+    const porMes = await api.get(`/api/compliance/by-month?month=${diaPrueba.slice(0, 7)}`);
     const fila = porMes.datos.clients.find(x => x.client_id === c.datos.id);
-    assert.equal(Number(fila.total), 8, 'el excedente familiar no baja el cumplimiento');
+    assert.equal(Number(fila.total), 9, 'la excedente familiar también es parte del calendario medible');
   });
 
   test('dentro de la capacidad el cobro y el cumplimiento no cambian', async () => {
@@ -2762,7 +2836,7 @@ describe('fronteras estrictas y excedentes de mensualidad', () => {
     await api.post('/api/billing/recurring/generate', {});
     const lote = await api.post('/api/sessions/batch', {
       clientId: c.datos.id,
-      startsAt: ['2026-09-06T14:00:00.000Z', '2026-09-07T14:00:00.000Z'],
+      startsAt: [instantePa(desplazarDiasPa(hoyPa(), -1), '10:00'), instantePa(desplazarDiasPa(hoyPa(), -1), '11:00')],
       durationMinutes: 60, mode: 'Presencial'
     });
     await marcar(lote.datos.sesiones.map(s => s.id));
@@ -2771,24 +2845,28 @@ describe('fronteras estrictas y excedentes de mensualidad', () => {
     assert.ok(sesiones.every(s => s.package_debited), 'dentro de capacidad ambas clases se cobran');
     const saldo = (await api.get('/api/packages')).datos.find(p => p.client_id === c.datos.id && p.kind === 'monthly');
     assert.equal(Number(saldo.used_sessions), 2);
-    const porMes = await api.get('/api/compliance/by-month?month=2026-09');
+    const porMes = await api.get(`/api/compliance/by-month?month=${desplazarDiasPa(hoyPa(), -1).slice(0, 7)}`);
     const fila = porMes.datos.clients.find(x => x.client_id === c.datos.id);
     assert.equal(Number(fila.total), 2);
     assert.equal(Number(fila.percent), 100);
   });
 
   test('la clase del último día se cobra al ciclo que vence ese día', async () => {
-    const c = await api.post('/api/clients', { fullName: 'Frontera de ciclo', billingModel: 'monthly', standardPrice: 100, cutoffDay: 28 });
+    const cutoff = 15;
+    const referencia = desplazarDiasPa(hoyPa(), -20);
+    const anteriorCiclo = cicloCortePa(referencia, cutoff);
+    const siguienteCiclo = cicloCortePa(desplazarDiasPa(anteriorCiclo.vence, 1), cutoff);
+    const c = await api.post('/api/clients', { fullName: 'Frontera de ciclo', billingModel: 'monthly', standardPrice: 100, cutoffDay: cutoff });
     const anterior = await api.post('/api/packages', {
-      clientId: c.datos.id, totalSessions: 1, amount: 100, kind: 'monthly', dueOn: '2026-08-28'
+      clientId: c.datos.id, totalSessions: 1, amount: 100, kind: 'monthly', dueOn: anteriorCiclo.vence
     });
-    await api.post(`/api/invoices/${anterior.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-28' });
+    await api.post(`/api/invoices/${anterior.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: anteriorCiclo.vence });
     const siguiente = await api.post('/api/packages', {
-      clientId: c.datos.id, totalSessions: 1, amount: 100, kind: 'monthly', dueOn: '2026-09-28'
+      clientId: c.datos.id, totalSessions: 1, amount: 100, kind: 'monthly', dueOn: siguienteCiclo.vence
     });
-    await api.post(`/api/invoices/${siguiente.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-09-28' });
+    await api.post(`/api/invoices/${siguiente.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: siguienteCiclo.inicio });
     const sesion = await api.post('/api/sessions/batch', {
-      clientId: c.datos.id, startsAt: ['2026-09-28T14:00:00.000Z'], durationMinutes: 60, mode: 'Presencial'
+      clientId: c.datos.id, startsAt: [instantePa(anteriorCiclo.vence, '12:00')], durationMinutes: 60, mode: 'Presencial'
     });
     await marcar([sesion.datos.sesiones[0].id]);
 

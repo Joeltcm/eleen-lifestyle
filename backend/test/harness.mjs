@@ -92,7 +92,7 @@ export async function levantar() {
     await new Promise(r => setTimeout(r, 150));
     await ejecutar('dropdb', ['--if-exists', nombreBase]).catch(() => {});
   };
-  return { base, parar, salida: () => salida };
+  return { base, databaseUrl: url, parar, salida: () => salida };
 }
 
 // Cliente mínimo: devuelve estado y cuerpo juntos, porque en estas pruebas el

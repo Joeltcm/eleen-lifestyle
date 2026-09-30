@@ -3,6 +3,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:
 import { z } from 'zod';
 import { config } from './config.js';
 import { sql } from './db.js';
+import { scheduleWasMoved } from './session-reschedule.js';
 
 const provider = 'google_calendar';
 const calendarScope = 'https://www.googleapis.com/auth/calendar.events';
@@ -201,7 +202,7 @@ async function eileenEventsFromGoogle(token: string, connection: CalendarConnect
   return events;
 }
 
-async function pullGoogleChanges(ownerId: string, token: string, connection: CalendarConnection) {
+export async function pullGoogleChanges(ownerId: string, token: string, connection: CalendarConnection) {
   const events = await eileenEventsFromGoogle(token, connection);
   const sessions = await sql`
     SELECT s.*
@@ -279,7 +280,7 @@ async function pullGoogleChanges(ownerId: string, token: string, connection: Cal
     // reprogramar, y hasta ahora no dejaba rastro: se movía la misma sesión y
     // no se cancelaba nada, así que el contador de reprogramaciones habría
     // dicho cero mientras la entrenadora movía citas todo el mes.
-    const seMovioDeHorario = startsAt.getTime() !== new Date(session.starts_at).getTime();
+    const seMovioDeHorario = scheduleWasMoved(session.starts_at, startsAt);
     if (seMovioDeHorario && session.status === 'completed' && session.package_debited && session.package_id) {
       // Arrastrar en Google una clase ya realizada tiene el mismo significado
       // que moverla desde Eileen: se reprograma y devuelve el débito al saldo.
