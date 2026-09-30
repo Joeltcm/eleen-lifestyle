@@ -1,4 +1,4 @@
-const APP_VERSION = '215';
+const APP_VERSION = '216';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -468,7 +468,7 @@ const sessionsThisWeek = () => { const start = mondayFor(today); const end = new
 // sesiones aún por delante: una clase ya dada conserva su "Realizada".
 const sesionEnPausa = session => session.status === 'scheduled'
   && (session.pausedHold || (data.clients || []).some(c => c.id === session.clientId && c.statusRaw === 'paused'));
-const sessionStateLabel = session => sesionEnPausa(session) ? 'Reservado (En Pausa)' : session.status === 'completed' ? 'Realizada' : session.status === 'no_show' ? 'No cumplió' : session.status === 'cancelled' ? 'Cancelada' : 'Programada';
+const sessionStateLabel = session => sesionEnPausa(session) ? 'Reservado (En Pausa)' : session.status === 'completed' ? 'Realizada' : session.status === 'no_show' ? 'No asistió' : session.status === 'cancelled' ? 'Cancelada' : 'Programada';
 // La clase visual: una sesión congelada por pausa manda sobre su status, para
 // que no tome prestado el verde de "programada" en el calendario.
 const estadoSesion = session => sesionEnPausa(session) ? 'pausa' : session.status;
@@ -476,7 +476,7 @@ const estadoSesion = session => sesionEnPausa(session) ? 'pausa' : session.statu
 // una marca puesta por error dejaba la sesión como incumplida —y le bajaba el
 // cumplimiento al cliente por una clase que ni siquiera había llegado—. Los
 // tres estados son distintos y ninguno es el "no" del otro.
-const sessionComplianceForm = session => `<form class="session-compliance" data-session-compliance="${session.id}"><label class="completion-outcome"><select name="outcome"><option value="scheduled" ${session.status !== 'completed' && session.status !== 'no_show' ? 'selected' : ''}>Sin marcar</option><option value="completed" ${session.status === 'completed' ? 'selected' : ''}>Cumplió</option><option value="no_show" ${session.status === 'no_show' ? 'selected' : ''}>No cumplió</option></select></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" ${session.status === 'completed' ? '' : 'disabled'} value="${session.status === 'completed' ? session.completionPercent || 100 : 0}" /><span>%</span></label><button class="secondary" title="Guardar cumplimiento">Guardar</button></form>`;
+const sessionComplianceForm = session => `<form class="session-compliance" data-session-compliance="${session.id}"><label class="completion-outcome"><select name="outcome"><option value="scheduled" ${session.status !== 'completed' && session.status !== 'no_show' ? 'selected' : ''}>Sin marcar</option><option value="completed" ${session.status === 'completed' ? 'selected' : ''}>Cumplió</option><option value="no_show" ${session.status === 'no_show' ? 'selected' : ''}>No asistió</option></select></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" ${session.status === 'completed' ? '' : 'disabled'} value="${session.status === 'completed' ? session.completionPercent || 100 : 0}" /><span>%</span></label><button class="secondary" title="Guardar cumplimiento">Guardar</button></form>`;
 function renderDashboard() {
   const confirmed = monthInvoices().filter(item => item.status === 'confirmed').reduce((sum, item) => sum + item.amount, 0);
   const pending = data.invoices.filter(item => item.status === 'pending').reduce((sum, item) => sum + item.balance, 0);
@@ -1106,7 +1106,7 @@ function renderAttendanceReport() {
   totals.innerHTML = [
     tile('Clases agendadas', t.agendadas),
     tile('Cumplidas', t.completadas),
-    tile('No cumplidas', t.noShow + t.canceladasCliente),
+    tile('Cancelaciones cliente', t.canceladasCliente, t.noShow ? `${t.noShow} no asistió` : ''),
     tile('Pendientes de marcar', t.pendientes),
     tile('Cumplimiento', t.compliancePercent === null ? '—' : `${t.compliancePercent}%`, `${t.medibles} sesiones medidas`),
     tile('Pausadas', t.pausadas, 'fuera de la métrica')
@@ -1117,13 +1117,12 @@ function renderAttendanceReport() {
     return { label: 'Inactivo', className: 'inactive' };
   };
   target.innerHTML = clients.map(client => {
-    const noCumplio = client.noShow + client.canceladasCliente;
     const compliance = client.compliancePercent === null ? '—' : `${client.compliancePercent}%`;
     const estadoCliente = estado(client);
     return `<tr><td data-label="Cliente"><b>${escapeHtml(client.name)}</b><br><small class="attendance-client-status attendance-status-${estadoCliente.className}">${estadoCliente.label}</small></td>
       <td data-label="Agendadas"><b>${client.agendadas}</b></td>
       <td data-label="Cumplió">${client.completadas}</td>
-      <td data-label="No cumplió">${noCumplio}</td>
+      <td data-label="Canceló cliente">${client.canceladasCliente}</td>
       <td data-label="Pendientes">${client.pendientes}</td>
       <td data-label="Reprogramadas">${client.reprogramadas}</td>
       <td data-label="Pausa">${client.pausadas}</td>
@@ -1503,7 +1502,7 @@ async function exportCompliance(period = compliancePeriod) {
 }
 async function notificationCenter(isPortal = false) {
   const [notifications, preferences] = await Promise.all([api('/api/notifications'), api('/api/notification-preferences')]);
-  const box = document.createElement('div'); box.innerHTML = `<form id="notification-form"><p class="eyebrow">RECORDATORIOS</p><h2>Notificaciones</h2><div class="notification-list">${notifications.length ? notifications.map(item => `<div class="notification-item ${item.type}"><b>${escapeHtml(item.title)}</b><span>${escapeHtml(item.body)}</span>${item.type === 'pending' && !isPortal ? `<div class="notification-actions"><button type="button" class="secondary" data-marcar="completed" data-sesion="${item.sessionId}">Cumplió</button><button type="button" class="secondary" data-marcar="no_show" data-sesion="${item.sessionId}">No cumplió</button><button type="button" class="secondary" data-marcar="cancel" data-sesion="${item.sessionId}">Cancelar clase</button></div>` : ''}</div>`).join('') : '<p class="empty">No hay recordatorios pendientes.</p>'}</div><div class="notification-settings"><label class="checkbox-line"><input name="inAppEnabled" type="checkbox" ${preferences.in_app_enabled ? 'checked' : ''} /> Mostrar dentro de la aplicación</label><label class="checkbox-line"><input name="browserEnabled" type="checkbox" ${preferences.browser_enabled ? 'checked' : ''} /> Notificaciones push en este dispositivo</label><p class="section-note">Hay que activarlas en cada teléfono o computadora por separado. En iPhone sólo funcionan con la aplicación instalada en la pantalla de inicio.</p>${preferences.browser_enabled ? '<button type="button" class="secondary wide-button" id="push-test">Enviar notificación de prueba</button>' : ''}<div class="form-row"><label>Avisar sesión con horas de anticipación<input name="sessionReminderHours" type="number" min="1" max="168" value="${preferences.session_reminder_hours}" /></label><label>Avisar pago con días de anticipación<input name="paymentReminderDays" type="number" min="0" max="30" value="${preferences.payment_reminder_days}" /></label></div></div><button class="primary wide-button">Guardar preferencias</button></form>`;
+  const box = document.createElement('div'); box.innerHTML = `<form id="notification-form"><p class="eyebrow">RECORDATORIOS</p><h2>Notificaciones</h2><div class="notification-list">${notifications.length ? notifications.map(item => `<div class="notification-item ${item.type}"><b>${escapeHtml(item.title)}</b><span>${escapeHtml(item.body)}</span>${item.type === 'pending' && !isPortal ? `<div class="notification-actions"><button type="button" class="secondary" data-marcar="completed" data-sesion="${item.sessionId}">Cumplió</button><button type="button" class="secondary" data-marcar="no_show" data-sesion="${item.sessionId}">No asistió</button><button type="button" class="secondary" data-marcar="cancel" data-sesion="${item.sessionId}">Cancelar clase</button></div>` : ''}</div>`).join('') : '<p class="empty">No hay recordatorios pendientes.</p>'}</div><div class="notification-settings"><label class="checkbox-line"><input name="inAppEnabled" type="checkbox" ${preferences.in_app_enabled ? 'checked' : ''} /> Mostrar dentro de la aplicación</label><label class="checkbox-line"><input name="browserEnabled" type="checkbox" ${preferences.browser_enabled ? 'checked' : ''} /> Notificaciones push en este dispositivo</label><p class="section-note">Hay que activarlas en cada teléfono o computadora por separado. En iPhone sólo funcionan con la aplicación instalada en la pantalla de inicio.</p>${preferences.browser_enabled ? '<button type="button" class="secondary wide-button" id="push-test">Enviar notificación de prueba</button>' : ''}<div class="form-row"><label>Avisar sesión con horas de anticipación<input name="sessionReminderHours" type="number" min="1" max="168" value="${preferences.session_reminder_hours}" /></label><label>Avisar pago con días de anticipación<input name="paymentReminderDays" type="number" min="0" max="30" value="${preferences.payment_reminder_days}" /></label></div></div><button class="primary wide-button">Guardar preferencias</button></form>`;
   openModal(box, true);
   // Resolver desde el propio aviso. Mandarla a buscar la sesión en la agenda
   // para marcar lo que el aviso ya le está preguntando es pedirle que haga dos
@@ -1520,7 +1519,7 @@ async function notificationCenter(isPortal = false) {
           const resultado = await api(`/api/sessions/${boton.dataset.sesion}/compliance`, { method: 'PATCH', body: {
             outcome: boton.dataset.marcar, completionPercent: boton.dataset.marcar === 'completed' ? 100 : 0
           } });
-          resumen = mensajeDeSaldo(resultado, boton.dataset.marcar === 'completed' ? 'Cumplió' : 'No cumplió');
+          resumen = mensajeDeSaldo(resultado, boton.dataset.marcar === 'completed' ? 'Cumplió' : 'No asistió');
         }
         await loadData(); renderAll();
         fila.remove();
@@ -4359,7 +4358,7 @@ document.addEventListener('submit', async event => {
   event.preventDefault();
   const outcome = form.elements.outcome ? form.elements.outcome.value : (form.elements.completed.checked ? 'completed' : 'no_show');
   const completionPercent = outcome === 'completed' ? Number(form.elements.completionPercent.value) : 0;
-  const dicho = { scheduled: 'Sin marcar', completed: 'Cumplió', no_show: 'No cumplió' }[outcome];
+  const dicho = { scheduled: 'Sin marcar', completed: 'Cumplió', no_show: 'No asistió' }[outcome];
   try { form.classList.add('loading-state'); const resultado = await api(`/api/sessions/${form.dataset.sessionCompliance}/compliance`, { method: 'PATCH', body: { outcome, completionPercent } }); await loadData(); renderAll(); toast(mensajeDeSaldo(resultado, `Guardado · ${dicho}`)); }
   catch (error) { toast(error.message, true); form.classList.remove('loading-state'); }
 });
@@ -4873,13 +4872,15 @@ function portalAttendanceReport(sessions = portalPeriodSessions()) {
   const period = portalPeriod();
   const past = sessions.filter(item => new Date(item.starts_at) <= today);
   const completed = past.filter(item => item.status === 'completed').length;
-  const cancelled = past.filter(item => item.status === 'cancelled' && item.cancellation_kind !== 'rescheduled').length;
+  const cancelled = past.filter(item => item.status === 'cancelled' && item.cancellation_kind === 'not_rescheduled' && (item.cancelled_by || 'client') === 'client').length;
   const noShow = past.filter(item => item.status === 'no_show').length;
+  const reprogrammed = past.filter(item => item.reprogramada).length;
   const pending = past.filter(item => item.status === 'scheduled').length;
   const denominator = completed + noShow + cancelled;
   const percent = denominator ? Math.round(completed / denominator * 100) : 0;
+  const cancelledPercent = denominator ? Math.round(cancelled / denominator * 100) : 0;
   const rows = past.slice().sort((a, b) => new Date(b.starts_at) - new Date(a.starts_at)).slice(0, 30).map(item => `<tr><td>${new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeZone: 'America/Panama' }).format(new Date(item.starts_at))}</td><td>${new Intl.DateTimeFormat('es-PA', { timeStyle: 'short', timeZone: 'America/Panama' }).format(new Date(item.starts_at))}</td><td>${escapeHtml(item.routine_title || 'Entrenamiento')}</td><td><span class="payment-status ${item.status}">${item.status === 'completed' ? 'Asistió' : item.status === 'cancelled' ? 'Cancelada' : item.status === 'no_show' ? 'No asistió' : 'Pendiente'}</span></td></tr>`).join('');
-  return `<section class="portal-report-section"><div class="card-head"><div><h3>Asistencia y cancelaciones</h3><p>${period.label} · ${fechaCorta(period.from)} al ${fechaCorta(period.to)}</p></div><span class="portal-report-period">${completed}/${denominator || 0} · ${percent}%</span></div><div class="portal-report-stats"><article><strong>${completed}</strong><span>Asistencias</span></article><article><strong>${cancelled}</strong><span>Cancelaciones</span></article><article><strong>${noShow}</strong><span>No asistidas</span></article><article><strong>${pending}</strong><span>Pendientes</span></article></div><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Hora</th><th>Sesión</th><th>Estado</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">Todavía no hay sesiones registradas en este período.</td></tr>'}</tbody></table></div></section>`;
+  return `<section class="portal-report-section"><div class="card-head"><div><h3>Asistencia y cancelaciones</h3><p>${period.label} · ${fechaCorta(period.from)} al ${fechaCorta(period.to)}</p></div><span class="portal-report-period"><b>${completed}/${denominator || 0} · ${percent}% cumplimiento</b><small>${cancelled}/${denominator || 0} · ${cancelledPercent}% cancelaciones</small></span></div><div class="portal-report-stats"><article><strong>${completed}</strong><span>Asistencias</span></article><article><strong>${cancelled}</strong><span>Cancelaciones cliente</span></article><article><strong>${reprogrammed}</strong><span>Reprogramadas</span></article><article><strong>${noShow}</strong><span>No asistidas</span></article><article><strong>${pending}</strong><span>Pendientes</span></article></div><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Hora</th><th>Sesión</th><th>Estado</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">Todavía no hay sesiones registradas en este período.</td></tr>'}</tbody></table></div></section>`;
 }
 function renderPortalReports() {
   const informes = document.getElementById('portal-reports-list'); if (!informes) return;
@@ -4927,6 +4928,14 @@ function renderPortal() {
   const periodSessions = portalPeriodSessions(period);
   const activities = portalActivities(periodSessions, period);
   const overall = activities.length ? Math.round(activities.reduce((sum, item) => sum + item.percent, 0) / activities.length) : 0;
+  const periodMeasured = periodSessions.filter(item => {
+    const past = new Date(item.starts_at) <= today;
+    return past && (item.status === 'completed' || item.status === 'no_show'
+      || (item.status === 'cancelled' && item.cancellation_kind === 'not_rescheduled' && (item.cancelled_by || 'client') === 'client'));
+  });
+  const periodClientCancellations = periodMeasured.filter(item => item.status === 'cancelled').length;
+  const periodCancellationPercent = periodMeasured.length ? Math.round(periodClientCancellations / periodMeasured.length * 100) : 0;
+  const periodReprogrammed = periodSessions.filter(item => item.reprogramada).length;
   const periodInvoices = portalPeriodInvoices(period);
   const periodPackages = portalPeriodPackages(period);
   const monthlyPackages = periodPackages.filter(pack => pack.kind === 'monthly');
@@ -4964,6 +4973,8 @@ function renderPortal() {
     tarjetas.push(`<article class="destacada"><span>Clases por reponer</span><strong>${quedan(reposicion)}</strong><small>${venceEl(reposicion)}</small></article>`);
   }
   tarjetas.push(`<article><span>Próximas sesiones</span><strong>${upcoming}</strong><small>en tu agenda</small></article>`);
+  tarjetas.push(`<article class="portal-cancel-card${periodClientCancellations ? ' con-aviso' : ''}"><span>Cancelaciones cliente</span><strong>${periodClientCancellations}<em> de ${periodMeasured.length}</em></strong><small>${periodCancellationPercent}% de las sesiones medidas</small></article>`);
+  tarjetas.push(`<article class="portal-reprogram-card"><span>Reprogramadas</span><strong>${periodReprogrammed}</strong><small>${period.kind === 'cutoff' ? 'en este corte' : 'en este mes'}</small></article>`);
   if (portalData.routines.length) tarjetas.push(`<article><span>Rutinas activas</span><strong>${portalData.routines.length}</strong><small>asignadas</small></article>`);
   tarjetas.push(`<article class="portal-debt-card${pending > 0 ? ' pendiente' : ' pagado'}"><span>Saldo pendiente</span><strong>${money.format(pending)}</strong><small>${pending > 0 ? `por pagar · ${period.label}` : 'estás al día'}</small></article>`);
   if (credito > 0) tarjetas.push(`<article class="destacada"><span>A tu favor</span><strong>${money.format(credito)}</strong><small>se descuenta del próximo cobro</small></article>`);
@@ -4977,7 +4988,7 @@ function renderPortal() {
     const measured = bucket.values.length;
     const completed = bucket.values.filter(item => item.completed).length;
     const percent = measured ? Math.round(bucket.values.reduce((sum, value) => sum + value.percent, 0) / measured) : null;
-    const label = measured ? `${completed}/${measured} · ${percent}%` : '—';
+    const label = measured ? `<b>${percent}%</b><small>${completed}/${measured} cumplidas</small>` : '<b>—</b><small>sin datos</small>';
     return `<div class="chart-column" title="${completed} de ${measured} sesiones medibles · ${percent === null ? 'sin datos' : `${percent}% promedio`}"><span>${label}</span><i style="height:${Math.max(4, percent || 0)}%"></i><small>${monthLabel(bucket.date)}</small></div>`;
   }).join('');
   document.getElementById('portal-inbody').innerHTML = portalData.assessments.length ? `<div class="portal-inbody-grid">${portalData.assessments.slice(-4).reverse().map(item => `<article><span>${String(item.tested_at).slice(0, 10)}</span><b>${Number(item.values.weightKg || 0).toFixed(1)} kg</b><small>${Number(item.values.percentBodyFat || 0).toFixed(1)}% grasa · ${Number(item.values.skeletalMuscleMassKg || 0).toFixed(1)} kg músculo</small></article>`).join('')}</div>` : '<p class="empty">Todavía no hay evaluaciones confirmadas.</p>';

@@ -456,3 +456,35 @@ Rama: `feature/flujo-cobro-y-perfil`
   corporal en pantallas estrechas.
 - Frontend preparado como v215; pendiente de publicación hasta confirmar el
   siguiente deploy.
+
+## Reprogramación, estados finales y métricas visibles
+
+Rama: `feature/flujo-cobro-y-perfil`
+
+- El backend identifica una sesión reprogramada por su registro en
+  `session_reschedules`, tanto si se movió fecha/hora desde la agenda como si
+  el movimiento llegó por la sincronización de Google Calendar. Se cuenta una
+  sola vez por sesión, sin depender de que termine en `scheduled`, `completed`
+  o cancelada.
+- Si la sesión reprogramada termina en `completed`, conserva el cumplimiento
+  y el porcentaje correspondiente. Si termina en cancelación del cliente con
+  `not_rescheduled`, se considera clase perdida, entra en las medibles y
+  descuenta según las reglas vigentes. Las cancelaciones de Eileen quedan fuera
+  del cumplimiento del cliente.
+- Asistencia dejó de presentar el estado ambiguo `No cumplió` como columna o
+  tarjeta. Ahora muestra `Canceló cliente`; las inasistencias se mantienen como
+  dato operativo separado y se nombran `No asistió`.
+- El portal muestra por período las cancelaciones del cliente con cantidad y
+  porcentaje, las reprogramaciones y las inasistencias. Las reprogramaciones
+  no inflan el denominador: sólo el resultado final de la sesión participa en
+  cumplimiento.
+- El gráfico del portal presenta el porcentaje como valor principal y debajo
+  `cumplidas/medibles`, además de conservar el detalle en el tooltip.
+- Frontend actualizado de v215 a v216.
+
+### Validación antes de publicar
+
+- `node --check app.js` ✅
+- `git diff --check` ✅
+- Suite backend: `214/214` ✅, incluyendo la regresión de una sesión movida que
+  después termina cumplida y otra que termina cancelada por el cliente.

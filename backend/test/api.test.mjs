@@ -931,6 +931,13 @@ describe('informe de asistencia flexible', () => {
     const ayer = new Date(Date.now() - 24 * 3600_000).toISOString();
     const lote = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: [ayer], durationMinutes: 60, mode: 'Presencial' });
     await api.patch(`/api/sessions/${lote.datos.sesiones[0].id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    const movida = new Date(ayer); movida.setUTCMinutes(movida.getUTCMinutes() + 30);
+    await api.patch(`/api/sessions/${lote.datos.sesiones[0].id}`, { startsAt: movida.toISOString(), durationMinutes: 60, mode: 'Presencial' });
+    const otra = new Date(Date.now() - 26 * 3600_000);
+    const segunda = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: [otra.toISOString()], durationMinutes: 60, mode: 'Presencial' });
+    const segundaMovida = new Date(otra); segundaMovida.setUTCMinutes(segundaMovida.getUTCMinutes() + 45);
+    await api.patch(`/api/sessions/${segunda.datos.sesiones[0].id}`, { startsAt: segundaMovida.toISOString(), durationMinutes: 60, mode: 'Presencial' });
+    await api.delete(`/api/sessions/${segunda.datos.sesiones[0].id}?rescheduled=false&by=client`);
 
     const desde = new Date(Date.now() - 7 * 24 * 3600_000).toISOString().slice(0, 10);
     const hasta = new Date().toISOString().slice(0, 10);
@@ -939,6 +946,13 @@ describe('informe de asistencia flexible', () => {
     assert.equal(rango.datos.clients.length, 1);
     assert.ok(rango.datos.clients[0].activities >= 1, 'cuenta la sesión completada en el rango');
     assert.ok(Array.isArray(rango.datos.clients[0].monthly), 'trae el detalle mes a mes');
+
+    const mensual = await api.get(`/api/attendance/monthly?month=${hoyPa().slice(0, 7)}`);
+    const fila = mensual.datos.clients.find(item => item.clientId === c.datos.id);
+    assert.equal(fila.reprogramadas, 2, 'cada sesión movida se cuenta una sola vez como reprogramada');
+    assert.equal(fila.completadas, 1, 'la reprogramada cumplida conserva su resultado');
+    assert.equal(fila.canceladasCliente, 1, 'la reprogramada cancelada conserva la cancelación del cliente');
+    assert.equal(fila.medibles, 2, 'los dos resultados finales entran una sola vez en la métrica');
 
     const ciclo = await api.get(`/api/compliance/report?mode=cycle&clientIds=${c.datos.id}`);
     assert.equal(ciclo.estado, 200, 'el modo por ciclo también responde');

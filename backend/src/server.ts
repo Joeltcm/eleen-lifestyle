@@ -4515,6 +4515,9 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async (request,
         s.status AS session_status, s.cancellation_kind, s.cancelled_by,
         COALESCE(s.completion_percent, 0)::int AS completion_percent,
         (s.starts_at AT TIME ZONE 'America/Panama')::date AS session_day,
+        EXISTS (
+          SELECT 1 FROM session_reschedules sr WHERE sr.session_id = s.id AND sr.origin = 'moved'
+        ) AS reprogramada,
         (
           COALESCE(s.paused_hold, false)
           OR EXISTS (
@@ -4539,7 +4542,7 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async (request,
         count(*) FILTER (WHERE session_status = 'no_show' AND NOT pausada)::int AS no_show,
         count(*) FILTER (WHERE session_status = 'cancelled' AND cancellation_kind = 'not_rescheduled'
           AND COALESCE(cancelled_by, 'client') = 'client' AND NOT pausada)::int AS canceladas_cliente,
-        count(*) FILTER (WHERE session_status = 'cancelled' AND cancellation_kind = 'rescheduled')::int AS reprogramadas,
+        count(*) FILTER (WHERE reprogramada)::int AS reprogramadas,
         count(*) FILTER (WHERE session_status = 'cancelled' AND cancelled_by = 'trainer')::int AS canceladas_entrenadora,
         count(*) FILTER (WHERE pausada)::int AS pausadas,
         count(*) FILTER (WHERE NOT pausada AND (
@@ -5361,7 +5364,7 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
       FROM invoices WHERE client_id = ${client.id} ORDER BY COALESCE(issued_on, due_on) DESC LIMIT 60
     `,
     sql`SELECT ra.id AS assignment_id, ra.due_on, r.id, r.title, r.description, r.sessions_per_week, r.exercises FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id WHERE ra.client_id = ${client.id} AND ra.active = true AND (ra.ends_on IS NULL OR ra.ends_on >= current_date) ORDER BY ra.starts_on DESC`,
-    sql`SELECT s.id, s.routine_id, s.starts_at, s.duration_minutes, s.mode, s.status, s.cancellation_kind, s.cancelled_by, s.completion_percent, r.title AS routine_title FROM sessions s LEFT JOIN routines r ON r.id = s.routine_id WHERE s.client_id = ${client.id} AND s.starts_at >= now() - interval '1 year' ORDER BY s.starts_at`,
+    sql`SELECT s.id, s.routine_id, s.starts_at, s.duration_minutes, s.mode, s.status, s.cancellation_kind, s.cancelled_by, s.completion_percent, r.title AS routine_title, EXISTS (SELECT 1 FROM session_reschedules sr WHERE sr.session_id = s.id AND sr.origin = 'moved') AS reprogramada FROM sessions s LEFT JOIN routines r ON r.id = s.routine_id WHERE s.client_id = ${client.id} AND s.starts_at >= now() - interval '1 year' ORDER BY s.starts_at`,
     sql`SELECT s.id, s.starts_at, s.duration_minutes, (s.client_id = ${client.id}) AS is_mine FROM sessions s JOIN clients c ON c.id = s.client_id WHERE c.owner_id = ${client.owner_id} AND s.status <> 'cancelled' AND s.starts_at BETWEEN now() - interval '60 days' AND now() + interval '90 days' ORDER BY s.starts_at`,
     sql`SELECT tested_at, values FROM inbody_assessments WHERE client_id = ${client.id} AND extraction_status = 'ready' ORDER BY tested_at`,
     sql`SELECT routine_id, completed_on, completion_percent FROM routine_completions WHERE client_id = ${client.id} AND completed_on >= current_date - interval '1 year' ORDER BY completed_on`,
