@@ -331,6 +331,27 @@ describe('el saldo sale del plan sin tener que teclearlo', () => {
     const segunda = await api.post('/api/billing/recurring/generate', {});
     assert.equal(segunda.datos.generated, 0, 'repetir la corrida no duplica la factura recuperada');
   });
+
+  test('corrige el vencimiento de una factura automática ya generada sin tocar su pago', async () => {
+    const plan = await api.post('/api/plans', { name: 'Normaliza fechas existentes', billingModel: 'monthly', price: 180, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Fecha automática existente', planId: plan.datos.id, cutoffDay: 15 });
+    const fechaCorrecta = `${mesActualPa().slice(0, 8)}15`;
+    await db`
+      INSERT INTO invoices (client_id, concept, amount, due_on, issued_on, billing_period, auto_generated, status, confirmed_at)
+      VALUES (${c.datos.id}, 'Mensualidad · fecha existente', 180, ${desplazarDiasPa(fechaCorrecta, -4)}::date, current_date, ${mesActualPa()}::date, true, 'confirmed', now())
+    `;
+
+    const corrida = await api.post('/api/billing/recurring/generate', {});
+    assert.equal(corrida.estado, 200);
+    const [factura] = await db`
+      SELECT due_on::text, amount::numeric, status FROM invoices
+      WHERE client_id = ${c.datos.id} AND auto_generated = true
+    `;
+    assert.equal(factura.due_on, fechaCorrecta);
+    assert.equal(Number(factura.amount), 180);
+    assert.equal(factura.status, 'confirmed');
+    assert.ok(Number(corrida.datos.fechasCorregidas) >= 1);
+  });
 });
 
 describe('descuento de clases individual', () => {

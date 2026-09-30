@@ -186,17 +186,18 @@ async function recurringBillingStatus(ownerId: string) {
 }
 
 // El día de emisión no debe adelantar el ciclo: una factura automática se
-// emite el día del corte. Sólo se corrigen facturas locales, automáticas y
-// pendientes; las confirmadas son historial contable y no se reescriben.
+// emite el día del corte. La reparación corrige sólo due_on de facturas locales
+// automáticas; no cambia emisión, monto, estado ni pagos. Las manuales y las
+// importadas de Zoho quedan fuera.
 async function normalizarFechasFacturasAutomaticas(ownerId?: string) {
-  await sql`
+  const actualizadas = await sql`
     UPDATE invoices i
     SET due_on = make_date(
-      extract(year FROM i.billing_period)::integer,
-      extract(month FROM i.billing_period)::integer,
+      extract(year FROM COALESCE(i.billing_period, date_trunc('month', i.due_on)::date))::integer,
+      extract(month FROM COALESCE(i.billing_period, date_trunc('month', i.due_on)::date))::integer,
       least(
         c.billing_cutoff_day,
-        extract(day FROM (i.billing_period + interval '1 month - 1 day'))::integer
+        extract(day FROM (COALESCE(i.billing_period, date_trunc('month', i.due_on)::date) + interval '1 month - 1 day'))::integer
       )
     )
     FROM clients c
@@ -204,18 +205,18 @@ async function normalizarFechasFacturasAutomaticas(ownerId?: string) {
       AND (${ownerId || null}::uuid IS NULL OR c.owner_id = ${ownerId || null}::uuid)
       AND i.auto_generated = true
       AND i.source_system IS NULL
-      AND i.status = 'pending'
-      AND i.billing_period IS NOT NULL
-      AND i.billing_period >= date_trunc('month', current_date)::date
+      AND i.status <> 'void'
       AND i.due_on IS DISTINCT FROM make_date(
-        extract(year FROM i.billing_period)::integer,
-        extract(month FROM i.billing_period)::integer,
+        extract(year FROM COALESCE(i.billing_period, date_trunc('month', i.due_on)::date))::integer,
+        extract(month FROM COALESCE(i.billing_period, date_trunc('month', i.due_on)::date))::integer,
         least(
           c.billing_cutoff_day,
-          extract(day FROM (i.billing_period + interval '1 month - 1 day'))::integer
+          extract(day FROM (COALESCE(i.billing_period, date_trunc('month', i.due_on)::date) + interval '1 month - 1 day'))::integer
         )
       )
+      RETURNING i.id
   `;
+  return actualizadas.length;
 }
 
 // Las columnas date vuelven de postgres.js como Date, no como texto. Pegarles
@@ -407,7 +408,7 @@ async function recalcularFacturasNoAnticipadas(ownerId?: string) {
 
 async function generateRecurringInvoices(ownerId?: string) {
   const selectedOwner = ownerId || null;
-  await normalizarFechasFacturasAutomaticas(selectedOwner || undefined);
+  const fechasCorregidas = await normalizarFechasFacturasAutomaticas(selectedOwner || undefined);
   const invoices = await sql`
     WITH periods AS (
       SELECT generate_series(
@@ -624,7 +625,7 @@ async function generateRecurringInvoices(ownerId?: string) {
   }
   const creditInvoicesRecalculated = await recalcularFacturasNoAnticipadas(selectedOwner || undefined);
   const descuentos = await aplicarCreditos(invoices as unknown as CobroGenerado[]);
-  return { generated: invoices.length, balances: pendientes.length, reposiciones: 0, descuentos, creditInvoicesRecalculated, invoices };
+  return { generated: invoices.length, balances: pendientes.length, reposiciones: 0, descuentos, creditInvoicesRecalculated, fechasCorregidas, invoices };
 }
 
 app.get('/api/billing/recurring/status', { preHandler: requireStaff }, async request => {
@@ -639,7 +640,7 @@ app.post('/api/billing/recurring/generate', { preHandler: requireStaff }, async 
     return { ...status, generated: 0, message: 'La facturación automática se activará después del corte final de Zoho.' };
   }
   const result = await generateRecurringInvoices(auth.sub);
-  return { ...(await recurringBillingStatus(auth.sub)), generated: result.generated, balances: result.balances, reposiciones: result.reposiciones, descuentos: result.descuentos, creditInvoicesRecalculated: result.creditInvoicesRecalculated };
+  return { ...(await recurringBillingStatus(auth.sub)), generated: result.generated, balances: result.balances, reposiciones: result.reposiciones, descuentos: result.descuentos, creditInvoicesRecalculated: result.creditInvoicesRecalculated, fechasCorregidas: result.fechasCorregidas };
 });
 
 app.get('/health', async () => {
