@@ -666,3 +666,29 @@ button.active-filter{background:#2f6f4f;color:#fff;border-color:#2f6f4f}
   .portal-report-downloads .portal-report{align-items:stretch}
   .portal-report-downloads .secondary{width:100%}
 }
+
+/* Mobile QA: evitar que los datos útiles se escondan detrás de scroll lateral
+   y conservar objetivos táctiles cómodos en teléfonos pequeños. */
+@media(max-width:600px){
+  .sidebar .nav-link>span:last-child{font-size:9px;white-space:nowrap}
+  .view button.primary,.view button.secondary,.view button.filter,.view input,.view select{min-height:44px}
+  .portal-view:not(#portal-dashboard) .stack-mobile{width:100%;min-width:0}
+  .portal-view:not(#portal-dashboard) .stack-mobile thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  .portal-view:not(#portal-dashboard) .stack-mobile,.portal-view:not(#portal-dashboard) .stack-mobile tbody,.portal-view:not(#portal-dashboard) .stack-mobile tr,.portal-view:not(#portal-dashboard) .stack-mobile td{display:block;width:auto}
+  .portal-view:not(#portal-dashboard) .stack-mobile tr{margin-bottom:10px;padding:13px;border:1px solid #eee3e8;border-radius:13px;background:#fff;box-shadow:0 4px 13px #6d4a5909}
+  .portal-view:not(#portal-dashboard) .stack-mobile td{display:grid;grid-template-columns:minmax(78px,auto) 1fr;gap:10px;align-items:baseline;border:0;padding:5px 0;font-size:13px}
+  .portal-view:not(#portal-dashboard) .stack-mobile td:before{content:attr(data-label);font:500 10px 'DM Mono';letter-spacing:1px;text-transform:uppercase;color:#897a82}
+  .portal-view:not(#portal-dashboard) .stack-mobile td[data-label="Acciones"],.portal-view:not(#portal-dashboard) .stack-mobile td[data-label="Comprobante"]{grid-template-columns:1fr;gap:7px;margin-top:6px;padding-top:10px;border-top:1px solid #eee3e8}
+  .portal-view:not(#portal-dashboard) .stack-mobile td[data-label="Acciones"]:before,.portal-view:not(#portal-dashboard) .stack-mobile td[data-label="Comprobante"]:before{display:none}
+  .portal-view:not(#portal-dashboard) .stack-mobile td[data-label="Comprobante"] button{width:100%;min-height:42px}
+  .portal-view:not(#portal-dashboard) .stack-mobile tr:has(td.empty){background:none;border:0;box-shadow:none;padding:0}
+  .portal-view:not(#portal-dashboard) .stack-mobile tr:has(td.empty) td{display:block}
+  .portal-view:not(#portal-dashboard) .stack-mobile tr:has(td.empty) td:before{display:none}
+}
+@media(max-width:390px){
+  #portal-calendar-list .portal-semana-rejilla{overflow-x:auto;grid-template-columns:38px repeat(7,minmax(42px,1fr))!important}
+  #portal-calendar-list .portal-semana-rejilla>*{min-width:0}
+  .portal-nav{bottom:max(10px,env(safe-area-inset-bottom));width:calc(100% - 18px);padding:5px}
+  .portal-nav a{padding:8px 2px;font-size:8px}
+  .portal-nav a span svg{width:18px;height:18px}
+}

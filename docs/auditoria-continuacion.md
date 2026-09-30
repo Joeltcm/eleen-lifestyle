@@ -524,3 +524,14 @@ Rama: `feature/flujo-cobro-y-perfil`
   historial` y `Mis informes`) sin cambiar los flujos ni las métricas.
 - Frontend actualizado localmente a v221. La suite completa queda en `214/214`;
   todavía no se publicó este cambio.
+
+### Optimización móvil del portal y la aplicación
+
+- Las tablas de Pagos e Informes del portal ahora se convierten en fichas
+  legibles en pantallas pequeñas, con sus etiquetas visibles y botones a todo el
+  ancho; se conserva el desplazamiento sólo para la rejilla semanal de Agenda,
+  cuando el teléfono no tiene espacio suficiente para siete días.
+- Se reforzaron los objetivos táctiles de los controles de la aplicación y la
+  legibilidad de las etiquetas de la navegación inferior en teléfonos.
+- Frontend actualizado localmente a v222. No cambia lógica de negocio ni se ha
+  publicado todavía.
