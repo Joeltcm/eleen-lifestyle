@@ -1,4 +1,4 @@
-const APP_VERSION = '218';
+const APP_VERSION = '219';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -4876,15 +4876,18 @@ function portalAttendanceReport(sessions = portalPeriodSessions()) {
   const period = portalPeriod();
   const past = sessions.filter(item => new Date(item.starts_at) <= today);
   const completed = past.filter(item => item.status === 'completed').length;
-  const cancelled = past.filter(item => item.status === 'cancelled' && item.cancellation_kind === 'not_rescheduled' && (item.cancelled_by || 'client') === 'client').length;
-  const noShow = past.filter(item => item.status === 'no_show').length;
+  // Para el cliente, una inasistencia tiene el mismo resultado operativo que
+  // una cancelación: la sesión no se cumple y cuenta dentro de las clases
+  // perdidas. Se presenta como una sola categoría para no duplicar el dato.
+  const cancelled = past.filter(item => item.status === 'no_show'
+    || (item.status === 'cancelled' && item.cancellation_kind === 'not_rescheduled' && (item.cancelled_by || 'client') === 'client')).length;
   const reprogrammed = past.filter(item => item.reprogramada).length;
   const pending = past.filter(item => item.status === 'scheduled').length;
-  const denominator = completed + noShow + cancelled;
+  const denominator = completed + cancelled;
   const percent = denominator ? Math.round(completed / denominator * 100) : 0;
   const cancelledPercent = denominator ? Math.round(cancelled / denominator * 100) : 0;
-  const rows = past.slice().sort((a, b) => new Date(b.starts_at) - new Date(a.starts_at)).slice(0, 30).map(item => `<tr><td>${new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeZone: 'America/Panama' }).format(new Date(item.starts_at))}</td><td>${new Intl.DateTimeFormat('es-PA', { timeStyle: 'short', timeZone: 'America/Panama' }).format(new Date(item.starts_at))}</td><td>${escapeHtml(item.routine_title || 'Entrenamiento')}</td><td><span class="payment-status ${item.status}">${item.status === 'completed' ? 'Asistió' : item.status === 'cancelled' ? 'Cancelada' : item.status === 'no_show' ? 'No asistió' : 'Pendiente'}</span></td></tr>`).join('');
-  return `<section class="portal-report-section"><div class="card-head"><div><h3>Asistencia y cancelaciones</h3><p>${period.label} · ${fechaCorta(period.from)} al ${fechaCorta(period.to)}</p></div><span class="portal-report-period"><b>${completed}/${denominator || 0} · ${percent}% cumplimiento</b><small>${cancelled}/${denominator || 0} · ${cancelledPercent}% cancelaciones</small></span></div><div class="portal-report-stats"><article><strong>${completed}</strong><span>Asistencias</span></article><article><strong>${cancelled}</strong><span>Cancelaciones cliente</span></article><article><strong>${reprogrammed}</strong><span>Reprogramadas</span></article><article><strong>${noShow}</strong><span>No asistidas</span></article><article><strong>${pending}</strong><span>Pendientes</span></article></div><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Hora</th><th>Sesión</th><th>Estado</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">Todavía no hay sesiones registradas en este período.</td></tr>'}</tbody></table></div></section>`;
+  const rows = past.slice().sort((a, b) => new Date(b.starts_at) - new Date(a.starts_at)).slice(0, 30).map(item => `<tr><td>${new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeZone: 'America/Panama' }).format(new Date(item.starts_at))}</td><td>${new Intl.DateTimeFormat('es-PA', { timeStyle: 'short', timeZone: 'America/Panama' }).format(new Date(item.starts_at))}</td><td>${escapeHtml(item.routine_title || 'Entrenamiento')}</td><td><span class="payment-status ${item.status}">${item.status === 'completed' ? 'Asistió' : item.status === 'cancelled' || item.status === 'no_show' ? 'Cancelada' : 'Pendiente'}</span></td></tr>`).join('');
+  return `<section class="portal-report-section"><div class="card-head"><div><h3>Asistencia y cancelaciones</h3><p>${period.label} · ${fechaCorta(period.from)} al ${fechaCorta(period.to)}</p></div><span class="portal-report-period"><b>${completed}/${denominator || 0} · ${percent}% cumplimiento</b><small>${cancelled}/${denominator || 0} · ${cancelledPercent}% cancelaciones</small></span></div><div class="portal-report-stats"><article><strong>${completed}</strong><span>Asistencias</span></article><article><strong>${cancelled}</strong><span>Cancelaciones cliente</span></article><article><strong>${reprogrammed}</strong><span>Reprogramadas</span></article><article><strong>${pending}</strong><span>Pendientes</span></article></div><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Hora</th><th>Sesión</th><th>Estado</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">Todavía no hay sesiones registradas en este período.</td></tr>'}</tbody></table></div></section>`;
 }
 function renderPortalReports() {
   const informes = document.getElementById('portal-reports-list'); if (!informes) return;
@@ -4937,7 +4940,7 @@ function renderPortal() {
     return past && (item.status === 'completed' || item.status === 'no_show'
       || (item.status === 'cancelled' && item.cancellation_kind === 'not_rescheduled' && (item.cancelled_by || 'client') === 'client'));
   });
-  const periodClientCancellations = periodMeasured.filter(item => item.status === 'cancelled').length;
+  const periodClientCancellations = periodMeasured.filter(item => item.status === 'cancelled' || item.status === 'no_show').length;
   const periodCancellationPercent = periodMeasured.length ? Math.round(periodClientCancellations / periodMeasured.length * 100) : 0;
   const periodReprogrammed = periodSessions.filter(item => item.reprogramada).length;
   const periodInvoices = portalPeriodInvoices(period);
