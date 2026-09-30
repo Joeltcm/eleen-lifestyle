@@ -5498,6 +5498,10 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
     billing_model: client.billing_model, standard_price: client.standard_price, billing_cutoff_day: client.billing_cutoff_day,
     plan_name: client.plan_name, sessions_included: client.sessions_included, validity_days: client.validity_days
   };
+  // El portal necesita conocer los intervalos ocupados para que el cliente
+  // pueda elegir un horario libre, pero nunca necesita saber quién ocupa el
+  // intervalo. Para terceros se devuelve deliberadamente sólo fecha/hora,
+  // duración y la marca is_mine; no se filtran id, client_id ni nombres.
   const privateBusySlots = busySlots.map(slot => slot.is_mine
     ? { id: slot.id, starts_at: slot.starts_at, duration_minutes: slot.duration_minutes, is_mine: true }
     : { starts_at: slot.starts_at, duration_minutes: slot.duration_minutes, is_mine: false });

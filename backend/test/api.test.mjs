@@ -360,9 +360,19 @@ describe('la pareja que paga uno y entrenan los dos', () => {
   });
 
   test('si entrena sólo ella, sólo a ella le baja', async () => {
-    const cuando = new Date(Date.now() - 3600_000).toISOString();
+    // El saldo de este caso empieza hoy porque el corte coincide con hoy.
+    // Usar ayer dejaba la sesión fuera del ciclo y no probaba el débito
+    // familiar; usar la medianoche de hoy la deja pasada y dentro del saldo.
+    const cuando = new Date(`${hoyPa()}T00:01:00-05:00`).toISOString();
+    const saldosAntes = (await api.get('/api/packages')).datos.filter(p => p.client_id === beatris);
+    assert.ok(saldosAntes.length > 0, JSON.stringify(saldosAntes));
+    assert.ok(saldosAntes.some(p => String(p.purchased_on).slice(0, 10) <= hoyPa()
+      && String(p.expires_on).slice(0, 10) >= hoyPa()), JSON.stringify(saldosAntes));
     const s = await api.post('/api/sessions/batch', { clientId: beatris, startsAt: [cuando], durationMinutes: 60, mode: 'Presencial' });
-    await api.patch(`/api/sessions/${s.datos.sesiones[0].id}/compliance`, { completed: true, completionPercent: 100 });
+    const marcada = await api.patch(`/api/sessions/${s.datos.sesiones[0].id}/compliance`, { completed: true, completionPercent: 100 });
+    assert.equal(marcada.estado, 200, JSON.stringify(marcada));
+    assert.equal(marcada.datos.status, 'completed', JSON.stringify(marcada.datos));
+    assert.equal(marcada.datos.billing?.action, 'debited', JSON.stringify(marcada.datos));
 
     const clientes = (await api.get('/api/clients')).datos;
     assert.equal(Number(clientes.find(c => c.id === beatris).available_sessions), 11, 'ella gastó una');
@@ -2469,6 +2479,37 @@ describe('lo que el portal dice que se debe', () => {
       .filter(i => i.status === 'pending')
       .reduce((suma, i) => suma + Number(i.balance || 0), 0);
     assert.equal(pendiente, 175, 'debe 175, no 0');
+  });
+
+  test('el portal muestra ocupación sin identidad de otros clientes', async () => {
+    const clientePortal = await api.post('/api/clients', {
+      fullName: 'Portal disponibilidad', billingModel: 'single', standardPrice: 45,
+      cutoffDay: 1, email: 'portal-disponibilidad@prueba.test'
+    });
+    const tercero = await api.post('/api/clients', {
+      fullName: 'Cliente cuya identidad no se filtra', billingModel: 'single',
+      standardPrice: 45, cutoffDay: 1
+    });
+    const mañana = enDiasPa(1).iso;
+    const ocupada = new Date(`${mañana}T10:00:00-05:00`).toISOString();
+    await api.post('/api/sessions', { clientId: tercero.datos.id, startsAt: ocupada, durationMinutes: 60, mode: 'Presencial' });
+
+    const enlace = await api.post(`/api/clients/${clientePortal.datos.id}/access-link`, {});
+    const token = String(enlace.datos.url).split('acceso=')[1];
+    const acceso = await api.post(`/api/auth/access-link/${token}`, { password: 'clave-del-portal-larga' });
+    assert.equal(acceso.estado, 200);
+
+    const portal = cliente(servidor.base);
+    portal.usarToken(acceso.datos.token);
+    const resumen = await portal.get('/api/portal/summary');
+    const ocupacionesDeTerceros = resumen.datos.busySlots.filter(slot => !slot.is_mine);
+    assert.ok(ocupacionesDeTerceros.some(slot => String(slot.starts_at).includes(mañana)));
+    for (const slot of ocupacionesDeTerceros) {
+      assert.deepEqual(Object.keys(slot).sort(), ['duration_minutes', 'is_mine', 'starts_at']);
+      assert.equal(slot.client_id, undefined);
+      assert.equal(slot.full_name, undefined);
+      assert.equal(slot.id, undefined);
+    }
   });
 });
 
