@@ -522,8 +522,8 @@ Rama: `feature/flujo-cobro-y-perfil`
   controles táctiles consistentes y mejor contraste en tablas, agenda y reportes.
 - Se añadieron títulos visibles por vista (`Mis rutinas`, `Mi agenda`, `Pagos e
   historial` y `Mis informes`) sin cambiar los flujos ni las métricas.
-- Frontend actualizado localmente a v221. La suite completa queda en `214/214`;
-  todavía no se publicó este cambio.
+- Frontend actualizado y publicado a v222. La suite completa queda en
+  `214/214`.
 
 ### Optimización móvil del portal y la aplicación
 
@@ -533,5 +533,4 @@ Rama: `feature/flujo-cobro-y-perfil`
   cuando el teléfono no tiene espacio suficiente para siete días.
 - Se reforzaron los objetivos táctiles de los controles de la aplicación y la
   legibilidad de las etiquetas de la navegación inferior en teléfonos.
-- Frontend actualizado localmente a v222. No cambia lógica de negocio ni se ha
-  publicado todavía.
+- Frontend actualizado y publicado a v222. No cambia lógica de negocio.

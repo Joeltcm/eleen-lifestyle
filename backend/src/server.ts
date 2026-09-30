@@ -232,6 +232,104 @@ async function cobrarClasesYaDadas(
   return cobradas.length;
 }
 
+type FacturaCredito = {
+  id: string;
+  client_id: string;
+  billed_for_client_id: string | null;
+  due_on: Date | string;
+  status: string;
+  amount: string | number;
+  paid_amount: string | number;
+  standard_price: string | number;
+  target_sessions: string | number;
+  billing_cutoff_day: string | number;
+};
+
+// El no anticipado no cobra una bolsa fija: cobra lo que se impartió durante
+// el ciclo, con un mínimo mensual. El corte sigue siendo la frontera —el pago
+// no mueve las fechas— y las clases extra no se pierden ni se pasan al ciclo
+// siguiente.
+function cicloQueCierraEn(dueOn: Date | string, cutoffDay: number) {
+  const referencia = mediodiaEnPanama(dueOn);
+  referencia.setUTCDate(referencia.getUTCDate() - 1);
+  return cicloDelCorte(referencia, cutoffDay);
+}
+
+function clasesCreditoLineItems(base: number, target: number, billable: number) {
+  const extra = Math.max(0, billable - target);
+  const rate = target > 0 ? base / target : 0;
+  const items = [{
+    name: `Mínimo mensual · ${target} clases`,
+    quantity: 1,
+    rate: Number(base.toFixed(2)),
+    item_total: Number(base.toFixed(2))
+  }];
+  if (extra > 0) items.push({
+    name: `${extra} clase${extra === 1 ? '' : 's'} excedente${extra === 1 ? '' : 's'}`,
+    quantity: extra,
+    rate: Number(rate.toFixed(2)),
+    item_total: Number((extra * rate).toFixed(2))
+  });
+  return items;
+}
+
+async function recalcularFacturasNoAnticipadas(ownerId?: string) {
+  const facturas = await sql`
+    SELECT i.id, i.client_id, i.billed_for_client_id, i.due_on, i.status, i.amount,
+      COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id),
+        CASE WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END, 0)::numeric AS paid_amount,
+      c.standard_price, c.billing_cutoff_day,
+      COALESCE(c.monthly_session_target, p.sessions_included, 0)::integer AS target_sessions
+    FROM invoices i
+    JOIN clients c ON c.id = COALESCE(i.billed_for_client_id, i.client_id)
+    LEFT JOIN service_plans p ON p.id = c.plan_id
+    WHERE c.payment_mode = 'no_anticipado' AND c.billing_model = 'monthly'
+      AND i.status <> 'void' AND i.source_system IS NULL
+      AND (i.auto_generated = true OR lower(i.concept) LIKE '%mensual%')
+      AND (${ownerId || null}::uuid IS NULL OR c.owner_id = ${ownerId || null}::uuid)
+  ` as unknown as FacturaCredito[];
+
+  let updated = 0;
+  for (const factura of facturas) {
+    const base = Number(factura.standard_price);
+    const target = Number(factura.target_sessions);
+    if (!(base > 0 && target > 0)) continue;
+    const cycle = cicloQueCierraEn(factura.due_on, Number(factura.billing_cutoff_day) || 1);
+    const [conteo] = await sql`
+      SELECT count(*)::integer AS billable_sessions
+      FROM sessions s
+      WHERE s.client_id = ${factura.billed_for_client_id || factura.client_id}
+        AND (s.starts_at AT TIME ZONE 'America/Panama')::date > ${cycle.inicio}::date
+        AND (s.starts_at AT TIME ZONE 'America/Panama')::date <= ${cycle.vence}::date
+        AND (
+          s.status IN ('completed', 'no_show')
+          OR (s.status = 'cancelled' AND s.cancellation_kind = 'not_rescheduled'
+            AND COALESCE(s.cancelled_by, 'client') = 'client')
+        )
+    `;
+    const billable = Number(conteo?.billable_sessions || 0);
+    const extra = Math.max(0, billable - target);
+    const amount = Number((base + extra * (base / target)).toFixed(2));
+    const paidAmount = Number(factura.paid_amount || 0);
+    const lineItems = clasesCreditoLineItems(base, target, billable);
+    const concept = `Mensualidad a crédito · ${billable} clases · ${(soloFecha(factura.due_on) || '').slice(0, 7).replace('-', '/')}`;
+    if (Math.abs(Number(factura.amount) - amount) < 0.005) continue;
+    await sql.begin(async transaction => {
+      await transaction`
+        UPDATE invoices i SET amount = ${amount}, subtotal = ${amount},
+          concept = ${concept}, line_items = ${transaction.json(lineItems)},
+          balance = GREATEST(${amount}::numeric - ${paidAmount}::numeric, 0),
+          status = CASE WHEN ${paidAmount}::numeric >= ${amount}::numeric - 0.01
+            THEN 'confirmed' ELSE 'pending' END
+        WHERE i.id = ${factura.id} AND i.status <> 'void'
+      `;
+    });
+    updated += 1;
+    app.log.info({ invoiceId: factura.id, cycle, billable, target, amount }, 'Factura de crédito recalculada');
+  }
+  return updated;
+}
+
 async function generateRecurringInvoices(ownerId?: string) {
   const selectedOwner = ownerId || null;
   const invoices = await sql`
@@ -473,8 +571,9 @@ async function generateRecurringInvoices(ownerId?: string) {
       }
     });
   }
+  const creditInvoicesRecalculated = await recalcularFacturasNoAnticipadas(selectedOwner || undefined);
   const descuentos = await aplicarCreditos(invoices as unknown as CobroGenerado[]);
-  return { generated: invoices.length, balances: pendientes.length, reposiciones: 0, descuentos, invoices };
+  return { generated: invoices.length, balances: pendientes.length, reposiciones: 0, descuentos, creditInvoicesRecalculated, invoices };
 }
 
 app.get('/api/billing/recurring/status', { preHandler: requireStaff }, async request => {
@@ -489,7 +588,7 @@ app.post('/api/billing/recurring/generate', { preHandler: requireStaff }, async 
     return { ...status, generated: 0, message: 'La facturación automática se activará después del corte final de Zoho.' };
   }
   const result = await generateRecurringInvoices(auth.sub);
-  return { ...(await recurringBillingStatus(auth.sub)), generated: result.generated, balances: result.balances, reposiciones: result.reposiciones, descuentos: result.descuentos };
+  return { ...(await recurringBillingStatus(auth.sub)), generated: result.generated, balances: result.balances, reposiciones: result.reposiciones, descuentos: result.descuentos, creditInvoicesRecalculated: result.creditInvoicesRecalculated };
 });
 
 app.get('/health', async () => {
