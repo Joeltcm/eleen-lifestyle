@@ -314,6 +314,23 @@ describe('el saldo sale del plan sin tener que teclearlo', () => {
     assert.equal(String(saldo.purchased_on).slice(0, 10), cicloCortePa(hoyPa(), cutoff).inicio,
       'purchased_on guarda el inicio del ciclo, no el día de ejecución');
   });
+
+  test('recupera el ciclo actual de un corte día 1 si la corrida del día faltó', async () => {
+    const plan = await api.post('/api/plans', { name: 'Recuperación corte uno', billingModel: 'monthly', price: 220, sessionsIncluded: 12 });
+    const c = await api.post('/api/clients', { fullName: 'Sandy Asis de prueba', planId: plan.datos.id, cutoffDay: 1 });
+    await db`UPDATE memberships SET starts_on = ${mesActualPa()}::date WHERE client_id = ${c.datos.id} AND status = 'active'`;
+
+    const primera = await api.post('/api/billing/recurring/generate', {});
+    assert.equal(primera.estado, 200);
+    const facturas = (await api.get('/api/invoices')).datos.filter(i => i.client_id === c.datos.id && i.auto_generated);
+    assert.equal(facturas.length, 1, 'el ciclo vigente se recupera sin intervención manual');
+    assert.equal(String(facturas[0].billing_period).slice(0, 10), mesActualPa());
+    assert.equal(String(facturas[0].due_on).slice(0, 10), `${mesActualPa().slice(0, 8)}01`);
+    assert.equal(String(facturas[0].issued_on).slice(0, 10), hoyPa());
+
+    const segunda = await api.post('/api/billing/recurring/generate', {});
+    assert.equal(segunda.datos.generated, 0, 'repetir la corrida no duplica la factura recuperada');
+  });
 });
 
 describe('descuento de clases individual', () => {
@@ -479,13 +496,11 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
   });
 
   test('a quien ya está cubierto no se le vuelve a cobrar el mes', async () => {
-    // Con el corte dentro de la ventana de generación, a esta persona sí se le
-    // emitiría su mensualidad. Lo único que lo impide es la cobertura.
-    const enVentana = new Date(Date.now() + 4 * 24 * 3600_000);
-    const corte = enVentana.getDate();
-    // El mes que se genera es el del corte dentro de la ventana; a fin de mes
-    // 'hoy' y 'hoy+4' pueden caer en meses distintos y la prueba se rompía.
-    const mesEnCurso = enVentana.toISOString().slice(0, 8) + '01';
+    // La generación ocurre el día exacto del corte. Usar hoy evita que la
+    // prueba dependa de una ventana de días futuros.
+    const enVentana = hoyPa();
+    const corte = partesPanama().d;
+    const mesEnCurso = mesActualPa();
     const plan = await api.post('/api/plans', { name: 'Pareja en ventana', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
     const p = await api.post('/api/clients', { fullName: 'Paga ya', planId: plan.datos.id, cutoffDay: corte });
     const d = await api.post('/api/clients', { fullName: 'Cubierta ya', planId: plan.datos.id, cutoffDay: corte });
@@ -495,7 +510,7 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     // El cobro compartido es de ESTE ciclo: vence en el corte del período que se
     // está generando. Con 'hoy' cerca de fin de mes caía en el mes anterior al
     // corte y parecía —correctamente— un cobro de otro ciclo.
-    const f = await api.post('/api/invoices', { clientId: p.datos.id, concept: 'Mensualidad de los dos', amount: 350, dueOn: enVentana.toISOString().slice(0, 10) });
+    const f = await api.post('/api/invoices', { clientId: p.datos.id, concept: 'Mensualidad de los dos', amount: 350, dueOn: enVentana });
     await api.post(`/api/invoices/${f.datos.id}/coverage`, {
       billingPeriod: mesEnCurso,
       entries: [{ clientId: d.datos.id, amount: 175, sessions: 12 }]
@@ -520,10 +535,9 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     // una cobertura etiquetada "septiembre" (punto medio del ciclo) que suprimía
     // el cobro NUEVO de septiembre —otro ciclo—. La supresión debe mirar el mes
     // del COBRO ORIGEN, no la etiqueta.
-    const ventana = enDiasPa(3); // corte dentro de los 7 días, en horario de Panamá
-    const corte = ventana.d;
-    const periodoNuevo = ventana.ym; // el mes que se va a generar
-    const dueAntes = enDiasPa(3 - 30).iso; // cobro del ciclo previo (30 días antes)
+    const corte = partesPanama().d;
+    const periodoNuevo = partesPanama().ym; // el mes que se va a generar hoy
+    const dueAntes = desplazarDiasPa(hoyPa(), -30); // cobro del ciclo previo
     const plan = await api.post('/api/plans', { name: 'Corte tardío mislabel', billingModel: 'monthly', price: 240, sessionsIncluded: 8 });
     const c = await api.post('/api/clients', { fullName: 'Cubierto ciclo anterior', planId: plan.datos.id, cutoffDay: corte });
     const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 240, dueOn: dueAntes });
@@ -3751,11 +3765,39 @@ describe('cambiar el día de corte', () => {
     assert.equal(Number(datos.billing_cutoff_day), 15, 'sin cutoffDay en el cuerpo, el día se respeta');
   });
 
+  test('actualiza la fecha de las facturas futuras pendientes y conserva el historial', async () => {
+    const plan = await api.post('/api/plans', { name: 'Mensual corte automático', billingModel: 'monthly', price: 90, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Corte automático', planId: plan.datos.id, cutoffDay: 1 });
+    const clientId = c.datos.id;
+    const mesSiguiente = desplazarMesInicioPa(mesActualPa(), 1);
+    const mesActual = mesActualPa();
+
+    await db`
+      INSERT INTO invoices (client_id, concept, amount, due_on, issued_on, billing_period, auto_generated, status)
+      VALUES (${clientId}, ${`Mensualidad · ${mesSiguiente.slice(0, 7)}`}, 90, ${mesSiguiente}::date, current_date, ${mesSiguiente}::date, true, 'pending')
+    `;
+    await db`
+      INSERT INTO invoices (client_id, concept, amount, due_on, issued_on, billing_period, auto_generated, status)
+      VALUES (${clientId}, 'Mensualidad · historial', 90, ${mesActual}::date, ${mesActual}::date, ${mesActual}::date, true, 'confirmed')
+    `;
+
+    const { estado } = await api.patch(`/api/clients/${clientId}`, { fullName: 'Corte automático', cutoffDay: 15 });
+    assert.equal(estado, 200);
+
+    const facturas = await db`
+      SELECT due_on::text, billing_period::text, status FROM invoices
+      WHERE client_id = ${clientId} AND auto_generated = true
+      ORDER BY billing_period
+    `;
+    assert.equal(facturas[0].due_on, mesActual, 'el historial conserva su fecha');
+    assert.equal(String(facturas[0].status), 'confirmed', 'el historial conserva su estado');
+    assert.equal(facturas[1].due_on, `${mesSiguiente.slice(0, 7)}-15`, 'la factura futura sigue el nuevo corte');
+  });
+
   test('el cobro del mes usa el día nuevo', async () => {
-    // El día se elige a tres días vista para que caiga dentro de la ventana de
-    // generación y después del alta de la membresía. Fijar un 15 hacía que la
-    // prueba dependiera del día en que se ejecutara.
-    const objetivo = new Date(Date.now() + 3 * 24 * 3600_000).getDate();
+    // La factura sólo debe nacer el día exacto del corte. Usar hoy hace que la
+    // prueba valide el comportamiento real sin depender de una ventana futura.
+    const objetivo = partesPanama().d;
     await api.patch(`/api/clients/${clientId}`, { fullName: 'Cambia corte', cutoffDay: objetivo });
     await api.post('/api/billing/recurring/generate', {});
 
@@ -3764,6 +3806,24 @@ describe('cambiar el día de corte', () => {
     for (const f of facturas) {
       assert.equal(Number(String(f.due_on).slice(8, 10)), objetivo, 'el vencimiento sigue al día de corte');
     }
+  });
+
+  test('el editor de plan también sincroniza el próximo cobro', async () => {
+    const plan = await api.post('/api/plans', { name: 'Editor corte automático', billingModel: 'monthly', price: 95, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Editor de corte', planId: plan.datos.id, cutoffDay: 1 });
+    const mesSiguiente = desplazarMesInicioPa(mesActualPa(), 1);
+    await db`
+      INSERT INTO invoices (client_id, concept, amount, due_on, issued_on, billing_period, auto_generated, status)
+      VALUES (${c.datos.id}, ${`Mensualidad · ${mesSiguiente.slice(0, 7)}`}, 95, ${mesSiguiente}::date, current_date, ${mesSiguiente}::date, true, 'pending')
+    `;
+
+    const { estado } = await api.patch(`/api/clients/${c.datos.id}/plan`, { planId: plan.datos.id, cutoffDay: 18 });
+    assert.equal(estado, 200);
+    const [factura] = await db`
+      SELECT due_on::text FROM invoices
+      WHERE client_id = ${c.datos.id} AND auto_generated = true AND billing_period = ${mesSiguiente}::date
+    `;
+    assert.equal(factura.due_on, `${mesSiguiente.slice(0, 7)}-18`);
   });
 });
 

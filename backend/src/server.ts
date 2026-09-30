@@ -79,6 +79,39 @@ async function lockBillingClient(transaction: TransactionSql, clientId: string) 
   await transaction`SELECT pg_advisory_xact_lock(hashtext('eileen:billing'), hashtext(${clientId}))`;
 }
 
+// Al mover el corte, sólo las facturas automáticas futuras y pendientes siguen
+// siendo editables. El historial confirmado, vencido o externo conserva su
+// fecha original; si el nuevo día ya pasó este mes, la próxima generación toma
+// el ciclo siguiente con el nuevo corte.
+async function actualizarFacturasFuturasPorCorte(transaction: TransactionSql, clientId: string, cutoffDay: number) {
+  await transaction`
+    WITH futuras AS (
+      SELECT i.id,
+        make_date(
+          extract(year FROM COALESCE(i.billing_period, i.due_on))::integer,
+          extract(month FROM COALESCE(i.billing_period, i.due_on))::integer,
+          least(
+            ${cutoffDay}::integer,
+            extract(day FROM (
+              date_trunc('month', COALESCE(i.billing_period, i.due_on))
+              + interval '1 month - 1 day'
+            ))::integer
+          )
+        )::date AS nuevo_due_on
+      FROM invoices i
+      WHERE COALESCE(i.billed_for_client_id, i.client_id) = ${clientId}
+        AND i.auto_generated = true
+        AND i.source_system IS NULL
+        AND i.status = 'pending'
+        AND i.due_on >= current_date
+    )
+    UPDATE invoices i
+    SET due_on = futuras.nuevo_due_on
+    FROM futuras
+    WHERE i.id = futuras.id AND futuras.nuevo_due_on >= current_date
+  `;
+}
+
 function sessionStateConflict(message: string): never {
   const error = new Error(message) as Error & { statusCode: number };
   error.statusCode = 409;
@@ -136,7 +169,7 @@ async function recurringBillingStatus(ownerId: string) {
     SELECT
       (SELECT count(*)::integer FROM eligible) AS active_clients,
       count(*) FILTER (WHERE billing_period = date_trunc('month', current_date)::date AND has_invoice)::integer AS current_period_invoices,
-      count(*) FILTER (WHERE due_on <= current_date + (${config.BILLING_GENERATION_DAYS_AHEAD})::integer AND NOT has_invoice)::integer AS ready_to_generate,
+      count(*) FILTER (WHERE billing_period = date_trunc('month', current_date)::date AND due_on <= current_date AND NOT has_invoice)::integer AS ready_to_generate,
       min(due_on) FILTER (WHERE due_on >= current_date) AS next_due_on
     FROM covered
   `;
@@ -144,12 +177,45 @@ async function recurringBillingStatus(ownerId: string) {
     automatic: !zohoConnection,
     blockedByZoho: Boolean(zohoConnection),
     zohoStatus: zohoConnection?.status || null,
-    daysAhead: config.BILLING_GENERATION_DAYS_AHEAD,
+    daysAhead: 0,
     activeClients: Number(summary?.active_clients || 0),
     currentPeriodInvoices: Number(summary?.current_period_invoices || 0),
     readyToGenerate: Number(summary?.ready_to_generate || 0),
     nextDueOn: summary?.next_due_on || null
   };
+}
+
+// El día de emisión no debe adelantar el ciclo: una factura automática se
+// emite el día del corte. Sólo se corrigen facturas locales, automáticas y
+// pendientes; las confirmadas son historial contable y no se reescriben.
+async function normalizarFechasFacturasAutomaticas(ownerId?: string) {
+  await sql`
+    UPDATE invoices i
+    SET due_on = make_date(
+      extract(year FROM i.billing_period)::integer,
+      extract(month FROM i.billing_period)::integer,
+      least(
+        c.billing_cutoff_day,
+        extract(day FROM (i.billing_period + interval '1 month - 1 day'))::integer
+      )
+    )
+    FROM clients c
+    WHERE c.id = COALESCE(i.billed_for_client_id, i.client_id)
+      AND (${ownerId || null}::uuid IS NULL OR c.owner_id = ${ownerId || null}::uuid)
+      AND i.auto_generated = true
+      AND i.source_system IS NULL
+      AND i.status = 'pending'
+      AND i.billing_period IS NOT NULL
+      AND i.billing_period >= date_trunc('month', current_date)::date
+      AND i.due_on IS DISTINCT FROM make_date(
+        extract(year FROM i.billing_period)::integer,
+        extract(month FROM i.billing_period)::integer,
+        least(
+          c.billing_cutoff_day,
+          extract(day FROM (i.billing_period + interval '1 month - 1 day'))::integer
+        )
+      )
+  `;
 }
 
 // Las columnas date vuelven de postgres.js como Date, no como texto. Pegarles
@@ -341,6 +407,7 @@ async function recalcularFacturasNoAnticipadas(ownerId?: string) {
 
 async function generateRecurringInvoices(ownerId?: string) {
   const selectedOwner = ownerId || null;
+  await normalizarFechasFacturasAutomaticas(selectedOwner || undefined);
   const invoices = await sql`
     WITH periods AS (
       SELECT generate_series(
@@ -374,12 +441,11 @@ async function generateRecurringInvoices(ownerId?: string) {
     ), candidates AS (
       SELECT s.*
       FROM schedule s
-      -- Ni antes de tiempo ni hacia atrás. Un cobro de un mes que ya terminó
-      -- no es un cobro: es un registro de algo que pasó, y emitirlo hoy le
-      -- llegaría al cliente como una deuda nueva de agosto el 31 de agosto.
-      -- Los pagos viejos se quedan como historial y no dirigen lo que viene.
-      WHERE s.due_on >= current_date
-        AND s.due_on <= current_date + (${config.BILLING_GENERATION_DAYS_AHEAD})::integer
+      -- La factura nace el día del corte. Si el proceso no corrió ese día,
+      -- puede recuperar el ciclo vigente después, conservando due_on en el
+      -- día del corte; nunca se emite una mensualidad antes de tiempo.
+      WHERE s.billing_period = date_trunc('month', current_date)::date
+        AND s.due_on <= current_date
         AND EXISTS (
           SELECT 1 FROM memberships m
           WHERE m.client_id = s.billed_for_client_id AND m.status = 'active' AND m.starts_on <= s.due_on
@@ -987,6 +1053,7 @@ app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, repl
     if (tocaCorte) {
       // memberships no tiene updated_at; añadirlo aquí rompía el guardado entero.
       await transaction`UPDATE memberships SET renewal_day = ${input.cutoffDay} WHERE client_id = ${id} AND status = 'active'`;
+      await actualizarFacturasFuturasPorCorte(transaction, id, input.cutoffDay);
     }
 
     // Inactivar termina el contrato operativo: el expediente y el historial
@@ -1071,6 +1138,7 @@ app.patch('/api/clients/:id/plan', { preHandler: requireStaff }, async (request,
       `;
       if (!client) return null;
       await transaction`UPDATE memberships SET status = 'paused' WHERE client_id = ${id} AND status = 'active'`;
+      await actualizarFacturasFuturasPorCorte(transaction, id, input.cutoffDay);
       return client;
     }
     if (!input.planId) return null;
@@ -1129,6 +1197,7 @@ app.patch('/api/clients/:id/plan', { preHandler: requireStaff }, async (request,
       // anterior seguiría midiendo el cumplimiento contra algo ya no pactado.
       if (plan.billing_model === 'single') {
         await transaction`UPDATE clients SET monthly_session_target = NULL WHERE id = ${id}`;
+        await actualizarFacturasFuturasPorCorte(transaction, id, input.cutoffDay);
         return client;
       }
       const [existingPackage] = await transaction`SELECT id FROM session_packages WHERE client_id = ${id} AND status IN ('pending', 'active') AND label = ${plan.name} ORDER BY created_at DESC LIMIT 1`;
@@ -1138,6 +1207,7 @@ app.patch('/api/clients/:id/plan', { preHandler: requireStaff }, async (request,
         await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${id}, ${createdPackage.id}, ${plan.name}, ${plan.price}, current_date)`;
       }
     }
+    await actualizarFacturasFuturasPorCorte(transaction, id, input.cutoffDay);
     return client;
   });
   if (!result) return reply.code(404).send({ error: 'Cliente o plan no encontrado' });

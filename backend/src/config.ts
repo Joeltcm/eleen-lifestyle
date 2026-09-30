@@ -23,7 +23,10 @@ const schema = z.object({
   VAPID_PRIVATE_KEY: z.string().optional(),
   VAPID_SUBJECT: z.string().default('https://eileen-lifestyle.pages.dev/'),
   REMINDER_INTERVAL_MINUTES: z.coerce.number().int().min(5).max(1440).default(15),
-  BILLING_GENERATION_DAYS_AHEAD: z.coerce.number().int().min(0).max(31).default(7),
+  // Las facturas recurrentes se generan el día del corte; se conserva la
+  // variable por compatibilidad con despliegues existentes, pero ya no se usa
+  // para adelantar cobros.
+  BILLING_GENERATION_DAYS_AHEAD: z.coerce.number().int().min(0).max(31).default(0),
   BILLING_INTERVAL_MINUTES: z.coerce.number().int().min(5).max(1440).default(60),
   ZOHO_CLIENT_ID: z.string().optional(),
   ZOHO_CLIENT_SECRET: z.string().optional(),
