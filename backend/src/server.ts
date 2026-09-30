@@ -5361,7 +5361,7 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
           WHEN source_system = 'zoho_invoice' THEN balance
           ELSE GREATEST(amount - COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = invoices.id), CASE WHEN status = 'confirmed' THEN amount ELSE 0 END), 0)
         END::numeric(12,2) AS balance
-      FROM invoices WHERE client_id = ${client.id} ORDER BY COALESCE(issued_on, due_on) DESC LIMIT 60
+      FROM invoices WHERE client_id = ${client.id} ORDER BY COALESCE(issued_on, due_on) DESC
     `,
     sql`SELECT ra.id AS assignment_id, ra.due_on, r.id, r.title, r.description, r.sessions_per_week, r.exercises FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id WHERE ra.client_id = ${client.id} AND ra.active = true AND (ra.ends_on IS NULL OR ra.ends_on >= current_date) ORDER BY ra.starts_on DESC`,
     sql`SELECT s.id, s.routine_id, s.starts_at, s.duration_minutes, s.mode, s.status, s.cancellation_kind, s.cancelled_by, s.completion_percent, r.title AS routine_title, EXISTS (SELECT 1 FROM session_reschedules sr WHERE sr.session_id = s.id AND sr.origin = 'moved') AS reprogramada FROM sessions s LEFT JOIN routines r ON r.id = s.routine_id WHERE s.client_id = ${client.id} AND s.starts_at >= now() - interval '1 year' ORDER BY s.starts_at`,

@@ -556,3 +556,139 @@ button.active-filter{background:#2f6f4f;color:#fff;border-color:#2f6f4f}
   .portal-chart .chart-column span{font-size:11px;min-height:0;white-space:normal}.portal-chart .chart-column span b{font-size:18px}.portal-chart .chart-column span small{font-size:10px}
   .portal-chart .chart-column small{font-size:11px}
 }
+
+/* Portal: las vistas secundarias comparten la jerarquía visual de Progreso.
+   La información y los flujos no cambian; aquí sólo se ordenan títulos,
+   tarjetas, controles y tablas para que el portal se sienta como una sola
+   experiencia. */
+.portal-view:not(#portal-dashboard)>.section-heading{display:grid;align-items:start;gap:5px;margin:0 0 22px;padding:0 3px}
+.portal-view:not(#portal-dashboard)>.section-heading .eyebrow{margin:0;color:#95627a;font-size:11px;font-weight:600;letter-spacing:1.5px}
+.portal-view:not(#portal-dashboard)>.section-heading h2{margin:0;font:600 34px/1.05 Fraunces;letter-spacing:-1.1px;color:#493a41}
+.portal-view:not(#portal-dashboard)>.portal-help{margin:-9px 3px 20px;color:#7c7077;font-size:13px;line-height:1.55}
+.portal-view:not(#portal-dashboard)>.card{border:0;border-radius:18px;padding:24px;background:rgba(255,253,252,.96);box-shadow:0 8px 24px #6d4a5910}
+.portal-view:not(#portal-dashboard)>.card .card-head{margin-bottom:20px}
+.portal-view:not(#portal-dashboard)>.card .card-head h3,.portal-view:not(#portal-dashboard) .portal-report h3{margin:0;font:600 22px/1.15 Fraunces;letter-spacing:-.4px;color:#493a41}
+.portal-view:not(#portal-dashboard)>.card .card-head p,.portal-view:not(#portal-dashboard) .portal-report p{margin:6px 0 0;color:#7c7077;font-size:13px;line-height:1.45}
+.portal-view:not(#portal-dashboard) button{font-family:'DM Sans',sans-serif}
+.portal-view:not(#portal-dashboard) .primary,.portal-view:not(#portal-dashboard) .secondary{min-height:42px;border-radius:10px;padding:10px 15px;font-size:12px}
+
+/* Rutinas */
+.portal-routines{grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:18px}
+.portal-routine-card{border:0!important;border-radius:18px!important;padding:24px!important;background:rgba(255,253,252,.96)!important;box-shadow:0 8px 24px #6d4a5910!important}
+.portal-routine-card .card-head{margin-bottom:18px}
+.portal-routine-card .card-head h3{margin:0;font:600 24px/1.1 Fraunces;letter-spacing:-.5px;color:#493a41}
+.portal-routine-card .card-head p{margin:7px 0 0;color:#7c7077;font-size:13px;line-height:1.45}
+.portal-routine-card .routine-due{margin-top:9px;padding:6px 10px;font-size:10px}
+.portal-routine-card .exercise-preview{margin:0 0 18px;padding:15px 16px;border:1px solid #eee3e8;border-radius:13px;background:#fbf6f8}
+.portal-routine-card .exercise-preview span{font-size:12px;line-height:1.45}
+.portal-routine-card .portal-completion-form{gap:12px;margin-top:0;padding-top:18px;border-top:1px solid #eee3e8}
+.portal-routine-card .completion-check{font-size:12px;line-height:1.35}
+.portal-routine-card .completion-percent input{min-height:42px}
+.portal-routine-card .portal-completion-form .primary{grid-column:1/-1;width:100%;margin-top:2px}
+
+/* Agenda */
+#portal-calendar-list{display:grid;gap:16px;padding:24px;border:0;border-radius:18px;background:rgba(255,253,252,.96);box-shadow:0 8px 24px #6d4a5910}
+#portal-calendar-list .portal-mes{margin:0;padding-bottom:17px;border-bottom:1px solid #eee3e8}
+#portal-calendar-list .portal-mes b{font:600 22px/1.1 Fraunces;letter-spacing:-.4px;color:#493a41}
+#portal-calendar-list .portal-mes-nav{width:42px;height:42px;border-color:#ead9e1;background:#fff8fb;color:#8e5871;box-shadow:0 3px 10px #6d4a590d}
+#portal-calendar-list .portal-semana-rejilla{margin-top:1px;padding:12px 7px 7px;border-radius:14px;background:#fcf8fa}
+#portal-calendar-list .portal-hora{font-size:10px;color:#897a82}
+#portal-calendar-list .portal-col-dia{padding:7px 0 9px}
+#portal-calendar-list .portal-col-dia b{font-size:11px;color:#897a82}
+#portal-calendar-list .portal-col-dia i{font-size:14px}
+#portal-calendar-list .portal-col-dia.hoy i{width:26px;height:26px;background:#59434f}
+#portal-calendar-list .portal-tramo{min-height:19px;border-radius:5px}
+#portal-calendar-list .portal-bloque{border-radius:7px;font-size:11px}
+#portal-calendar-list .portal-leyenda{margin:0;padding:0 2px;color:#7c7077;font-size:12px;line-height:1.5}
+#portal-calendar-list .portal-dia-titulo{margin:3px 0 0;padding-top:16px;border-top:1px solid #eee3e8;font:600 22px/1.15 Fraunces;color:#493a41}
+#portal-calendar-list>.empty{padding:18px 0 0;font-size:13px}
+.portal-slot{grid-template-columns:165px minmax(0,1fr) auto;padding:17px 19px;border:1px solid #eee3e8;border-radius:14px;background:#fff;box-shadow:0 5px 16px #6d4a5909}
+.portal-slot.busy{background:#f5f0f2;color:#766b71}
+.portal-slot.mine{border-left:4px solid #c47f9d;background:#fff8fb}
+.portal-slot time b,.portal-slot>div b{font-size:13px}
+.portal-slot time span,.portal-slot>div span{font-size:11px}
+
+/* Pagos e informes */
+#portal-plan{margin-bottom:18px;padding:21px 22px;border:0;border-radius:18px;background:linear-gradient(120deg,#fff,#fbf2f6);box-shadow:0 8px 24px #6d4a5910}
+#portal-plan h3{font:600 22px/1.15 Fraunces;letter-spacing:-.4px;color:#493a41}
+#portal-plan p{font-size:13px}
+#portal-pending-payment{margin-bottom:18px}
+#portal-billing>.card{padding:24px}
+#portal-billing .table-wrap{margin:0 -4px}
+#portal-billing table th{padding-top:4px;font-size:11px}
+#portal-billing table td{padding:16px 8px;font-size:13px}
+#portal-billing table td b{font-size:13px}
+#portal-billing table td small{color:#897a82;font-size:11px}
+#portal-billing table .secondary{min-height:36px;padding:8px 12px;font-size:11px}
+.portal-payment-alert,.portal-payment-ok{margin:0;padding:17px 20px;border-radius:15px;box-shadow:0 5px 16px #6d4a5909}
+.portal-payment-alert strong{font:600 17px Fraunces}
+.portal-payment-alert span,.portal-payment-ok{font-size:13px}
+.portal-reports{gap:18px}
+.portal-report-section{gap:20px;padding:24px;border:0;border-radius:18px;background:rgba(255,253,252,.96);box-shadow:0 8px 24px #6d4a5910}
+.portal-report-section+.portal-report-section{margin-top:0}
+.portal-report-section .card-head{margin-bottom:0}
+.portal-report-section .card-head h3{font:600 22px/1.15 Fraunces;letter-spacing:-.4px;color:#493a41}
+.portal-report-section .card-head p{font-size:13px}
+.portal-report-period b{font-size:14px}
+.portal-report-period small{font-size:12px}
+.portal-report-stats{gap:12px}
+.portal-report-stats article{padding:15px;border:1px solid #eee3e8;border-radius:13px;background:#fbf6f8}
+.portal-report-stats strong{font-size:28px;color:#493a41}
+.portal-report-stats span{font-size:12px}
+.portal-weight-chart{min-height:210px;border:1px solid #eee3e8;border-radius:14px;background:#fcf8fa}
+.portal-weight-chart text{font-size:12px}
+.portal-unit-select{font-size:12px}
+.portal-unit-select select{min-height:38px;border-radius:9px;font-size:12px}
+.portal-report-downloads{gap:14px;margin-top:0}
+.portal-report-downloads .card{margin:0;padding:20px 22px;border:0;border-radius:16px;background:rgba(255,253,252,.96);box-shadow:0 7px 20px #6d4a5909}
+.portal-report-downloads .secondary{min-width:145px}
+
+@media(max-width:760px){
+  .portal-view:not(#portal-dashboard)>.section-heading h2{font-size:30px}
+  .portal-view:not(#portal-dashboard)>.card,#portal-calendar-list,#portal-billing>.card,.portal-report-section{padding:18px}
+  .portal-routines{grid-template-columns:1fr}
+  .portal-slot{grid-template-columns:120px minmax(0,1fr);gap:12px}
+  .portal-slot .portal-session-form{grid-column:1/-1}
+  .portal-report-section .card-head{align-items:flex-start;flex-direction:column}
+  .portal-report-period{text-align:left}
+  .portal-report-downloads .card{padding:18px}
+}
+@media(max-width:560px){
+  .portal-view:not(#portal-dashboard)>.section-heading{margin-bottom:18px}
+  .portal-view:not(#portal-dashboard)>.section-heading h2{font-size:28px}
+  #portal-calendar-list{padding:14px}
+  #portal-calendar-list .portal-mes b{font-size:18px}
+  #portal-calendar-list .portal-semana-rejilla{overflow:hidden;padding-left:2px;padding-right:2px}
+  #portal-calendar-list .portal-leyenda{font-size:10px}
+  .portal-slot{grid-template-columns:100px minmax(0,1fr);padding:14px}
+  #portal-billing table{min-width:680px}
+  .portal-report-stats{grid-template-columns:repeat(2,1fr)}
+  .portal-report-downloads .portal-report{align-items:stretch}
+  .portal-report-downloads .secondary{width:100%}
+}
+
+/* Mobile QA: evitar que los datos útiles se escondan detrás de scroll lateral
+   y conservar objetivos táctiles cómodos en teléfonos pequeños. */
+@media(max-width:600px){
+  .sidebar .nav-link>span:last-child{font-size:9px;white-space:nowrap}
+  .view button.primary,.view button.secondary,.view button.filter,.view input,.view select{min-height:44px}
+  .portal-view:not(#portal-dashboard) .stack-mobile{width:100%;min-width:0}
+  .portal-view:not(#portal-dashboard) .stack-mobile thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  .portal-view:not(#portal-dashboard) .stack-mobile,.portal-view:not(#portal-dashboard) .stack-mobile tbody,.portal-view:not(#portal-dashboard) .stack-mobile tr,.portal-view:not(#portal-dashboard) .stack-mobile td{display:block;width:auto}
+  .portal-view:not(#portal-dashboard) .stack-mobile tr{margin-bottom:10px;padding:13px;border:1px solid #eee3e8;border-radius:13px;background:#fff;box-shadow:0 4px 13px #6d4a5909}
+  .portal-view:not(#portal-dashboard) .stack-mobile td{display:grid;grid-template-columns:minmax(78px,auto) 1fr;gap:10px;align-items:baseline;border:0;padding:5px 0;font-size:13px}
+  .portal-view:not(#portal-dashboard) .stack-mobile td:before{content:attr(data-label);font:500 10px 'DM Mono';letter-spacing:1px;text-transform:uppercase;color:#897a82}
+  .portal-view:not(#portal-dashboard) .stack-mobile td[data-label="Acciones"],.portal-view:not(#portal-dashboard) .stack-mobile td[data-label="Comprobante"]{grid-template-columns:1fr;gap:7px;margin-top:6px;padding-top:10px;border-top:1px solid #eee3e8}
+  .portal-view:not(#portal-dashboard) .stack-mobile td[data-label="Acciones"]:before,.portal-view:not(#portal-dashboard) .stack-mobile td[data-label="Comprobante"]:before{display:none}
+  .portal-view:not(#portal-dashboard) .stack-mobile td[data-label="Comprobante"] button{width:100%;min-height:42px}
+  .portal-view:not(#portal-dashboard) .stack-mobile tr:has(td.empty){background:none;border:0;box-shadow:none;padding:0}
+  .portal-view:not(#portal-dashboard) .stack-mobile tr:has(td.empty) td{display:block}
+  .portal-view:not(#portal-dashboard) .stack-mobile tr:has(td.empty) td:before{display:none}
+}
+@media(max-width:390px){
+  #portal-calendar-list .portal-semana-rejilla{overflow-x:auto;grid-template-columns:38px repeat(7,minmax(42px,1fr))!important}
+  #portal-calendar-list .portal-semana-rejilla>*{min-width:0}
+  .portal-nav{bottom:max(10px,env(safe-area-inset-bottom));width:calc(100% - 18px);padding:5px}
+  .portal-nav a{padding:8px 2px;font-size:8px}
+  .portal-nav a span svg{width:18px;height:18px}
+}
