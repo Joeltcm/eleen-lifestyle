@@ -994,6 +994,46 @@ describe('integridad de saldos y concurrencia', () => {
 });
 
 describe('modalidad de pago y cobros pendientes', () => {
+  test('no anticipado calcula el mínimo y las clases excedentes del ciclo actual', async () => {
+    const plan = await api.post('/api/plans', {
+      name: 'Crédito por clases', billingModel: 'monthly', price: 275, sessionsIncluded: 10
+    });
+    const c = await api.post('/api/clients', {
+      fullName: 'Julio crédito reproducible', planId: plan.datos.id, cutoffDay: 31, paymentMode: 'no_anticipado'
+    });
+    assert.equal(c.estado, 201);
+
+    const fechas = Array.from({ length: 12 }, (_, index) =>
+      new Date(`${enDiasPa(-index - 1).iso}T15:00:00-05:00`).toISOString());
+    const lote = await api.post('/api/sessions/batch', {
+      clientId: c.datos.id, startsAt: fechas, durationMinutes: 60, mode: 'Presencial'
+    });
+    assert.equal(lote.datos.creadas, 12);
+    for (const session of lote.datos.sesiones) {
+      const marcada = await api.patch(`/api/sessions/${session.id}/compliance`, {
+        outcome: 'completed', completionPercent: 100
+      });
+      assert.equal(marcada.estado, 200);
+    }
+
+    const [year, month] = hoyPa().split('-').map(Number);
+    const ultimoDia = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    const dueOn = `${year}-${String(month).padStart(2, '0')}-${String(ultimoDia).padStart(2, '0')}`;
+    // Simula la factura de septiembre que ya existía con el mínimo: la
+    // generación debe corregirla retroactivamente a 12 × $27.50 = $330.
+    const factura = await api.post('/api/invoices', {
+      clientId: c.datos.id, concept: 'Mensualidad', amount: 275, dueOn
+    });
+    assert.equal(factura.estado, 201);
+
+    const generado = await api.post('/api/billing/recurring/generate', {});
+    assert.equal(generado.estado, 200);
+    assert.equal(generado.datos.creditInvoicesRecalculated, 1);
+    const actualizada = (await api.get('/api/invoices')).datos.find(item => item.id === factura.datos.id);
+    assert.equal(Number(actualizada.amount), 330, '10 clases mínimas + 2 excedentes a $27.50');
+    assert.match(actualizada.concept, /12 clases/, 'la factura explica cuántas clases se cobraron');
+  });
+
   test('una mensualidad anticipada pendiente no abre un paquete activo manualmente', async () => {
     const plan = await api.post('/api/plans', { name: 'Anticipado pendiente', billingModel: 'monthly', price: 180, sessionsIncluded: 8 });
     const c = await api.post('/api/clients', { fullName: 'Anticipado sin pagar', planId: plan.datos.id, cutoffDay: 15, paymentMode: 'anticipado' });
