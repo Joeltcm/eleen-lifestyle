@@ -118,15 +118,16 @@ function table(document: PDFKit.PDFDocument, columns: Column[], rows: PdfRecord[
 
 export function invoicePdf(invoice: PdfRecord, payments: PdfRecord[]) {
   return pdfBuffer(document => {
-    const isPaid = invoice.status === 'confirmed' || Number(invoice.balance_amount || 0) === 0;
+    const sinCargo = Number(invoice.amount || 0) === 0;
+    const isPaid = !sinCargo && (invoice.status === 'confirmed' || Number(invoice.balance_amount || 0) === 0);
     const number = clean(invoice.invoice_number || `EIL-${String(invoice.id).slice(0, 8).toUpperCase()}`);
-    brandHeader(document, isPaid ? 'Recibo de pago' : 'Factura', `${number} · Documento comercial no fiscal`);
+    brandHeader(document, sinCargo ? 'Resumen de sesiones' : isPaid ? 'Recibo de pago' : 'Factura', `${number} · Documento comercial no fiscal`);
     const metaY = document.y;
     infoPair(document, 'Cliente', clean(invoice.full_name), 42, metaY, 210);
     infoPair(document, 'Correo', clean(invoice.email || 'No registrado'), 42, metaY + 38, 210);
     infoPair(document, 'Fecha de emisión', date(invoice.issued_on || invoice.created_at), 322, metaY, 110);
     infoPair(document, 'Vencimiento', date(invoice.due_on), 445, metaY, 110);
-    infoPair(document, 'Estado', status(invoice.status), 322, metaY + 38, 110);
+    infoPair(document, 'Estado', sinCargo ? 'Sin cargo' : status(invoice.status), 322, metaY + 38, 110);
     infoPair(document, 'Origen', invoice.source_system === 'zoho_invoice' ? 'Zoho Invoice' : 'Eileen', 445, metaY + 38, 110);
     document.y = metaY + 91;
     const items = Array.isArray(invoice.line_items) && invoice.line_items.length ? invoice.line_items.map((item: PdfRecord) => ({
@@ -147,11 +148,14 @@ export function invoicePdf(invoice: PdfRecord, payments: PdfRecord[]) {
     row('Saldo', money(invoice.balance_amount), true);
     document.y += 10;
     ensureSpace(document, 88, `Factura ${number}`);
-    document.save().roundedRect(42, document.y, 513, 72, 9).fill(isPaid ? '#eef6f1' : '#fff8e9').restore();
+    document.save().roundedRect(42, document.y, 513, 72, 9).fill(sinCargo ? '#f5f0f2' : isPaid ? '#eef6f1' : '#fff8e9').restore();
     const boxY = document.y;
-    document.font('Helvetica-Bold').fontSize(9).fillColor(isPaid ? colors.green : colors.amber).text(isPaid ? 'PAGO REGISTRADO' : 'SALDO PENDIENTE', 55, boxY + 12);
+    document.font('Helvetica-Bold').fontSize(9).fillColor(sinCargo ? colors.muted : isPaid ? colors.green : colors.amber).text(sinCargo ? 'SIN CARGO' : isPaid ? 'PAGO REGISTRADO' : 'SALDO PENDIENTE', 55, boxY + 12);
     const payment = payments[0] || {};
-    document.font('Helvetica').fontSize(8).fillColor(colors.ink).text(`Método: ${clean(payment.method || invoice.payment_method || '-')}   ·   Referencia: ${clean(payment.reference || invoice.payment_reference || '-')}   ·   Fecha: ${date(payment.paid_on || invoice.confirmed_at)}`, 55, boxY + 32, { width: 485 });
+    const paymentDetail = sinCargo
+      ? 'No se generó cargo: no hubo sesiones cobrables en este ciclo.'
+      : `Método: ${clean(payment.method || invoice.payment_method || '-')}   ·   Referencia: ${clean(payment.reference || invoice.payment_reference || '-')}   ·   Fecha: ${date(payment.paid_on || invoice.confirmed_at)}`;
+    document.font('Helvetica').fontSize(8).fillColor(colors.ink).text(paymentDetail, 55, boxY + 32, { width: 485 });
     document.fontSize(7).fillColor(colors.muted).text('Este comprobante documenta una operación comercial de Eileen Lifestyle y no constituye una factura fiscal.', 55, boxY + 51, { width: 485 });
     document.y = boxY + 88;
   });
