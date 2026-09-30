@@ -445,3 +445,14 @@ Rama: `feature/flujo-cobro-y-perfil`
 - `npm run verify` y suite backend ✅
 - Se conservaron los archivos locales no relacionados (`003_progress_photo_metadata.sql`,
   `graphify-out/` y `worktrees/`).
+
+## Legibilidad del portal
+
+- Se aumentó el tamaño y contraste de etiquetas, subtítulos y valores en las
+  tarjetas de saldo, deuda y próximas sesiones.
+- El gráfico de cumplimiento ahora conserva visible el detalle `realizadas /
+  medibles · porcentaje`, con tipografía mayor y barras más fáciles de leer.
+- Se mejoró también la lectura de los estados y mensajes de composición
+  corporal en pantallas estrechas.
+- Frontend preparado como v215; pendiente de publicación hasta confirmar el
+  siguiente deploy.
