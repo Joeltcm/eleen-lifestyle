@@ -3,7 +3,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:
 import { z } from 'zod';
 import { config } from './config.js';
 import { sql } from './db.js';
-import { scheduleWasMoved } from './session-reschedule.js';
+import { moveSessionInTransaction } from './session-reschedule.js';
 
 const provider = 'google_calendar';
 const calendarScope = 'https://www.googleapis.com/auth/calendar.events';
@@ -276,47 +276,27 @@ export async function pullGoogleChanges(ownerId: string, token: string, connecti
 
     const scheduleChanged = startsAt.getTime() !== new Date(session.starts_at).getTime()
       || durationMinutes !== Number(session.duration_minutes);
-    // Arrastrar la cita a otro día en Google es la forma habitual de
-    // reprogramar, y hasta ahora no dejaba rastro: se movía la misma sesión y
-    // no se cancelaba nada, así que el contador de reprogramaciones habría
-    // dicho cero mientras la entrenadora movía citas todo el mes.
-    const seMovioDeHorario = scheduleWasMoved(session.starts_at, startsAt);
-    if (seMovioDeHorario && session.status === 'completed' && session.package_debited && session.package_id) {
-      // Arrastrar en Google una clase ya realizada tiene el mismo significado
-      // que moverla desde Eileen: se reprograma y devuelve el débito al saldo.
-      // Antes sólo se cambiaba starts_at aquí, dejando la clase cobrada aunque
-      // el contador de reprogramaciones sí aumentara.
+    // El movimiento completo vive en una transacción compartida con el PATCH
+    // de la aplicación. Así Google también revierte un débito ya cobrado,
+    // desvincula la sesión y registra la reprogramación, y dos pulls no pueden
+    // descontar/devolver el mismo saldo dos veces.
+    if (scheduleChanged) {
       await sql.begin(async transaction => {
+        const moved = await moveSessionInTransaction(transaction, String(session.id), {
+          startsAt: startsAt.toISOString(),
+          durationMinutes
+        });
+        if (!moved) return;
         await transaction`
-          UPDATE session_packages
-          SET used_sessions = GREATEST(0, used_sessions - 1),
-              status = CASE WHEN GREATEST(0, used_sessions - 1) >= total_sessions THEN 'exhausted' ELSE 'active' END
-          WHERE id = ${session.package_id}
-        `;
-        const [desvinculada] = await transaction`
-          UPDATE sessions SET starts_at = ${startsAt.toISOString()}, duration_minutes = ${durationMinutes},
-            package_id = NULL, package_debited = false, debited_group_id = NULL,
-            google_event_link = ${event.htmlLink ? String(event.htmlLink) : session.google_event_link},
+          UPDATE sessions SET google_event_link = ${event.htmlLink ? String(event.htmlLink) : session.google_event_link},
             google_event_updated_at = ${eventUpdatedAt.toISOString()}, google_event_etag = ${event.etag ? String(event.etag) : null},
             google_synced_at = now(), google_sync_error = NULL, updated_at = now()
           WHERE id = ${session.id}
-          RETURNING starts_at
-        `;
-        await transaction`
-          INSERT INTO session_reschedules (session_id, client_id, from_starts_at, to_starts_at, origin)
-          VALUES (${session.id}, ${session.client_id}, ${session.starts_at}, ${desvinculada.starts_at}, 'moved')
         `;
       });
     } else {
-      if (seMovioDeHorario) {
-        await sql`
-          INSERT INTO session_reschedules (session_id, client_id, from_starts_at, to_starts_at, origin)
-          VALUES (${session.id}, ${session.client_id}, ${session.starts_at}, ${startsAt.toISOString()}, 'moved')
-        `;
-      }
       await sql`
-        UPDATE sessions SET starts_at = ${startsAt.toISOString()}, duration_minutes = ${durationMinutes},
-          google_event_link = ${event.htmlLink ? String(event.htmlLink) : session.google_event_link},
+        UPDATE sessions SET google_event_link = ${event.htmlLink ? String(event.htmlLink) : session.google_event_link},
           google_event_updated_at = ${eventUpdatedAt.toISOString()}, google_event_etag = ${event.etag ? String(event.etag) : null},
           google_synced_at = now(), google_sync_error = NULL, updated_at = now()
         WHERE id = ${session.id}

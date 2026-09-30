@@ -24,6 +24,12 @@ const desplazarDiasPa = (fecha, dias) => {
 };
 const instantePa = (fecha, hora) => new Date(`${fecha}T${hora}:00-05:00`).toISOString();
 const mesActualPa = () => partesPanama().ym + '-01';
+const mesDe = fecha => String(fecha).slice(0, 7);
+const desplazarMesInicioPa = (fecha, meses) => {
+  const base = new Date(`${String(fecha).slice(0, 7)}-01T12:00:00-05:00`);
+  base.setUTCMonth(base.getUTCMonth() + meses);
+  return partesPanama(base).iso;
+};
 const cicloCortePa = (referencia, cutoff) => {
   const [year, month, day] = referencia.split('-').map(Number);
   const daysInMonth = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
@@ -177,7 +183,7 @@ describe('agenda por lotes', () => {
   });
 
   test('crea una sesión por fecha', async () => {
-    const fechas = ['2026-09-07T13:00:00.000Z', '2026-09-09T13:00:00.000Z', '2026-09-11T13:00:00.000Z'];
+    const fechas = [instantePa(desplazarDiasPa(hoyPa(), -7), '08:00'), instantePa(desplazarDiasPa(hoyPa(), -5), '08:00'), instantePa(desplazarDiasPa(hoyPa(), -3), '08:00')];
     const { estado, datos } = await api.post('/api/sessions/batch', { clientId: clienteId, startsAt: fechas, durationMinutes: 60, mode: 'Presencial' });
     assert.equal(estado, 201);
     assert.equal(datos.creadas, 3);
@@ -185,7 +191,7 @@ describe('agenda por lotes', () => {
   });
 
   test('repetir la misma petición no duplica el calendario', async () => {
-    const fechas = ['2026-09-07T13:00:00.000Z', '2026-09-09T13:00:00.000Z', '2026-09-11T13:00:00.000Z'];
+    const fechas = [instantePa(desplazarDiasPa(hoyPa(), -7), '08:00'), instantePa(desplazarDiasPa(hoyPa(), -5), '08:00'), instantePa(desplazarDiasPa(hoyPa(), -3), '08:00')];
     const { datos } = await api.post('/api/sessions/batch', { clientId: clienteId, startsAt: fechas, durationMinutes: 60, mode: 'Presencial' });
     assert.equal(datos.creadas, 0);
     assert.equal(datos.omitidas, 3);
@@ -211,15 +217,16 @@ describe('gastos y ámbito', () => {
     // Hace falta un ingreso cobrado: sin ingresos el margen es nulo de todas
     // formas y la prueba pasaría sin comprobar nada.
     const pagador = await api.post('/api/clients', { fullName: 'Ingreso Prueba', billingModel: 'monthly', standardPrice: 200, cutoffDay: 1 });
-    const cobro = await api.post('/api/invoices', { clientId: pagador.datos.id, concept: 'Mensualidad', amount: 200, dueOn: '2026-08-05' });
-    await api.post(`/api/invoices/${cobro.datos.id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-05' });
+    const fechaIngreso = desplazarDiasPa(hoyPa(), -30);
+    const cobro = await api.post('/api/invoices', { clientId: pagador.datos.id, concept: 'Mensualidad', amount: 200, dueOn: fechaIngreso });
+    await api.post(`/api/invoices/${cobro.datos.id}/confirm`, { method: 'Efectivo', paidOn: fechaIngreso });
 
     // Una categoría nueva (personal por defecto) con un gasto: no es operativo.
     const personal = await api.post('/api/expense-categories', { name: 'Compra personal' });
-    await api.post('/api/expenses', { description: 'Compra', amount: 50, spentOn: '2026-08-10', categoryId: personal.datos.id });
+    await api.post('/api/expenses', { description: 'Compra', amount: 50, spentOn: desplazarDiasPa(hoyPa(), -25), categoryId: personal.datos.id });
     // Y un gasto operativo marcado como negocio.
     const operativo = await api.post('/api/expense-categories', { name: 'Operativo', ambito: 'negocio' });
-    await api.post('/api/expenses', { description: 'Combustible', amount: 30, spentOn: '2026-08-11', categoryId: operativo.datos.id });
+    await api.post('/api/expenses', { description: 'Combustible', amount: 30, spentOn: desplazarDiasPa(hoyPa(), -24), categoryId: operativo.datos.id });
 
     const { datos } = await api.get('/api/finance/summary?rango=todo');
     assert.ok(datos.totales.ingresos > 0, 'debe haber ingresos para que el margen signifique algo');
@@ -316,7 +323,7 @@ describe('descuento de clases individual', () => {
     // Cada uno con su propio saldo, como los configura Eileen.
     for (const id of [pagador, dependiente]) {
       const p = await api.post('/api/packages', { clientId: id, totalSessions: 8, amount: 200, kind: 'monthly' });
-      await api.post(`/api/invoices/${p.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-01' });
+      await api.post(`/api/invoices/${p.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: desplazarDiasPa(hoyPa(), -30) });
     }
   });
 
@@ -607,9 +614,9 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
   test('un cliente de clase suelta no recibe mensualidad aunque lo cubra un pagador mensual', async () => {
     const pagador = await api.post('/api/clients', { fullName: 'Paga por la familia', billingModel: 'monthly', standardPrice: 200, cutoffDay: 1 });
     const suelto = await api.post('/api/clients', { fullName: 'Depende pero es suelto', billingModel: 'single', standardPrice: 25, cutoffDay: 1, billingResponsibleClientId: pagador.datos.id });
-    const f = await api.post('/api/invoices', { clientId: pagador.datos.id, concept: 'Mensualidad', amount: 200, dueOn: '2026-09-17' });
+    const f = await api.post('/api/invoices', { clientId: pagador.datos.id, concept: 'Mensualidad', amount: 200, dueOn: hoyPa() });
     await api.post(`/api/invoices/${f.datos.id}/coverage`, {
-      billingPeriod: '2026-09-01',
+      billingPeriod: mesActualPa(),
       entries: [
         { clientId: pagador.datos.id, amount: 175, sessions: 12 },
         { clientId: suelto.datos.id, amount: 25, sessions: 8 }
@@ -625,14 +632,15 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
   test('el ciclo se ancla al día de corte del cliente, no al día del pago', async () => {
     const plan = await api.post('/api/plans', { name: 'Mensual corte 15', billingModel: 'monthly', price: 175, sessionsIncluded: 12 });
     const c = await api.post('/api/clients', { fullName: 'Corte 15 paga 17', planId: plan.datos.id, cutoffDay: 15 });
-    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: '2026-09-30' });
-    await api.post(`/api/invoices/${f.datos.id}/confirm`, { method: 'Efectivo', paidOn: '2026-09-17' });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: hoyPa() });
+    await api.post(`/api/invoices/${f.datos.id}/confirm`, { method: 'Efectivo', paidOn: hoyPa() });
     const paquetes = await api.get('/api/packages');
     assert.equal(paquetes.estado, 200, `la lista de saldos respondió ${JSON.stringify(paquetes)}`);
     const saldo = paquetes.datos.find(p => p.client_id === c.datos.id && p.kind === 'monthly');
     assert.ok(saldo, 'el pago abre el saldo del ciclo');
-    assert.equal(String(saldo.expires_on).slice(0, 10), '2026-10-15', 'vence el 15 (corte configurado), no el 17 (día de pago)');
-    assert.match(saldo.label, /15-09-2026 – 15-10-2026/, 'la etiqueta muestra el ciclo del corte, no la fecha de pago');
+    const ciclo15 = cicloCortePa(hoyPa(), 15);
+    assert.equal(String(saldo.expires_on).slice(0, 10), ciclo15.vence, 'vence en el corte configurado, no el día de pago');
+    assert.match(saldo.label, new RegExp(`${ciclo15.inicio.split('-').reverse().join('-')}.*${ciclo15.vence.split('-').reverse().join('-')}`), 'la etiqueta muestra el ciclo del corte, no la fecha de pago');
 
     // Un pago anticipado puede caer mucho antes del corte. Debe abrir el ciclo
     // 28→28 que dice la factura, no un ciclo que empiece el día del pago.
@@ -641,12 +649,13 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
       clientId: anticipado.datos.id,
       concept: 'Mensualidad anticipada',
       amount: 175,
-      dueOn: '2026-09-28'
+      dueOn: hoyPa()
     });
-    await api.post(`/api/invoices/${facturaAnticipada.datos.id}/confirm`, { method: 'Yappy', paidOn: '2026-09-02' });
+    await api.post(`/api/invoices/${facturaAnticipada.datos.id}/confirm`, { method: 'Yappy', paidOn: hoyPa() });
     const saldoAnticipado = (await api.get('/api/packages')).datos.find(p => p.client_id === anticipado.datos.id && p.kind === 'monthly');
-    assert.equal(String(saldoAnticipado.expires_on).slice(0, 10), '2026-10-28', 'un pago anticipado respeta el corte 28');
-    assert.match(saldoAnticipado.label, /28-09-2026 – 28-10-2026/, 'la etiqueta anticipada usa el rango del corte');
+    const ciclo28 = cicloCortePa(hoyPa(), 28);
+    assert.equal(String(saldoAnticipado.expires_on).slice(0, 10), ciclo28.vence, 'un pago anticipado respeta el corte 28');
+    assert.match(saldoAnticipado.label, new RegExp(`${ciclo28.inicio.split('-').reverse().join('-')}.*${ciclo28.vence.split('-').reverse().join('-')}`), 'la etiqueta anticipada usa el rango del corte');
   });
 
   // Criterio de cierre (auditoría Codex): el paquete manual conserva el mismo
@@ -869,7 +878,9 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     await api.patch(`/api/sessions/${primera.datos.sesiones[0].id}/compliance`, { outcome: 'completed', completionPercent: 100 });
     const factura = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Sesiones a crédito', amount: 25, dueOn });
     await api.post(`/api/invoices/${factura.datos.id}/confirm`, { method: 'Efectivo', paidOn: dueOn });
-    const antes = (await api.get('/api/invoices')).datos.find(item => item.id === factura.datos.id);
+    const listadoAntes = await api.get('/api/invoices');
+    assert.equal(listadoAntes.estado, 200, JSON.stringify(listadoAntes.datos));
+    const antes = listadoAntes.datos.find(item => item.id === factura.datos.id);
     assert.equal(Number(antes.amount), 25);
     assert.equal(antes.status, 'confirmed');
 
@@ -883,6 +894,56 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     assert.equal(despues.status, 'confirmed', 'el estado pagado permanece confirmado');
   });
 
+  test('una factura de crédito cerrada sólo cambia con el recálculo explícito y deja bitácora', async () => {
+    const plan = await api.post('/api/plans', { name: 'Crédito recalculable', billingModel: 'monthly', price: 275, sessionsIncluded: 10 });
+    const c = await api.post('/api/clients', {
+      fullName: 'Factura recalculable', planId: plan.datos.id, cutoffDay: 15,
+      paymentMode: 'no_anticipado', creditSessionPrice: 25
+    });
+    const dueOn = desplazarDiasPa(hoyPa(), -20);
+    const diaClase = desplazarDiasPa(dueOn, -1);
+    const primera = await api.post('/api/sessions', {
+      clientId: c.datos.id, startsAt: instantePa(diaClase, '09:00'), durationMinutes: 60, mode: 'Presencial'
+    });
+    await api.patch(`/api/sessions/${primera.datos.id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    const factura = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Sesiones a crédito', amount: 25, dueOn });
+    await api.post(`/api/invoices/${factura.datos.id}/confirm`, { method: 'Efectivo', paidOn: dueOn });
+    const segunda = await api.post('/api/sessions', {
+      clientId: c.datos.id, startsAt: instantePa(diaClase, '11:00'), durationMinutes: 60, mode: 'Presencial'
+    });
+    await api.patch(`/api/sessions/${segunda.datos.id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+
+    const listadoAntes = await api.get('/api/invoices');
+    assert.equal(listadoAntes.estado, 200, JSON.stringify(listadoAntes.datos));
+    const antes = listadoAntes.datos.find(item => item.id === factura.datos.id);
+    assert.equal(antes.credit_invoice, true, 'la lista identifica una factura de crédito local');
+    assert.equal(Number(antes.amount), 25, 'la reconciliación automática sigue congelada');
+    const preview = await api.post(`/api/invoices/${factura.datos.id}/recalculate`, {});
+    assert.equal(preview.estado, 200);
+    assert.equal(preview.datos.preview, true);
+    assert.equal(Number(preview.datos.previousAmount), 25);
+    assert.equal(Number(preview.datos.newAmount), 50);
+    assert.equal(Number(preview.datos.difference), 25);
+    assert.equal(preview.datos.newStatus, 'pending', 'el aumento deja el saldo pendiente');
+    assert.equal(Number((await api.get('/api/invoices')).datos.find(item => item.id === factura.datos.id).amount), 25,
+      'la vista previa no toca la factura');
+
+    const aplicado = await api.post(`/api/invoices/${factura.datos.id}/recalculate`, { apply: true });
+    assert.equal(aplicado.estado, 200, JSON.stringify(aplicado.datos));
+    assert.equal(aplicado.datos.applied, true);
+    const despues = (await api.get('/api/invoices')).datos.find(item => item.id === factura.datos.id);
+    assert.equal(Number(despues.amount), 50);
+    assert.equal(despues.status, 'pending');
+    const bitacora = (await api.get('/api/audit-log?limit=100')).datos.find(item => item.action === 'RECALCULATE_CREDIT_INVOICE' && item.target_id === factura.datos.id);
+    assert.ok(bitacora, 'la acción queda registrada con el usuario y el importe anterior/nuevo');
+    assert.equal(Number(bitacora.detail.difference), 25);
+
+    const normal = await api.post('/api/clients', { fullName: 'No es crédito', billingModel: 'single', standardPrice: 25, cutoffDay: 1 });
+    const normalInvoice = await api.post('/api/invoices', { clientId: normal.datos.id, concept: 'Clase suelta', amount: 25, dueOn: hoyPa() });
+    assert.equal((await api.post(`/api/invoices/${normalInvoice.datos.id}/recalculate`, {})).estado, 404,
+      'la acción sólo existe para facturas locales de crédito');
+  });
+
   test('la mensualidad familiar se abre aunque el dependiente ya tenga cobertura de otro cobro (clases extra)', async () => {
     const pagador = await api.post('/api/clients', { fullName: 'Paga por el grupo', billingModel: 'monthly', standardPrice: 900, cutoffDay: 15 });
     const dep = await api.post('/api/clients', { fullName: 'Dependiente con extra', billingModel: 'monthly', standardPrice: 240, cutoffDay: 15 });
@@ -890,14 +951,14 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     // Clases que el dependiente pagó por su cuenta, aplicadas como cobertura de
     // SU propio cobro: deja una fila invoice_coverage(dep, septiembre) que antes
     // hacía chocar y borrar la mensualidad familiar.
-    const propio = await api.post('/api/invoices', { clientId: dep.datos.id, concept: 'Mensualidad', amount: 120, dueOn: '2026-09-17' });
+    const propio = await api.post('/api/invoices', { clientId: dep.datos.id, concept: 'Mensualidad', amount: 120, dueOn: hoyPa() });
     await api.post(`/api/invoices/${propio.datos.id}/coverage`, {
-      billingPeriod: '2026-09-01', entries: [{ clientId: dep.datos.id, amount: 120, sessions: 4 }]
+      billingPeriod: mesActualPa(), entries: [{ clientId: dep.datos.id, amount: 120, sessions: 4 }]
     });
     // El cobro de grupo del pagador cubre la mensualidad familiar del dependiente.
-    const f = await api.post('/api/invoices', { clientId: pagador.datos.id, concept: 'Mensualidad', amount: 900, dueOn: '2026-09-17' });
+    const f = await api.post('/api/invoices', { clientId: pagador.datos.id, concept: 'Mensualidad', amount: 900, dueOn: hoyPa() });
     await api.post(`/api/invoices/${f.datos.id}/coverage`, {
-      billingPeriod: '2026-09-01', entries: [{ clientId: dep.datos.id, amount: 240, sessions: 8 }]
+      billingPeriod: mesActualPa(), entries: [{ clientId: dep.datos.id, amount: 240, sessions: 8 }]
     });
     const activos = (await api.get('/api/packages')).datos.filter(p => p.client_id === dep.datos.id && p.kind === 'monthly' && p.status === 'active');
     assert.equal(activos.length, 2, 'quedan dos saldos: las clases extra y la mensualidad familiar');
@@ -910,8 +971,8 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
     const c = await api.post('/api/clients', { fullName: 'Ajusta sesiones en perfil', planId: plan.datos.id, cutoffDay: 1 });
     // La entrenadora ajusta en el perfil: ahora toma 10 clases al mes.
     await api.patch(`/api/clients/${c.datos.id}`, { fullName: 'Ajusta sesiones en perfil', monthlySessionTarget: 10, cutoffDay: 1 });
-    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: '2026-09-30' });
-    await api.post(`/api/invoices/${f.datos.id}/confirm`, { method: 'Efectivo', paidOn: '2026-09-10' });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: hoyPa() });
+    await api.post(`/api/invoices/${f.datos.id}/confirm`, { method: 'Efectivo', paidOn: hoyPa() });
     const saldo = (await api.get('/api/packages')).datos.find(p => p.client_id === c.datos.id && p.kind === 'monthly' && p.status === 'active');
     assert.ok(saldo, 'se abrió el saldo al confirmar');
     assert.equal(Number(saldo.total_sessions), 10, 'toma las 10 del perfil, no las 8 del plan');
@@ -1345,7 +1406,7 @@ describe('cobertura end-to-end de facturación y modalidad de pago', () => {
 
     const aplicado = await api.post('/api/maintenance/reconcile-monthly-billing', { apply: true });
     assert.equal(aplicado.estado, 200);
-    assert.equal(aplicado.datos.recoveredSessions, 2, 'la reconciliación recupera las clases pendientes del saldo sin aplicar un recorte');
+    assert.equal(aplicado.datos.recoveredSessions, 3, 'la reconciliación recupera las clases pendientes del saldo sin aplicar un recorte');
     let saldo = (await api.get('/api/packages')).datos.find(p => p.id === paquete.datos.id);
     assert.equal(Number(saldo.used_sessions), 1);
 
@@ -1592,7 +1653,7 @@ describe('el resultado de una sesión se dice, no se deduce', () => {
     const c = await api.post('/api/clients', { fullName: 'Se marcó por error', planId: plan.datos.id, cutoffDay: 1 });
     clientId = c.datos.id;
     const p = await api.post('/api/packages', { clientId, totalSessions: 8, amount: 100, kind: 'monthly' });
-    await api.post(`/api/invoices/${p.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-01' });
+    await api.post(`/api/invoices/${p.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: desplazarDiasPa(hoyPa(), -30) });
     // Mañana: todavía no ha ocurrido, así que no puede haberse cumplido ni incumplido.
     const manana = new Date(Date.now() + 24 * 3600_000).toISOString();
     const lote = await api.post('/api/sessions/batch', { clientId, startsAt: [manana], durationMinutes: 60, mode: 'Presencial' });
@@ -1667,7 +1728,7 @@ describe('una clase cancelada por equivocación se puede reactivar', () => {
     clientId = c.datos.id;
     const p = await api.post('/api/packages', { clientId, totalSessions: 8, amount: 120, kind: 'monthly' });
     packageId = p.datos.id;
-    await api.post(`/api/invoices/${p.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-01' });
+    await api.post(`/api/invoices/${p.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: desplazarDiasPa(hoyPa(), -30) });
   });
 
   const nuevaClase = async () => {
@@ -1937,15 +1998,10 @@ describe('avisar de las clases que se quedaron sin marcar', () => {
 describe('reporte mensual de agenda y cumplimiento', () => {
   test('incluye todas las sesiones y separa lo que sí mide al cliente', async () => {
     const c = await api.post('/api/clients', { fullName: 'Reporte mensual integral', billingModel: 'single', standardPrice: 30, cutoffDay: 1 });
+    const fechas = [-5, -4, -3, -2, -1].map(offset => instantePa(desplazarDiasPa(hoyPa(), offset), '08:00'));
     const lote = await api.post('/api/sessions/batch', {
       clientId: c.datos.id,
-      startsAt: [
-        '2026-09-05T13:00:00.000Z',
-        '2026-09-06T13:00:00.000Z',
-        '2026-09-07T13:00:00.000Z',
-        '2026-09-08T13:00:00.000Z',
-        '2026-09-09T13:00:00.000Z'
-      ],
+      startsAt: fechas,
       durationMinutes: 60,
       mode: 'Presencial'
     });
@@ -1955,7 +2011,8 @@ describe('reporte mensual de agenda y cumplimiento', () => {
     await api.delete(`/api/sessions/${sesiones[3].id}?by=trainer`);
     await api.delete(`/api/sessions/${sesiones[4].id}?rescheduled=false`);
 
-    const { estado, datos } = await api.get('/api/attendance/monthly?month=2026-09');
+    const mes = mesActualPa().slice(0, 7);
+    const { estado, datos } = await api.get(`/api/attendance/monthly?month=${mes}`);
     assert.equal(estado, 200);
     const fila = datos.clients.find(item => item.clientId === c.datos.id);
     assert.ok(fila, 'el informe incluye al cliente aunque sea de clase suelta');
@@ -1980,10 +2037,12 @@ describe('reporte mensual de agenda y cumplimiento', () => {
     });
     assert.ok(datos.totals.agendadas >= 5, 'los totales reúnen a toda la clientela');
 
-    const rango = await api.get('/api/attendance/monthly?from=2026-09-05&to=2026-09-07');
+    const rangoDesde = desplazarDiasPa(hoyPa(), -5);
+    const rangoHasta = desplazarDiasPa(hoyPa(), -3);
+    const rango = await api.get(`/api/attendance/monthly?from=${rangoDesde}&to=${rangoHasta}`);
     assert.equal(rango.estado, 200);
-    assert.deepEqual(rango.datos.period, { from: '2026-09-05', to: '2026-09-07' });
-    assert.equal(rango.datos.periodKey, 'range:2026-09-05:2026-09-07');
+    assert.deepEqual(rango.datos.period, { from: rangoDesde, to: rangoHasta });
+    assert.equal(rango.datos.periodKey, `range:${rangoDesde}:${rangoHasta}`);
     const filaRango = rango.datos.clients.find(item => item.clientId === c.datos.id);
     assert.deepEqual({
       agendadas: filaRango.agendadas,
@@ -1999,7 +2058,7 @@ describe('reporte mensual de agenda y cumplimiento', () => {
       medibles: 2
     });
 
-    assert.equal((await api.get('/api/attendance/monthly?from=2026-09-08&to=2026-09-07')).estado, 400,
+    assert.equal((await api.get(`/api/attendance/monthly?from=${hoyPa()}&to=${desplazarDiasPa(hoyPa(), -1)}`)).estado, 400,
       'rechaza rangos invertidos');
   });
 
@@ -2048,6 +2107,77 @@ describe('reporte mensual de agenda y cumplimiento', () => {
   });
 });
 
+describe('cumplimiento canónico contra el calendario completo', () => {
+  test('todas las pantallas cuentan sólo las sesiones medibles y usan el mismo porcentaje', async () => {
+    const c = await api.post('/api/clients', {
+      fullName: 'Métrica canónica', billingModel: 'single', standardPrice: 25,
+      cutoffDay: 15, email: 'metrica-canonica@prueba.test'
+    });
+    assert.equal(c.estado, 201);
+    const hace = horas => new Date(Date.now() - horas * 3600_000).toISOString();
+    const lote = await api.post('/api/sessions/batch', {
+      clientId: c.datos.id,
+      startsAt: [hace(1), hace(2), hace(3), hace(4), hace(5), hace(6), hace(7), hace(8)],
+      durationMinutes: 30,
+      mode: 'Presencial'
+    });
+    const sesiones = lote.datos.sesiones.sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)));
+    await api.patch(`/api/sessions/${sesiones[0].id}/compliance`, { outcome: 'completed', completionPercent: 100 });
+    await api.patch(`/api/sessions/${sesiones[1].id}/compliance`, { outcome: 'no_show', completionPercent: 0 });
+    await api.delete(`/api/sessions/${sesiones[2].id}?rescheduled=false&by=client`);
+    await api.delete(`/api/sessions/${sesiones[3].id}?rescheduled=true&by=client`);
+    await api.delete(`/api/sessions/${sesiones[4].id}?rescheduled=false&by=trainer`);
+    // Las tres restantes quedan programadas: una pasada sin marcar y dos que
+    // todavía no se resuelven. Ninguna debe convertirse en falta automática.
+
+    const mes = mesActualPa().slice(0, 7);
+    const asistencia = await api.get(`/api/attendance/monthly?month=${mes}`);
+    const fila = asistencia.datos.clients.find(item => item.clientId === c.datos.id);
+    assert.deepEqual({ medibles: fila.medibles, completadas: fila.completadas, noShow: fila.noShow, canceladasCliente: fila.canceladasCliente, compliancePercent: fila.compliancePercent },
+      { medibles: 3, completadas: 1, noShow: 1, canceladasCliente: 1, compliancePercent: 33 });
+
+    const byMonth = await api.get(`/api/compliance/by-month?month=${mes}`);
+    const mensual = byMonth.datos.clients.find(item => item.client_id === c.datos.id);
+    assert.deepEqual({ total: Number(mensual.total), completadas: Number(mensual.completadas), percent: Number(mensual.percent) }, { total: 3, completadas: 1, percent: 33 });
+
+    const resumen = await api.get('/api/compliance/summary?period=week');
+    const resumenCliente = resumen.datos.clients.find(item => item.clientId === c.datos.id);
+    assert.deepEqual({ activities: resumenCliente.activities, compliancePercent: resumenCliente.compliancePercent }, { activities: 3, compliancePercent: 33 });
+
+    const desde = desplazarDiasPa(hoyPa(), -2);
+    const reporte = await api.get(`/api/compliance/report?clientIds=${c.datos.id}&mode=range&from=${desde}&to=${hoyPa()}`);
+    const reporteCliente = reporte.datos.clients[0];
+    assert.deepEqual({ activities: reporteCliente.activities, compliancePercent: reporteCliente.compliancePercent }, { activities: 3, compliancePercent: 33 });
+
+    const csv = await api.get(`/api/compliance/report.csv?period=month&clientId=${c.datos.id}`);
+    assert.equal(csv.estado, 200);
+    assert.equal(String(csv.datos).trim().split('\n').length - 1, 3, 'el CSV sólo exporta las tres medibles');
+
+    const enlace = await api.post(`/api/clients/${c.datos.id}/access-link`, {});
+    const acceso = await api.post(`/api/auth/access-link/${String(enlace.datos.url).split('acceso=')[1]}`, { password: 'clave-del-portal-larga' });
+    const portal = cliente(servidor.base); portal.usarToken(acceso.datos.token);
+    const portalSummary = await portal.get('/api/portal/summary');
+    assert.equal(portalSummary.estado, 200);
+    assert.equal(portalSummary.datos.complianceSessions.length, 3, 'el portal reutiliza las mismas medibles');
+  });
+
+  test('una pausa se informa, pero no se convierte en cumplimiento ni en falta', async () => {
+    const c = await api.post('/api/clients', { fullName: 'Métrica en pausa', billingModel: 'package', standardPrice: 50, cutoffDay: 15 });
+    const paquete = await api.post('/api/packages', { clientId: c.datos.id, totalSessions: 2, amount: 50, kind: 'package' });
+    await api.post(`/api/invoices/${paquete.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: hoyPa() });
+    const futura = await api.post('/api/sessions', { clientId: c.datos.id, startsAt: instantePa(desplazarDiasPa(hoyPa(), 1), '10:00'), durationMinutes: 60, mode: 'Presencial' });
+    const pausada = await api.post(`/api/clients/${c.datos.id}/package-pause`, { reason: 'Prueba de pausa' });
+    assert.equal(pausada.estado, 201);
+    const reporte = await api.get(`/api/attendance/monthly?month=${mesDe(desplazarDiasPa(hoyPa(), 1))}`);
+    const fila = reporte.datos.clients.find(item => item.clientId === c.datos.id);
+    assert.equal(fila.pausadas, 1);
+    assert.equal(fila.medibles, 0);
+    assert.equal(fila.pendientes, 0);
+    assert.equal(fila.futuras, 0);
+    assert.equal(futura.datos.id != null, true);
+  });
+});
+
 describe('con dos saldos, se gasta el que vence antes', () => {
   // El caso de Ernesto: su mensualidad la paga otro, y él se compra aparte un
   // paquete de clases sueltas que no caduca. Al mes siguiente ese paquete es
@@ -2059,11 +2189,11 @@ describe('con dos saldos, se gasta el que vence antes', () => {
     clientId = c.datos.id;
     // Primero el paquete suelto, sin vencimiento.
     const extra = await api.post('/api/packages', { clientId, totalSessions: 4, amount: 140, kind: 'package' });
-    await api.post(`/api/invoices/${extra.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-01' });
+    await api.post(`/api/invoices/${extra.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: desplazarDiasPa(hoyPa(), -30) });
     // Después la mensualidad, que vence en el corte.
     const vence = new Date(Date.now() + 10 * 24 * 3600_000).toISOString().slice(0, 10);
     const mensual = await api.post('/api/packages', { clientId, totalSessions: 8, amount: 280, kind: 'monthly', expiresOn: vence });
-    await api.post(`/api/invoices/${mensual.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-01' });
+    await api.post(`/api/invoices/${mensual.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: desplazarDiasPa(hoyPa(), -30) });
   });
 
   test('la clase sale de la mensualidad, no del paquete sin vencimiento', async () => {
@@ -2650,47 +2780,50 @@ describe('el período que se dice que cubre un cobro', () => {
     const plan = await api.post('/api/plans', { name: 'Mensual corte día 1', billingModel: 'monthly', price: 150, sessionsIncluded: 8 });
     const c = await api.post('/api/clients', { fullName: 'Sandy Asis', planId: plan.datos.id, cutoffDay: 1 });
     sandy = c.datos.id;
-    const f = await api.post('/api/invoices', { clientId: sandy, concept: 'Mensualidad', amount: 150, dueOn: '2026-09-01' });
+    const f = await api.post('/api/invoices', { clientId: sandy, concept: 'Mensualidad', amount: 150, dueOn: hoyPa() });
     factura = f.datos.id;
   });
 
   test('un pago del 1 de septiembre cubre septiembre, no octubre', async () => {
     const { datos } = await api.get(`/api/invoices/${factura}/coverage`);
-    assert.equal(String(datos.suggestedPeriod).slice(0, 7), '2026-09',
-      'el ciclo va del 1 sept al 1 oct: octubre es un solo día de él');
+    const medio = new Date(`${hoyPa()}T12:00:00-05:00`); medio.setUTCDate(medio.getUTCDate() + 15);
+    assert.equal(String(datos.suggestedPeriod).slice(0, 7), mesDe(partesPanama(medio).iso),
+      'la sugerencia depende del punto medio del ciclo, no de una fecha fija');
   });
 
   test('un corte a fin de mes sí cubre el mes siguiente', async () => {
     // No se rompe el caso contrario: pagar el 28 de agosto cubre septiembre,
     // porque ahí es donde cae la mayor parte del ciclo.
     const c = await api.post('/api/clients', { fullName: 'Corte 28', billingModel: 'monthly', standardPrice: 175, cutoffDay: 28 });
-    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: '2026-08-28' });
+    const due = desplazarDiasPa(hoyPa(), -32);
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: due });
     const { datos } = await api.get(`/api/invoices/${f.datos.id}/coverage`);
-    assert.equal(String(datos.suggestedPeriod).slice(0, 7), '2026-09');
+    const medio = new Date(`${due}T12:00:00-05:00`); medio.setUTCDate(medio.getUTCDate() + 15);
+    assert.equal(String(datos.suggestedPeriod).slice(0, 7), mesDe(partesPanama(medio).iso));
   });
 
   test('el saldo no vence el mismo día que empieza', async () => {
     const { datos } = await api.post(`/api/invoices/${factura}/coverage`, {
-      billingPeriod: '2026-09-01',
+      billingPeriod: mesActualPa(),
       entries: [{ clientId: sandy, amount: 150, sessions: 8 }]
     });
     const saldo = datos.applied.find(a => String(a.client_id) === String(sandy));
     assert.ok(saldo, 'se abrió el saldo');
     const pack = (await api.get('/api/packages')).datos.find(p => p.client_id === sandy);
-    assert.equal(String(pack.expires_on).slice(0, 10), '2026-10-01',
-      'del 1 de septiembre al 1 de octubre, no al 1 de septiembre');
+    assert.equal(String(pack.expires_on).slice(0, 10), desplazarMesInicioPa(mesActualPa(), 1),
+      'el saldo vence en el corte siguiente, no el día en que empieza');
   });
 
   test('y la etiqueta dice el período, no un mes', async () => {
     const pack = (await api.get('/api/packages')).datos.find(p => p.client_id === sandy);
-    assert.match(pack.label, /\d{2}-09-2026.*\d{2}-10-2026/,
-      'decir "octubre" cuando se cubre del 1 sept al 1 oct engaña; el período va en dd-mm-yyyy');
+    assert.match(pack.label, /\d{2}-\d{2}-\d{4}.*\d{2}-\d{2}-\d{4}/,
+      'la etiqueta enseña el período completo en vez de sólo un mes');
   });
 
   test('el ciclo se puede consultar para cualquier corte', async () => {
-    const { estado, datos } = await api.get('/api/billing/cycle?from=2026-10-01&cutoffDay=1');
+    const { estado, datos } = await api.get(`/api/billing/cycle?from=${desplazarMesInicioPa(mesActualPa(), 1)}&cutoffDay=1`);
     assert.equal(estado, 200);
-    assert.equal(datos.to, '2026-11-01', 'el corte que cierra es el siguiente, no el del mismo día');
+    assert.equal(datos.to, desplazarMesInicioPa(mesActualPa(), 2), 'el corte que cierra es el siguiente, no el del mismo día');
   });
 });
 
@@ -2735,10 +2868,11 @@ describe('pausar la mensualidad', () => {
 describe('cumplimiento por cliente de un mes (Control de paquetes)', () => {
   test('cuenta cumplidas y calcula el porcentaje del mes', async () => {
     const c = await api.post('/api/clients', { fullName: 'Cumple por mes', billingModel: 'single', standardPrice: 25, cutoffDay: 1 });
-    const lote = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: ['2026-09-05T14:00:00Z', '2026-09-12T14:00:00Z'], durationMinutes: 60, mode: 'Presencial' });
+    const fechas = [-5, -4].map(offset => instantePa(desplazarDiasPa(hoyPa(), offset), '09:00'));
+    const lote = await api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: fechas, durationMinutes: 60, mode: 'Presencial' });
     await api.patch(`/api/sessions/${lote.datos.sesiones[0].id}/compliance`, { outcome: 'completed', completionPercent: 100 });
     await api.patch(`/api/sessions/${lote.datos.sesiones[1].id}/compliance`, { outcome: 'no_show', completionPercent: 0 });
-    const { estado, datos } = await api.get('/api/compliance/by-month?month=2026-09');
+    const { estado, datos } = await api.get(`/api/compliance/by-month?month=${mesDe(hoyPa())}`);
     assert.equal(estado, 200);
     const fila = datos.clients.find(x => x.client_id === c.datos.id);
     assert.ok(fila, 'aparece el cliente con clases en el mes');
@@ -2878,26 +3012,32 @@ describe('fronteras estrictas y excedentes de mensualidad', () => {
 
 describe('informe mensual (cobros, gastos, finanzas)', () => {
   test('resume ingresos y gastos del mes y filtra por categoría', async () => {
+    const mes = mesActualPa();
+    const mesClave = mesDe(mes);
+    const fechaFactura = desplazarDiasPa(hoyPa(), -5);
+    const fechaPago = desplazarDiasPa(hoyPa(), -4);
+    const fechaGasolina = desplazarDiasPa(hoyPa(), -3);
+    const fechaAlmuerzo = desplazarDiasPa(hoyPa(), -2);
     const c = await api.post('/api/clients', { fullName: 'Informe cliente', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
-    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 100, dueOn: '2026-09-05' });
-    await api.post(`/api/invoices/${f.datos.id}/confirm`, { method: 'Efectivo', paidOn: '2026-09-10' });
+    const f = await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 100, dueOn: fechaFactura });
+    await api.post(`/api/invoices/${f.datos.id}/confirm`, { method: 'Efectivo', paidOn: fechaPago });
     const cat = await api.post('/api/expense-categories', { name: 'Combustible informe', ambito: 'negocio' });
-    await api.post('/api/expenses', { categoryId: cat.datos.id, description: 'Gasolina', amount: 40, spentOn: '2026-09-12', paymentMethod: 'Efectivo' });
+    await api.post('/api/expenses', { categoryId: cat.datos.id, description: 'Gasolina', amount: 40, spentOn: fechaGasolina, paymentMethod: 'Efectivo' });
     const otra = await api.post('/api/expense-categories', { name: 'Comida informe', ambito: 'personal' });
-    await api.post('/api/expenses', { categoryId: otra.datos.id, description: 'Almuerzo', amount: 15, spentOn: '2026-09-14', paymentMethod: 'Efectivo' });
+    await api.post('/api/expenses', { categoryId: otra.datos.id, description: 'Almuerzo', amount: 15, spentOn: fechaAlmuerzo, paymentMethod: 'Efectivo' });
 
     // La BD de tests es compartida, así que no se asumen totales globales: se
     // verifica que lo propio aparezca y que el filtro por categoría acote.
-    const { estado, datos } = await api.get('/api/finance/monthly?month=2026-09');
+    const { estado, datos } = await api.get(`/api/finance/monthly?month=${mesClave}`);
     assert.equal(estado, 200);
     assert.ok(datos.cobros.some(x => x.cliente === 'Informe cliente' && Number(x.monto) === 100), 'el cobro del mes aparece');
     assert.ok(datos.gastos.some(x => x.descripcion === 'Gasolina'), 'el gasto del negocio aparece');
     assert.ok(datos.gastos.some(x => x.descripcion === 'Almuerzo'), 'el gasto personal aparece');
     // Un cobro de OTRO mes no entra.
-    assert.ok(!datos.cobros.some(x => String(x.fecha).slice(0, 7) !== '2026-09'), 'solo cobros de septiembre');
+    assert.ok(!datos.cobros.some(x => String(x.fecha).slice(0, 7) !== mesClave), 'solo cobros del mes consultado');
 
     // Filtrado por categoría (única de este test): solo esa categoría.
-    const filtrado = await api.get(`/api/finance/monthly?month=2026-09&categoryId=${cat.datos.id}`);
+    const filtrado = await api.get(`/api/finance/monthly?month=${mesClave}&categoryId=${cat.datos.id}`);
     assert.equal(Number(filtrado.datos.resumen.gastos), 40, 'solo la categoría filtrada suma');
     assert.ok(filtrado.datos.gastos.every(x => x.categoria === 'Combustible informe'), 'solo esa categoría en la lista');
     assert.ok(!filtrado.datos.gastos.some(x => x.descripcion === 'Almuerzo'), 'excluye otras categorías');
@@ -2912,8 +3052,9 @@ describe('vencimiento de los paquetes', () => {
   });
 
   test('con fecha, la respeta', async () => {
-    const { datos } = await api.post('/api/packages', { clientId, totalSessions: 10, amount: 300, kind: 'package', expiresOn: '2026-12-31' });
-    assert.equal(String(datos.expires_on).slice(0, 10), '2026-12-31');
+    const vencimiento = desplazarDiasPa(hoyPa(), 90);
+    const { datos } = await api.post('/api/packages', { clientId, totalSessions: 10, amount: 300, kind: 'package', expiresOn: vencimiento });
+    assert.equal(String(datos.expires_on).slice(0, 10), vencimiento);
   });
 
   test('sin fecha, vence a las 6 semanas del pago', async () => {
@@ -2936,7 +3077,7 @@ describe('renovar un paquete de clases', () => {
   async function paqueteConClasesSueltas(usadas) {
     const c = await api.post('/api/clients', { fullName: 'Renueva paquete', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
     const p = await api.post('/api/packages', { clientId: c.datos.id, totalSessions: 10, amount: 300, kind: 'package' });
-    await api.post(`/api/invoices/${p.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-09-01' });
+    await api.post(`/api/invoices/${p.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: desplazarDiasPa(hoyPa(), -21) });
     if (usadas) await api.patch(`/api/packages/${p.datos.id}`, { usedSessions: usadas });
     return { clienteId: c.datos.id, paqueteId: p.datos.id };
   }
@@ -2944,7 +3085,7 @@ describe('renovar un paquete de clases', () => {
   test('renovar y perder: el nuevo nace con lo contratado y el viejo se cierra', async () => {
     const { clienteId, paqueteId } = await paqueteConClasesSueltas(3); // le quedaban 7
     const { estado, datos } = await api.post(`/api/packages/${paqueteId}/renew`, {
-      method: 'Yappy', paidOn: '2026-09-17', carryover: false
+      method: 'Yappy', paidOn: desplazarDiasPa(hoyPa(), -10), carryover: false
     });
     assert.equal(estado, 201);
     assert.equal(datos.sessions, 10, 'empieza limpio con las 10 contratadas');
@@ -2963,7 +3104,7 @@ describe('renovar un paquete de clases', () => {
   test('renovar y arrastrar: las clases que le quedaban se suman al nuevo', async () => {
     const { clienteId, paqueteId } = await paqueteConClasesSueltas(3); // le quedaban 7
     const { datos } = await api.post(`/api/packages/${paqueteId}/renew`, {
-      method: 'Efectivo', paidOn: '2026-09-17', carryover: true
+      method: 'Efectivo', paidOn: desplazarDiasPa(hoyPa(), -10), carryover: true
     });
     assert.equal(datos.sessions, 17, 'las 7 que le quedaban se suman a las 10 nuevas');
     assert.equal(datos.perdidas, 0, 'no se pierde nada cuando se arrastran');
@@ -2973,17 +3114,18 @@ describe('renovar un paquete de clases', () => {
 
   test('el nuevo paquete vence a las 6 semanas del pago', async () => {
     const { paqueteId } = await paqueteConClasesSueltas(0);
+    const pago = desplazarDiasPa(hoyPa(), -10);
     const { datos } = await api.post(`/api/packages/${paqueteId}/renew`, {
-      method: 'Efectivo', paidOn: '2026-09-10', carryover: false
+      method: 'Efectivo', paidOn: pago, carryover: false
     });
-    assert.equal(datos.expiresOn, '2026-10-22', '2026-09-10 + 42 días');
+    assert.equal(datos.expiresOn, desplazarDiasPa(pago, 42), 'el nuevo paquete vence 42 días después del pago');
   });
 });
 
 describe('alerta de pago atrasado', () => {
   test('un cobro vencido y sin pagar sale como alerta clara, sin bloquear clases', async () => {
     const c = await api.post('/api/clients', { fullName: 'Paga unos días tarde', billingModel: 'monthly', standardPrice: 175, cutoffDay: 1 });
-    await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: '2026-09-01' });
+    await api.post('/api/invoices', { clientId: c.datos.id, concept: 'Mensualidad', amount: 175, dueOn: desplazarDiasPa(hoyPa(), -3) });
     const { datos } = await api.get('/api/notifications');
     const alerta = datos.find(n => n.type === 'overdue' && n.title.includes('Paga unos días tarde'));
     assert.ok(alerta, 'el cobro vencido aparece como alerta de pago atrasado');
@@ -3023,18 +3165,24 @@ describe('pasar a clase suelta desde el editor de plan', () => {
 describe('reparar ciclos mensuales degenerados', () => {
   test('recalcula el saldo de un solo día al corte configurado de su cliente', async () => {
     const c = await api.post('/api/clients', { fullName: 'Ciclo roto corte 15', billingModel: 'monthly', standardPrice: 175, cutoffDay: 15 });
-    const p = await api.post('/api/packages', { clientId: c.datos.id, totalSessions: 12, amount: 175, kind: 'monthly', dueOn: '2026-09-17' });
+    const referencia = cicloCortePa(hoyPa(), 15).inicio;
+    const p = await api.post('/api/packages', { clientId: c.datos.id, totalSessions: 12, amount: 175, kind: 'monthly', dueOn: referencia });
     // Simular el ciclo degenerado que dejó el cálculo de corte viejo: vence el
     // mismo día en que empieza.
-    await api.patch(`/api/packages/${p.datos.id}`, { expiresOn: '2026-09-17' });
+    await api.patch(`/api/packages/${p.datos.id}`, { expiresOn: referencia });
     const { estado, datos } = await api.post('/api/maintenance/fix-cycles', {});
     assert.equal(estado, 200);
     const arreglado = datos.corregidos.find(x => x.cliente === 'Ciclo roto corte 15');
     assert.ok(arreglado, 'lo corrige');
-    assert.equal(arreglado.vence, '2026-10-15', 'lo lleva al corte 15 del mes siguiente');
+    const cicloSiguiente = cicloCortePa(desplazarDiasPa(referencia, 1), 15);
+    assert.equal(arreglado.vence, cicloSiguiente.vence, 'lo lleva al corte 15 del mes siguiente');
     const saldo = (await api.get('/api/packages')).datos.find(x => x.id === p.datos.id);
-    assert.equal(String(saldo.expires_on).slice(0, 10), '2026-10-15');
-    assert.match(saldo.label, /15-09-2026 – 15-10-2026/, 'la etiqueta queda con el ciclo del corte');
+    assert.equal(String(saldo.expires_on).slice(0, 10), cicloSiguiente.vence);
+    const etiqueta = value => {
+      const [year, month, day] = value.split('-');
+      return `${day}-${month}-${year}`;
+    };
+    assert.match(saldo.label, new RegExp(`${etiqueta(cicloSiguiente.inicio)}.*${etiqueta(cicloSiguiente.vence)}`), 'la etiqueta queda con el ciclo del corte');
   });
 
   test('un saldo mensual en un cliente de clase suelta se reporta, no se arregla', async () => {
@@ -3042,8 +3190,9 @@ describe('reparar ciclos mensuales degenerados', () => {
     // cliente a clase suelta, como hará la entrenadora.
     const single = await api.post('/api/plans', { name: 'Suelta reparación', billingModel: 'single', price: 25 });
     const c = await api.post('/api/clients', { fullName: 'Suelto con saldo viejo', billingModel: 'monthly', standardPrice: 100, cutoffDay: 1 });
-    const p = await api.post('/api/packages', { clientId: c.datos.id, totalSessions: 4, amount: 100, kind: 'monthly', dueOn: '2026-09-17' });
-    await api.patch(`/api/packages/${p.datos.id}`, { expiresOn: '2026-09-17' });
+    const referencia = desplazarDiasPa(hoyPa(), -20);
+    const p = await api.post('/api/packages', { clientId: c.datos.id, totalSessions: 4, amount: 100, kind: 'monthly', dueOn: referencia });
+    await api.patch(`/api/packages/${p.datos.id}`, { expiresOn: referencia });
     await api.patch(`/api/clients/${c.datos.id}/plan`, { planId: single.datos.id, cutoffDay: 1 });
     const { datos } = await api.post('/api/maintenance/fix-cycles', {});
     assert.ok(datos.noMensuales.some(x => x.id === p.datos.id), 'se reporta como saldo de no-mensual para borrar');
@@ -3052,7 +3201,7 @@ describe('reparar ciclos mensuales degenerados', () => {
 
   test('un ciclo ya sano no se vuelve a tocar (idempotente)', async () => {
     const c = await api.post('/api/clients', { fullName: 'Ciclo sano', billingModel: 'monthly', standardPrice: 175, cutoffDay: 1 });
-    const p = await api.post('/api/packages', { clientId: c.datos.id, totalSessions: 12, amount: 175, kind: 'monthly', dueOn: '2026-09-01' });
+    const p = await api.post('/api/packages', { clientId: c.datos.id, totalSessions: 12, amount: 175, kind: 'monthly', dueOn: hoyPa() });
     const antes = (await api.get('/api/packages')).datos.find(x => x.id === p.datos.id);
     const { datos } = await api.post('/api/maintenance/fix-cycles', {});
     assert.ok(!datos.corregidos.some(x => x.cliente === 'Ciclo sano'), 'no aparece entre los corregidos');
@@ -3086,7 +3235,7 @@ describe('saldos de sesiones', () => {
     // Un saldo nace 'pending' hasta que se cobra su factura, y la edición
     // respeta ese estado a propósito. Para probar el recálculo hay que
     // cobrarlo primero.
-    await api.post(`/api/invoices/${p.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: '2026-08-05' });
+    await api.post(`/api/invoices/${p.datos.invoice_id}/confirm`, { method: 'Efectivo', paidOn: hoyPa() });
   });
 
   test('subir las contratadas revive un saldo agotado', async () => {
@@ -3120,15 +3269,15 @@ describe('cobros', () => {
   });
 
   test('un cobro pendiente se borra sin ceremonia', async () => {
-    const cobro = await api.post('/api/invoices', { clientId: clienteId, concept: 'Mensualidad', amount: 100, dueOn: '2026-09-01' });
+    const cobro = await api.post('/api/invoices', { clientId: clienteId, concept: 'Mensualidad', amount: 100, dueOn: hoyPa() });
     assert.equal(cobro.estado, 201);
     const borrado = await api.delete(`/api/invoices/${cobro.datos.id}/permanent`);
     assert.equal(borrado.estado, 200);
   });
 
   test('un cobro pagado exige el borrado definitivo, y entonces se lleva el pago', async () => {
-    const cobro = await api.post('/api/invoices', { clientId: clienteId, concept: 'Mensualidad septiembre', amount: 100, dueOn: '2026-09-01' });
-    const confirmado = await api.post(`/api/invoices/${cobro.datos.id}/confirm`, { method: 'Efectivo', paidOn: '2026-09-01' });
+    const cobro = await api.post('/api/invoices', { clientId: clienteId, concept: 'Mensualidad', amount: 100, dueOn: hoyPa() });
+    const confirmado = await api.post(`/api/invoices/${cobro.datos.id}/confirm`, { method: 'Efectivo', paidOn: hoyPa() });
     assert.equal(confirmado.estado, 200);
 
     const suave = await api.delete(`/api/invoices/${cobro.datos.id}/permanent`);
@@ -3163,7 +3312,7 @@ describe('cancelar afecta o no el cumplimiento', () => {
     const despues = await api.get('/api/compliance/summary?period=month');
     const ahora = despues.datos.clients.find(c => c.clientId === clientId);
     assert.ok(ahora, 'el cliente debe seguir apareciendo en el cumplimiento');
-    assert.equal(ahora.activities, (previo?.activities ?? 0), 'la sesión sigue contando, ahora como incumplida');
+    assert.equal(ahora.activities, (previo?.activities ?? 0) + 1, 'la sesión resuelta cuenta ahora como incumplida');
     assert.ok(ahora.missed >= 1, 'debe figurar como incumplida');
     assert.equal(ahora.compliancePercent, 0, 'una sesión perdida no puntúa');
   });
@@ -3177,7 +3326,7 @@ describe('cancelar afecta o no el cumplimiento', () => {
 
     const despues = await api.get('/api/compliance/summary?period=month');
     const ahora = despues.datos.clients.find(c => c.clientId === clientId);
-    assert.equal(ahora.activities, previo.activities - 1,
+    assert.equal(ahora.activities, previo?.activities ?? 0,
       'la reprogramada sale del cálculo: contará la sesión nueva');
     assert.equal(ahora.missed, previo.missed, 'no suma incumplimientos');
   });
@@ -3243,7 +3392,7 @@ describe('quitar sesiones canceladas de la agenda', () => {
   before(async () => {
     const c = await api.post('/api/clients', { fullName: 'Agenda Prueba', billingModel: 'single', standardPrice: 30, cutoffDay: 1 });
     clienteId = c.datos.id;
-    const lote = await api.post('/api/sessions/batch', { clientId: clienteId, startsAt: ['2026-10-05T13:00:00.000Z'], durationMinutes: 60, mode: 'Presencial' });
+    const lote = await api.post('/api/sessions/batch', { clientId: clienteId, startsAt: [instantePa(desplazarDiasPa(hoyPa(), 5), '08:00')], durationMinutes: 60, mode: 'Presencial' });
     sesionId = lote.datos.sesiones[0].id;
   });
 
@@ -3266,25 +3415,27 @@ describe('quitar sesiones canceladas de la agenda', () => {
 });
 
 describe('corregir una sesión ya guardada', () => {
-  let clientA, clientB, sesionId;
+  let clientA, clientB, sesionId, fechaPrimera;
   before(async () => {
     const a = await api.post('/api/clients', { fullName: 'Destino A', billingModel: 'single', standardPrice: 30, cutoffDay: 1 });
     const b = await api.post('/api/clients', { fullName: 'Destino B', billingModel: 'single', standardPrice: 30, cutoffDay: 1 });
     clientA = a.datos.id; clientB = b.datos.id;
-    const lote = await api.post('/api/sessions/batch', { clientId: clientA, startsAt: ['2026-11-05T13:00:00.000Z'], durationMinutes: 60, mode: 'Presencial' });
+    fechaPrimera = instantePa(desplazarDiasPa(hoyPa(), 12), '08:00');
+    const lote = await api.post('/api/sessions/batch', { clientId: clientA, startsAt: [fechaPrimera], durationMinutes: 60, mode: 'Presencial' });
     sesionId = lote.datos.sesiones[0].id;
   });
 
   test('se puede cambiar el cliente agendado', async () => {
     const { estado, datos } = await api.patch(`/api/sessions/${sesionId}`, {
-      startsAt: '2026-11-05T13:00:00.000Z', durationMinutes: 60, mode: 'Presencial', clientId: clientB
+      startsAt: fechaPrimera, durationMinutes: 60, mode: 'Presencial', clientId: clientB
     });
     assert.equal(estado, 200);
     assert.equal(datos.client_id, clientB, 'la sesión debe quedar a nombre del cliente nuevo');
   });
 
   test('una sesión creada por error se borra sin pasar por cancelada', async () => {
-    const lote = await api.post('/api/sessions/batch', { clientId: clientA, startsAt: ['2026-11-12T13:00:00.000Z'], durationMinutes: 60, mode: 'Presencial' });
+    const fechaSegunda = instantePa(desplazarDiasPa(hoyPa(), 19), '08:00');
+    const lote = await api.post('/api/sessions/batch', { clientId: clientA, startsAt: [fechaSegunda], durationMinutes: 60, mode: 'Presencial' });
     const id = lote.datos.sesiones[0].id;
     const { estado } = await api.delete(`/api/sessions/${id}/permanent`);
     assert.equal(estado, 200, 'programada se borra directamente: cancelarla la contaría como incumplida');
@@ -3373,13 +3524,14 @@ describe('no se agenda a quien ya no entrena', () => {
   });
 
   test('ni una sesión suelta', async () => {
-    const { estado, datos } = await api.post('/api/sessions', { clientId, startsAt: '2026-12-01T13:00:00.000Z', durationMinutes: 60 });
+    const fechaUno = instantePa(desplazarDiasPa(hoyPa(), 60), '08:00');
+    const { estado, datos } = await api.post('/api/sessions', { clientId, startsAt: fechaUno, durationMinutes: 60 });
     assert.equal(estado, 409);
     assert.match(datos.error, /inactivo/i);
   });
 
   test('ni por lotes', async () => {
-    const { estado } = await api.post('/api/sessions/batch', { clientId, startsAt: ['2026-12-02T13:00:00.000Z'], durationMinutes: 60, mode: 'Presencial' });
+    const { estado } = await api.post('/api/sessions/batch', { clientId, startsAt: [instantePa(desplazarDiasPa(hoyPa(), 61), '08:00')], durationMinutes: 60, mode: 'Presencial' });
     assert.equal(estado, 409);
   });
 
@@ -3390,16 +3542,17 @@ describe('no se agenda a quien ya no entrena', () => {
 
   test('ni moviéndole la sesión de otra persona', async () => {
     const otro = await api.post('/api/clients', { fullName: 'Sigue activo', billingModel: 'single', standardPrice: 30, cutoffDay: 1 });
-    const lote = await api.post('/api/sessions/batch', { clientId: otro.datos.id, startsAt: ['2026-12-03T13:00:00.000Z'], durationMinutes: 60, mode: 'Presencial' });
+    const fechaTres = instantePa(desplazarDiasPa(hoyPa(), 62), '08:00');
+    const lote = await api.post('/api/sessions/batch', { clientId: otro.datos.id, startsAt: [fechaTres], durationMinutes: 60, mode: 'Presencial' });
     const { estado } = await api.patch(`/api/sessions/${lote.datos.sesiones[0].id}`, {
-      startsAt: '2026-12-03T13:00:00.000Z', durationMinutes: 60, mode: 'Presencial', clientId
+      startsAt: fechaTres, durationMinutes: 60, mode: 'Presencial', clientId
     });
     assert.equal(estado, 409, 'la puerta de atrás también debe estar cerrada');
   });
 
   test('al reactivarlo vuelve a poderse', async () => {
     await api.patch(`/api/clients/${clientId}`, { fullName: 'De baja', status: 'active' });
-    const { estado } = await api.post('/api/sessions/batch', { clientId, startsAt: ['2026-12-04T13:00:00.000Z'], durationMinutes: 60, mode: 'Presencial' });
+    const { estado } = await api.post('/api/sessions/batch', { clientId, startsAt: [instantePa(desplazarDiasPa(hoyPa(), 63), '08:00')], durationMinutes: 60, mode: 'Presencial' });
     assert.equal(estado, 201);
   });
 });
