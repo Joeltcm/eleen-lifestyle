@@ -5361,7 +5361,7 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
       FROM invoices WHERE client_id = ${client.id} ORDER BY COALESCE(issued_on, due_on) DESC LIMIT 60
     `,
     sql`SELECT ra.id AS assignment_id, ra.due_on, r.id, r.title, r.description, r.sessions_per_week, r.exercises FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id WHERE ra.client_id = ${client.id} AND ra.active = true AND (ra.ends_on IS NULL OR ra.ends_on >= current_date) ORDER BY ra.starts_on DESC`,
-    sql`SELECT s.id, s.routine_id, s.starts_at, s.duration_minutes, s.mode, s.status, s.completion_percent, r.title AS routine_title FROM sessions s LEFT JOIN routines r ON r.id = s.routine_id WHERE s.client_id = ${client.id} AND s.starts_at >= now() - interval '1 year' ORDER BY s.starts_at`,
+    sql`SELECT s.id, s.routine_id, s.starts_at, s.duration_minutes, s.mode, s.status, s.cancellation_kind, s.cancelled_by, s.completion_percent, r.title AS routine_title FROM sessions s LEFT JOIN routines r ON r.id = s.routine_id WHERE s.client_id = ${client.id} AND s.starts_at >= now() - interval '1 year' ORDER BY s.starts_at`,
     sql`SELECT s.id, s.starts_at, s.duration_minutes, (s.client_id = ${client.id}) AS is_mine FROM sessions s JOIN clients c ON c.id = s.client_id WHERE c.owner_id = ${client.owner_id} AND s.status <> 'cancelled' AND s.starts_at BETWEEN now() - interval '60 days' AND now() + interval '90 days' ORDER BY s.starts_at`,
     sql`SELECT tested_at, values FROM inbody_assessments WHERE client_id = ${client.id} AND extraction_status = 'ready' ORDER BY tested_at`,
     sql`SELECT routine_id, completed_on, completion_percent FROM routine_completions WHERE client_id = ${client.id} AND completed_on >= current_date - interval '1 year' ORDER BY completed_on`,
@@ -5376,10 +5376,11 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
     // Su saldo de clases: es lo primero que quiere saber quien entrena y no
     // estaba en ninguna parte del portal.
     sql`
-      SELECT id, label, kind, total_sessions, used_sessions, expires_on, status
+      SELECT id, label, kind, total_sessions, used_sessions, expires_on, purchased_on, status
       FROM session_packages
-      WHERE client_id = ${client.id} AND status = 'active' AND used_sessions < total_sessions
-      ORDER BY expires_on ASC NULLS LAST, purchased_on
+      WHERE client_id = ${client.id} AND status <> 'cancelled'
+      ORDER BY purchased_on DESC, expires_on DESC NULLS LAST
+      LIMIT 120
     `,
     sql`
       SELECT concept, amount FROM billing_credits

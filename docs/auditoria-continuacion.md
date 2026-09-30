@@ -416,3 +416,32 @@ Rama: `feature/flujo-cobro-y-perfil`
   etiquetas se monten o queden recortadas en pantallas estrechas.
 - Se añadió una regresión para el corte anterior y se conserva la prueba del
   corte vigente.
+
+## Portal del cliente: períodos, saldos y cumplimiento
+
+Rama: `feature/flujo-cobro-y-perfil`
+
+- El nombre mostrado en el portal se refresca desde el expediente real del
+  cliente al iniciar sesión; esto corrige nombres que quedaron antiguos en la
+  cuenta de acceso, como `Riccardo Francolini`.
+- El portal permite consultar por mes calendario o activar un botón destacado
+  de `Corte actual`. En ambos modos se puede navegar al período anterior y
+  regresar al actual; los ciclos usan el `billing_cutoff_day` del expediente,
+  no un día fijo.
+- El saldo de clases, las facturas pendientes, el aviso de pago y el estado de
+  cuenta se recalculan para el período seleccionado. El pago tardío no bloquea
+  las clases: el saldo sigue visible y solo se informa la deuda.
+- La tarjeta de saldo pendiente y la tarjeta de clases tienen estilos de
+  alerta cuando existe deuda. El gráfico de cumplimiento ahora identifica el
+  numerador y denominador (`realizadas/medibles · porcentaje`) en vez de
+  mostrar únicamente `100%`.
+- Se ampliaron los datos del portal para incluir ciclos anteriores y los
+  estados de cancelación, excluyendo reprogramaciones de la métrica.
+- Frontend actualizado de v212 a v214.
+
+### Validación antes de publicar
+
+- `node --check app.js` ✅
+- `npm run verify` y suite backend ✅
+- Se conservaron los archivos locales no relacionados (`003_progress_photo_metadata.sql`,
+  `graphify-out/` y `worktrees/`).

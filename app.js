@@ -1,4 +1,4 @@
-const APP_VERSION = '212';
+const APP_VERSION = '214';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -32,6 +32,9 @@ if (authToken && !localStorage.getItem(authKey)) {
 let currentUser = null;
 let data = { clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, notifications: [], googleCalendar: { configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } } };
 let portalData = null;
+let portalPeriodMode = 'month';
+let portalPeriodMonth = dateKey(today).slice(0, 7);
+let portalCutOffset = 0;
 let mostrarHistorialPaquetes = false;
 // El control de paquetes navega por CORTE, no por mes calendario: 0 = corte
 // vigente de cada cliente, -1 = anterior, +1 = siguiente. Cada cliente se ve en
@@ -4625,9 +4628,61 @@ const portalNavigate = (id, { replace = false } = {}) => {
 };
 const portalSession = item => ({ id: item.id, startsAt: new Date(item.starts_at), status: item.status, completionPercent: Number(item.completion_percent || 0), routine: item.routine_title || 'Evaluación / seguimiento', mode: item.mode });
 const monthLabel = date => new Intl.DateTimeFormat('es-PA', { month: 'short' }).format(date).replace('.', '');
-function portalActivities() {
-  const sessionActivities = portalData.sessions.filter(item => new Date(item.starts_at) <= today && item.status !== 'cancelled').map(item => ({ date: new Date(item.starts_at), percent: Number(item.completion_percent || 0) }));
-  const routineActivities = portalData.routineCompletions.map(item => ({ date: new Date(`${item.completed_on}T12:00:00`), percent: Number(item.completion_percent || 0) }));
+const portalDaysInMonth = (year, month) => new Date(year, month + 1, 0).getDate();
+const portalCutoffDate = (year, month, cutoff) => `${year}-${String(month + 1).padStart(2, '0')}-${String(Math.min(cutoff, portalDaysInMonth(year, month))).padStart(2, '0')}`;
+function portalCycle(offset = 0) {
+  const cutoff = Math.max(1, Number(portalData?.client?.billing_cutoff_day) || 1);
+  const now = dateKey(today);
+  let year = today.getFullYear(); let month = today.getMonth();
+  if (now < portalCutoffDate(year, month, cutoff)) month -= 1;
+  month += offset;
+  while (month > 11) { month -= 12; year += 1; }
+  while (month < 0) { month += 12; year -= 1; }
+  const inicio = portalCutoffDate(year, month, cutoff);
+  let nextYear = year; let nextMonth = month + 1;
+  if (nextMonth > 11) { nextMonth = 0; nextYear += 1; }
+  return { inicio, vence: portalCutoffDate(nextYear, nextMonth, cutoff) };
+}
+function portalPeriod() {
+  if (portalPeriodMode === 'cutoff') {
+    const cycle = portalCycle(portalCutOffset);
+    const label = portalCutOffset === 0 ? 'Corte actual' : `Corte anterior · ${Math.abs(portalCutOffset)}`;
+    return { ...cycle, label, kind: 'cutoff' };
+  }
+  const [year, month] = portalPeriodMonth.split('-').map(Number);
+  const last = new Date(year, month, 0).getDate();
+  return { from: `${portalPeriodMonth}-01`, to: `${portalPeriodMonth}-${String(last).padStart(2, '0')}`, label: attendanceMonthLabel(portalPeriodMonth), kind: 'month' };
+}
+function portalDateInPeriod(value, period) {
+  const date = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)
+    ? value.slice(0, 10)
+    : panamaDateTimeParts(value).date;
+  return date >= period.from && date <= period.to;
+}
+function portalPeriodSessions(period = portalPeriod()) {
+  return (portalData?.sessions || []).filter(item => portalDateInPeriod(item.starts_at, period));
+}
+function portalPeriodInvoices(period = portalPeriod()) {
+  return (portalData?.invoices || []).filter(item => portalDateInPeriod(item.issued_on || item.due_on, period));
+}
+function portalPeriodPackages(period = portalPeriod()) {
+  const packages = (portalData?.packages || []).filter(item => {
+    const purchased = String(item.purchased_on || '').slice(0, 10);
+    const expires = String(item.expires_on || '').slice(0, 10);
+    if (period.kind === 'month') return !purchased || (purchased >= period.from && purchased <= period.to);
+    return (!purchased || purchased <= period.to) && (!expires || expires >= period.from);
+  });
+  return packages.sort((a, b) => String(b.purchased_on || '').localeCompare(String(a.purchased_on || '')));
+}
+function portalActivities(sessions = portalData.sessions, period = null) {
+  const sessionActivities = sessions.filter(item => {
+    const status = item.status;
+    return new Date(item.starts_at) <= today && (status === 'completed' || status === 'no_show'
+      || (status === 'cancelled' && item.cancellation_kind !== 'rescheduled'));
+  }).map(item => ({ date: new Date(item.starts_at), percent: item.status === 'completed' ? Number(item.completion_percent || 0) : 0, completed: item.status === 'completed', measured: true }));
+  const routineActivities = portalData.routineCompletions
+    .filter(item => !period || portalDateInPeriod(item.completed_on, period))
+    .map(item => ({ date: new Date(`${item.completed_on}T12:00:00`), percent: Number(item.completion_percent || 0), completed: true, measured: true }));
   return [...sessionActivities, ...routineActivities];
 }
 // Calendario del portal. Antes era una lista corrida de fechas: para saber si
@@ -4814,16 +4869,17 @@ function portalWeightModal() {
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
-function portalAttendanceReport() {
-  const past = portalData.sessions.filter(item => new Date(item.starts_at) <= today);
+function portalAttendanceReport(sessions = portalPeriodSessions()) {
+  const period = portalPeriod();
+  const past = sessions.filter(item => new Date(item.starts_at) <= today);
   const completed = past.filter(item => item.status === 'completed').length;
-  const cancelled = past.filter(item => item.status === 'cancelled').length;
+  const cancelled = past.filter(item => item.status === 'cancelled' && item.cancellation_kind !== 'rescheduled').length;
   const noShow = past.filter(item => item.status === 'no_show').length;
   const pending = past.filter(item => item.status === 'scheduled').length;
   const denominator = completed + noShow + cancelled;
   const percent = denominator ? Math.round(completed / denominator * 100) : 0;
   const rows = past.slice().sort((a, b) => new Date(b.starts_at) - new Date(a.starts_at)).slice(0, 30).map(item => `<tr><td>${new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeZone: 'America/Panama' }).format(new Date(item.starts_at))}</td><td>${new Intl.DateTimeFormat('es-PA', { timeStyle: 'short', timeZone: 'America/Panama' }).format(new Date(item.starts_at))}</td><td>${escapeHtml(item.routine_title || 'Entrenamiento')}</td><td><span class="payment-status ${item.status}">${item.status === 'completed' ? 'Asistió' : item.status === 'cancelled' ? 'Cancelada' : item.status === 'no_show' ? 'No asistió' : 'Pendiente'}</span></td></tr>`).join('');
-  return `<section class="portal-report-section"><div class="card-head"><div><h3>Asistencia y cancelaciones</h3><p>Historial de tus sesiones</p></div><span class="portal-report-period">${percent}% asistencia</span></div><div class="portal-report-stats"><article><strong>${completed}</strong><span>Asistencias</span></article><article><strong>${cancelled}</strong><span>Cancelaciones</span></article><article><strong>${noShow}</strong><span>No asistidas</span></article><article><strong>${pending}</strong><span>Pendientes</span></article></div><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Hora</th><th>Sesión</th><th>Estado</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">Todavía no hay sesiones registradas.</td></tr>'}</tbody></table></div></section>`;
+  return `<section class="portal-report-section"><div class="card-head"><div><h3>Asistencia y cancelaciones</h3><p>${period.label} · ${fechaCorta(period.from)} al ${fechaCorta(period.to)}</p></div><span class="portal-report-period">${completed}/${denominator || 0} · ${percent}%</span></div><div class="portal-report-stats"><article><strong>${completed}</strong><span>Asistencias</span></article><article><strong>${cancelled}</strong><span>Cancelaciones</span></article><article><strong>${noShow}</strong><span>No asistidas</span></article><article><strong>${pending}</strong><span>Pendientes</span></article></div><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Hora</th><th>Sesión</th><th>Estado</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">Todavía no hay sesiones registradas en este período.</td></tr>'}</tbody></table></div></section>`;
 }
 function renderPortalReports() {
   const informes = document.getElementById('portal-reports-list'); if (!informes) return;
@@ -4846,20 +4902,49 @@ function clientWeightLogsSection(target, clientId) {
 }
 
 function renderPortal() {
-  const client = portalData.client; const activities = portalActivities(); const overall = activities.length ? Math.round(activities.reduce((sum, item) => sum + item.percent, 0) / activities.length) : 0;
-  document.getElementById('portal-welcome').textContent = `Hola, ${client.full_name.split(' ')[0]}`; document.getElementById('portal-compliance').textContent = `${overall}%`;
-  const upcoming = portalData.sessions.filter(item => new Date(item.starts_at) >= today && item.status === 'scheduled').length;
+  const client = portalData.client;
+  const period = portalPeriod();
+  const periodMonthInput = document.getElementById('portal-period-month');
+  const periodLabel = document.getElementById('portal-period-label');
+  const periodDates = document.getElementById('portal-period-dates');
+  const periodCutoffButton = document.getElementById('portal-period-cutoff');
+  const periodPrevious = document.getElementById('portal-period-previous');
+  const periodCurrent = document.getElementById('portal-period-current');
+  const periodNext = document.getElementById('portal-period-next');
+  if (periodMonthInput) periodMonthInput.value = portalPeriodMonth;
+  if (periodLabel) periodLabel.textContent = period.kind === 'cutoff' ? `${period.label} · día ${client.billing_cutoff_day}` : period.label;
+  if (periodDates) periodDates.textContent = `${fechaCorta(period.from)} al ${fechaCorta(period.to)}`;
+  if (periodCutoffButton) {
+    periodCutoffButton.textContent = portalPeriodMode === 'cutoff' ? 'Corte seleccionado ✓' : 'Ver corte actual';
+    periodCutoffButton.classList.toggle('active-filter', portalPeriodMode === 'cutoff');
+  }
+  if (periodPrevious) periodPrevious.textContent = portalPeriodMode === 'cutoff' ? '‹ Corte anterior' : '‹ Mes anterior';
+  if (periodNext) {
+    periodNext.textContent = portalPeriodMode === 'cutoff' ? 'Corte siguiente ›' : 'Mes siguiente ›';
+    periodNext.disabled = portalPeriodMode === 'cutoff' ? portalCutOffset === 0 : portalPeriodMonth >= dateKey(today).slice(0, 7);
+  }
+  if (periodCurrent) periodCurrent.textContent = portalPeriodMode === 'cutoff' && portalCutOffset === 0 ? 'Corte actual' : 'Período actual';
+  const periodSessions = portalPeriodSessions(period);
+  const activities = portalActivities(periodSessions, period);
+  const overall = activities.length ? Math.round(activities.reduce((sum, item) => sum + item.percent, 0) / activities.length) : 0;
+  const periodInvoices = portalPeriodInvoices(period);
+  const periodPackages = portalPeriodPackages(period);
+  const monthlyPackages = periodPackages.filter(pack => pack.kind === 'monthly');
+  const packagePackages = periodPackages.filter(pack => pack.kind === 'package');
+  const principalPackages = monthlyPackages.length ? monthlyPackages : packagePackages;
+  const principal = principalPackages.length ? {
+    total: principalPackages.reduce((sum, pack) => sum + Number(pack.total_sessions || 0), 0),
+    used: principalPackages.reduce((sum, pack) => sum + Number(pack.used_sessions || 0), 0),
+    expires: principalPackages.map(pack => pack.expires_on).filter(Boolean).sort()[0] || ''
+  } : null;
+  const upcoming = periodSessions.filter(item => new Date(item.starts_at) >= today && item.status === 'scheduled').length;
   // El servidor ya manda en balance lo que falta por pagar de verdad: aquí
   // sólo se suma. Antes se sumaba la columna cruda, que en un cobro local vale
   // 0, y el portal decía "estás al día" con la mensualidad sin pagar.
-  const pending = portalData.invoices.filter(item => item.status === 'pending').reduce((sum, item) => sum + Number(item.balance || 0), 0);
+  const pending = periodInvoices.filter(item => item.status === 'pending').reduce((sum, item) => sum + Number(item.balance || 0), 0);
   // Lo primero que quiere saber quien entrena: cuántas clases le quedan. Antes
   // el portal no lo decía en ninguna parte y había que preguntárselo a Eileen.
-  const saldos = portalData.packages || [];
-  const mensual = saldos.find(pack => pack.kind === 'monthly');
-  const reposicion = saldos.find(pack => pack.kind === 'makeup');
-  const paquete = saldos.find(pack => pack.kind === 'package');
-  const principal = mensual || paquete;
+  const reposicion = periodPackages.find(pack => pack.kind === 'makeup');
   const quedan = pack => Math.max(0, Number(pack.total_sessions) - Number(pack.used_sessions));
   const venceEl = pack => pack.expires_on
     ? `vencen el ${new Intl.DateTimeFormat('es-PA', { day: 'numeric', month: 'short', timeZone: 'America/Panama' }).format(new Date(`${String(pack.expires_on).slice(0, 10)}T12:00:00-05:00`))}`
@@ -4873,35 +4958,52 @@ function renderPortal() {
     // lo que hace que se entere quien tiene que enterarse.
     const sinPagar = pending > 0
       ? `<small class="aviso-pago">Pendiente de pago: ${money.format(pending)}</small>` : '';
-    tarjetas.push(`<article${pending > 0 ? ' class="con-aviso"' : ''}><span>${mensual ? 'Clases de este mes' : 'Clases de tu paquete'}</span><strong>${quedan(principal)}<em> de ${principal.total_sessions}</em></strong><small>${venceEl(principal)}</small>${sinPagar}</article>`);
+    tarjetas.push(`<article class="portal-balance-card${pending > 0 ? ' con-aviso' : ''}"><span>${period.kind === 'cutoff' ? 'Saldo del corte' : 'Saldo del mes'}</span><strong>${Math.max(0, principal.total - principal.used)}<em> de ${principal.total}</em></strong><small>${principal.expires ? venceEl({ expires_on: principal.expires }) : 'sin fecha de vencimiento'}</small>${sinPagar}</article>`);
   }
   if (reposicion) {
     tarjetas.push(`<article class="destacada"><span>Clases por reponer</span><strong>${quedan(reposicion)}</strong><small>${venceEl(reposicion)}</small></article>`);
   }
   tarjetas.push(`<article><span>Próximas sesiones</span><strong>${upcoming}</strong><small>en tu agenda</small></article>`);
   if (portalData.routines.length) tarjetas.push(`<article><span>Rutinas activas</span><strong>${portalData.routines.length}</strong><small>asignadas</small></article>`);
-  tarjetas.push(`<article><span>Saldo pendiente</span><strong>${money.format(pending)}</strong><small>${pending > 0 ? 'por pagar' : 'estás al día'}</small></article>`);
+  tarjetas.push(`<article class="portal-debt-card${pending > 0 ? ' pendiente' : ' pagado'}"><span>Saldo pendiente</span><strong>${money.format(pending)}</strong><small>${pending > 0 ? `por pagar · ${period.label}` : 'estás al día'}</small></article>`);
   if (credito > 0) tarjetas.push(`<article class="destacada"><span>A tu favor</span><strong>${money.format(credito)}</strong><small>se descuenta del próximo cobro</small></article>`);
   document.getElementById('portal-metrics').innerHTML = tarjetas.join('');
 
   renderPortalReports();
+  const allActivities = portalActivities();
   const buckets = Array.from({ length: 6 }, (_, index) => { const date = new Date(today.getFullYear(), today.getMonth() - 5 + index, 1, 12); return { key: `${date.getFullYear()}-${date.getMonth()}`, date, values: [] }; });
-  activities.forEach(item => buckets.find(bucket => bucket.key === `${item.date.getFullYear()}-${item.date.getMonth()}`)?.values.push(item.percent));
-  document.getElementById('portal-chart').innerHTML = buckets.map(bucket => { const percent = bucket.values.length ? Math.round(bucket.values.reduce((sum, value) => sum + value, 0) / bucket.values.length) : 0; return `<div class="chart-column"><span>${percent}%</span><i style="height:${Math.max(4, percent)}%"></i><small>${monthLabel(bucket.date)}</small></div>`; }).join('');
+  allActivities.forEach(item => buckets.find(bucket => bucket.key === `${item.date.getFullYear()}-${item.date.getMonth()}`)?.values.push(item));
+  document.getElementById('portal-chart').innerHTML = buckets.map(bucket => {
+    const measured = bucket.values.length;
+    const completed = bucket.values.filter(item => item.completed).length;
+    const percent = measured ? Math.round(bucket.values.reduce((sum, value) => sum + value.percent, 0) / measured) : null;
+    const label = measured ? `${completed}/${measured} · ${percent}%` : '—';
+    return `<div class="chart-column" title="${completed} de ${measured} sesiones medibles · ${percent === null ? 'sin datos' : `${percent}% promedio`}"><span>${label}</span><i style="height:${Math.max(4, percent || 0)}%"></i><small>${monthLabel(bucket.date)}</small></div>`;
+  }).join('');
   document.getElementById('portal-inbody').innerHTML = portalData.assessments.length ? `<div class="portal-inbody-grid">${portalData.assessments.slice(-4).reverse().map(item => `<article><span>${String(item.tested_at).slice(0, 10)}</span><b>${Number(item.values.weightKg || 0).toFixed(1)} kg</b><small>${Number(item.values.percentBodyFat || 0).toFixed(1)}% grasa · ${Number(item.values.skeletalMuscleMassKg || 0).toFixed(1)} kg músculo</small></article>`).join('')}</div>` : '<p class="empty">Todavía no hay evaluaciones confirmadas.</p>';
   document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(routine => { const todayCompletion = portalData.routineCompletions.find(item => item.routine_id === routine.id && item.completed_on === dateKey(today)); return `<article class="card portal-routine-card"><div class="card-head"><div><h3>${escapeHtml(routine.title)}</h3><p>${escapeHtml(routine.description || '')} · ${routine.sessions_per_week} veces por semana</p>${routine.due_on ? `<p class="routine-due${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? 'Venció el' : 'Para cumplirla antes del'} ${fechaCorta(routine.due_on)}</p>` : ''}</div></div><div class="exercise-preview">${portalExerciseRows(routine.exercises || [])}</div><form data-portal-routine="${routine.id}" class="portal-completion-form"><label class="completion-check"><input name="completed" type="checkbox" ${todayCompletion && Number(todayCompletion.completion_percent) > 0 ? 'checked' : ''} /><span>Entrenamiento realizado hoy</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${Number(todayCompletion?.completion_percent || 100)}" /><span>% completado</span></label><button class="primary">Guardar cumplimiento</button></form></article>`; }).join('') : '<p class="empty">La entrenadora todavía no te ha asignado una rutina.</p>';
   const ownSessions = new Map(portalData.sessions.map(item => [item.id, portalSession(item)]));
   renderPortalCalendar(ownSessions);
   document.getElementById('portal-plan').innerHTML = `<span class="commercial-label ${client.billing_model === 'package' ? 'package-label' : ''}">${client.billing_model === 'package' ? 'Paquete' : 'Mensualidad'}</span><div><h3>${escapeHtml(client.plan_name || 'Plan personalizado')}</h3><p>${money.format(Number(client.standard_price))}${client.billing_model === 'monthly' ? ` · corte día ${client.billing_cutoff_day}` : ` · ${client.sessions_included || 0} sesiones`}</p></div>`;
-  const pendingInvoices = portalData.invoices.filter(invoice => invoice.status === 'pending');
+  const pendingInvoices = periodInvoices.filter(invoice => invoice.status === 'pending');
   document.getElementById('portal-pending-payment').innerHTML = pendingInvoices.length ? `<div class="portal-payment-alert"><strong>Pago pendiente</strong><span>${pendingInvoices.length === 1 ? `Tienes 1 factura pendiente por ${money.format(Number(pendingInvoices[0].balance || pendingInvoices[0].amount))}.` : `Tienes ${pendingInvoices.length} facturas pendientes por ${money.format(pendingInvoices.reduce((sum, invoice) => sum + Number(invoice.balance || invoice.amount), 0))}.`}</span></div>` : '<div class="portal-payment-ok">No tienes pagos pendientes.</div>';
-  const invoicesSorted = portalData.invoices.slice().sort((a, b) => new Date(b.issued_on || b.due_on) - new Date(a.issued_on || a.due_on));
+  const invoicesSorted = periodInvoices.slice().sort((a, b) => new Date(b.issued_on || b.due_on) - new Date(a.issued_on || a.due_on));
   const invoiceDate = invoice => { const raw = invoice.issued_on || invoice.due_on; return raw ? new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeZone: 'America/Panama' }).format(new Date(`${String(raw).slice(0, 10)}T12:00:00-05:00`)) : '—'; };
   document.getElementById('portal-invoices').innerHTML = invoicesSorted.length ? invoicesSorted.map(invoice => `<tr><td><b>${escapeHtml(invoice.concept)}</b>${invoice.invoice_number ? `<br><small>${escapeHtml(invoice.invoice_number)}</small>` : ''}</td><td>${invoiceDate(invoice)}</td><td>${money.format(Number(invoice.amount))}</td><td><span class="payment-status ${invoice.status}">${invoice.status === 'confirmed' ? 'Pagada' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'}</span></td><td><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoice_number || invoice.id.slice(0, 8))}">Ver PDF</button></td></tr>`).join('') : '<tr><td colspan="5" class="empty">No hay facturas registradas.</td></tr>';
   const portalCount = document.getElementById('portal-notification-count'); portalCount.textContent = portalData.notifications.length; portalCount.hidden = !portalData.notifications.length;
 }
 async function loadPortalData() {
-  const [summary, notifications] = await Promise.all([api('/api/portal/summary'), api('/api/notifications')]); portalData = { ...summary, notifications }; renderPortal(); showPendingBrowserNotification(notifications);
+  const [summary, notifications] = await Promise.all([api('/api/portal/summary'), api('/api/notifications')]);
+  portalData = { ...summary, notifications };
+  // El expediente es la fuente de verdad del nombre. El usuario del portal
+  // puede conservar un nombre antiguo, por eso se actualiza también el menú y
+  // el avatar después de leer el expediente.
+  if (currentUser && portalData.client?.full_name) {
+    currentUser.fullName = portalData.client.full_name;
+    currentUser.full_name = portalData.client.full_name;
+    document.getElementById('portal-account-button').textContent = initials(portalData.client.full_name);
+  }
+  renderPortal(); showPendingBrowserNotification(notifications);
 }
 async function enterPortal(user) {
   const restoredView = portalViewFromHash(); currentUser = user; portalView(restoredView);
@@ -4913,6 +5015,43 @@ document.querySelectorAll('[data-portal-view]').forEach(link => link.addEventLis
 document.querySelectorAll('[data-portal-view-go]').forEach(link => link.addEventListener('click', event => { event.preventDefault(); portalNavigate(link.dataset.portalViewGo); }));
 document.getElementById('portal-notification-button').addEventListener('click', () => notificationCenter(true));
 document.getElementById('portal-add-weight').addEventListener('click', portalWeightModal);
+document.getElementById('portal-period-month')?.addEventListener('change', event => {
+  portalPeriodMonth = event.target.value || dateKey(today).slice(0, 7);
+  portalPeriodMode = 'month';
+  portalCutOffset = 0;
+  renderPortal();
+});
+document.getElementById('portal-period-cutoff')?.addEventListener('click', () => {
+  portalPeriodMode = 'cutoff';
+  portalCutOffset = 0;
+  renderPortal();
+});
+document.getElementById('portal-period-previous')?.addEventListener('click', () => {
+  if (portalPeriodMode === 'cutoff') portalCutOffset -= 1;
+  else {
+    const [year, month] = portalPeriodMonth.split('-').map(Number);
+    const previous = new Date(year, month - 2, 1, 12);
+    portalPeriodMonth = `${previous.getFullYear()}-${String(previous.getMonth() + 1).padStart(2, '0')}`;
+  }
+  renderPortal();
+});
+document.getElementById('portal-period-next')?.addEventListener('click', () => {
+  if (portalPeriodMode === 'cutoff') {
+    if (portalCutOffset < 0) portalCutOffset += 1;
+  } else {
+    const currentMonth = dateKey(today).slice(0, 7);
+    const [year, month] = portalPeriodMonth.split('-').map(Number);
+    const next = new Date(year, month, 1, 12);
+    const candidate = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}`;
+    portalPeriodMonth = candidate > currentMonth ? currentMonth : candidate;
+  }
+  renderPortal();
+});
+document.getElementById('portal-period-current')?.addEventListener('click', () => {
+  if (portalPeriodMode === 'cutoff') portalCutOffset = 0;
+  else portalPeriodMonth = dateKey(today).slice(0, 7);
+  renderPortal();
+});
 document.addEventListener('submit', async event => {
   const routineForm = event.target.closest('[data-portal-routine]'); const sessionForm = event.target.closest('[data-portal-session]'); if (!routineForm && !sessionForm) return;
   event.preventDefault(); const form = routineForm || sessionForm; const completed = form.elements.completed.checked; const completionPercent = completed ? Number(form.elements.completionPercent.value) : 0;
