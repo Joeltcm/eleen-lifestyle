@@ -1,4 +1,4 @@
-const APP_VERSION = '217';
+const APP_VERSION = '218';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -4646,7 +4646,11 @@ function portalPeriod() {
   if (portalPeriodMode === 'cutoff') {
     const cycle = portalCycle(portalCutOffset);
     const label = portalCutOffset === 0 ? 'Corte actual' : `Corte anterior · ${Math.abs(portalCutOffset)}`;
-    return { ...cycle, label, kind: 'cutoff' };
+    // El resto del portal filtra por `from`/`to`; portalCycle conserva
+    // `inicio`/`vence` porque esos nombres describen mejor un saldo. Si no
+    // hacemos esta traducción, el corte aparece sin fechas y todas sus
+    // tarjetas quedan en cero aunque existan sesiones y cobros.
+    return { ...cycle, from: cycle.inicio, to: cycle.vence, label, kind: 'cutoff' };
   }
   const [year, month] = portalPeriodMonth.split('-').map(Number);
   const last = new Date(year, month, 0).getDate();
