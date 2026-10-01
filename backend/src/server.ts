@@ -1256,7 +1256,7 @@ async function assertSubscriptionNoOverlap(transaction: TransactionSql, ownerId:
       AND COALESCE(ends_on, '9999-12-31'::date) >= ${input.startsOn}::date
     FOR UPDATE
   `;
-  if (overlap) sessionStateConflict('Ya existe un cobro del mismo tipo para ese beneficiario y pagador en ese período');
+  if (overlap) sessionStateConflict('Ya existe un concepto a facturar del mismo tipo para ese beneficiario y pagador en ese período');
 }
 
 app.get('/api/clients/:id/billing-subscriptions', { preHandler: requireStaff }, async (request, reply) => {
@@ -1359,7 +1359,7 @@ app.patch('/api/billing-subscriptions/:id', { preHandler: requireStaff }, async 
       await auditBillingSubscription(transaction, request, auth, 'REPLACE_BILLING_SUBSCRIPTION', id, oldValue, billingSubscriptionValue({ ...replacement, beneficiary_name: current.beneficiary_name, payer_name: current.payer_name }));
       return replacement;
     }
-    if (input.startsOn && input.startsOn !== dateOnly(current.starts_on)) sessionStateConflict('La fecha inicial histórica no se puede editar; cierre la línea y abra otra');
+    if (input.startsOn && input.startsOn !== dateOnly(current.starts_on)) sessionStateConflict('La fecha inicial histórica no se puede editar; cierre el concepto y abra otro');
     if (input.cycleDays !== undefined && current.kind !== 'package' && input.cycleDays !== null) sessionStateConflict('Sólo los paquetes usan días de ciclo');
     await assertSubscriptionNoOverlap(transaction, auth.sub, { beneficiaryClientId: current.beneficiary_client_id, payerClientId: current.payer_client_id, kind: current.kind, startsOn: nextStart, endsOn: nextEnd }, id);
     const [row] = await transaction`
@@ -1369,7 +1369,7 @@ app.patch('/api/billing-subscriptions/:id', { preHandler: requireStaff }, async 
     await auditBillingSubscription(transaction, request, auth, nextEnd ? 'CLOSE_BILLING_SUBSCRIPTION' : 'UPDATE_BILLING_SUBSCRIPTION', id, oldValue, billingSubscriptionValue({ ...row, beneficiary_name: current.beneficiary_name, payer_name: current.payer_name }));
     return row;
   });
-  if (!updated) return reply.code(404).send({ error: 'Línea de cobro no encontrada' });
+  if (!updated) return reply.code(404).send({ error: 'Concepto a facturar no encontrado' });
   const [result] = await sql`SELECT bs.*, b.full_name AS beneficiary_name, p.full_name AS payer_name FROM billing_subscriptions bs JOIN clients b ON b.id = bs.beneficiary_client_id JOIN clients p ON p.id = bs.payer_client_id WHERE bs.id = ${updated.id}`;
   return billingSubscriptionValue(result);
 });
