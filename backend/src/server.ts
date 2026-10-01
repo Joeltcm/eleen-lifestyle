@@ -16,6 +16,7 @@ import { moveSessionInTransaction } from './session-reschedule.js';
 import { complianceCompletionExpression, complianceSessionCondition } from './compliance.js';
 import { routineSuggestionsReady, suggestRoutine } from './routine-suggestions.js';
 import { accountStatementPdf, accountsReceivablePdf, compliancePdf, invoicePdf, monthlyFinancePdf } from './billing-reports.js';
+import { fechaDeNegocioPanama, fechaPanamaDiasAtras } from './panama-date.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
 const app = Fastify({ logger: true, trustProxy: true });
@@ -3391,7 +3392,7 @@ app.patch('/api/sessions/:id/compliance', { preHandler: requireStaff }, async (r
 // La entrenadora atiende a la mayoría en persona y no alcanza a crear una
 // rutina para cada día. Esta pantalla le deja marcar quién entrenó y que eso
 // cuente igual en el cumplimiento, que ya sumaba sesiones sin rutina.
-const dailyDateSchema = z.object({ date: z.string().date().default(() => new Date().toISOString().slice(0, 10)) });
+const dailyDateSchema = z.object({ date: z.string().date().default(() => fechaDeNegocioPanama()) });
 
 app.get('/api/trainings/daily', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
@@ -3474,7 +3475,7 @@ app.post('/api/trainings/daily', { preHandler: requireStaff }, async (request, r
 
 const invoiceSchema = z.object({ clientId: z.string().uuid(), packageId: z.string().uuid().optional(), concept: z.string().min(2), amount: z.coerce.number().min(0), dueOn: z.string().date() });
 const statementQuerySchema = z.object({ clientId: z.string().uuid(), from: z.string().date(), to: z.string().date() }).refine(value => value.from <= value.to, { message: 'La fecha inicial debe ser anterior a la fecha final' });
-const receivablesQuerySchema = z.object({ asOf: z.string().date().default(new Date().toISOString().slice(0, 10)) });
+const receivablesQuerySchema = z.object({ asOf: z.string().date().default(() => fechaDeNegocioPanama()) });
 
 async function accountStatementData(ownerId: string, query: z.infer<typeof statementQuerySchema>) {
   const [client] = await sql`SELECT id, full_name, email, phone FROM clients WHERE id = ${query.clientId} AND owner_id = ${ownerId}`;
@@ -5577,8 +5578,8 @@ app.get('/api/portal/reports/account-statement.pdf', { preHandler: requireAuth }
   const client = await portalClient(auth.sub);
   if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
   const rango = z.object({
-    from: z.string().date().default(new Date(Date.now() - 180 * 86400000).toISOString().slice(0, 10)),
-    to: z.string().date().default(new Date().toISOString().slice(0, 10))
+    from: z.string().date().default(() => fechaPanamaDiasAtras(180)),
+    to: z.string().date().default(() => fechaDeNegocioPanama())
   }).parse(request.query);
   const report = await accountStatementData(client.owner_id as string, { clientId: client.id as string, ...rango });
   if (!report) return reply.code(404).send({ error: 'Cliente no encontrado' });
