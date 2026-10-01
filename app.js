@@ -1,4 +1,4 @@
-const APP_VERSION = '263';
+const APP_VERSION = '264';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -5221,7 +5221,7 @@ function portalPeriodControlsMarkup(prefix = 'portal-report-period') {
   const previousLabel = cutoff ? '‹ Corte anterior' : '‹ Mes anterior';
   const nextLabel = cutoff ? 'Corte siguiente ›' : 'Mes siguiente ›';
   const currentLabel = cutoff && portalCutOffset === 0 ? 'Corte actual' : cutoff ? 'Volver al corte actual' : 'Mes actual';
-  return `<div class="portal-period-controls portal-report-period-controls" id="${prefix}-controls" aria-label="Filtros de asistencia"><div class="portal-period-copy"><p class="eyebrow">CONSULTA TU PERÍODO</p><strong>${modeLabel}</strong><small>Elige mes o corte para actualizar el informe.</small></div><label for="${prefix}-month">Mes<input type="month" id="${prefix}-month" value="${portalPeriodMonth}" max="${currentMonth}"${cutoff ? ' disabled' : ''} /></label><button type="button" class="primary portal-cutoff-button${cutoff ? ' active-filter' : ''}" id="${prefix}-cutoff">${cutoffButton}</button><div class="portal-period-nav" aria-label="Navegar períodos"><button type="button" class="secondary" id="${prefix}-previous" aria-label="${cutoff ? 'Corte anterior' : 'Mes anterior'}"${cutoff && portalCutOffset <= -PORTAL_MAX_CUT_HISTORY ? ' disabled' : ''}>${previousLabel}</button><button type="button" class="secondary" id="${prefix}-current">${currentLabel}</button><button type="button" class="secondary" id="${prefix}-next" aria-label="${cutoff ? 'Corte siguiente' : 'Mes siguiente'}"${cutoff ? (portalCutOffset === 0 ? ' disabled' : '') : (portalPeriodMonth >= currentMonth ? ' disabled' : '')}>${nextLabel}</button></div></div>`;
+  return `<div class="portal-period-controls portal-report-period-controls" id="${prefix}-controls" aria-label="Filtros de período"><div class="portal-period-copy"><p class="eyebrow">CONSULTA TU PERÍODO</p><strong>${modeLabel}</strong><small>Elige mes o corte para actualizar el informe.</small></div><label for="${prefix}-month">Mes<input type="month" id="${prefix}-month" value="${portalPeriodMonth}" max="${currentMonth}"${cutoff ? ' disabled' : ''} /></label><button type="button" class="primary portal-cutoff-button${cutoff ? ' active-filter' : ''}" id="${prefix}-cutoff">${cutoffButton}</button><div class="portal-period-nav" aria-label="Navegar períodos"><button type="button" class="secondary" id="${prefix}-previous" aria-label="${cutoff ? 'Corte anterior' : 'Mes anterior'}"${cutoff && portalCutOffset <= -PORTAL_MAX_CUT_HISTORY ? ' disabled' : ''}>${previousLabel}</button><button type="button" class="secondary" id="${prefix}-current">${currentLabel}</button><button type="button" class="secondary" id="${prefix}-next" aria-label="${cutoff ? 'Corte siguiente' : 'Mes siguiente'}"${cutoff ? (portalCutOffset === 0 ? ' disabled' : '') : (portalPeriodMonth >= currentMonth ? ' disabled' : '')}>${nextLabel}</button></div></div>`;
 }
 function updatePortalPeriodFromMonth(value) {
   portalPeriodMonth = value || dateKey(today).slice(0, 7);
@@ -5515,6 +5515,11 @@ function clientWeightLogsSection(target, clientId) {
 function renderPortal() {
   const client = portalData.client;
   const period = portalPeriod();
+  const billingPeriodControls = document.getElementById('portal-billing-period');
+  if (billingPeriodControls) {
+    billingPeriodControls.innerHTML = portalPeriodControlsMarkup('portal-billing-period');
+    bindPortalPeriodControls('portal-billing-period');
+  }
   const periodMonthInput = document.getElementById('portal-period-month');
   const periodLabel = document.getElementById('portal-period-label');
   const periodDates = document.getElementById('portal-period-dates');
@@ -5607,10 +5612,10 @@ function renderPortal() {
   const ownSessions = new Map(portalData.sessions.map(item => [item.id, portalSession(item)]));
   renderPortalCalendar(ownSessions);
   document.getElementById('portal-plan').innerHTML = `<span class="commercial-label ${client.billing_model === 'package' ? 'package-label' : ''}">${client.payment_mode === 'no_anticipado' ? 'Crédito por sesión' : client.billing_model === 'package' ? 'Paquete' : 'Mensualidad'}</span><div><h3>${escapeHtml(client.plan_name || 'Plan personalizado')}</h3><p>${client.payment_mode === 'no_anticipado' ? `${money.format(Number(client.credit_session_price || 25))} por sesión · corte día ${client.billing_cutoff_day}` : `${money.format(Number(client.standard_price))}${client.billing_model === 'monthly' ? ` · corte día ${client.billing_cutoff_day}` : ` · ${client.sessions_included || 0} sesiones`}`}</p></div>`;
-  // La vista Pagos es un historial independiente del período del dashboard:
-  // aquí deben aparecer todos los cobros del cliente, no sólo los del mes o
-  // corte que esté seleccionado para las métricas.
-  const historyInvoices = (portalData.invoices || []).slice().sort((a, b) => new Date(b.issued_on || b.due_on) - new Date(a.issued_on || a.due_on));
+  // Pagos usa el mismo período elegido en el portal. En modo corte, la fecha
+  // de inicio es inclusiva: una factura emitida exactamente en el corte
+  // pertenece a ese ciclo, igual que los demás datos de facturación.
+  const historyInvoices = periodInvoices.slice().sort((a, b) => new Date(b.issued_on || b.due_on) - new Date(a.issued_on || a.due_on));
   const pendingInvoices = historyInvoices.filter(invoice => invoice.status === 'pending');
   document.getElementById('portal-pending-payment').innerHTML = pendingInvoices.length ? `<div class="portal-payment-alert"><strong>Pago pendiente</strong><span>${pendingInvoices.length === 1 ? `Tienes 1 factura pendiente por ${money.format(Number(pendingInvoices[0].balance || pendingInvoices[0].amount))}.` : `Tienes ${pendingInvoices.length} facturas pendientes por ${money.format(pendingInvoices.reduce((sum, invoice) => sum + Number(invoice.balance || invoice.amount), 0))}.`}</span></div>` : '<div class="portal-payment-ok">No tienes pagos pendientes.</div>';
   // Beneficiario que no paga (módulo nuevo, tras el corte): solo ve si su plan está cubierto o si hay un pago pendiente de quien lo paga;
