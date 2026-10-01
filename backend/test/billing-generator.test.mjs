@@ -185,6 +185,12 @@ describe('crédito (Julio): postpago por clases cobrables', () => {
     const temprano = (await plan('2026-10-31', 0, 20)).find(i => i.payerId === julio);
     assert.equal(temprano.status, 'programada');
     assert.match(temprano.reason, /Se emite hoy desde las 21:00/);
+    // Proyección: antes de la hora, con el ciclo en curso, el plan muestra lo que lleva hasta hoy (no se emite)
+    assert.deepEqual([temprano.lines[0].quantity, temprano.total], [5, 125], 'proyección con lo marcado hasta hoy: 5 clases a $25');
+    const mitad = (await plan('2026-10-20', 20)).find(i => i.payerId === julio);
+    assert.deepEqual([mitad.status, mitad.total], ['programada', 125]);
+    assert.match(mitad.reason, /Proyección con lo marcado hasta hoy: 5 clases\. El importe final se confirma el 31-10-2026 desde las 21:00/);
+    assert.equal((await gen.runBillingGeneration(ownerId, '2026-10-20', 20)).created.filter(c => c.payerName === 'Julio').length, 0, 'una proyección nunca se emite');
     assert.equal((await plan('2026-10-31', 0, 21)).find(i => i.payerId === julio).status, 'emitir');
     assert.equal((await plan('2026-10-31', 0, 23)).find(i => i.payerId === julio).status, 'emitir');
     const tarde = (await plan('2026-11-01', 0, 1)).find(i => i.payerId === julio);

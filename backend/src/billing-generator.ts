@@ -149,9 +149,13 @@ export async function planBillingGeneration(tx: Tx, ownerId: string, today = fec
         status = 'omitida'; reason = `El ciclo ${kind === 'credito' ? 'cerró' : 'empezó'} hace ${daysBetween(due, today)} ${daysBetween(due, today) === 1 ? 'día' : 'días'}: las facturas automáticas solo se emiten el mismo día del corte; se crea a mano`;
       }
       const invoiceLines: PlannedLine[] = [];
+      let projection = false;
       for (const line of active) {
         if (kind === 'credito') {
-          const quantity = status === 'programada' ? 0 : await billableSessions(tx, line.beneficiaryId, cycleStart, cycleEnd);
+          // Programada con el ciclo ya en curso: PROYECCIÓN con lo marcado hasta hoy (no se emite; el importe final se confirma el día de corte desde CREDIT_EMIT_HOUR).
+          const enCurso = status === 'programada' && cycleStart <= today;
+          const quantity = status === 'programada' && !enCurso ? 0 : await billableSessions(tx, line.beneficiaryId, cycleStart, cycleEnd);
+          if (enCurso) projection = true;
           invoiceLines.push({ subscriptionId: line.id, beneficiaryId: line.beneficiaryId, beneficiaryName: line.beneficiaryName, description: 'Sesiones a crédito',
             quantity, unitAmount: line.price, amount: fromCents(quantity * cents(line.price)), sessionsReference: quantity || null });
         } else {
@@ -160,6 +164,10 @@ export async function planBillingGeneration(tx: Tx, ownerId: string, today = fec
         }
       }
       const total = fromCents(invoiceLines.reduce((sum, line) => sum + cents(line.amount), 0));
+      if (projection && status === 'programada' && !reason) {
+        const clases = invoiceLines.reduce((sum, line) => sum + line.quantity, 0);
+        reason = `Proyección con lo marcado hasta hoy: ${clases} ${clases === 1 ? 'clase' : 'clases'}. El importe final se confirma el ${cycleEnd.split('-').reverse().join('-')} desde las ${CREDIT_EMIT_HOUR}:00`;
+      }
       if (kind === 'credito' && status === 'emitir' && total === 0) { status = 'sin_cargo'; reason = 'Sin clases cobrables en el ciclo: no hay nada que facturar'; }
       planned.push({ ...base, cycleStart, cycleEnd, issuedOn, dueOn: issuedOn, lines: invoiceLines.filter(line => kind !== 'credito' || line.quantity > 0 || status === 'programada'), total,
         status, reason, referenceInvoiceId, referenceCode });
