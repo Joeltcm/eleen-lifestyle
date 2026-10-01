@@ -1336,6 +1336,26 @@ app.get('/api/billing/cutover/readiness', { preHandler: requireStaff }, async re
     ? { key: 'reference', label: 'Cada pagador tiene su factura de referencia', status: 'fail', detail: 'Estos pagadores tienen plan pero no tienen una factura previa de esa modalidad; el generador no emite la primera (se crea a mano, D-15).',
         items: noRef.map(item => ({ payer: item.payerName, kind: item.kind })) }
     : { key: 'reference', label: 'Cada pagador tiene su factura de referencia', status: 'ok', detail: 'Todos los pagadores con plan tienen una factura previa.' });
+  // La factura de un pagador se repite con las líneas de sus planes: quien figura en la última factura y ya no tiene plan con ESE pagador
+  // dejaría de facturarse (p. ej. la parte familiar de Ernesto en la factura de Riccardo). Se compara con la última factura de cada pagador.
+  const dropped = await sql`
+    SELECT DISTINCT p.full_name AS payer, b.full_name AS beneficiary, l.amount::text AS amount, i.kind, i.number
+    FROM billing_invoices i
+    JOIN (SELECT payer_client_id, kind, max(cycle_start) AS cycle_start FROM billing_invoices
+          WHERE owner_id = ${auth.sub} AND kind IN ('mensual', 'paquete') AND status <> 'anulada' GROUP BY payer_client_id, kind) last
+      ON last.payer_client_id = i.payer_client_id AND last.kind = i.kind AND last.cycle_start = i.cycle_start
+    JOIN billing_invoice_lines l ON l.invoice_id = i.id AND l.line_type = 'plan'
+    JOIN clients p ON p.id = i.payer_client_id JOIN clients b ON b.id = l.beneficiary_client_id
+    WHERE i.owner_id = ${auth.sub} AND i.status <> 'anulada'
+      AND EXISTS (SELECT 1 FROM billing_subscriptions s0 WHERE s0.payer_client_id = i.payer_client_id AND s0.auto_generate AND s0.starts_on <= ${today}::date AND (s0.ends_on IS NULL OR s0.ends_on >= ${today}::date))
+      AND NOT EXISTS (SELECT 1 FROM billing_subscriptions s WHERE s.payer_client_id = i.payer_client_id AND s.beneficiary_client_id = l.beneficiary_client_id
+        AND s.kind = CASE i.kind WHEN 'mensual' THEN 'monthly' ELSE 'package' END AND s.starts_on <= ${today}::date AND (s.ends_on IS NULL OR s.ends_on >= ${today}::date))
+    ORDER BY p.full_name, b.full_name`;
+  checks.push(dropped.length
+    ? { key: 'dropped-lines', label: 'La próxima factura de cada pagador conserva todas sus líneas', status: 'fail',
+        detail: 'Estas personas figuran en la última factura de su pagador pero no tienen un plan vigente con ese pagador: la próxima factura saldría con menos importe. Agrégales su plan en el expediente ("Agregar concepto a facturar", con ese pagador).',
+        items: dropped.map(row => ({ payer: row.payer, beneficiary: row.beneficiary, amount: Number(row.amount) })) }
+    : { key: 'dropped-lines', label: 'La próxima factura de cada pagador conserva todas sus líneas', status: 'ok', detail: 'Cada línea de la última factura sigue teniendo su plan vigente.' });
   const omitted = plan.filter(item => item.status === 'omitida');
   checks.push(omitted.length
     ? { key: 'omitted', label: 'No hay ciclos atrasados sin emitir', status: 'warn', detail: 'Estos ciclos están más atrasados que el límite del generador: se crean a mano.',

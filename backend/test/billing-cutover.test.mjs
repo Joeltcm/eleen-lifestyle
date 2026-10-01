@@ -88,3 +88,18 @@ test('quien ya tiene un plan PROPIO (Ernesto) sigue necesitando la línea de su 
   assert.deepEqual(lineas.map(l => [l.pagador, l.precio]), [['Ernesto', 120], ['Riccardo', 150]], 'queda con sus DOS planes: propio y familiar');
   assert.equal((await api.get('/api/billing/cutover/proposed-lines')).datos.lines.length, 0);
 });
+
+test('la lista avisa si alguien de la última factura de un pagador ya no tiene plan con ESE pagador (Ernesto declarado solo con plan propio)', async () => {
+  const f = await api.post('/api/billing/invoices', { payerClientId: id.Riccardo, kind: 'mensual', cycleStart: '2026-09-15', cycleEnd: '2026-10-15', issuedOn: '2026-09-15',
+    lines: [[id.Riccardo, 450], [id.Iraida, 300], [id.Ernesto, 150]].map(([beneficiaryClientId, unitAmount]) => ({ beneficiaryClientId, unitAmount, description: 'Mensualidad' })) });
+  assert.equal(f.estado, 201, JSON.stringify(f.datos));
+  const check = async () => (await api.get('/api/billing/cutover/readiness')).datos.checks.find(c => c.key === 'dropped-lines');
+  assert.equal((await check()).status, 'ok', 'con los tres planes vigentes no hay nada que avisar');
+  await db`DELETE FROM billing_subscriptions WHERE beneficiary_client_id = ${id.Ernesto} AND payer_client_id = ${id.Riccardo}`;
+  const c = await check();
+  assert.equal(c.status, 'fail');
+  assert.deepEqual(c.items, [{ payer: 'Riccardo', beneficiary: 'Ernesto', amount: 150 }]);
+  const plan = await api.post(`/api/clients/${id.Ernesto}/billing-subscriptions`, { beneficiaryClientId: id.Ernesto, payerClientId: id.Riccardo, kind: 'monthly', price: 150, sessionsReference: 4, startsOn: '2026-09-15' });
+  assert.equal(plan.estado, 201);
+  assert.equal((await check()).status, 'ok', 'al declarar su línea con Riccardo el aviso desaparece');
+});
