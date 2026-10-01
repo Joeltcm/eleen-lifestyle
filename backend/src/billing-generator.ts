@@ -24,7 +24,7 @@ import type { TransactionSql } from 'postgres';
 import { sql } from './db.js';
 import { fechaDeNegocioPanama, horaDeNegocioPanama } from './panama-date.js';
 
-// Solo el día que toca (Joel, 01-10-2026): sin facturas "de rezago". El bucle corre cada hora, así que hay 24 intentos ese día; si aun así no salió, se avisa y se crea a mano.
+// Solo el día que toca (Joel, 01-10-2026): sin facturas "de rezago". El bucle corre cada 15 minutos, así que hay ~96 intentos ese día; si aun así no salió, se avisa y se crea a mano.
 export const RETRO_DAYS = 0;
 // A crédito (Julio): se emite EL DÍA DEL CORTE (último día del mes), pero solo a partir de esta hora de Panamá, para que ya estén marcadas las clases de ese día (Joel, 01-10-2026).
 export const CREDIT_EMIT_HOUR = 21;

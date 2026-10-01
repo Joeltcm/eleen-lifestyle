@@ -7678,7 +7678,8 @@ if (billingEngine.conflict) app.log.error({ billingEngine }, billingEngine.messa
 else app.log.info({ state: billingEngine.state }, 'Estado operativo de la facturación');
 // El generador nuevo solo escribe en el estado `new` (1B-6); en cualquier otro estado no corre.
 const firstNewBillingRun = setTimeout(() => { if (billingEngine.newWrites) runNewBillingGenerationForAll().catch(error => app.log.error(error)); }, 30_000);
-const newBillingInterval = setInterval(() => { if (billingEngine.newWrites) runNewBillingGenerationForAll().catch(error => app.log.error(error)); }, config.BILLING_INTERVAL_MINUTES * 60_000);
+// Cada 15 minutos como máximo (J-081): el día del corte hay ~96 intentos y la factura de Julio (desde las 21:00) tiene ~12 en su ventana; cada intento es idempotente.
+const newBillingInterval = setInterval(() => { if (billingEngine.newWrites) runNewBillingGenerationForAll().catch(error => app.log.error(error)); }, Math.min(config.BILLING_INTERVAL_MINUTES, 15) * 60_000);
 const firstBillingRun = setTimeout(() => { if (billingEngine.legacyWrites) generateRecurringInvoices().catch(error => app.log.error(error)); }, 15_000);
 const billingInterval = setInterval(() => { if (billingEngine.legacyWrites) generateRecurringInvoices().catch(error => app.log.error(error)); }, config.BILLING_INTERVAL_MINUTES * 60_000);
 // Los intentos de acceso viejos no sirven para nada pasada la ventana; se
