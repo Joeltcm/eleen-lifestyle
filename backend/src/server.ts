@@ -2319,7 +2319,7 @@ app.patch('/api/billing-subscriptions/:id', { preHandler: requireStaff }, async 
     if (nextEnd && nextStart > nextEnd) sessionStateConflict('La fecha final no puede ser anterior a la inicial');
     const amountChanged = input.price !== undefined && Number(input.price) !== Number(current.price);
     if (amountChanged) {
-      if (!input.startsOn || input.startsOn <= dateOnly(current.starts_on)) sessionStateConflict('Un cambio de monto debe comenzar después de la línea histórica');
+      if (!input.startsOn || input.startsOn <= dateOnly(current.starts_on)) sessionStateConflict(`Un cambio de monto debe empezar DESPUÉS del inicio de la línea (${dateOnly(current.starts_on).split('-').reverse().join('-')}): elige en "Desde" la fecha desde la que rige el monto nuevo, por ejemplo el próximo corte`);
       const oldEnd = dayBefore(input.startsOn);
       await transaction`UPDATE billing_subscriptions SET ends_on = ${oldEnd}, updated_at = now() WHERE id = ${id}`;
       await assertSubscriptionNoOverlap(transaction, auth.sub, { beneficiaryClientId: current.beneficiary_client_id, payerClientId: current.payer_client_id, kind: current.kind, startsOn: input.startsOn, endsOn: nextEnd }, id);
