@@ -1,4 +1,4 @@
-const APP_VERSION = '243';
+const APP_VERSION = '244';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -4156,6 +4156,49 @@ async function newBillingInvoices() {
   list.querySelectorAll('[data-new-invoice-pdf]').forEach(button => button.onclick = () => previewProtectedPdf(`/api/billing/invoices/${button.dataset.newInvoicePdf}/pdf`, `Factura ${button.dataset.code}`, `factura-${button.dataset.code}.pdf`));
   list.querySelectorAll('[data-new-invoice-void]').forEach(button => button.onclick = () => newBillingVoidDialog(button.dataset.newInvoiceVoid, button.dataset.code));
 }
+// Archivo (solo lectura): lo facturado antes del inicio en limpio (Zoho y el sistema anterior). No tiene botones que escriban.
+const newArchiveFilters = { month: '', source: '', status: '', clientId: '' };
+const newArchiveStatus = { pagada: 'Pagada', pendiente: 'Pendiente', anulada: 'Anulada' };
+async function newBillingArchive() {
+  const root = document.getElementById('archivo-mount');
+  if (!root) return;
+  const f = newArchiveFilters;
+  if (!root.querySelector('#new-archive-list')) root.innerHTML = '<article class="card"><p class="empty">Cargando archivo…</p></article>';
+  let result;
+  try {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(f)) if (value) query.set(key, value);
+    result = await api(`/api/billing/archive?${query}`);
+  } catch (error) { root.innerHTML = `<article class="card"><p class="empty">${escapeHtml(error.message)}</p></article>`; return; }
+  const { invoices, summary, meta } = result;
+  const clientOptions = data.clients.slice().sort((a, b) => a.name.localeCompare(b.name, 'es')).map(client => `<option value="${client.id}"${client.id === f.clientId ? ' selected' : ''}>${escapeHtml(client.name)}</option>`).join('');
+  const monthOptions = meta.months.map(month => `<option value="${month}"${month === f.month ? ' selected' : ''}>${newBillingMonthText(month)}</option>`).join('');
+  const filtered = Object.values(f).some(Boolean);
+  root.innerHTML = `<article class="card"><div class="card-head"><div><h3>Archivo</h3><p>${summary.count} facturas${filtered ? ' con estos filtros' : ''} · Total ${money.format(summary.total)} · Solo lectura</p></div></div>
+    <p class="section-note">Historial anterior a ${fechaCorta(result.cleanStart)}: lo facturado en Zoho y en el sistema anterior. No se puede modificar; desde esa fecha todo vive en Facturas y Cobros.</p>
+    <div class="billing-period-bar">
+      <label>Mes<select id="new-archive-month"><option value="">Todos</option>${monthOptions}</select></label>
+      <label>Origen<select id="new-archive-source"><option value="">Todos</option><option value="zoho"${f.source === 'zoho' ? ' selected' : ''}>Zoho</option><option value="sistema"${f.source === 'sistema' ? ' selected' : ''}>Sistema anterior</option></select></label>
+      <label>Cliente<select id="new-archive-client"><option value="">Todos</option>${clientOptions}</select></label>
+      <label>Estado<select id="new-archive-status"><option value="">Todos</option>${Object.entries(newArchiveStatus).map(([value, text]) => `<option value="${value}"${f.status === value ? ' selected' : ''}>${text}</option>`).join('')}</select></label>
+      ${filtered ? '<button class="secondary" type="button" id="new-archive-clear">Quitar filtros</button>' : ''}</div>
+    <div class="metrics new-billing-metrics">
+      <article><span>Facturado</span><strong>${summary.count} · ${money.format(summary.total)}</strong></article>
+      <article><span>Cobrado</span><strong>${money.format(summary.paid)}</strong></article>
+      <article><span>Saldo sin cobrar</span><strong>${money.format(summary.balance)}</strong></article></div>
+    <div id="new-archive-list">${invoices.length ? `<div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Factura</th><th>Cliente</th><th>Concepto</th><th>Emisión</th><th>Total</th><th>Cobro</th><th>Estado</th></tr></thead><tbody>${invoices.map(invoice => `<tr>
+      <td data-label="Factura"><b>${escapeHtml(invoice.number || '—')}</b><br><small>${invoice.source === 'zoho' ? 'Zoho' : 'Sistema anterior'}</small></td>
+      <td data-label="Cliente">${escapeHtml(invoice.client)}</td>
+      <td data-label="Concepto">${escapeHtml(invoice.concept)}</td>
+      <td data-label="Emisión">${fechaCorta(invoice.issuedOn)}${invoice.dueOn ? `<br><small>vence ${fechaCorta(invoice.dueOn)}</small>` : ''}</td>
+      <td data-label="Total">${money.format(invoice.amount)}</td>
+      <td data-label="Cobro">${invoice.payments.length ? invoice.payments.map(payment => `${money.format(payment.amount)}${payment.method ? ` · ${escapeHtml(payment.method)}` : ''}<br><small>${fechaCorta(payment.paidOn)}</small>`).join('<br>') : 'Sin cobro'}${invoice.balance > 0 && invoice.paid > 0 ? `<br><small>saldo ${money.format(invoice.balance)}</small>` : ''}</td>
+      <td data-label="Estado">${escapeHtml(newArchiveStatus[invoice.status] || invoice.status)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">No hay facturas con estos filtros.</p>'}</div></article>`;
+  const bind = (id, key) => { document.getElementById(id).onchange = event => { f[key] = event.target.value; newBillingArchive(); }; };
+  bind('new-archive-month', 'month'); bind('new-archive-source', 'source'); bind('new-archive-client', 'clientId'); bind('new-archive-status', 'status');
+  const clear = document.getElementById('new-archive-clear');
+  if (clear) clear.onclick = () => { Object.assign(f, { month: '', source: '', status: '', clientId: '' }); newBillingArchive(); };
+}
 function newBillingVoidDialog(id, code) {
   const box = document.createElement('div');
   box.innerHTML = `<form id="new-billing-void-form"><p class="eyebrow">FACTURAS (NUEVO)</p><h2>Anular ${escapeHtml(code)}</h2><p class="section-note">La factura queda en el historial con su número y el motivo; no se borra. Si tiene cobros aplicados, hay que revertirlos antes.</p><label>Motivo<input name="reason" required minlength="3" maxlength="300" placeholder="Ej.: capturada con el monto equivocado" /></label><button class="primary wide-button">Anular factura</button></form>`;
@@ -4591,6 +4634,7 @@ function activarSubtab(nombre) {
   if (nombre === 'carga-inicial') newBillingImport();
   if (nombre === 'corte') newBillingCutover();
   if (nombre === 'reportes-nuevo') newBillingReports();
+  if (nombre === 'archivo') newBillingArchive();
   if (nombre === 'finanzas') financeDashboard();
   if (nombre === 'gastos') expensesManager();
 }

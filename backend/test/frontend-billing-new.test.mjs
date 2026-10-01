@@ -95,3 +95,14 @@ test('1B-7: el menú Cobros viejo ya no se ofrece; Facturas es la pestaña de en
   const app = await leer('app.js');
   for (const id of ['new-billing-month', 'new-billing-cut', 'new-billing-client', 'new-billing-status']) assert.match(app, new RegExp(id));
 });
+
+test('Archivo: pestaña de solo lectura con filtros y sin botones que escriban', async () => {
+  const html = await leer('index.html');
+  assert.match(html, /data-subtab="archivo">Archivo</);
+  assert.match(html, /id="subpanel-archivo"/);
+  const app = await leer('app.js');
+  assert.match(app, /nombre === 'archivo'\) newBillingArchive\(\)/);
+  const cuerpo = app.slice(app.indexOf('async function newBillingArchive()'), app.indexOf('function newBillingVoidDialog('));
+  assert.doesNotMatch(cuerpo, /method: '(POST|PATCH|PUT|DELETE)'/, 'el archivo no escribe nada');
+  for (const id of ['new-archive-month', 'new-archive-source', 'new-archive-client', 'new-archive-status']) assert.match(cuerpo, new RegExp(id));
+});

@@ -635,6 +635,17 @@ async function generateRecurringInvoices(ownerId?: string) {
   return { generated: invoices.length, balances: pendientes.length, reposiciones: 0, descuentos, creditInvoicesRecalculated, fechasCorregidas, invoices };
 }
 
+// Sistema anterior RETIRADO tras el corte (J-067): fuera del estado `legacy` (o `shadow`) las rutas que ESCRIBÍAN cobros, pagos y coberturas del sistema
+// viejo responden 410 y no tocan nada; las lecturas (listados, PDF, archivo) siguen. Es reversible a propósito: si se vuelve a LEGACY_BILLING_GENERATION=on y
+// NEW_BILLING_GENERATION=off, vuelven a funcionar. El código se borrará cuando la primera emisión automática del 15-10 salga bien.
+const legacyWritePaths = [/^\/api\/invoices(\/|$)/, /^\/api\/maintenance\/(reconcile-monthly-billing|cerrar-zoho-viejas)$/];
+app.addHook('onRequest', async (request, reply) => {
+  if (billingEngine.legacyWrites || ['GET', 'HEAD', 'OPTIONS'].includes(request.method)) return;
+  const path = request.url.split('?')[0];
+  if (!legacyWritePaths.some(pattern => pattern.test(path))) return;
+  return reply.code(410).send({ error: 'Retirado: los cobros y facturas ahora se manejan en Facturas y Cobros. El sistema anterior es solo de consulta (Archivo).' });
+});
+
 app.get('/api/billing/recurring/status', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return recurringBillingStatus(auth.sub);
@@ -4823,6 +4834,57 @@ app.get('/api/invoices', { preHandler: requireStaff }, async request => {
 
 
 // Cobros sin saldo de sesiones vinculado, para cerrar la migración.
+
+// Archivo (solo lectura): el historial del sistema anterior —lo facturado en Zoho y el sistema viejo— anterior al inicio en limpio (01-09-2026).
+// No escribe nada. Desde septiembre todo vive en Facturas y Cobros.
+app.get('/api/billing/archive', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const query = z.object({
+    clientId: z.string().uuid().optional(), month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional(),
+    source: z.enum(['zoho', 'sistema']).optional(), status: z.enum(['pagada', 'pendiente', 'anulada']).optional(),
+    limit: z.coerce.number().int().min(1).max(1000).default(500)
+  }).parse(request.query);
+  const rows = await sql`
+    SELECT i.id::text AS id, i.invoice_number, c.full_name AS client, i.client_id::text AS client_id, i.concept, i.status, i.source_system,
+      COALESCE(i.issued_on, i.due_on, i.created_at::date)::text AS issued_on, i.due_on::text AS due_on, i.amount::text AS amount,
+      CASE WHEN i.source_system = 'zoho_invoice' THEN GREATEST(i.amount - i.balance, 0)
+        ELSE COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), CASE WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END) END::text AS paid,
+      i.payment_method, i.confirmed_at::date::text AS confirmed_on
+    FROM invoices i JOIN clients c ON c.id = i.client_id
+    WHERE c.owner_id = ${auth.sub} AND COALESCE(i.issued_on, i.due_on, i.created_at::date) < ${NEW_BILLING_CLEAN_START}::date
+      AND (${query.clientId ?? null}::uuid IS NULL OR i.client_id = ${query.clientId ?? null} OR i.billed_for_client_id = ${query.clientId ?? null})
+      AND (${query.month ?? null}::text IS NULL OR to_char(COALESCE(i.issued_on, i.due_on, i.created_at::date), 'YYYY-MM') = ${query.month ?? null})
+      AND (${query.source ?? null}::text IS NULL OR (${query.source ?? null} = 'zoho' AND i.source_system = 'zoho_invoice') OR (${query.source ?? null} = 'sistema' AND i.source_system IS DISTINCT FROM 'zoho_invoice'))
+      AND (${query.status ?? null}::text IS NULL OR (${query.status ?? null} = 'pagada' AND i.status = 'confirmed') OR (${query.status ?? null} = 'pendiente' AND i.status = 'pending') OR (${query.status ?? null} = 'anulada' AND i.status = 'void'))
+    ORDER BY COALESCE(i.issued_on, i.due_on, i.created_at::date) DESC, i.created_at DESC LIMIT ${query.limit}`;
+  const ids = rows.map(row => row.id as string);
+  const payments = ids.length ? await sql`
+    SELECT pa.invoice_id::text AS invoice_id, ip.paid_on::text AS paid_on, ip.method, pa.amount::text AS amount
+    FROM payment_allocations pa JOIN invoice_payments ip ON ip.id = pa.payment_id
+    WHERE pa.invoice_id IN ${sql(ids)} ORDER BY ip.paid_on` : [];
+  const statusLabel: Record<string, string> = { confirmed: 'pagada', pending: 'pendiente', void: 'anulada' };
+  const invoices = rows.map(row => {
+    const amount = Number(row.amount); const paid = Number(row.paid);
+    const own = payments.filter(item => item.invoice_id === row.id).map(item => ({ paidOn: item.paid_on as string, method: (item.method as string | null) ?? null, amount: Number(item.amount) }));
+    // Sin cobros ligados (facturas del sistema viejo confirmadas a mano): se muestra el método y la fecha de confirmación.
+    const shown = own.length ? own : (row.status === 'confirmed' && row.confirmed_on ? [{ paidOn: row.confirmed_on as string, method: (row.payment_method as string | null) ?? null, amount }] : []);
+    return {
+      id: row.id as string, number: (row.invoice_number as string | null) ?? null, clientId: row.client_id as string, client: row.client as string, concept: row.concept as string,
+      issuedOn: row.issued_on as string, dueOn: (row.due_on as string | null) ?? null, amount, paid, balance: row.status === 'void' ? 0 : Math.max(0, amount - paid),
+      status: statusLabel[row.status as string] ?? (row.status as string), source: row.source_system === 'zoho_invoice' ? 'zoho' : 'sistema', payments: shown
+    };
+  });
+  const live = invoices.filter(invoice => invoice.status !== 'anulada');
+  const [meta] = await sql`
+    SELECT COALESCE(array_agg(DISTINCT to_char(COALESCE(i.issued_on, i.due_on, i.created_at::date), 'YYYY-MM')), '{}') AS months
+    FROM invoices i JOIN clients c ON c.id = i.client_id
+    WHERE c.owner_id = ${auth.sub} AND COALESCE(i.issued_on, i.due_on, i.created_at::date) < ${NEW_BILLING_CLEAN_START}::date`;
+  return {
+    cleanStart: NEW_BILLING_CLEAN_START, invoices,
+    summary: { count: invoices.length, total: desdeCentavos(live.reduce((sum, item) => sum + centavos(item.amount), 0)), paid: desdeCentavos(live.reduce((sum, item) => sum + centavos(item.paid), 0)), balance: desdeCentavos(live.reduce((sum, item) => sum + centavos(item.balance), 0)) },
+    meta: { months: (meta.months as string[]).slice().sort().reverse() }
+  };
+});
 
 app.get('/api/billing/analytics', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
