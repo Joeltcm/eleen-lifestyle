@@ -1,4 +1,4 @@
-const APP_VERSION = '259';
+const APP_VERSION = '260';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -5131,10 +5131,11 @@ function portalPeriod() {
     const cycle = portalCycle(portalCutOffset);
     const label = portalCutOffset === 0 ? 'Corte actual' : portalCutOffset === -1 ? 'Corte anterior' : `Corte de hace ${Math.abs(portalCutOffset)}`;
     // El resto del portal filtra por `from`/`to`; portalCycle conserva
-    // `inicio`/`vence` porque esos nombres describen mejor un saldo. Si no
-    // hacemos esta traducción, el corte aparece sin fechas y todas sus
-    // tarjetas quedan en cero aunque existan sesiones y cobros.
-    return { ...cycle, from: addDaysIso(cycle.inicio, 1), to: cycle.vence, sessionsFromExclusive: cycle.inicio, label, kind: 'cutoff' };
+    // `from` permanece inclusivo para facturas, pagos y paquetes: una factura
+    // anticipada puede estar fechada exactamente el día de inicio del ciclo.
+    // Las sesiones usan su propia frontera exclusiva y los textos muestran el
+    // día siguiente para no prometer un día que no entra en asistencia.
+    return { ...cycle, from: cycle.inicio, labelFrom: addDaysIso(cycle.inicio, 1), to: cycle.vence, sessionsFromExclusive: cycle.inicio, label, kind: 'cutoff' };
   }
   const [year, month] = portalPeriodMonth.split('-').map(Number);
   const last = new Date(year, month, 0).getDate();
@@ -5444,7 +5445,7 @@ function portalAttendanceReport(sessions = portalPeriodSessions()) {
     const detalle = item.credit_charge ? ` · ${money.format(Number(portalData.client?.credit_session_price || 25))}` : '';
     return `<tr><td data-label="Fecha">${fechaHoraPanama(item.starts_at, false)}</td><td data-label="Hora">${horaPanama(item.starts_at)}</td><td data-label="Sesión">${escapeHtml(item.routine_title || 'Entrenamiento')}</td><td data-label="Estado"><span class="payment-status ${item.status}">${estado}${detalle}</span></td></tr>`;
   }).join('');
-  return `<section class="portal-report-section"><div class="card-head"><div><h3>Asistencia y cancelaciones</h3><p>${period.label} · ${fechaCorta(period.from)} al ${fechaCorta(period.to)}</p></div><span class="portal-report-period"><b>${completed}/${denominator || 0} · ${percent}% cumplimiento</b><small>${cancelled}/${denominator || 0} · ${cancelledPercent}% cancelaciones</small></span></div><div class="portal-report-stats"><article><strong>${completed}</strong><span>Asistencias</span></article><article><strong>${cancelled}</strong><span>Cancelaciones cliente</span></article><article><strong>${reprogrammed}</strong><span>Reprogramadas</span></article><article><strong>${pending}</strong><span>Pendientes</span></article></div><div class="table-wrap"><table class="stack-mobile portal-attendance-table"><thead><tr><th>Fecha</th><th>Hora</th><th>Sesión</th><th>Estado</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">Todavía no hay sesiones registradas en este período.</td></tr>'}</tbody></table></div></section>`;
+  return `<section class="portal-report-section"><div class="card-head"><div><h3>Asistencia y cancelaciones</h3><p>${period.label} · ${fechaCorta(period.labelFrom || period.from)} al ${fechaCorta(period.to)}</p></div><span class="portal-report-period"><b>${completed}/${denominator || 0} · ${percent}% cumplimiento</b><small>${cancelled}/${denominator || 0} · ${cancelledPercent}% cancelaciones</small></span></div><div class="portal-report-stats"><article><strong>${completed}</strong><span>Asistencias</span></article><article><strong>${cancelled}</strong><span>Cancelaciones cliente</span></article><article><strong>${reprogrammed}</strong><span>Reprogramadas</span></article><article><strong>${pending}</strong><span>Pendientes</span></article></div><div class="table-wrap"><table class="stack-mobile portal-attendance-table"><thead><tr><th>Fecha</th><th>Hora</th><th>Sesión</th><th>Estado</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">Todavía no hay sesiones registradas en este período.</td></tr>'}</tbody></table></div></section>`;
 }
 function renderPortalReports() {
   const informes = document.getElementById('portal-reports-list'); if (!informes) return;
@@ -5480,7 +5481,7 @@ function renderPortal() {
   const periodNext = document.getElementById('portal-period-next');
   if (periodMonthInput) periodMonthInput.value = portalPeriodMonth;
   if (periodLabel) periodLabel.textContent = period.kind === 'cutoff' ? `${period.label} · día ${client.billing_cutoff_day}` : period.label;
-  if (periodDates) periodDates.textContent = `${fechaCorta(period.from)} al ${fechaCorta(period.to)}`;
+  if (periodDates) periodDates.textContent = `${fechaCorta(period.labelFrom || period.from)} al ${fechaCorta(period.to)}`;
   if (periodCutoffButton) {
     periodCutoffButton.textContent = portalPeriodMode === 'cutoff' ? 'Volver al mes' : 'Ver corte actual';
     periodCutoffButton.classList.toggle('active-filter', portalPeriodMode === 'cutoff');

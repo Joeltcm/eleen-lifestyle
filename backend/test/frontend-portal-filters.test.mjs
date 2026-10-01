@@ -23,19 +23,21 @@ test('los filtros de informes conservan el corte anterior y excluyen el día de 
   assert.match(app, /sessionsFromExclusive: cycle\.inicio/);
   assert.match(app, /period\.sessionsFromExclusive \? date > period\.sessionsFromExclusive && date <= period\.to/);
   assert.match(app, /PORTAL_MAX_CUT_HISTORY = 12/);
-  assert.match(app, /from: addDaysIso\(cycle\.inicio, 1\)/);
+  assert.match(app, /from: cycle\.inicio/);
+  assert.match(app, /labelFrom: addDaysIso\(cycle\.inicio, 1\)/);
+  assert.match(app, /portalDateInPeriod\(value, period\)/);
   assert.match(app, /Corte anterior/);
   assert.match(app, /fechaHoraPanama\(item\.starts_at, false\)/);
   assert.match(app, /horaPanama\(item\.starts_at\)/);
   assert.match(app, /portalCutOffset > -PORTAL_MAX_CUT_HISTORY/);
 });
 
-test('el portal sube todos sus marcadores a la versión 259', async () => {
+test('el portal sube todos sus marcadores a la versión 260', async () => {
   const [app, sw, version, html] = await Promise.all(['app.js', 'sw.js', 'version.json', 'index.html'].map(leer));
-  assert.equal(/const APP_VERSION = '(\d+)'/.exec(app)[1], '259');
-  assert.equal(/const VERSION = '(\d+)'/.exec(sw)[1], '259');
-  assert.equal(JSON.parse(version).version, '259');
+  assert.equal(/const APP_VERSION = '(\d+)'/.exec(app)[1], '260');
+  assert.equal(/const VERSION = '(\d+)'/.exec(sw)[1], '260');
+  assert.equal(JSON.parse(version).version, '260');
   const marcas = [...html.matchAll(/\?v=(\d+)/g)].map(match => match[1]);
   assert.equal(marcas.length, 7);
-  assert.ok(marcas.every(value => value === '259'));
+  assert.ok(marcas.every(value => value === '260'));
 });
