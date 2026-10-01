@@ -507,6 +507,7 @@ button.active-filter{background:#2f6f4f;color:#fff;border-color:#2f6f4f}
 .client-billing-summary strong{font:600 18px Fraunces}
 .client-billing-summary .due{color:#9a6011}
 .client-billing-summary .credit{color:#31745b}
+.declarative-billing{margin-top:18px;padding:14px;border:1px solid #eadfe4;border-radius:11px;background:#fffafb}.declarative-billing-lines,.declarative-billing-proposals{display:grid;gap:8px;margin-top:10px}.declarative-billing-line{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px;border:1px solid var(--line);border-radius:9px;background:#fff}.declarative-billing-line strong,.declarative-billing-line small{display:block}.declarative-billing-line small{margin-top:4px;color:var(--muted);font-size:11px}.declarative-billing-line.proposal{border-style:dashed;background:#fffdfc}.declarative-billing-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.declarative-billing-actions .secondary{padding:7px 9px;font-size:11px}.declarative-billing-summary{display:grid;gap:4px;margin:10px 0;padding:12px;border-radius:9px;background:#f5efeF}.declarative-billing-summary small{color:var(--muted)}
 .client-invoice-list{display:grid;gap:7px;margin-top:9px}
 .client-invoice-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:#fff}
 .client-invoice-row b{display:block;font-size:11px}

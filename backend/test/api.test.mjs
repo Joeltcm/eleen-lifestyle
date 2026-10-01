@@ -3950,3 +3950,85 @@ describe('bitácora', () => {
     assert.equal(entrada.detail.categoria.name, 'Categoría efímera');
   });
 });
+
+describe('cobro declarativo del expediente · etapa 1A', () => {
+  let mensual;
+  let riccardo;
+  let ernesto;
+  let sara;
+  let ownLine;
+
+  before(async () => {
+    const plan = await api.post('/api/plans', { name: 'Cobro declarativo mensual', billingModel: 'monthly', price: 150, sessionsIncluded: 8 });
+    mensual = plan.datos;
+    riccardo = (await api.post('/api/clients', { fullName: 'Riccardo declarativo', planId: mensual.id, cutoffDay: 15 })).datos;
+    ernesto = (await api.post('/api/clients', { fullName: 'Ernesto declarativo', billingModel: 'monthly', standardPrice: 120, cutoffDay: 15 })).datos;
+    sara = (await api.post('/api/clients', { fullName: 'Sara paquete declarativo', billingModel: 'package', standardPrice: 420, packageSessions: 12, cutoffDay: 15 })).datos;
+  });
+
+  test('permite dos líneas simultáneas para Ernesto: familiar y propia', async () => {
+    const familiar = await api.post(`/api/clients/${ernesto.id}/billing-subscriptions`, {
+      beneficiaryClientId: ernesto.id, payerClientId: riccardo.id, kind: 'monthly', price: 150,
+      startsOn: '2026-09-15', sessionsReference: 8
+    });
+    assert.equal(familiar.estado, 201);
+    ownLine = await api.post(`/api/clients/${ernesto.id}/billing-subscriptions`, {
+      beneficiaryClientId: ernesto.id, payerClientId: ernesto.id, kind: 'monthly', price: 120,
+      startsOn: '2026-09-15', sessionsReference: 4
+    });
+    assert.equal(ownLine.estado, 201);
+    const expediente = await api.get(`/api/clients/${riccardo.id}/billing-subscriptions`);
+    assert.equal(expediente.estado, 200);
+    assert.equal(expediente.datos.summary.totalForPayer, 150);
+    assert.equal(expediente.datos.lines.length, 1);
+    const ernestoDossier = await api.get(`/api/clients/${ernesto.id}/billing-subscriptions`);
+    assert.equal(ernestoDossier.datos.lines.length, 2);
+  });
+
+  test('registra un paquete con ciclo de 35 días desde el corte', async () => {
+    const creado = await api.post(`/api/clients/${sara.id}/billing-subscriptions`, {
+      kind: 'package', price: 420, cycleDays: 35, sessionsReference: 12, startsOn: '2026-09-15'
+    });
+    assert.equal(creado.estado, 201);
+    assert.equal(creado.datos.kind, 'package');
+    assert.equal(creado.datos.cycleDays, 35);
+    assert.equal(creado.datos.startsOn, '2026-09-15');
+  });
+
+  test('un cambio de monto cierra la línea y abre otra sin reescribir la historia', async () => {
+    const cambiado = await api.patch(`/api/billing-subscriptions/${ownLine.datos.id}`, { price: 125, startsOn: '2026-10-15' });
+    assert.equal(cambiado.estado, 200);
+    const expediente = await api.get(`/api/clients/${ernesto.id}/billing-subscriptions`);
+    const history = expediente.datos.lines.filter(line => line.payerClientId === ernesto.id);
+    assert.equal(history.length, 2);
+    const anterior = history.find(line => line.price === 120);
+    const actual = history.find(line => line.price === 125);
+    assert.equal(anterior.endsOn, '2026-10-14');
+    assert.equal(actual.startsOn, '2026-10-15');
+    const audit = (await api.get('/api/audit-log?limit=40')).datos.find(row => row.action === 'REPLACE_BILLING_SUBSCRIPTION' && row.target_id === ownLine.datos.id);
+    assert.ok(audit, 'el reemplazo debe registrar quién y qué cambió');
+    assert.equal(audit.detail.previous.price, 120);
+    assert.equal(audit.detail.next.price, 125);
+  });
+
+  test('rechaza solapamientos del mismo beneficiario, pagador y tipo', async () => {
+    const repetido = await api.post(`/api/clients/${ernesto.id}/billing-subscriptions`, {
+      beneficiaryClientId: ernesto.id, payerClientId: ernesto.id, kind: 'monthly', price: 130,
+      startsOn: '2026-10-01'
+    });
+    assert.equal(repetido.estado, 409);
+  });
+
+  test('guardar contacto no altera la línea declarativa', async () => {
+    const antes = (await api.get(`/api/clients/${ernesto.id}/billing-subscriptions`)).datos.lines.find(line => line.price === 125);
+    await api.patch(`/api/clients/${ernesto.id}`, { fullName: 'Ernesto declarativo', phone: '6000-0000' });
+    const despues = (await api.get(`/api/clients/${ernesto.id}/billing-subscriptions`)).datos.lines.find(line => line.price === 125);
+    assert.deepEqual({ price: despues.price, startsOn: despues.startsOn, endsOn: despues.endsOn }, { price: antes.price, startsOn: antes.startsOn, endsOn: antes.endsOn });
+  });
+
+  test('un cobro manual no altera la línea declarativa', async () => {
+    await api.post('/api/invoices', { clientId: ernesto.id, concept: 'Mensualidad manual histórica', amount: 999, dueOn: hoyPa() });
+    const line = (await api.get(`/api/clients/${ernesto.id}/billing-subscriptions`)).datos.lines.find(item => item.price === 125);
+    assert.equal(line.price, 125);
+  });
+});

@@ -1159,6 +1159,216 @@ app.delete('/api/clients/:id', { preHandler: requireStaff }, async (request, rep
   return { deleted: true, client };
 });
 
+// ── Cobro declarativo del expediente (etapa 1A) ───────────────────────────
+// Estas líneas describen el acuerdo comercial, pero todavía no emiten cobros
+// ni sustituyen al motor legado. Son deliberadamente aditivas y reversibles:
+// el expediente puede prepararse mientras la facturación actual sigue intacta.
+const billingSubscriptionKinds = ['monthly', 'credit', 'package'] as const;
+const billingSubscriptionInput = z.object({
+  beneficiaryClientId: z.string().uuid().optional(),
+  payerClientId: z.string().uuid().optional(),
+  kind: z.enum(billingSubscriptionKinds),
+  cycleDays: z.coerce.number().int().min(1).max(366).nullable().optional(),
+  sessionsReference: z.coerce.number().int().positive().max(1000).nullable().optional(),
+  startsOn: z.string().date(),
+  endsOn: z.string().date().nullable().optional(),
+  price: z.coerce.number().positive().max(100000)
+}).superRefine((value, context) => {
+  if (value.endsOn && value.startsOn > value.endsOn) context.addIssue({ code: z.ZodIssueCode.custom, path: ['endsOn'], message: 'La fecha final no puede ser anterior a la inicial' });
+  if (value.kind === 'package' && !value.cycleDays) context.addIssue({ code: z.ZodIssueCode.custom, path: ['cycleDays'], message: 'Un paquete requiere días de ciclo' });
+  if (value.kind !== 'package' && value.cycleDays != null) context.addIssue({ code: z.ZodIssueCode.custom, path: ['cycleDays'], message: 'Los cobros mensuales o a crédito no usan días de ciclo' });
+});
+const billingSubscriptionPatch = z.object({
+  price: z.coerce.number().positive().max(100000).optional(),
+  startsOn: z.string().date().optional(),
+  endsOn: z.string().date().nullable().optional(),
+  cycleDays: z.coerce.number().int().min(1).max(366).nullable().optional(),
+  sessionsReference: z.coerce.number().int().positive().max(1000).nullable().optional()
+});
+
+function dayBefore(date: string): string {
+  const value = new Date(`${date}T12:00:00Z`);
+  value.setUTCDate(value.getUTCDate() - 1);
+  return value.toISOString().slice(0, 10);
+}
+
+function dateOnly(value: unknown): string {
+  return value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
+}
+
+function billingSubscriptionValue(row: Record<string, any>) {
+  return {
+    id: row.id,
+    beneficiaryClientId: row.beneficiary_client_id,
+    beneficiaryName: row.beneficiary_name,
+    payerClientId: row.payer_client_id,
+    payerName: row.payer_name,
+    kind: row.kind,
+    cycleDays: row.cycle_days == null ? null : Number(row.cycle_days),
+    sessionsReference: row.sessions_reference == null ? null : Number(row.sessions_reference),
+    startsOn: dateOnly(row.starts_on),
+    endsOn: row.ends_on ? dateOnly(row.ends_on) : null,
+    price: Number(row.price),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+async function auditBillingSubscription(transaction: TransactionSql, request: FastifyRequest, auth: AuthUser, action: string, id: string, previous: unknown, next: unknown) {
+  await transaction`
+    INSERT INTO audit_log (user_id, user_email, action, route, target_id, detail, ip)
+    VALUES (${auth.sub}, ${auth.email || null}, ${action}, ${request.routeOptions?.url || request.url}, ${id},
+      ${transaction.json({ previous: previous as any, next: next as any })}, ${request.ip || null})
+  `;
+}
+
+async function assertBillingClients(transaction: TransactionSql, ownerId: string, beneficiaryId: string, payerId: string) {
+  const clients = await transaction`
+    SELECT id, full_name, billing_responsible_client_id, billing_model, payment_mode,
+      standard_price, credit_session_price, billing_cutoff_day, monthly_session_target,
+      plan_id, created_at
+    FROM clients WHERE owner_id = ${ownerId} AND (id = ${beneficiaryId} OR id = ${payerId})
+  `;
+  const beneficiary = clients.find(client => client.id === beneficiaryId);
+  const payer = clients.find(client => client.id === payerId);
+  if (!beneficiary || !payer) return { beneficiary: null, payer: null };
+  // La línea declarativa permite que un beneficiario tenga una línea propia y
+  // otra familiar. Sólo se prohíbe encadenar a un pagador que ya depende de
+  // otro cliente; no se toca billing_responsible_client_id.
+  if (payerId !== beneficiaryId && payer.billing_responsible_client_id) {
+    sessionStateConflict('El pagador seleccionado depende de otro cliente y no puede encadenarse');
+  }
+  return { beneficiary, payer };
+}
+
+async function assertSubscriptionNoOverlap(transaction: TransactionSql, ownerId: string, input: { beneficiaryClientId: string; payerClientId: string; kind: string; startsOn: string; endsOn?: string | null }, excludeId?: string) {
+  const [overlap] = await transaction`
+    SELECT id FROM billing_subscriptions
+    WHERE owner_id = ${ownerId}
+      AND beneficiary_client_id = ${input.beneficiaryClientId}
+      AND payer_client_id = ${input.payerClientId}
+      AND kind = ${input.kind}
+      AND (${excludeId || null}::uuid IS NULL OR id <> ${excludeId || null}::uuid)
+      AND starts_on <= COALESCE(${input.endsOn || null}::date, '9999-12-31'::date)
+      AND COALESCE(ends_on, '9999-12-31'::date) >= ${input.startsOn}::date
+    FOR UPDATE
+  `;
+  if (overlap) sessionStateConflict('Ya existe un cobro del mismo tipo para ese beneficiario y pagador en ese período');
+}
+
+app.get('/api/clients/:id/billing-subscriptions', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const clientId = z.string().uuid().parse((request.params as { id: string }).id);
+  const [focus] = await sql`
+    SELECT c.id, c.full_name, c.billing_responsible_client_id, c.billing_model, c.payment_mode,
+      c.standard_price, c.credit_session_price, c.billing_cutoff_day, c.monthly_session_target,
+      c.plan_id, c.created_at
+    FROM clients c WHERE c.id = ${clientId} AND c.owner_id = ${auth.sub}
+  `;
+  if (!focus) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  const rows = await sql`
+    SELECT bs.*, b.full_name AS beneficiary_name, p.full_name AS payer_name
+    FROM billing_subscriptions bs
+    JOIN clients b ON b.id = bs.beneficiary_client_id
+    JOIN clients p ON p.id = bs.payer_client_id
+    WHERE bs.owner_id = ${auth.sub} AND (bs.beneficiary_client_id = ${clientId} OR bs.payer_client_id = ${clientId})
+    ORDER BY bs.starts_on DESC, bs.created_at DESC
+  ` as unknown as Record<string, any>[];
+  const lines = rows.map(billingSubscriptionValue);
+  const active = rows.filter(row => !row.ends_on || dateOnly(row.ends_on) >= new Date().toISOString().slice(0, 10));
+  const payerActive = active.filter(row => row.payer_client_id === clientId);
+  const breakdown = payerActive.map(row => ({ beneficiaryClientId: row.beneficiary_client_id, beneficiaryName: row.beneficiary_name, amount: Number(row.price), kind: row.kind }));
+  const candidates = await sql`
+    SELECT c.id, c.full_name, c.billing_responsible_client_id, c.billing_model, c.payment_mode,
+      c.standard_price, c.credit_session_price, c.billing_cutoff_day, c.monthly_session_target,
+      c.plan_id, c.created_at, p.validity_days, p.sessions_included
+    FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id
+    WHERE c.owner_id = ${auth.sub} AND (c.id = ${clientId} OR c.billing_responsible_client_id = ${clientId})
+    ORDER BY c.id = ${clientId} DESC, c.full_name
+  ` as unknown as Record<string, any>[];
+  const proposal = candidates.flatMap(candidate => {
+    const kind = candidate.billing_model === 'package' ? 'package' : candidate.payment_mode === 'no_anticipado' ? 'credit' : 'monthly';
+    const payerId = candidate.billing_responsible_client_id || candidate.id;
+    const hasLine = rows.some(row => row.beneficiary_client_id === candidate.id && row.payer_client_id === payerId && row.kind === kind && (!row.ends_on || dateOnly(row.ends_on) >= new Date().toISOString().slice(0, 10)));
+    if (hasLine) return [];
+    return [{
+      beneficiaryClientId: candidate.id, beneficiaryName: candidate.full_name, payerClientId: payerId,
+      payerName: payerId === clientId ? focus.full_name : candidate.full_name, kind,
+      cycleDays: kind === 'package' ? Number(candidate.validity_days || 35) : null,
+      sessionsReference: Number(candidate.monthly_session_target || candidate.sessions_included || 0) || null,
+      startsOn: dateOnly(candidate.created_at), endsOn: null,
+      price: Number(kind === 'credit' ? candidate.credit_session_price || 25 : candidate.standard_price || 0)
+    }];
+  });
+  return { client: { id: focus.id, name: focus.full_name }, lines, proposal, summary: { payerId: clientId, payerName: focus.full_name, totalForPayer: payerActive.reduce((sum, row) => sum + Number(row.price), 0), breakdown } };
+});
+
+app.post('/api/clients/:id/billing-subscriptions', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const routeClientId = z.string().uuid().parse((request.params as { id: string }).id);
+  const parsed = billingSubscriptionInput.parse(request.body);
+  const beneficiaryClientId = parsed.beneficiaryClientId || routeClientId;
+  const payerClientId = parsed.payerClientId || beneficiaryClientId;
+  const created = await sql.begin(async transaction => {
+    const { beneficiary, payer } = await assertBillingClients(transaction, auth.sub, beneficiaryClientId, payerClientId);
+    if (!beneficiary || !payer) return null;
+    await assertSubscriptionNoOverlap(transaction, auth.sub, { beneficiaryClientId, payerClientId, kind: parsed.kind, startsOn: parsed.startsOn, endsOn: parsed.endsOn });
+    const [row] = await transaction`
+      INSERT INTO billing_subscriptions (owner_id, beneficiary_client_id, payer_client_id, kind, cycle_days, sessions_reference, starts_on, ends_on, price)
+      VALUES (${auth.sub}, ${beneficiaryClientId}, ${payerClientId}, ${parsed.kind}, ${parsed.cycleDays ?? null}, ${parsed.sessionsReference ?? null}, ${parsed.startsOn}, ${parsed.endsOn || null}, ${parsed.price})
+      RETURNING *
+    `;
+    await auditBillingSubscription(transaction, request, auth, 'CREATE_BILLING_SUBSCRIPTION', row.id, null, billingSubscriptionValue({ ...row, beneficiary_name: beneficiary.full_name, payer_name: payer.full_name }));
+    return row;
+  });
+  if (!created) return reply.code(404).send({ error: 'Cliente beneficiario o pagador no encontrado' });
+  const [result] = await sql`SELECT bs.*, b.full_name AS beneficiary_name, p.full_name AS payer_name FROM billing_subscriptions bs JOIN clients b ON b.id = bs.beneficiary_client_id JOIN clients p ON p.id = bs.payer_client_id WHERE bs.id = ${created.id}`;
+  return reply.code(201).send(billingSubscriptionValue(result));
+});
+
+app.patch('/api/billing-subscriptions/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = billingSubscriptionPatch.parse(request.body);
+  const updated = await sql.begin(async transaction => {
+    const [current] = await transaction`
+      SELECT bs.*, b.full_name AS beneficiary_name, p.full_name AS payer_name
+      FROM billing_subscriptions bs JOIN clients b ON b.id = bs.beneficiary_client_id JOIN clients p ON p.id = bs.payer_client_id
+      WHERE bs.id = ${id} AND bs.owner_id = ${auth.sub} FOR UPDATE
+    ` as unknown as Record<string, any>[];
+    if (!current) return null;
+    const oldValue = billingSubscriptionValue(current);
+    const nextStart = input.startsOn || dateOnly(current.starts_on);
+    const nextEnd = input.endsOn === undefined ? (current.ends_on ? dateOnly(current.ends_on) : null) : input.endsOn;
+    if (nextEnd && nextStart > nextEnd) sessionStateConflict('La fecha final no puede ser anterior a la inicial');
+    const amountChanged = input.price !== undefined && Number(input.price) !== Number(current.price);
+    if (amountChanged) {
+      if (!input.startsOn || input.startsOn <= dateOnly(current.starts_on)) sessionStateConflict('Un cambio de monto debe comenzar después de la línea histórica');
+      const oldEnd = dayBefore(input.startsOn);
+      await transaction`UPDATE billing_subscriptions SET ends_on = ${oldEnd}, updated_at = now() WHERE id = ${id}`;
+      await assertSubscriptionNoOverlap(transaction, auth.sub, { beneficiaryClientId: current.beneficiary_client_id, payerClientId: current.payer_client_id, kind: current.kind, startsOn: input.startsOn, endsOn: nextEnd }, id);
+      const [replacement] = await transaction`
+        INSERT INTO billing_subscriptions (owner_id, beneficiary_client_id, payer_client_id, kind, cycle_days, sessions_reference, starts_on, ends_on, price)
+        VALUES (${auth.sub}, ${current.beneficiary_client_id}, ${current.payer_client_id}, ${current.kind}, ${input.cycleDays ?? current.cycle_days}, ${input.sessionsReference ?? current.sessions_reference}, ${input.startsOn}, ${nextEnd}, ${input.price ?? current.price}) RETURNING *
+      `;
+      await auditBillingSubscription(transaction, request, auth, 'REPLACE_BILLING_SUBSCRIPTION', id, oldValue, billingSubscriptionValue({ ...replacement, beneficiary_name: current.beneficiary_name, payer_name: current.payer_name }));
+      return replacement;
+    }
+    if (input.startsOn && input.startsOn !== dateOnly(current.starts_on)) sessionStateConflict('La fecha inicial histórica no se puede editar; cierre la línea y abra otra');
+    if (input.cycleDays !== undefined && current.kind !== 'package' && input.cycleDays !== null) sessionStateConflict('Sólo los paquetes usan días de ciclo');
+    await assertSubscriptionNoOverlap(transaction, auth.sub, { beneficiaryClientId: current.beneficiary_client_id, payerClientId: current.payer_client_id, kind: current.kind, startsOn: nextStart, endsOn: nextEnd }, id);
+    const [row] = await transaction`
+      UPDATE billing_subscriptions SET ends_on = ${nextEnd}, cycle_days = ${input.cycleDays === undefined ? current.cycle_days : input.cycleDays}, sessions_reference = ${input.sessionsReference === undefined ? current.sessions_reference : input.sessionsReference}, updated_at = now()
+      WHERE id = ${id} RETURNING *
+    `;
+    await auditBillingSubscription(transaction, request, auth, nextEnd ? 'CLOSE_BILLING_SUBSCRIPTION' : 'UPDATE_BILLING_SUBSCRIPTION', id, oldValue, billingSubscriptionValue({ ...row, beneficiary_name: current.beneficiary_name, payer_name: current.payer_name }));
+    return row;
+  });
+  if (!updated) return reply.code(404).send({ error: 'Línea de cobro no encontrada' });
+  const [result] = await sql`SELECT bs.*, b.full_name AS beneficiary_name, p.full_name AS payer_name FROM billing_subscriptions bs JOIN clients b ON b.id = bs.beneficiary_client_id JOIN clients p ON p.id = bs.payer_client_id WHERE bs.id = ${updated.id}`;
+  return billingSubscriptionValue(result);
+});
+
 // planId elige un plan existente; model 'single' pasa al cliente a clase suelta
 // directo, sin necesidad de crear un plan de sesión suelta.
 const clientPlanSchema = z.object({
