@@ -4,7 +4,7 @@
 // (billing_subscriptions), con las reglas decididas por Joel:
 //   * Solo CONTINÚA: emite el ciclo siguiente al último facturado de cada pagador y modalidad (D-15).
 //     Nunca emite un ciclo para quien no tiene factura previa ("sin referencia": se crea a mano y salta
-//     una alerta) ni un ciclo atrasado más de RETRO_DAYS días (se avisa: "se crea a mano").
+//     una alerta) ni un ciclo atrasado (se avisa: "se crea a mano"): solo se emite EL MISMO DÍA que toca (RETRO_DAYS = 0, decisión de Joel 01-10-2026).
 //   * Mensual y paquete son ANTICIPADOS: la factura sale el día en que empieza el ciclo y vence ese día (O-2).
 //     El paquete usa su propia duración en días (Sara Djamous: 35).
 //   * El CRÉDITO (Julio) es POSTPAGO: al cerrar el ciclo cobra las clases realmente impartidas (más las
@@ -23,7 +23,8 @@ import type { TransactionSql } from 'postgres';
 import { sql } from './db.js';
 import { fechaDeNegocioPanama } from './panama-date.js';
 
-export const RETRO_DAYS = 3;
+// Solo el día que toca (Joel, 01-10-2026): sin facturas "de rezago". El bucle corre cada hora, así que hay 24 intentos ese día; si aun así no salió, se avisa y se crea a mano.
+export const RETRO_DAYS = 0;
 
 type Tx = TransactionSql<Record<string, unknown>>;
 type Kind = 'mensual' | 'credito' | 'paquete';
@@ -141,7 +142,7 @@ export async function planBillingGeneration(tx: Tx, ownerId: string, today = fec
       let status: PlannedInvoice['status'] = due <= today ? 'emitir' : 'programada';
       let reason: string | null = null;
       if (status === 'emitir' && daysBetween(due, today) > RETRO_DAYS) {
-        status = 'omitida'; reason = `El ciclo ${kind === 'credito' ? 'cerró' : 'empezó'} hace ${daysBetween(due, today)} días: no se emite sola (límite ${RETRO_DAYS}); se crea a mano`;
+        status = 'omitida'; reason = `El ciclo ${kind === 'credito' ? 'cerró' : 'empezó'} hace ${daysBetween(due, today)} ${daysBetween(due, today) === 1 ? 'día' : 'días'}: las facturas automáticas solo se emiten el mismo día del corte; se crea a mano`;
       }
       const invoiceLines: PlannedLine[] = [];
       for (const line of active) {

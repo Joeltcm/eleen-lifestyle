@@ -93,11 +93,14 @@ describe('mensualidad anticipada y familia', () => {
     assert.equal((await db`SELECT count(*)::int AS n FROM billing_invoices`)[0].n, n);
   });
 
-  test('límite de retroactivos: hasta 3 días tras el corte se emite; a los 4 no, y se avisa', async () => {
-    assert.equal(deRiccardo(await plan('2026-10-18')).find(i => i.cycleStart === '2026-10-15').status, 'emitir');
-    const tarde = deRiccardo(await plan('2026-10-19')).find(i => i.cycleStart === '2026-10-15');
+  test('solo se emite el MISMO DÍA del corte: al día siguiente ya no se emite sola y se avisa que se crea a mano', async () => {
+    assert.equal(deRiccardo(await plan('2026-10-14', 5)).find(i => i.cycleStart === '2026-10-15').status, 'programada', 'el día antes todavía no toca');
+    assert.equal(deRiccardo(await plan('2026-10-15')).find(i => i.cycleStart === '2026-10-15').status, 'emitir');
+    const tarde = deRiccardo(await plan('2026-10-16')).find(i => i.cycleStart === '2026-10-15');
     assert.equal(tarde.status, 'omitida');
-    assert.match(tarde.reason, /hace 4 días/);
+    assert.match(tarde.reason, /hace 1 día: las facturas automáticas solo se emiten el mismo día del corte/);
+    const mas = deRiccardo(await plan('2026-10-19')).find(i => i.cycleStart === '2026-10-15');
+    assert.match(mas.reason, /hace 4 días/);
   });
 
   test('el horizonte muestra los próximos ciclos como programados, sin emitir', async () => {
