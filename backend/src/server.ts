@@ -2314,9 +2314,17 @@ app.get('/api/clients/:id/billing-subscriptions', { preHandler: requireStaff }, 
   ` as unknown as Record<string, any>[];
   const hoy = fechaDeNegocioPanama();
   const lines = rows.map(billingSubscriptionValue);
+  // Vigente HOY = ya empezó y no ha terminado. Las líneas que empiezan después (un monto nuevo del próximo corte) no suman al total de hoy; se muestran aparte como "próximo".
+  const activeOn = (row: Record<string, any>, day: string) => dateOnly(row.starts_on) <= day && (!row.ends_on || dateOnly(row.ends_on) >= day);
   const active = rows.filter(row => !row.ends_on || dateOnly(row.ends_on) >= hoy);
-  const payerActive = active.filter(row => row.payer_client_id === clientId);
+  const payerActive = rows.filter(row => row.payer_client_id === clientId && activeOn(row, hoy));
   const breakdown = payerActive.map(row => ({ beneficiaryClientId: row.beneficiary_client_id, beneficiaryName: row.beneficiary_name, amount: Number(row.price), kind: row.kind }));
+  const nextStart = rows.filter(row => row.payer_client_id === clientId && dateOnly(row.starts_on) > hoy).map(row => dateOnly(row.starts_on)).sort()[0] ?? null;
+  const upcoming = nextStart ? (() => {
+    const lines = rows.filter(row => row.payer_client_id === clientId && activeOn(row, nextStart));
+    return { startsOn: nextStart, totalForPayer: lines.reduce((sum, row) => sum + Number(row.price), 0), breakdown: lines.map(row => ({ beneficiaryClientId: row.beneficiary_client_id, beneficiaryName: row.beneficiary_name, amount: Number(row.price), kind: row.kind })) };
+  })() : null;
+  const payersOfFocus = [...new Set(rows.filter(row => row.beneficiary_client_id === clientId && row.payer_client_id !== clientId && activeOn(row, hoy)).map(row => row.payer_name as string))];
   const candidates = await sql`
     SELECT c.id, c.full_name, c.billing_responsible_client_id, c.billing_model, c.payment_mode,
       c.standard_price, c.credit_session_price, c.billing_cutoff_day, c.monthly_session_target,
@@ -2340,7 +2348,7 @@ app.get('/api/clients/:id/billing-subscriptions', { preHandler: requireStaff }, 
       autoGenerate: true
     }];
   });
-  return { client: { id: focus.id, name: focus.full_name }, lines, proposal, summary: { payerId: clientId, payerName: focus.full_name, totalForPayer: payerActive.reduce((sum, row) => sum + Number(row.price), 0), breakdown } };
+  return { client: { id: focus.id, name: focus.full_name }, lines, proposal, summary: { payerId: clientId, payerName: focus.full_name, totalForPayer: payerActive.reduce((sum, row) => sum + Number(row.price), 0), breakdown, upcoming, paidBy: payersOfFocus } };
 });
 
 app.post('/api/clients/:id/billing-subscriptions', { preHandler: requireStaff }, async (request, reply) => {
