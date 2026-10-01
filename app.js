@@ -1,4 +1,4 @@
-const APP_VERSION = '237';
+const APP_VERSION = '238';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -4433,6 +4433,58 @@ function newBillingImportConfirm(title, message, word, action, onConfirm) {
     try { await onConfirm(); modal.close(); } catch (error) { toast(error.message, true); }
   };
 }
+// ── Corte (1B-6) ─────────────────────────────────────────────────────────────
+// Prepara el paso del generador anterior al nuevo: estado operativo, lista de comprobación, planes de
+// facturación propuestos, lo que emitiría el generador nuevo y la guía del corte. Aquí NO se apaga ni se
+// enciende nada: los interruptores viven en Railway y los acciona Joel en el momento.
+const newCutoverKinds = { monthly: 'Mensualidad', credit: 'A crédito', package: 'Paquete', mensual: 'Mensualidad', credito: 'A crédito', paquete: 'Paquete' };
+const newCutoverPlanStatus = { emitir: 'Se emite hoy', programada: 'Programada', omitida: 'Omitida (se crea a mano)', sin_cargo: 'Sin cargo', sin_referencia: 'Sin factura previa' };
+const newCutoverEngineText = {
+  legacy: 'El generador del sistema anterior está activo y el nuevo apagado. Es la situación actual hasta el corte.',
+  shadow: 'El generador anterior escribe y el nuevo solo calcula (modo sombra).',
+  maintenance: 'Mantenimiento: ningún generador escribe. Es el momento de aprobar y aplicar la carga.',
+  new: 'El generador nuevo está activo y el anterior apagado: el corte ya se hizo.'
+};
+function newCutoverItemText(item) {
+  return Object.entries(item).map(([key, value]) => {
+    if (typeof value === 'number') return /price|amount/i.test(key) ? money.format(value) : String(value);
+    if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return fechaCorta(value);
+    return newCutoverKinds[value] || String(value ?? '');
+  }).filter(Boolean).join(' · ');
+}
+
+async function newBillingCutover() {
+  const root = document.getElementById('corte-mount');
+  if (!root) return;
+  root.innerHTML = '<article class="card"><p class="empty">Cargando…</p></article>';
+  try {
+    const [readiness, plan, proposed] = await Promise.all([api('/api/billing/cutover/readiness'), api('/api/billing/generation/plan?horizon=35'), api('/api/billing/cutover/proposed-lines')]);
+    const engine = readiness.engine;
+    const icon = status => status === 'ok' ? '✓' : status === 'warn' ? '!' : '✗';
+    root.innerHTML = `<article class="card"><div class="card-head"><div><h3>Corte</h3><p>${readiness.ready ? 'Todo lo imprescindible está en orden' : 'Faltan cosas antes del corte'} · ${fechaCorta(readiness.today)}</p></div></div>
+      <p class="section-note">Aquí se prepara el paso del generador anterior al nuevo. Esta pantalla no apaga ni enciende nada: los interruptores están en Railway y los accionas tú, en el momento.</p>
+      <p class="eyebrow">1 · ESTADO OPERATIVO</p><p class="form-summary"><b>${escapeHtml(engine.state)}</b> · ${escapeHtml(newCutoverEngineText[engine.state] || engine.message)}${engine.conflict ? '<br><b>¡Conflicto de configuración!</b> Los dos generadores estaban activos; se dejaron apagados.' : ''}<br>Generador anterior: <b>${engine.legacyWrites ? 'activo' : 'apagado'}</b> · Generador nuevo: <b>${engine.newWrites ? 'activo' : engine.newComputes ? 'solo calcula' : 'apagado'}</b></p>
+      <p class="eyebrow" style="margin-top:14px">2 · LISTA DE COMPROBACIÓN</p>
+      <div class="new-billing-allocs">${readiness.checks.map(check => `<div class="new-billing-alloc" style="grid-template-columns:1fr"><div><b>${icon(check.status)} ${escapeHtml(check.label)}</b><small>${escapeHtml(check.detail)}</small>${check.items?.length ? `<small>${check.items.slice(0, 12).map(item => escapeHtml(newCutoverItemText(item))).join('<br>')}${check.items.length > 12 ? `<br>… y ${check.items.length - 12} más` : ''}</small>` : ''}</div></div>`).join('')}</div>
+      <p class="eyebrow" style="margin-top:14px">3 · PLANES DE FACTURACIÓN PROPUESTOS</p>
+      ${proposed.lines.length ? `<p class="section-note">Estos clientes activos con cobro todavía no tienen un plan de facturación. Se proponen leyendo su expediente actual (monto, pagador y corte); revisa y confirma. Lo que el expediente no puede expresar —por ejemplo el plan propio de Ernesto o el paquete de 35 días de Sara— se agrega a mano en su expediente.</p><div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Beneficiario</th><th>Pagador</th><th>Modalidad</th><th>Monto</th><th>Desde</th></tr></thead><tbody>${proposed.lines.map(line => `<tr><td data-label="Beneficiario">${escapeHtml(line.beneficiaryName)}</td><td data-label="Pagador">${escapeHtml(line.payerName)}</td><td data-label="Modalidad">${escapeHtml(newCutoverKinds[line.kind] || line.kind)}${line.cycleDays ? ` · ${line.cycleDays} días` : ''}</td><td data-label="Monto">${money.format(line.price)}${line.kind === 'credit' ? ' por clase' : ''}</td><td data-label="Desde">${fechaCorta(line.startsOn)}</td></tr>`).join('')}</tbody></table></div><div class="subpanel-toolbar"><button class="primary" type="button" id="new-cutover-create">Crear los ${proposed.lines.length} planes propuestos</button></div>` : '<p class="empty">No hay planes pendientes por proponer.</p>'}
+      <p class="eyebrow" style="margin-top:14px">4 · LO QUE EMITIRÍA EL GENERADOR NUEVO (PRÓXIMOS ${plan.horizon} DÍAS)</p>
+      ${plan.plan.length ? `<div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Emisión</th><th>Pagador</th><th>Modalidad</th><th>Ciclo</th><th>Líneas</th><th>Total</th><th>Estado</th></tr></thead><tbody>${plan.plan.map(item => `<tr><td data-label="Emisión">${item.status === 'sin_referencia' ? '—' : fechaCorta(item.kind === 'credito' ? (item.cycleEnd && addDaysIso(item.cycleEnd, 1)) : item.cycleStart)}</td><td data-label="Pagador">${escapeHtml(item.payerName)}</td><td data-label="Modalidad">${escapeHtml(newCutoverKinds[item.kind] || item.kind)}</td><td data-label="Ciclo">${item.status === 'sin_referencia' ? '—' : `${fechaCorta(item.cycleStart)} → ${fechaCorta(item.cycleEnd)}`}</td><td data-label="Líneas">${item.lines.map(line => `${escapeHtml(line.beneficiaryName)}: ${money.format(line.amount)}`).join('<br>') || '—'}</td><td data-label="Total">${money.format(item.total)}</td><td data-label="Estado">${escapeHtml(newCutoverPlanStatus[item.status] || item.status)}${item.reason ? `<br><small>${escapeHtml(item.reason)}</small>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">El generador nuevo no tiene nada que emitir en este período.</p>'}
+      <div class="subpanel-toolbar"><button class="secondary" type="button" id="new-cutover-run"${engine.newWrites ? '' : ' disabled'}>Generar ahora lo que toca hoy</button></div>${engine.newWrites ? '' : '<p class="section-note">El generador nuevo solo escribe cuando el corte lo activa; hasta entonces este plan es solo una vista previa.</p>'}
+      <p class="eyebrow" style="margin-top:14px">5 · GUÍA DEL CORTE</p>
+      <ol class="section-note" style="padding-left:20px"><li>Comprueba que la lista de arriba no tenga ✗ y que entiendes cada !.</li><li>Actualiza la lista de la Carga inicial con lo que el sistema anterior emitió hasta hoy y genera una vista previa nueva: debe dar 0 por revisar.</li><li>Confirma que hay un respaldo reciente de la base (el respaldo diario o uno manual).</li><li>En Railway, servicio de la API → Variables: pon <code>LEGACY_BILLING_GENERATION=off</code>. El servicio se reinicia y el estado pasa a mantenimiento.</li><li>En Carga inicial: Aprobar y Aplicar la carga. Revisa Facturas (nuevo) y Cobros (nuevo) contra tu estado de cuenta.</li><li>En Railway: <code>NEW_BILLING_GENERATION=on</code>. El estado pasa a <b>new</b> y el generador nuevo emite desde el siguiente corte.</li><li>Reversa: antes del paso 6 se puede revertir la carga; para volver al sistema anterior, <code>LEGACY_BILLING_GENERATION=on</code> y <code>NEW_BILLING_GENERATION=off</code>.</li></ol></article>`;
+    const create = document.getElementById('new-cutover-create');
+    if (create) create.onclick = () => newBillingImportConfirm('Crear los planes propuestos', `Se crearán ${proposed.lines.length} planes de facturación leídos de los expedientes actuales. No emiten facturas por sí solos: solo declaran el acuerdo para el generador nuevo.`, 'CREAR', 'Crear planes', async () => {
+      const result = await api('/api/billing/cutover/proposed-lines/apply', { method: 'POST', body: { confirm: true } }); toast(`${result.count} planes creados`); newBillingCutover();
+    });
+    const run = document.getElementById('new-cutover-run');
+    if (run && engine.newWrites) run.onclick = async () => {
+      run.disabled = true;
+      try { const result = await api('/api/billing/generation/run', { method: 'POST', body: {} }); toast(`${result.created.length} factura(s) generada(s)`); newBillingCutover(); } catch (error) { toast(error.message, true); run.disabled = false; }
+    };
+  } catch (error) { root.innerHTML = `<article class="card"><p class="empty">${escapeHtml(error.message)}</p></article>`; }
+}
+function addDaysIso(iso, days) { const base = new Date(`${iso}T12:00:00Z`); base.setUTCDate(base.getUTCDate() + days); return base.toISOString().slice(0, 10); }
 // Sub-pestañas del área financiera: Cobros / Finanzas / Planes / Gastos.
 // Cada dataset en su propia pantalla, para no amontonar todo en una sola página
 // —sobre todo en el teléfono—. Finanzas y Gastos se pintan al abrir su pestaña.
@@ -4442,6 +4494,7 @@ function activarSubtab(nombre) {
   if (nombre === 'facturas-nuevo') newBillingInvoices();
   if (nombre === 'cobros-nuevo') newBillingPayments();
   if (nombre === 'carga-inicial') newBillingImport();
+  if (nombre === 'corte') newBillingCutover();
   if (nombre === 'finanzas') financeDashboard();
   if (nombre === 'gastos') expensesManager();
 }

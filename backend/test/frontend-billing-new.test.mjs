@@ -53,3 +53,15 @@ test('la pestaña Carga inicial existe, confirma con una palabra y muestra fecha
   assert.match(app, /function fechaHoraPanama/);
   assert.doesNotMatch(app, /toLocaleString\('es-PA'[^)]*\)\.replace\(\/\\\/\/g/);
 });
+
+test('la pestaña Corte existe, no enciende ni apaga nada y explica los interruptores de Railway', async () => {
+  const html = await leer('index.html');
+  assert.match(html, /data-subtab="corte">Corte</);
+  assert.match(html, /id="subpanel-corte"/);
+  const app = await leer('app.js');
+  assert.match(app, /nombre === 'corte'\) newBillingCutover\(\)/);
+  assert.match(app, /LEGACY_BILLING_GENERATION=off/);
+  assert.match(app, /NEW_BILLING_GENERATION=on/);
+  assert.match(app, /\/api\/billing\/cutover\/readiness/);
+  assert.match(app, /Crear los \$\{proposed\.lines\.length\} planes propuestos/);
+});

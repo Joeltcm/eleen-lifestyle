@@ -18,6 +18,7 @@ import { routineSuggestionsReady, suggestRoutine } from './routine-suggestions.j
 import { accountStatementPdf, accountsReceivablePdf, billingInvoicePdf, compliancePdf, invoicePdf, monthlyFinancePdf } from './billing-reports.js';
 import { fechaDeNegocioPanama, fechaPanamaDiasAtras } from './panama-date.js';
 import { resolveBillingEngine } from './billing-engine.js';
+import { planBillingGeneration, runBillingGeneration } from './billing-generator.js';
 import { DEFAULT_IMPORT_MANIFEST, applyBatch, approveBatch, createPreviewBatch, getBatch, listBatches, reverseBatch, type ImportManifest } from './billing-import.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
@@ -1211,6 +1212,150 @@ app.post('/api/billing/imports/:id/reverse', { preHandler: requireStaff }, async
   const id = z.string().uuid().parse((request.params as { id: string }).id);
   const { reason } = billingReasonInput.parse(request.body);
   return reverseBatch(auth.sub, auth.sub, id, reason);
+});
+
+// ── Generador nuevo y preparación del corte (1B-6) ───────────────────────────
+// El generador nuevo emite las facturas recurrentes desde los planes de facturación del expediente
+// (billing-generator.ts). Solo ESCRIBE si el estado operativo es `new`; en cualquier otro estado el plan
+// se puede consultar (modo sombra) pero no crea nada.
+async function runNewBillingGenerationForAll() {
+  const owners = await sql`SELECT DISTINCT owner_id::text AS owner_id FROM billing_subscriptions`;
+  for (const owner of owners) {
+    const result = await runBillingGeneration(owner.owner_id as string);
+    if (result.created.length) app.log.info({ owner: owner.owner_id, created: result.created.map(item => item.code) }, 'Facturas generadas por el generador nuevo');
+  }
+}
+
+app.get('/api/billing/generation/plan', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const { horizon } = z.object({ horizon: z.coerce.number().int().min(0).max(120).default(35) }).parse(request.query);
+  const today = fechaDeNegocioPanama();
+  const plan = await sql.begin('isolation level repeatable read read only', tx => planBillingGeneration(tx as any, auth.sub, today, horizon));
+  const count = (status: string) => plan.filter(item => item.status === status).length;
+  return {
+    today, horizon, engine: billingEngine, plan,
+    summary: { toIssueToday: count('emitir'), scheduled: count('programada'), omitted: count('omitida'), noCharge: count('sin_cargo'), noReference: count('sin_referencia'),
+      totalToIssueToday: plan.filter(item => item.status === 'emitir').reduce((sum, item) => sum + centavos(item.total), 0) / 100 }
+  };
+});
+
+app.post('/api/billing/generation/run', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  if (!billingEngine.newWrites) {
+    throw Object.assign(new Error(`El generador nuevo no está activo (estado ${billingEngine.state}): solo escribe cuando el corte lo activa`), { statusCode: 409 });
+  }
+  return runBillingGeneration(auth.sub);
+});
+
+// Planes de facturación PROPUESTOS para quien aún no tiene ninguno, leídos del expediente actual (precio, pagador, corte).
+// No escribe: Joel los revisa y confirma. Lo que el expediente actual no puede expresar (un segundo plan propio de
+// Ernesto, el paquete de 35 días de Sara si no está declarado) se agrega a mano con "Agregar concepto a facturar".
+async function proposedBillingLines(ownerId: string, today: string) {
+  const rows = await sql`
+    SELECT c.id::text AS id, c.full_name, c.billing_responsible_client_id::text AS responsible,
+      (SELECT r.full_name FROM clients r WHERE r.id = c.billing_responsible_client_id) AS responsible_name,
+      c.billing_model, c.payment_mode, c.standard_price::text AS standard_price, c.credit_session_price::text AS credit_session_price,
+      c.billing_cutoff_day, c.monthly_session_target, p.sessions_included, p.validity_days
+    FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id
+    WHERE c.owner_id = ${ownerId} AND c.status = 'active' AND c.billing_model IN ('monthly', 'package')
+      AND (c.standard_price > 0 OR c.payment_mode = 'no_anticipado')
+      AND NOT EXISTS (SELECT 1 FROM billing_subscriptions s WHERE s.beneficiary_client_id = c.id AND s.starts_on <= ${today}::date AND (s.ends_on IS NULL OR s.ends_on >= ${today}::date))
+    ORDER BY c.full_name`;
+  return rows.map(row => {
+    const kind = row.billing_model === 'package' ? 'package' : row.payment_mode === 'no_anticipado' ? 'credit' : 'monthly';
+    const cut = Number(row.billing_cutoff_day) || 1;
+    return {
+      beneficiaryClientId: row.id as string, beneficiaryName: row.full_name as string,
+      payerClientId: (row.responsible || row.id) as string, payerName: (row.responsible_name || row.full_name) as string,
+      kind, cycleDays: kind === 'package' ? Number(row.validity_days || 35) : null,
+      sessionsReference: Number(row.monthly_session_target || row.sessions_included || 0) || null,
+      startsOn: cicloDelCorte(today, cut).inicio,
+      price: Number(kind === 'credit' ? row.credit_session_price || 25 : row.standard_price || 0)
+    };
+  }).filter(line => line.price > 0);
+}
+
+app.get('/api/billing/cutover/proposed-lines', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  return { lines: await proposedBillingLines(auth.sub, fechaDeNegocioPanama()) };
+});
+
+app.post('/api/billing/cutover/proposed-lines/apply', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  z.object({ confirm: z.literal(true) }).parse(request.body);
+  const today = fechaDeNegocioPanama();
+  const lines = await proposedBillingLines(auth.sub, today);
+  const created = await sql.begin(async transaction => {
+    const made: { id: string; beneficiary: string; payer: string; kind: string; price: number }[] = [];
+    for (const line of lines) {
+      const { beneficiary, payer } = await assertBillingClients(transaction, auth.sub, line.beneficiaryClientId, line.payerClientId);
+      if (!beneficiary || !payer) continue;
+      await assertSubscriptionNoOverlap(transaction, auth.sub, { beneficiaryClientId: line.beneficiaryClientId, payerClientId: line.payerClientId, kind: line.kind, startsOn: line.startsOn, endsOn: null });
+      const [row] = await transaction`
+        INSERT INTO billing_subscriptions (owner_id, beneficiary_client_id, payer_client_id, kind, cycle_days, sessions_reference, starts_on, ends_on, price, auto_generate)
+        VALUES (${auth.sub}, ${line.beneficiaryClientId}, ${line.payerClientId}, ${line.kind}, ${line.cycleDays}, ${line.sessionsReference}, ${line.startsOn}, NULL, ${line.price}, true)
+        RETURNING *`;
+      await auditBillingSubscription(transaction, request, auth, 'CREATE_BILLING_SUBSCRIPTION', row.id, null, billingSubscriptionValue({ ...row, beneficiary_name: line.beneficiaryName, payer_name: line.payerName }));
+      made.push({ id: row.id as string, beneficiary: line.beneficiaryName, payer: line.payerName, kind: line.kind, price: line.price });
+    }
+    return made;
+  });
+  return reply.code(201).send({ created, count: created.length });
+});
+
+// Lista de comprobación antes del corte: qué falta para que apagar el generador viejo sea seguro.
+app.get('/api/billing/cutover/readiness', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const today = fechaDeNegocioPanama();
+  const checks: { key: string; label: string; status: 'ok' | 'warn' | 'fail'; detail: string; items?: Record<string, unknown>[] }[] = [];
+
+  const [batch] = await sql`SELECT id::text AS id, applied_at, totals FROM billing_import_batches WHERE owner_id = ${auth.sub} AND status = 'applied' ORDER BY applied_at DESC LIMIT 1`;
+  checks.push(batch
+    ? { key: 'import', label: 'La carga inicial está aplicada', status: 'ok', detail: `${(batch.totals as any)?.invoices ?? 0} facturas y ${(batch.totals as any)?.payments ?? 0} cobros cargados` }
+    : { key: 'import', label: 'La carga inicial está aplicada', status: 'fail', detail: 'Aún no se aplicó la carga inicial (Facturación → Carga inicial).' });
+
+  const missing = await sql`
+    SELECT c.id::text AS id, c.full_name AS name, c.standard_price::text AS price, c.payment_mode, c.billing_model
+    FROM clients c
+    WHERE c.owner_id = ${auth.sub} AND c.status = 'active' AND c.billing_model IN ('monthly', 'package')
+      AND (c.standard_price > 0 OR c.payment_mode = 'no_anticipado')
+      AND NOT EXISTS (SELECT 1 FROM billing_subscriptions s WHERE s.beneficiary_client_id = c.id AND s.starts_on <= ${today}::date AND (s.ends_on IS NULL OR s.ends_on >= ${today}::date))
+    ORDER BY c.full_name`;
+  checks.push(missing.length
+    ? { key: 'plans', label: 'Todos los clientes con cobro tienen su Plan de facturación', status: 'fail', detail: `${missing.length} cliente(s) activos con cobro no tienen plan de facturación declarado: sin él el generador nuevo no los facturaría.`,
+        items: missing.map(row => ({ name: row.name, price: Number(row.price), mode: row.payment_mode })) }
+    : { key: 'plans', label: 'Todos los clientes con cobro tienen su Plan de facturación', status: 'ok', detail: 'Todos tienen al menos un plan vigente.' });
+
+  const plan = await sql.begin('isolation level repeatable read read only', tx => planBillingGeneration(tx as any, auth.sub, today, 35));
+  const noRef = plan.filter(item => item.status === 'sin_referencia');
+  checks.push(noRef.length
+    ? { key: 'reference', label: 'Cada pagador tiene su factura de referencia', status: 'fail', detail: 'Estos pagadores tienen plan pero no tienen una factura previa de esa modalidad; el generador no emite la primera (se crea a mano, D-15).',
+        items: noRef.map(item => ({ payer: item.payerName, kind: item.kind })) }
+    : { key: 'reference', label: 'Cada pagador tiene su factura de referencia', status: 'ok', detail: 'Todos los pagadores con plan tienen una factura previa.' });
+  const omitted = plan.filter(item => item.status === 'omitida');
+  checks.push(omitted.length
+    ? { key: 'omitted', label: 'No hay ciclos atrasados sin emitir', status: 'warn', detail: 'Estos ciclos están más atrasados que el límite del generador: se crean a mano.',
+        items: omitted.map(item => ({ payer: item.payerName, kind: item.kind, cycleStart: item.cycleStart, reason: item.reason })) }
+    : { key: 'omitted', label: 'No hay ciclos atrasados sin emitir', status: 'ok', detail: 'Ninguno.' });
+
+  // Facturas del sistema anterior que siguen pendientes y NO se cargaron: quedan en el archivo.
+  const loaded = batch ? await sql`SELECT source_ids FROM billing_import_items WHERE batch_id = ${batch.id}` : [];
+  const loadedIds = new Set(loaded.flatMap(row => ((row.source_ids as any)?.invoices ?? []) as string[]));
+  const legacyPending = await sql`
+    SELECT i.id::text AS id, c.full_name AS client, i.concept, i.amount::text AS amount, i.due_on::text AS due_on
+    FROM invoices i JOIN clients c ON c.id = i.client_id
+    WHERE c.owner_id = ${auth.sub} AND i.status = 'pending' AND i.amount > 0 ORDER BY i.due_on, c.full_name`;
+  const notLoaded = legacyPending.filter(row => !loadedIds.has(row.id as string));
+  checks.push(notLoaded.length
+    ? { key: 'legacy-pending', label: 'Facturas pendientes del sistema anterior que no se cargaron', status: 'warn',
+        detail: `${notLoaded.length} factura(s) pendientes quedan solo en el archivo del sistema anterior: hay que cargarlas a mano o cobrarlas antes del corte.`,
+        items: notLoaded.map(row => ({ client: row.client, concept: row.concept, amount: Number(row.amount), dueOn: row.due_on })) }
+    : { key: 'legacy-pending', label: 'Facturas pendientes del sistema anterior que no se cargaron', status: 'ok', detail: 'No quedan pendientes fuera de la carga.' });
+
+  const summary = {
+    toIssueToday: plan.filter(item => item.status === 'emitir').length, scheduledIn35Days: plan.filter(item => item.status === 'programada').length
+  };
+  return { today, engine: billingEngine, ready: !checks.some(check => check.status === 'fail'), checks, summary };
 });
 
 // Diagnóstico del estado operativo (solo lectura): permite comprobar desde fuera
@@ -7002,6 +7147,9 @@ const reminderInterval = setInterval(() => dispatchReminders().catch(error => ap
 // `maintenance` y `new` no escribe, y con un conflicto de configuración tampoco.
 if (billingEngine.conflict) app.log.error({ billingEngine }, billingEngine.message);
 else app.log.info({ state: billingEngine.state }, 'Estado operativo de la facturación');
+// El generador nuevo solo escribe en el estado `new` (1B-6); en cualquier otro estado no corre.
+const firstNewBillingRun = setTimeout(() => { if (billingEngine.newWrites) runNewBillingGenerationForAll().catch(error => app.log.error(error)); }, 30_000);
+const newBillingInterval = setInterval(() => { if (billingEngine.newWrites) runNewBillingGenerationForAll().catch(error => app.log.error(error)); }, config.BILLING_INTERVAL_MINUTES * 60_000);
 const firstBillingRun = setTimeout(() => { if (billingEngine.legacyWrites) generateRecurringInvoices().catch(error => app.log.error(error)); }, 15_000);
 const billingInterval = setInterval(() => { if (billingEngine.legacyWrites) generateRecurringInvoices().catch(error => app.log.error(error)); }, config.BILLING_INTERVAL_MINUTES * 60_000);
 // Los intentos de acceso viejos no sirven para nada pasada la ventana; se
@@ -7078,6 +7226,8 @@ app.addHook('onClose', async () => {
   clearInterval(reminderInterval);
   clearTimeout(firstBillingRun);
   clearInterval(billingInterval);
+  clearTimeout(firstNewBillingRun);
+  clearInterval(newBillingInterval);
   await sql.end();
 });
 await app.listen({ port: config.PORT, host: '::' });

@@ -72,7 +72,7 @@ export const DEFAULT_IMPORT_MANIFEST: ImportManifest = {
     // Gila: el cobro NO está registrado todavía; Joel (J-058) pidió dejarlo abierto para confirmarlo con Eileen.
     { key: 'gila-2026-09', label: 'Gila Falic · 28-09 (pendiente: se confirma con Eileen)', payer: 'Gila Falic', kind: 'mensual', cycleStart: '2026-09-28', cycleEnd: '2026-10-28',
       lines: [{ beneficiary: 'Gila Falic', description: 'Mensualidad', amount: 240 }], allowWithoutEvidence: 'Cobro abierto: se confirma con Eileen (J-058). El sistema anterior no trae su factura ni su cobro.' },
-    { key: 'julio-2026-09', label: 'Julio Alvarez · crédito (31-08, 30-09]', payer: 'Julio Alvarez', kind: 'credito', cycleStart: '2026-08-31', cycleEnd: '2026-09-30', amountFrom: 'legacy',
+    { key: 'julio-2026-09', label: 'Julio Alvarez · crédito (31-08, 30-09]', payer: 'Julio Alvarez', kind: 'credito', cycleStart: '2026-08-31', cycleEnd: '2026-09-30', issuedOn: '2026-09-30', dueOn: '2026-09-30', amountFrom: 'legacy',
       lines: [{ beneficiary: 'Julio Alvarez', description: 'Sesiones cobrables del ciclo' }] }
   ],
   exclusions: [
