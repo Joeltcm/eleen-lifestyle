@@ -671,6 +671,11 @@ const billingInvoiceListQuery = z.object({
   status: z.enum(['all', 'abierta', 'pendiente', 'parcial', 'pagada', 'anulada', 'vencida']).default('all'),
   kind: z.enum(billingInvoiceKinds).optional(),
   payerId: z.string().uuid().optional(),
+  // Panel: cliente = pagador O beneficiario de alguna línea; mes = mes de emisión; corte = día de corte del pagador.
+  clientId: z.string().uuid().optional(),
+  month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional(),
+  cutDay: z.coerce.number().int().min(1).max(31).optional(),
+  details: z.enum(['1']).optional(),
   from: z.string().date().optional(),
   to: z.string().date().optional(),
   limit: z.coerce.number().int().min(1).max(500).default(200)
@@ -726,19 +731,54 @@ app.get('/api/billing/invoices', { preHandler: requireStaff }, async request => 
       AND ($4::uuid IS NULL OR i.payer_client_id = $4)
       AND ($5::date IS NULL OR i.issued_on >= $5)
       AND ($6::date IS NULL OR i.issued_on <= $6)
+      AND ($8::text IS NULL OR to_char(i.issued_on, 'YYYY-MM') = $8)
+      AND ($9::int IS NULL OR i.cut_day = $9)
+      AND ($10::uuid IS NULL OR i.payer_client_id = $10 OR EXISTS (SELECT 1 FROM billing_invoice_lines l0 WHERE l0.invoice_id = i.id AND l0.beneficiary_client_id = $10))
     ORDER BY i.number DESC LIMIT $7`,
-    [auth.sub, query.status, query.kind ?? null, query.payerId ?? null, query.from ?? null, query.to ?? null, query.limit]
+    [auth.sub, query.status, query.kind ?? null, query.payerId ?? null, query.from ?? null, query.to ?? null, query.limit, query.month ?? null, query.cutDay ?? null, query.clientId ?? null]
   ) as unknown as Record<string, any>[];
-  let invoices = rows.map(row => billingInvoiceValue(row, hoy));
+  let invoices: Record<string, any>[] = rows.map(row => billingInvoiceValue(row, hoy));
   if (query.status === 'vencida') invoices = invoices.filter(invoice => invoice.overdue);
   const open = invoices.filter(invoice => invoice.status !== 'anulada');
+  const summary: Record<string, unknown> = {
+    count: invoices.length,
+    total: desdeCentavos(open.reduce((sum, invoice) => sum + centavos(invoice.total), 0)),
+    balance: desdeCentavos(open.reduce((sum, invoice) => sum + centavos(invoice.balance), 0))
+  };
+  if (query.details !== '1') return { invoices, summary };
+
+  // Panel: líneas y cobros aplicados de cada factura, totales y los meses/cortes que existen (sin filtros).
+  const ids = invoices.map(invoice => invoice.id as string);
+  const lineRows = ids.length ? await sql`
+    SELECT l.invoice_id::text AS invoice_id, c.full_name AS beneficiary_name, l.amount::text AS amount
+    FROM billing_invoice_lines l JOIN clients c ON c.id = l.beneficiary_client_id
+    WHERE l.invoice_id IN ${sql(ids)} ORDER BY c.full_name, l.line_type` : [];
+  const paymentRows = ids.length ? await sql`
+    SELECT a.invoice_id::text AS invoice_id, p.id::text AS payment_id, p.paid_on::text AS paid_on, p.method, a.amount::text AS amount
+    FROM billing_payment_applications a JOIN billing_payments p ON p.id = a.payment_id
+    WHERE a.invoice_id IN ${sql(ids)} AND a.reversed_at IS NULL ORDER BY p.paid_on, a.created_at` : [];
+  const detailed: Record<string, any>[] = invoices.map(invoice => ({
+    ...invoice,
+    lines: lineRows.filter(row => row.invoice_id === invoice.id).map(row => ({ beneficiaryName: row.beneficiary_name as string, amount: Number(row.amount) })),
+    payments: paymentRows.filter(row => row.invoice_id === invoice.id).map(row => ({ paymentId: row.payment_id as string, paidOn: row.paid_on as string, method: row.method as string, amount: Number(row.amount) }))
+  }));
+  const active = detailed.filter(invoice => invoice.status !== 'anulada');
+  const applied: { paymentId: string }[] = active.flatMap(invoice => invoice.payments);
+  const [meta] = await sql`
+    SELECT COALESCE(array_agg(DISTINCT to_char(issued_on, 'YYYY-MM')), '{}') AS months, COALESCE(array_agg(DISTINCT cut_day), '{}') AS cut_days
+    FROM billing_invoices WHERE owner_id = ${auth.sub} AND status <> 'anulada'`;
   return {
-    invoices,
+    invoices: detailed,
     summary: {
-      count: invoices.length,
-      total: desdeCentavos(open.reduce((sum, invoice) => sum + centavos(invoice.total), 0)),
-      balance: desdeCentavos(open.reduce((sum, invoice) => sum + centavos(invoice.balance), 0))
-    }
+      ...summary,
+      paid: desdeCentavos(active.reduce((sum, invoice) => sum + centavos(invoice.paid), 0)),
+      paymentsCount: new Set(applied.map(item => item.paymentId)).size,
+      paidCount: active.filter(invoice => invoice.status === 'pagada').length,
+      pendingCount: active.filter(invoice => invoice.status === 'pendiente' || invoice.status === 'parcial').length,
+      overdueCount: active.filter(invoice => invoice.overdue).length,
+      overdueBalance: desdeCentavos(active.filter(invoice => invoice.overdue).reduce((sum, invoice) => sum + centavos(invoice.balance), 0))
+    },
+    meta: { months: (meta.months as string[]).slice().sort(), cutDays: (meta.cut_days as number[]).map(Number).sort((a, b) => a - b) }
   };
 });
 

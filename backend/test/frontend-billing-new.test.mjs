@@ -5,18 +5,18 @@ import { readFile } from 'node:fs/promises';
 
 const leer = ruta => readFile(new URL(`../../${ruta}`, import.meta.url), 'utf8');
 
-test('la pestaña Facturas (nuevo) y su panel están en la pantalla de Facturación', async () => {
+test('la pestaña Facturas y su panel están en la pantalla de Facturación', async () => {
   const html = await leer('index.html');
-  assert.match(html, /data-subtab="facturas-nuevo">Facturas \(nuevo\)</);
+  assert.match(html, /data-subtab="facturas-nuevo">Facturas</);
   assert.match(html, /id="subpanel-facturas-nuevo"/);
   const app = await leer('app.js');
   assert.match(app, /nombre === 'facturas-nuevo'\) newBillingInvoices\(\)/);
   assert.match(app, /\/api\/billing\/invoices/);
 });
 
-test('el módulo nuevo muestra fechas dd-mm-aaaa y el aviso de que no reemplaza al sistema actual', async () => {
+test('el panel de facturas tiene filtros por mes, corte y cliente y muestra fechas dd-mm-aaaa', async () => {
   const app = await leer('app.js');
-  assert.match(app, /Módulo nuevo \(interno\)/);
+  assert.match(app, /Mes de emisión/);
   assert.match(app, /fechaCorta\(invoice\.cycleStart\)/);
   assert.doesNotMatch(app, /newBilling[^\n]*toISOString\(\)\.slice\(0, 10\)/);
 });
@@ -31,9 +31,9 @@ test('app.js, sw.js, version.json e index.html llevan la misma versión', async 
   assert.ok(marcas.every(v => v === enApp), `index.html tiene ${[...new Set(marcas)]} y app.js ${enApp}`);
 });
 
-test('la pestaña Cobros (nuevo) existe, es distinta de la de facturas y usa el vocabulario cobro = dinero recibido', async () => {
+test('la pestaña Cobros existe, es distinta de la de facturas y usa el vocabulario cobro = dinero recibido', async () => {
   const html = await leer('index.html');
-  assert.match(html, /data-subtab="cobros-nuevo">Cobros \(nuevo\)</);
+  assert.match(html, /data-subtab="cobros-nuevo">Cobros</);
   assert.match(html, /id="subpanel-cobros-nuevo"/);
   const app = await leer('app.js');
   assert.match(app, /nombre === 'cobros-nuevo'\) newBillingPayments\(\)/);
@@ -66,9 +66,9 @@ test('la pestaña Corte existe, no enciende ni apaga nada y explica los interrup
   assert.match(app, /Crear los \$\{proposed\.lines\.length\} planes propuestos/);
 });
 
-test('la pestaña Reportes (nuevo) existe, descarga con la sesión y el portal muestra el aviso del beneficiario sin montos', async () => {
+test('la pestaña Reportes existe, descarga con la sesión y el portal muestra el aviso del beneficiario sin montos', async () => {
   const html = await leer('index.html');
-  assert.match(html, /data-subtab="reportes-nuevo">Reportes \(nuevo\)</);
+  assert.match(html, /data-subtab="reportes-nuevo">Reportes</);
   assert.match(html, /id="subpanel-reportes-nuevo"/);
   const app = await leer('app.js');
   assert.match(app, /nombre === 'reportes-nuevo'\) newBillingReports\(\)/);
@@ -84,4 +84,14 @@ test('cada factura con saldo ofrece "Registrar cobro": abre el formulario con el
   assert.match(app, /data-new-invoice-pay="\$\{invoice\.id\}">Registrar cobro</);
   assert.match(app, /newBillingPaymentDialog\(\{ payerId: invoice\.payerClientId, amount: invoice\.balance, invoiceId: invoice\.id \}\)/);
   assert.match(app, /\(b\.id === firstInvoiceId\) - \(a\.id === firstInvoiceId\)/);
+});
+
+test('1B-7: el menú Cobros viejo ya no se ofrece; Facturas es la pestaña de entrada y los datos viejos siguen en la página', async () => {
+  const html = await leer('index.html');
+  assert.doesNotMatch(html, /data-subtab="cobros">/, 'ya no hay pestaña del sistema anterior');
+  assert.match(html, /class="subtab active" data-subtab="facturas-nuevo">Facturas</);
+  assert.match(html, /<div class="subpanel active" id="subpanel-facturas-nuevo">/);
+  assert.match(html, /id="subpanel-cobros" hidden>/, 'el panel viejo queda oculto, no borrado: sus datos no se tocan');
+  const app = await leer('app.js');
+  for (const id of ['new-billing-month', 'new-billing-cut', 'new-billing-client', 'new-billing-status']) assert.match(app, new RegExp(id));
 });

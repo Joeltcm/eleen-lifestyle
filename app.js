@@ -1,4 +1,4 @@
-const APP_VERSION = '241';
+const APP_VERSION = '243';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -288,6 +288,7 @@ const navigate = (id, { replace = false } = {}) => {
   const target = viewIds.has(id) ? id : 'dashboard';
   view(target);
   if (target === 'attendance') loadAttendanceReport();
+  if (target === 'billing' && document.querySelector('#billing .subtab.active')?.dataset.subtab === 'facturas-nuevo') newBillingInvoices();
   const hash = `#${target}`;
   if (window.location.hash !== hash) window.history[replace ? 'replaceState' : 'pushState'](null, '', hash);
 };
@@ -1036,7 +1037,7 @@ async function loadAttendanceReport() {
     if (requestId === attendanceReportRequest) { attendanceReportLoading = false; renderAttendanceReport(); }
   }
 }
-function renderAll() { renderDashboard(); renderClients(); renderGoogleCalendar(); renderCalendar(); renderRoutines(); renderBilling(); renderAttendanceReport(); }
+function renderAll() { renderDashboard(); renderClients(); renderGoogleCalendar(); renderCalendar(); renderRoutines(); renderBilling(); renderAttendanceReport(); if (document.getElementById('billing')?.classList.contains('active') && document.querySelector('#billing .subtab.active')?.dataset.subtab === 'facturas-nuevo') newBillingInvoices(); }
 const modal = document.getElementById('modal');
 function openModal(content, wide = false) { modal.classList.toggle('modal-wide', wide); document.getElementById('modal-content').replaceChildren(content); if (!modal.open) modal.showModal(); }
 function formFromTemplate(id) { return document.getElementById(id).content.cloneNode(true); }
@@ -4096,44 +4097,64 @@ document.querySelectorAll('[data-view-go]').forEach(button => button.addEventLis
 // se registra aparte (1B-3).
 const newBillingKinds = { mensual: 'Mensualidad', credito: 'A crédito', clase_suelta: 'Clase suelta', paquete: 'Paquete', manual: 'Manual' };
 const newBillingStatusLabels = { pendiente: 'Pendiente', parcial: 'Pago parcial', pagada: 'Pagada', anulada: 'Anulada' };
-const newBillingFilters = { status: 'all', payerId: '' };
+const newBillingFilters = { status: 'all', clientId: '', month: '', cutDay: '' };
+const newBillingMonthNames = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+const newBillingMonthText = value => { const [year, month] = value.split('-'); const name = newBillingMonthNames[Number(month) - 1]; return `${name[0].toUpperCase()}${name.slice(1)} ${year}`; };
 function newBillingStatusText(invoice) {
   return invoice.overdue ? `${newBillingStatusLabels[invoice.status]} · vencida` : (newBillingStatusLabels[invoice.status] || invoice.status);
 }
 async function newBillingInvoices() {
   const root = document.getElementById('facturas-nuevo-mount');
   if (!root) return;
-  const payerOptions = data.clients.slice().sort((a, b) => a.name.localeCompare(b.name, 'es')).map(client => `<option value="${client.id}"${client.id === newBillingFilters.payerId ? ' selected' : ''}>${escapeHtml(client.name)}</option>`).join('');
-  root.innerHTML = `<article class="card"><div class="card-head"><div><h3>Facturas</h3><p id="new-billing-summary">Cargando…</p></div></div>
-    <p class="section-note">Módulo nuevo (interno). Aquí se crean las facturas con numeración FAC-. Todavía no reemplaza al sistema actual ni cambia lo que éste factura; los cobros se registran aparte.</p>
-    <div class="subpanel-toolbar"><button class="primary" type="button" id="new-billing-create">+ Nueva factura</button></div>
-    <div class="billing-period-bar"><label>Estado<select id="new-billing-status">${[['all', 'Todas'], ['pendiente', 'Pendientes'], ['parcial', 'Pago parcial'], ['pagada', 'Pagadas'], ['vencida', 'Vencidas'], ['anulada', 'Anuladas']].map(([value, text]) => `<option value="${value}"${value === newBillingFilters.status ? ' selected' : ''}>${text}</option>`).join('')}</select></label>
-      <label>Pagador<select id="new-billing-payer"><option value="">Todos</option>${payerOptions}</select></label></div>
-    <div id="new-billing-list"><p class="empty">Cargando facturas…</p></div></article>`;
-  document.getElementById('new-billing-create').onclick = () => newBillingInvoiceDialog();
-  document.getElementById('new-billing-status').onchange = event => { newBillingFilters.status = event.target.value; newBillingInvoices(); };
-  document.getElementById('new-billing-payer').onchange = event => { newBillingFilters.payerId = event.target.value; newBillingInvoices(); };
-  const list = document.getElementById('new-billing-list');
+  const f = newBillingFilters;
+  if (!root.querySelector('#new-billing-list')) root.innerHTML = '<article class="card"><p class="empty">Cargando facturas…</p></article>';
+  let result;
   try {
-    const query = new URLSearchParams({ status: newBillingFilters.status });
-    if (newBillingFilters.payerId) query.set('payerId', newBillingFilters.payerId);
-    const result = await api(`/api/billing/invoices?${query}`);
-    document.getElementById('new-billing-summary').textContent = `${result.summary.count} facturas · Total ${money.format(result.summary.total)} · Saldo ${money.format(result.summary.balance)}`;
-    if (!result.invoices.length) { list.innerHTML = '<p class="empty">No hay facturas con este filtro.</p>'; return; }
-    list.innerHTML = `<div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Factura</th><th>Pagador</th><th>Ciclo</th><th>Vence</th><th>Total</th><th>Pagado</th><th>Saldo</th><th>Estado</th><th></th></tr></thead><tbody>${result.invoices.map(invoice => `<tr>
-      <td data-label="Factura"><b>${escapeHtml(invoice.code)}</b><br><small>${escapeHtml(newBillingKinds[invoice.kind] || invoice.kind)}</small></td>
+    const query = new URLSearchParams({ status: f.status, details: '1' });
+    if (f.clientId) query.set('clientId', f.clientId);
+    if (f.month) query.set('month', f.month);
+    if (f.cutDay) query.set('cutDay', f.cutDay);
+    result = await api(`/api/billing/invoices?${query}`);
+  } catch (error) { root.innerHTML = `<article class="card"><p class="empty">${escapeHtml(error.message)}</p></article>`; return; }
+  const { invoices, summary, meta } = result;
+  const clientOptions = data.clients.slice().sort((a, b) => a.name.localeCompare(b.name, 'es')).map(client => `<option value="${client.id}"${client.id === f.clientId ? ' selected' : ''}>${escapeHtml(client.name)}</option>`).join('');
+  const monthOptions = meta.months.map(month => `<option value="${month}"${month === f.month ? ' selected' : ''}>${newBillingMonthText(month)}</option>`).join('');
+  const cutOptions = meta.cutDays.map(day => `<option value="${day}"${String(day) === String(f.cutDay) ? ' selected' : ''}>Corte del ${day}</option>`).join('');
+  const percent = summary.total > 0 ? Math.round((summary.paid / summary.total) * 100) : 0;
+  const filtered = f.status !== 'all' || f.clientId || f.month || f.cutDay;
+  root.innerHTML = `<article class="card"><div class="card-head"><div><h3>Facturas</h3><p id="new-billing-summary">${summary.count} facturas${filtered ? ' con estos filtros' : ''} · Total ${money.format(summary.total)} · Saldo ${money.format(summary.balance)}</p></div></div>
+    <div class="subpanel-toolbar"><button class="primary" type="button" id="new-billing-create">+ Nueva factura</button></div>
+    <div class="billing-period-bar">
+      <label>Mes de emisión<select id="new-billing-month"><option value="">Todos</option>${monthOptions}</select></label>
+      <label>Corte<select id="new-billing-cut"><option value="">Todos</option>${cutOptions}</select></label>
+      <label>Cliente<select id="new-billing-client"><option value="">Todos</option>${clientOptions}</select></label>
+      <label>Estado<select id="new-billing-status">${[['all', 'Todas'], ['pendiente', 'Pendientes'], ['parcial', 'Pago parcial'], ['pagada', 'Pagadas'], ['vencida', 'Vencidas'], ['anulada', 'Anuladas']].map(([value, text]) => `<option value="${value}"${value === f.status ? ' selected' : ''}>${text}</option>`).join('')}</select></label>
+      ${filtered ? '<button class="secondary" type="button" id="new-billing-clear">Quitar filtros</button>' : ''}</div>
+    <div class="metrics new-billing-metrics">
+      <article><span>Facturado</span><strong>${summary.count} · ${money.format(summary.total)}</strong></article>
+      <article><span>Cobrado</span><strong>${summary.paymentsCount} · ${money.format(summary.paid)}</strong></article>
+      <article><span>Saldo pendiente</span><strong>${money.format(summary.balance)}</strong></article>
+      <article><span>Pagadas / pendientes</span><strong>${summary.paidCount} / ${summary.pendingCount}</strong></article>
+      <article><span>Vencidas</span><strong>${summary.overdueCount} · ${money.format(summary.overdueBalance)}</strong></article>
+      <article><span>% cobrado</span><strong>${percent}%</strong></article></div>
+    <div id="new-billing-list">${invoices.length ? `<div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Factura</th><th>Pagador</th><th>Ciclo</th><th>Líneas</th><th>Total</th><th>Cobro</th><th>Estado</th><th></th></tr></thead><tbody>${invoices.map(invoice => `<tr>
+      <td data-label="Factura"><b>${escapeHtml(invoice.code)}</b><br><small>${escapeHtml(newBillingKinds[invoice.kind] || invoice.kind)} · corte ${invoice.cutDay}</small></td>
       <td data-label="Pagador">${escapeHtml(invoice.payerName)}</td>
-      <td data-label="Ciclo">${fechaCorta(invoice.cycleStart)} → ${fechaCorta(invoice.cycleEnd)}</td>
-      <td data-label="Vence">${fechaCorta(invoice.dueOn)}</td>
+      <td data-label="Ciclo">${fechaCorta(invoice.cycleStart)} → ${fechaCorta(invoice.cycleEnd)}<br><small>vence ${fechaCorta(invoice.dueOn)}</small></td>
+      <td data-label="Líneas">${invoice.lines.map(line => `${escapeHtml(line.beneficiaryName)}: ${money.format(line.amount)}`).join('<br>')}</td>
       <td data-label="Total">${money.format(invoice.total)}</td>
-      <td data-label="Pagado">${money.format(invoice.paid)}</td>
-      <td data-label="Saldo">${money.format(invoice.balance)}</td>
+      <td data-label="Cobro">${invoice.payments.length ? invoice.payments.map(payment => `${money.format(payment.amount)} · ${escapeHtml(payment.method)}<br><small>${fechaCorta(payment.paidOn)}</small>`).join('<br>') : 'Sin cobro'}${invoice.balance > 0 && invoice.paid > 0 ? `<br><small>saldo ${money.format(invoice.balance)}</small>` : ''}</td>
       <td data-label="Estado">${escapeHtml(newBillingStatusText(invoice))}${invoice.status === 'anulada' && invoice.voidReason ? `<br><small>${escapeHtml(invoice.voidReason)}</small>` : ''}</td>
-      <td data-label="">${invoice.status !== 'anulada' && invoice.balance > 0 ? `<button class="primary" type="button" data-new-invoice-pay="${invoice.id}">Registrar cobro</button> ` : ''}<button class="secondary" type="button" data-new-invoice-pdf="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Ver PDF</button>${invoice.status === 'anulada' || invoice.paid > 0 ? '' : ` <button class="secondary" type="button" data-new-invoice-void="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Anular</button>`}</td></tr>`).join('')}</tbody></table></div>`;
-    list.querySelectorAll('[data-new-invoice-pay]').forEach(button => button.onclick = () => { const invoice = result.invoices.find(item => item.id === button.dataset.newInvoicePay); newBillingPaymentDialog({ payerId: invoice.payerClientId, amount: invoice.balance, invoiceId: invoice.id }); });
-    list.querySelectorAll('[data-new-invoice-pdf]').forEach(button => button.onclick = () => previewProtectedPdf(`/api/billing/invoices/${button.dataset.newInvoicePdf}/pdf`, `Factura ${button.dataset.code}`, `factura-${button.dataset.code}.pdf`));
-    list.querySelectorAll('[data-new-invoice-void]').forEach(button => button.onclick = () => newBillingVoidDialog(button.dataset.newInvoiceVoid, button.dataset.code));
-  } catch (error) { list.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; }
+      <td data-label="">${invoice.status !== 'anulada' && invoice.balance > 0 ? `<button class="primary" type="button" data-new-invoice-pay="${invoice.id}">Registrar cobro</button> ` : ''}<button class="secondary" type="button" data-new-invoice-pdf="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Ver PDF</button>${invoice.status === 'anulada' || invoice.paid > 0 ? '' : ` <button class="secondary" type="button" data-new-invoice-void="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Anular</button>`}</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">No hay facturas con estos filtros.</p>'}</div></article>`;
+  document.getElementById('new-billing-create').onclick = () => newBillingInvoiceDialog();
+  const bind = (id, key) => { document.getElementById(id).onchange = event => { f[key] = event.target.value; newBillingInvoices(); }; };
+  bind('new-billing-month', 'month'); bind('new-billing-cut', 'cutDay'); bind('new-billing-client', 'clientId'); bind('new-billing-status', 'status');
+  const clear = document.getElementById('new-billing-clear');
+  if (clear) clear.onclick = () => { Object.assign(f, { status: 'all', clientId: '', month: '', cutDay: '' }); newBillingInvoices(); };
+  const list = document.getElementById('new-billing-list');
+  list.querySelectorAll('[data-new-invoice-pay]').forEach(button => button.onclick = () => { const invoice = invoices.find(item => item.id === button.dataset.newInvoicePay); newBillingPaymentDialog({ payerId: invoice.payerClientId, amount: invoice.balance, invoiceId: invoice.id }); });
+  list.querySelectorAll('[data-new-invoice-pdf]').forEach(button => button.onclick = () => previewProtectedPdf(`/api/billing/invoices/${button.dataset.newInvoicePdf}/pdf`, `Factura ${button.dataset.code}`, `factura-${button.dataset.code}.pdf`));
+  list.querySelectorAll('[data-new-invoice-void]').forEach(button => button.onclick = () => newBillingVoidDialog(button.dataset.newInvoiceVoid, button.dataset.code));
 }
 function newBillingVoidDialog(id, code) {
   const box = document.createElement('div');

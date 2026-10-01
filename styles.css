@@ -721,3 +721,5 @@ button.active-filter{background:#2f6f4f;color:#fff;border-color:#2f6f4f}
 
 /* Reportes del módulo nuevo (1B-5): ninguna celda debe ensanchar la tabla en el teléfono */
 #reportes-nuevo-mount td{overflow-wrap:anywhere;word-break:break-word;min-width:0}
+
+.new-billing-metrics{grid-template-columns:repeat(3,1fr)}.new-billing-metrics strong{font-size:22px;white-space:nowrap}@media(max-width:720px){.new-billing-metrics{grid-template-columns:repeat(2,1fr)}.new-billing-metrics strong{font-size:18px}}
