@@ -702,3 +702,9 @@ button.active-filter{background:#2f6f4f;color:#fff;border-color:#2f6f4f}
   .portal-nav a{padding:8px 2px;font-size:8px}
   .portal-nav a span svg{width:18px;height:18px}
 }
+
+/* Facturas del módulo nuevo (1B-2): una fila por beneficiario. El diálogo es angosto,
+   así que la fila nunca usa más de dos columnas (sin desbordamiento horizontal). */
+.new-billing-line{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;padding:10px;border-radius:12px;background:#fdfafb;box-shadow:0 2px 8px #6d4a590d}
+.new-billing-line select,.new-billing-line input{min-width:0;width:100%;box-sizing:border-box}
+.new-billing-line select,.new-billing-line input[name=description],.new-billing-line button{grid-column:1/-1}

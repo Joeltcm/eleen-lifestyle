@@ -1,4 +1,4 @@
-const APP_VERSION = '234';
+const APP_VERSION = '235';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -4090,12 +4090,120 @@ document.querySelectorAll('.nav-link').forEach(link => link.addEventListener('cl
 document.querySelectorAll('[data-view-go]').forEach(button => button.addEventListener('click', event => {
   event.preventDefault(); navigate(button.dataset.viewGo);
 }));
+// ── Facturas del módulo nuevo (1B-2) ─────────────────────────────────────────
+// Documento por cobrar con número FAC-. Módulo interno: hoy convive con el
+// sistema anterior y NO cambia lo que éste factura. El dinero recibido (cobros)
+// se registra aparte (1B-3).
+const newBillingKinds = { mensual: 'Mensualidad', credito: 'A crédito', clase_suelta: 'Clase suelta', paquete: 'Paquete', manual: 'Manual' };
+const newBillingStatusLabels = { pendiente: 'Pendiente', parcial: 'Pago parcial', pagada: 'Pagada', anulada: 'Anulada' };
+const newBillingFilters = { status: 'all', payerId: '' };
+function newBillingStatusText(invoice) {
+  return invoice.overdue ? `${newBillingStatusLabels[invoice.status]} · vencida` : (newBillingStatusLabels[invoice.status] || invoice.status);
+}
+async function newBillingInvoices() {
+  const root = document.getElementById('facturas-nuevo-mount');
+  if (!root) return;
+  const payerOptions = data.clients.slice().sort((a, b) => a.name.localeCompare(b.name, 'es')).map(client => `<option value="${client.id}"${client.id === newBillingFilters.payerId ? ' selected' : ''}>${escapeHtml(client.name)}</option>`).join('');
+  root.innerHTML = `<article class="card"><div class="card-head"><div><h3>Facturas</h3><p id="new-billing-summary">Cargando…</p></div></div>
+    <p class="section-note">Módulo nuevo (interno). Aquí se crean las facturas con numeración FAC-. Todavía no reemplaza al sistema actual ni cambia lo que éste factura; los cobros se registran aparte.</p>
+    <div class="subpanel-toolbar"><button class="primary" type="button" id="new-billing-create">+ Nueva factura</button></div>
+    <div class="billing-period-bar"><label>Estado<select id="new-billing-status">${[['all', 'Todas'], ['pendiente', 'Pendientes'], ['parcial', 'Pago parcial'], ['pagada', 'Pagadas'], ['vencida', 'Vencidas'], ['anulada', 'Anuladas']].map(([value, text]) => `<option value="${value}"${value === newBillingFilters.status ? ' selected' : ''}>${text}</option>`).join('')}</select></label>
+      <label>Pagador<select id="new-billing-payer"><option value="">Todos</option>${payerOptions}</select></label></div>
+    <div id="new-billing-list"><p class="empty">Cargando facturas…</p></div></article>`;
+  document.getElementById('new-billing-create').onclick = () => newBillingInvoiceDialog();
+  document.getElementById('new-billing-status').onchange = event => { newBillingFilters.status = event.target.value; newBillingInvoices(); };
+  document.getElementById('new-billing-payer').onchange = event => { newBillingFilters.payerId = event.target.value; newBillingInvoices(); };
+  const list = document.getElementById('new-billing-list');
+  try {
+    const query = new URLSearchParams({ status: newBillingFilters.status });
+    if (newBillingFilters.payerId) query.set('payerId', newBillingFilters.payerId);
+    const result = await api(`/api/billing/invoices?${query}`);
+    document.getElementById('new-billing-summary').textContent = `${result.summary.count} facturas · Total ${money.format(result.summary.total)} · Saldo ${money.format(result.summary.balance)}`;
+    if (!result.invoices.length) { list.innerHTML = '<p class="empty">No hay facturas con este filtro.</p>'; return; }
+    list.innerHTML = `<div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Factura</th><th>Pagador</th><th>Ciclo</th><th>Vence</th><th>Total</th><th>Pagado</th><th>Saldo</th><th>Estado</th><th></th></tr></thead><tbody>${result.invoices.map(invoice => `<tr>
+      <td data-label="Factura"><b>${escapeHtml(invoice.code)}</b><br><small>${escapeHtml(newBillingKinds[invoice.kind] || invoice.kind)}</small></td>
+      <td data-label="Pagador">${escapeHtml(invoice.payerName)}</td>
+      <td data-label="Ciclo">${fechaCorta(invoice.cycleStart)} → ${fechaCorta(invoice.cycleEnd)}</td>
+      <td data-label="Vence">${fechaCorta(invoice.dueOn)}</td>
+      <td data-label="Total">${money.format(invoice.total)}</td>
+      <td data-label="Pagado">${money.format(invoice.paid)}</td>
+      <td data-label="Saldo">${money.format(invoice.balance)}</td>
+      <td data-label="Estado">${escapeHtml(newBillingStatusText(invoice))}${invoice.status === 'anulada' && invoice.voidReason ? `<br><small>${escapeHtml(invoice.voidReason)}</small>` : ''}</td>
+      <td data-label=""><button class="secondary" type="button" data-new-invoice-pdf="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Ver PDF</button>${invoice.status === 'anulada' ? '' : ` <button class="secondary" type="button" data-new-invoice-void="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Anular</button>`}</td></tr>`).join('')}</tbody></table></div>`;
+    list.querySelectorAll('[data-new-invoice-pdf]').forEach(button => button.onclick = () => previewProtectedPdf(`/api/billing/invoices/${button.dataset.newInvoicePdf}/pdf`, `Factura ${button.dataset.code}`, `factura-${button.dataset.code}.pdf`));
+    list.querySelectorAll('[data-new-invoice-void]').forEach(button => button.onclick = () => newBillingVoidDialog(button.dataset.newInvoiceVoid, button.dataset.code));
+  } catch (error) { list.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; }
+}
+function newBillingVoidDialog(id, code) {
+  const box = document.createElement('div');
+  box.innerHTML = `<form id="new-billing-void-form"><p class="eyebrow">FACTURAS (NUEVO)</p><h2>Anular ${escapeHtml(code)}</h2><p class="section-note">La factura queda en el historial con su número y el motivo; no se borra. Si tiene cobros aplicados, hay que revertirlos antes.</p><label>Motivo<input name="reason" required minlength="3" maxlength="300" placeholder="Ej.: capturada con el monto equivocado" /></label><button class="primary wide-button">Anular factura</button></form>`;
+  openModal(box);
+  box.querySelector('form').onsubmit = async event => {
+    event.preventDefault();
+    try { await api(`/api/billing/invoices/${id}/void`, { method: 'POST', body: { reason: new FormData(event.target).get('reason') } }); modal.close(); toast(`Factura ${code} anulada`); newBillingInvoices(); } catch (error) { toast(error.message, true); }
+  };
+}
+function newBillingInvoiceDialog() {
+  const clientsSorted = data.clients.slice().sort((a, b) => a.name.localeCompare(b.name, 'es'));
+  const options = (selected = '') => clientsSorted.map(client => `<option value="${client.id}"${client.id === selected ? ' selected' : ''}>${escapeHtml(client.name)}</option>`).join('');
+  const today = dateKey(new Date());
+  const box = document.createElement('div');
+  box.innerHTML = `<form id="new-billing-form"><p class="eyebrow">FACTURAS (NUEVO)</p><h2>Nueva factura</h2>
+    <label>Pagador<select name="payerClientId" required><option value="">Elige al pagador</option>${options()}</select><small>Quien paga. En una familia es uno solo; sus beneficiarios van como líneas.</small></label>
+    <label>Tipo<select name="kind">${Object.entries(newBillingKinds).map(([value, text]) => `<option value="${value}">${text}</option>`).join('')}</select></label>
+    <label>Inicio del ciclo<input name="cycleStart" type="date" value="${today}" required /></label>
+    <label>Fin del ciclo<input name="cycleEnd" type="date" /><small>Vacío: el siguiente corte del pagador (o el mismo día en clases sueltas y manuales).</small></label>
+    <label class="new-billing-package" hidden>Días del ciclo<input name="cycleDays" type="number" min="1" max="366" placeholder="Ej.: 35" /></label>
+    <label>Fecha de emisión<input name="issuedOn" type="date" value="${today}" required /></label>
+    <label>Vencimiento<input name="dueOn" type="date" /><small>Vacío: el mismo día de la emisión.</small></label>
+    <p class="eyebrow" style="margin-top:14px">LÍNEAS POR BENEFICIARIO</p><div id="new-billing-lines"></div>
+    <button type="button" class="secondary" id="new-billing-add-line">+ Agregar persona</button>
+    <label>Notas<textarea name="notes" rows="2" maxlength="500"></textarea></label>
+    <p class="form-summary" id="new-billing-total">Total: ${money.format(0)}</p>
+    <button class="primary wide-button">Crear factura</button></form>`;
+  openModal(box);
+  const form = box.querySelector('form'); const linesBox = box.querySelector('#new-billing-lines');
+  const recalc = () => {
+    let total = 0;
+    linesBox.querySelectorAll('.new-billing-line').forEach(row => { total += Math.round((Number(row.querySelector('[name=quantity]').value || 0) * Number(row.querySelector('[name=unitAmount]').value || 0)) * 100); });
+    box.querySelector('#new-billing-total').textContent = `Total: ${money.format(total / 100)}`;
+  };
+  const addLine = () => {
+    const row = document.createElement('div'); row.className = 'new-billing-line';
+    row.innerHTML = `<select name="beneficiaryClientId" required><option value="">Beneficiario</option>${options()}</select><input name="description" placeholder="Concepto" maxlength="200" /><input name="quantity" type="number" min="0.01" step="0.01" value="1" aria-label="Cantidad" /><input name="unitAmount" type="number" step="0.01" placeholder="Importe" required aria-label="Importe" /><input name="sessionsReference" type="number" min="1" placeholder="Clases (ref.)" aria-label="Clases de referencia" /><button type="button" class="secondary">Quitar persona</button>`;
+    row.querySelector('button').onclick = () => { if (linesBox.children.length > 1) { row.remove(); recalc(); } };
+    row.addEventListener('input', recalc); linesBox.appendChild(row);
+  };
+  addLine();
+  box.querySelector('#new-billing-add-line').onclick = addLine;
+  const kind = form.elements.kind; const packageField = form.querySelector('.new-billing-package');
+  kind.onchange = () => { packageField.hidden = kind.value !== 'paquete'; };
+  form.elements.payerClientId.onchange = event => { const first = linesBox.querySelector('[name=beneficiaryClientId]'); if (first && !first.value) first.value = event.target.value; };
+  form.onsubmit = async event => {
+    event.preventDefault();
+    const values = new FormData(form);
+    const lines = [...linesBox.querySelectorAll('.new-billing-line')].map(row => {
+      const item = { beneficiaryClientId: row.querySelector('[name=beneficiaryClientId]').value, quantity: Number(row.querySelector('[name=quantity]').value || 1), unitAmount: Number(row.querySelector('[name=unitAmount]').value) };
+      const description = row.querySelector('[name=description]').value.trim(); if (description) item.description = description;
+      const sessions = row.querySelector('[name=sessionsReference]').value; if (sessions) item.sessionsReference = Number(sessions);
+      return item;
+    });
+    const body = { payerClientId: values.get('payerClientId'), kind: values.get('kind'), cycleStart: values.get('cycleStart'), issuedOn: values.get('issuedOn'), lines };
+    if (values.get('cycleEnd')) body.cycleEnd = values.get('cycleEnd');
+    if (values.get('dueOn')) body.dueOn = values.get('dueOn');
+    if (values.get('cycleDays')) body.cycleDays = Number(values.get('cycleDays'));
+    if (values.get('notes').trim()) body.notes = values.get('notes').trim();
+    try { form.classList.add('loading-state'); const result = await api('/api/billing/invoices', { method: 'POST', body }); modal.close(); toast(`Factura ${result.code} creada`); newBillingInvoices(); }
+    catch (error) { toast(error.message, true); form.classList.remove('loading-state'); }
+  };
+}
 // Sub-pestañas del área financiera: Cobros / Finanzas / Planes / Gastos.
 // Cada dataset en su propia pantalla, para no amontonar todo en una sola página
 // —sobre todo en el teléfono—. Finanzas y Gastos se pintan al abrir su pestaña.
 function activarSubtab(nombre) {
   document.querySelectorAll('#billing .subtab').forEach(boton => boton.classList.toggle('active', boton.dataset.subtab === nombre));
   document.querySelectorAll('#billing .subpanel').forEach(panel => panel.classList.toggle('active', panel.id === `subpanel-${nombre}`));
+  if (nombre === 'facturas-nuevo') newBillingInvoices();
   if (nombre === 'finanzas') financeDashboard();
   if (nombre === 'gastos') expensesManager();
 }

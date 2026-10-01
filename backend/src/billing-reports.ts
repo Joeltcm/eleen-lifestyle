@@ -19,6 +19,19 @@ const date = (value: unknown) => {
     : /^\d{4}-\d{2}-\d{2}/.test(text) ? new Date(`${text.slice(0, 10)}T12:00:00-05:00`) : new Date(text);
   return Number.isNaN(parsed.getTime()) ? text.slice(0, 10) : new Intl.DateTimeFormat('es-PA', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Panama' }).format(parsed);
 };
+// Fecha para MOSTRAR en las facturas nuevas: dd-mm-aaaa, siempre (convención del
+// proyecto). Una cadena aaaa-mm-dd se reordena tal cual (sin pasar por Date, para no
+// correr un día); un instante se lleva a la fecha de Panamá.
+const dmy = (value: unknown) => {
+  if (!value) return '-';
+  const text = value instanceof Date ? '' : String(value);
+  const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(text);
+  if (iso) return `${iso[3]}-${iso[2]}-${iso[1]}`;
+  const parsed = value instanceof Date ? value : new Date(text);
+  if (Number.isNaN(parsed.getTime())) return text.slice(0, 10) || '-';
+  const [y, m, d] = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Panama', year: 'numeric', month: '2-digit', day: '2-digit' }).format(parsed).split('-');
+  return `${d}-${m}-${y}`;
+};
 const clean = (value: unknown) => String(value ?? '').replace(/[\r\n]+/g, ' ').trim();
 const status = (value: unknown) => value === 'confirmed' ? 'Pagada' : value === 'void' ? 'Anulada' : 'Pendiente';
 
@@ -177,10 +190,10 @@ export function billingInvoicePdf(invoice: PdfRecord, lines: PdfRecord[], applic
     brandHeader(document, anulada ? 'Factura anulada' : 'Factura', `${number} · Documento interno no fiscal`);
     const metaY = document.y;
     infoPair(document, 'Pagador', clean(invoice.payer_name), 42, metaY, 250);
-    infoPair(document, 'Ciclo', `${date(invoice.cycle_start)} al ${date(invoice.cycle_end)}`, 322, metaY, 233);
+    infoPair(document, 'Ciclo', `${dmy(invoice.cycle_start)} al ${dmy(invoice.cycle_end)}`, 322, metaY, 233);
     infoPair(document, 'Correo', clean(invoice.payer_email || 'No registrado'), 42, metaY + 38, 250);
-    infoPair(document, 'Fecha de emisión', date(invoice.issued_on), 322, metaY + 38, 110);
-    infoPair(document, 'Vencimiento', date(invoice.due_on), 445, metaY + 38, 110);
+    infoPair(document, 'Fecha de emisión', dmy(invoice.issued_on), 322, metaY + 38, 110);
+    infoPair(document, 'Vencimiento', dmy(invoice.due_on), 445, metaY + 38, 110);
     infoPair(document, 'Estado', billingStatusLabel[String(invoice.status)] || clean(invoice.status), 42, metaY + 76, 110);
     infoPair(document, 'Tipo', billingKindLabel[String(invoice.kind)] || clean(invoice.kind), 322, metaY + 76, 110);
     document.y = metaY + 129;
@@ -206,7 +219,7 @@ export function billingInvoicePdf(invoice: PdfRecord, lines: PdfRecord[], applic
       ensureSpace(document, 80, `Factura ${number}`);
       document.font('Helvetica-Bold').fontSize(8).fillColor(colors.muted).text('COBROS APLICADOS', 42, document.y); document.y += 14;
       table(document, [
-        { label: 'Fecha', key: 'paid_on', width: 80, format: date },
+        { label: 'Fecha', key: 'paid_on', width: 80, format: dmy },
         { label: 'Método', key: 'method', width: 130 },
         { label: 'Referencia', key: 'reference', width: 178 },
         { label: 'Aplicado', key: 'amount', width: 125, align: 'right', format: money }
@@ -219,7 +232,7 @@ export function billingInvoicePdf(invoice: PdfRecord, lines: PdfRecord[], applic
     document.font('Helvetica-Bold').fontSize(9).fillColor(anulada ? colors.muted : settled ? colors.green : colors.amber)
       .text(anulada ? 'FACTURA ANULADA' : settled ? 'PAGADA' : 'SALDO PENDIENTE', 55, boxY + 13, { width: 485 });
     document.font('Helvetica').fontSize(8).fillColor(colors.ink).text(
-      anulada ? `Motivo: ${clean(invoice.void_reason)}   ·   Anulada el ${date(invoice.voided_at)}` : (clean(invoice.notes) || 'Sin notas.'), 55, boxY + 32, { width: 485 });
+      anulada ? `Motivo: ${clean(invoice.void_reason)}   ·   Anulada el ${dmy(invoice.voided_at)}` : (clean(invoice.notes) || 'Sin notas.'), 55, boxY + 32, { width: 485 });
     document.fontSize(7).fillColor(colors.muted).text('Documento interno de Eileen Lifestyle. No constituye una factura fiscal.', 55, boxY + 51, { width: 485 });
     document.y = boxY + 88;
   });
