@@ -370,7 +370,9 @@ async function calcularFacturaCredito(factura: FacturaCredito) {
   return { cycle, target, base, sesiones, billable, amount, paidAmount, lineItems, concept, status };
 }
 
+// Reescribe las facturas VIEJAS de crédito. Fuera del estado legacy (X-018) no debe tocar nada: la fuente de verdad es el módulo nuevo y el archivo queda intacto.
 async function recalcularFacturasNoAnticipadas(ownerId?: string) {
+  if (!billingEngine.legacyWrites) return 0;
   const facturas = await sql`
     SELECT i.id, i.client_id, i.billed_for_client_id, i.due_on, i.status, i.amount,
       COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id),
@@ -638,7 +640,8 @@ async function generateRecurringInvoices(ownerId?: string) {
 // Sistema anterior RETIRADO tras el corte (J-067): fuera del estado `legacy` (o `shadow`) las rutas que ESCRIBÍAN cobros, pagos y coberturas del sistema
 // viejo responden 410 y no tocan nada; las lecturas (listados, PDF, archivo) siguen. Es reversible a propósito: si se vuelve a LEGACY_BILLING_GENERATION=on y
 // NEW_BILLING_GENERATION=off, vuelven a funcionar. El código se borrará cuando la primera emisión automática del 15-10 salga bien.
-const legacyWritePaths = [/^\/api\/invoices(\/|$)/, /^\/api\/maintenance\/(reconcile-monthly-billing|cerrar-zoho-viejas)$/];
+// POST /api/packages y /api/packages/:id/renew crean factura y cobro heredados (X-018); las demás rutas de paquetes (reprogramar, editar, borrar) no facturan y siguen.
+const legacyWritePaths = [/^\/api\/invoices(\/|$)/, /^\/api\/maintenance\/(reconcile-monthly-billing|cerrar-zoho-viejas)$/, /^\/api\/packages$/, /^\/api\/packages\/[^/]+\/renew$/];
 app.addHook('onRequest', async (request, reply) => {
   if (billingEngine.legacyWrites || ['GET', 'HEAD', 'OPTIONS'].includes(request.method)) return;
   const path = request.url.split('?')[0];
@@ -2054,7 +2057,7 @@ app.post('/api/clients', { preHandler: requireStaff }, async (request, reply) =>
     } else if (packageSessions) {
       const expiresOn = vencePaqueteDesde(new Date());
       const [pack] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on) VALUES (${client.id}, ${selectedPlan?.name || `Paquete ${packageSessions} sesiones`}, ${packageSessions}, ${standardPrice}, ${expiresOn}) RETURNING id`;
-      await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${client.id}, ${pack.id}, 'Paquete de sesiones', ${standardPrice}, current_date)`;
+      if (billingEngine.legacyWrites) await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${client.id}, ${pack.id}, 'Paquete de sesiones', ${standardPrice}, current_date)`;
     }
     return client;
   });
@@ -2555,7 +2558,7 @@ app.patch('/api/clients/:id/plan', { preHandler: requireStaff }, async (request,
       if (!existingPackage) {
         const expiresOn = vencePaqueteDesde(new Date());
         const [createdPackage] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on) VALUES (${id}, ${plan.name}, ${plan.sessions_included}, ${plan.price}, ${expiresOn}) RETURNING id`;
-        await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${id}, ${createdPackage.id}, ${plan.name}, ${plan.price}, current_date)`;
+        if (billingEngine.legacyWrites) await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${id}, ${createdPackage.id}, ${plan.name}, ${plan.price}, current_date)`;
       }
     }
     await actualizarFacturasFuturasPorCorte(transaction, id, input.cutoffDay);
