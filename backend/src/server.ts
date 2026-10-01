@@ -1172,7 +1172,8 @@ const billingSubscriptionInput = z.object({
   sessionsReference: z.coerce.number().int().positive().max(1000).nullable().optional(),
   startsOn: z.string().date(),
   endsOn: z.string().date().nullable().optional(),
-  price: z.coerce.number().positive().max(100000)
+  price: z.coerce.number().positive().max(100000),
+  autoGenerate: z.boolean().default(true)
 }).superRefine((value, context) => {
   if (value.endsOn && value.startsOn > value.endsOn) context.addIssue({ code: z.ZodIssueCode.custom, path: ['endsOn'], message: 'La fecha final no puede ser anterior a la inicial' });
   if (value.kind === 'package' && !value.cycleDays) context.addIssue({ code: z.ZodIssueCode.custom, path: ['cycleDays'], message: 'Un paquete requiere días de ciclo' });
@@ -1183,7 +1184,8 @@ const billingSubscriptionPatch = z.object({
   startsOn: z.string().date().optional(),
   endsOn: z.string().date().nullable().optional(),
   cycleDays: z.coerce.number().int().min(1).max(366).nullable().optional(),
-  sessionsReference: z.coerce.number().int().positive().max(1000).nullable().optional()
+  sessionsReference: z.coerce.number().int().positive().max(1000).nullable().optional(),
+  autoGenerate: z.boolean().optional()
 });
 
 function dayBefore(date: string): string {
@@ -1209,6 +1211,7 @@ function billingSubscriptionValue(row: Record<string, any>) {
     startsOn: dateOnly(row.starts_on),
     endsOn: row.ends_on ? dateOnly(row.ends_on) : null,
     price: Number(row.price),
+    autoGenerate: row.auto_generate !== false,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -1274,8 +1277,9 @@ app.get('/api/clients/:id/billing-subscriptions', { preHandler: requireStaff }, 
     WHERE bs.owner_id = ${auth.sub} AND (bs.beneficiary_client_id = ${clientId} OR bs.payer_client_id = ${clientId})
     ORDER BY bs.starts_on DESC, bs.created_at DESC
   ` as unknown as Record<string, any>[];
+  const hoy = fechaDeNegocioPanama();
   const lines = rows.map(billingSubscriptionValue);
-  const active = rows.filter(row => !row.ends_on || dateOnly(row.ends_on) >= new Date().toISOString().slice(0, 10));
+  const active = rows.filter(row => !row.ends_on || dateOnly(row.ends_on) >= hoy);
   const payerActive = active.filter(row => row.payer_client_id === clientId);
   const breakdown = payerActive.map(row => ({ beneficiaryClientId: row.beneficiary_client_id, beneficiaryName: row.beneficiary_name, amount: Number(row.price), kind: row.kind }));
   const candidates = await sql`
@@ -1289,15 +1293,16 @@ app.get('/api/clients/:id/billing-subscriptions', { preHandler: requireStaff }, 
   const proposal = candidates.flatMap(candidate => {
     const kind = candidate.billing_model === 'package' ? 'package' : candidate.payment_mode === 'no_anticipado' ? 'credit' : 'monthly';
     const payerId = candidate.billing_responsible_client_id || candidate.id;
-    const hasLine = rows.some(row => row.beneficiary_client_id === candidate.id && row.payer_client_id === payerId && row.kind === kind && (!row.ends_on || dateOnly(row.ends_on) >= new Date().toISOString().slice(0, 10)));
+    const hasLine = rows.some(row => row.beneficiary_client_id === candidate.id && row.payer_client_id === payerId && row.kind === kind && (!row.ends_on || dateOnly(row.ends_on) >= hoy));
     if (hasLine) return [];
     return [{
       beneficiaryClientId: candidate.id, beneficiaryName: candidate.full_name, payerClientId: payerId,
       payerName: payerId === clientId ? focus.full_name : candidate.full_name, kind,
       cycleDays: kind === 'package' ? Number(candidate.validity_days || 35) : null,
       sessionsReference: Number(candidate.monthly_session_target || candidate.sessions_included || 0) || null,
-      startsOn: dateOnly(candidate.created_at), endsOn: null,
-      price: Number(kind === 'credit' ? candidate.credit_session_price || 25 : candidate.standard_price || 0)
+      startsOn: cicloDelCorte(hoy, Number(candidate.billing_cutoff_day) || 1).inicio, endsOn: null,
+      price: Number(kind === 'credit' ? candidate.credit_session_price || 25 : candidate.standard_price || 0),
+      autoGenerate: true
     }];
   });
   return { client: { id: focus.id, name: focus.full_name }, lines, proposal, summary: { payerId: clientId, payerName: focus.full_name, totalForPayer: payerActive.reduce((sum, row) => sum + Number(row.price), 0), breakdown } };
@@ -1314,8 +1319,8 @@ app.post('/api/clients/:id/billing-subscriptions', { preHandler: requireStaff },
     if (!beneficiary || !payer) return null;
     await assertSubscriptionNoOverlap(transaction, auth.sub, { beneficiaryClientId, payerClientId, kind: parsed.kind, startsOn: parsed.startsOn, endsOn: parsed.endsOn });
     const [row] = await transaction`
-      INSERT INTO billing_subscriptions (owner_id, beneficiary_client_id, payer_client_id, kind, cycle_days, sessions_reference, starts_on, ends_on, price)
-      VALUES (${auth.sub}, ${beneficiaryClientId}, ${payerClientId}, ${parsed.kind}, ${parsed.cycleDays ?? null}, ${parsed.sessionsReference ?? null}, ${parsed.startsOn}, ${parsed.endsOn || null}, ${parsed.price})
+      INSERT INTO billing_subscriptions (owner_id, beneficiary_client_id, payer_client_id, kind, cycle_days, sessions_reference, starts_on, ends_on, price, auto_generate)
+      VALUES (${auth.sub}, ${beneficiaryClientId}, ${payerClientId}, ${parsed.kind}, ${parsed.cycleDays ?? null}, ${parsed.sessionsReference ?? null}, ${parsed.startsOn}, ${parsed.endsOn || null}, ${parsed.price}, ${parsed.autoGenerate})
       RETURNING *
     `;
     await auditBillingSubscription(transaction, request, auth, 'CREATE_BILLING_SUBSCRIPTION', row.id, null, billingSubscriptionValue({ ...row, beneficiary_name: beneficiary.full_name, payer_name: payer.full_name }));
@@ -1348,8 +1353,8 @@ app.patch('/api/billing-subscriptions/:id', { preHandler: requireStaff }, async 
       await transaction`UPDATE billing_subscriptions SET ends_on = ${oldEnd}, updated_at = now() WHERE id = ${id}`;
       await assertSubscriptionNoOverlap(transaction, auth.sub, { beneficiaryClientId: current.beneficiary_client_id, payerClientId: current.payer_client_id, kind: current.kind, startsOn: input.startsOn, endsOn: nextEnd }, id);
       const [replacement] = await transaction`
-        INSERT INTO billing_subscriptions (owner_id, beneficiary_client_id, payer_client_id, kind, cycle_days, sessions_reference, starts_on, ends_on, price)
-        VALUES (${auth.sub}, ${current.beneficiary_client_id}, ${current.payer_client_id}, ${current.kind}, ${input.cycleDays ?? current.cycle_days}, ${input.sessionsReference ?? current.sessions_reference}, ${input.startsOn}, ${nextEnd}, ${input.price ?? current.price}) RETURNING *
+        INSERT INTO billing_subscriptions (owner_id, beneficiary_client_id, payer_client_id, kind, cycle_days, sessions_reference, starts_on, ends_on, price, auto_generate)
+        VALUES (${auth.sub}, ${current.beneficiary_client_id}, ${current.payer_client_id}, ${current.kind}, ${input.cycleDays ?? current.cycle_days}, ${input.sessionsReference ?? current.sessions_reference}, ${input.startsOn}, ${nextEnd}, ${input.price ?? current.price}, ${input.autoGenerate ?? (current.auto_generate !== false)}) RETURNING *
       `;
       await auditBillingSubscription(transaction, request, auth, 'REPLACE_BILLING_SUBSCRIPTION', id, oldValue, billingSubscriptionValue({ ...replacement, beneficiary_name: current.beneficiary_name, payer_name: current.payer_name }));
       return replacement;
@@ -1358,7 +1363,7 @@ app.patch('/api/billing-subscriptions/:id', { preHandler: requireStaff }, async 
     if (input.cycleDays !== undefined && current.kind !== 'package' && input.cycleDays !== null) sessionStateConflict('Sólo los paquetes usan días de ciclo');
     await assertSubscriptionNoOverlap(transaction, auth.sub, { beneficiaryClientId: current.beneficiary_client_id, payerClientId: current.payer_client_id, kind: current.kind, startsOn: nextStart, endsOn: nextEnd }, id);
     const [row] = await transaction`
-      UPDATE billing_subscriptions SET ends_on = ${nextEnd}, cycle_days = ${input.cycleDays === undefined ? current.cycle_days : input.cycleDays}, sessions_reference = ${input.sessionsReference === undefined ? current.sessions_reference : input.sessionsReference}, updated_at = now()
+      UPDATE billing_subscriptions SET ends_on = ${nextEnd}, cycle_days = ${input.cycleDays === undefined ? current.cycle_days : input.cycleDays}, sessions_reference = ${input.sessionsReference === undefined ? current.sessions_reference : input.sessionsReference}, auto_generate = ${input.autoGenerate === undefined ? current.auto_generate !== false : input.autoGenerate}, updated_at = now()
       WHERE id = ${id} RETURNING *
     `;
     await auditBillingSubscription(transaction, request, auth, nextEnd ? 'CLOSE_BILLING_SUBSCRIPTION' : 'UPDATE_BILLING_SUBSCRIPTION', id, oldValue, billingSubscriptionValue({ ...row, beneficiary_name: current.beneficiary_name, payer_name: current.payer_name }));

@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS billing_subscriptions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   beneficiary_client_id uuid NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
-  payer_client_id uuid NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  payer_client_id uuid NOT NULL REFERENCES clients(id) ON DELETE RESTRICT,
+  auto_generate boolean NOT NULL DEFAULT true,
   kind text NOT NULL CHECK (kind IN ('monthly', 'credit', 'package')),
   cycle_days integer CHECK (cycle_days IS NULL OR cycle_days BETWEEN 1 AND 366),
   sessions_reference integer CHECK (sessions_reference IS NULL OR sessions_reference > 0),
@@ -27,3 +28,14 @@ CREATE INDEX IF NOT EXISTS billing_subscriptions_payer_idx
   ON billing_subscriptions (payer_client_id, starts_on DESC);
 CREATE INDEX IF NOT EXISTS billing_subscriptions_owner_idx
   ON billing_subscriptions (owner_id, starts_on DESC);
+
+ALTER TABLE billing_subscriptions
+  ADD COLUMN IF NOT EXISTS auto_generate boolean NOT NULL DEFAULT true;
+
+DO $$
+BEGIN
+  ALTER TABLE billing_subscriptions DROP CONSTRAINT IF EXISTS billing_subscriptions_payer_client_id_fkey;
+  ALTER TABLE billing_subscriptions
+    ADD CONSTRAINT billing_subscriptions_payer_client_id_fkey
+    FOREIGN KEY (payer_client_id) REFERENCES clients(id) ON DELETE RESTRICT;
+END $$;

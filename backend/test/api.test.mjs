@@ -3981,6 +3981,9 @@ describe('cobro declarativo del expediente · etapa 1A', () => {
     assert.equal(expediente.estado, 200);
     assert.equal(expediente.datos.summary.totalForPayer, 150);
     assert.equal(expediente.datos.lines.length, 1);
+    const propuestaPropia = expediente.datos.proposal.find(line => line.beneficiaryClientId === riccardo.id);
+    assert.equal(propuestaPropia.startsOn, cicloCortePa(hoyPa(), 15).inicio, 'la propuesta parte del último corte');
+    assert.equal(propuestaPropia.autoGenerate, true, 'la propuesta nace con facturación automática activa');
     const ernestoDossier = await api.get(`/api/clients/${ernesto.id}/billing-subscriptions`);
     assert.equal(ernestoDossier.datos.lines.length, 2);
   });
@@ -3993,6 +3996,13 @@ describe('cobro declarativo del expediente · etapa 1A', () => {
     assert.equal(creado.datos.kind, 'package');
     assert.equal(creado.datos.cycleDays, 35);
     assert.equal(creado.datos.startsOn, '2026-09-15');
+    assert.equal(creado.datos.autoGenerate, true);
+
+    const manual = await api.post(`/api/clients/${sara.id}/billing-subscriptions`, {
+      kind: 'monthly', price: 430, sessionsReference: 12, startsOn: '2027-01-15', autoGenerate: false
+    });
+    assert.equal(manual.estado, 201);
+    assert.equal(manual.datos.autoGenerate, false);
   });
 
   test('un cambio de monto cierra la línea y abre otra sin reescribir la historia', async () => {
