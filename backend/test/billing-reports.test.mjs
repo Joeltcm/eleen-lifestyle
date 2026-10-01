@@ -219,4 +219,29 @@ describe('tras el corte (estado new): portal, facturas y finanzas leen la fuente
     assert.deepEqual(sep.cobros.map(c => c.metodo), ['Yappy']);
     assert.match(sep.cobros[0].concepto, /FAC-0001/);
   });
+
+  test('la ficha del cliente muestra su deuda pendiente desde la fuente nueva (parte proporcional del saldo de la familia)', async () => {
+    // FAC-0001: $900 con $400 pagados -> falta 500/900 de cada línea; el saldo se pagó después en una prueba anterior, así que se reabre
+    const [abierta] = await B.db`SELECT id FROM billing_invoices WHERE number = 1`;
+    await B.db`UPDATE billing_payment_applications SET reversed_at = now(), reversal_reason = 'prueba' WHERE invoice_id = ${abierta.id} AND amount = 500`;
+    await B.db`UPDATE billing_invoices SET status = 'parcial' WHERE id = ${abierta.id}`;
+    const r = await B.api.get('/api/clients');
+    const deuda = nombre => Number(r.datos.find(c => c.full_name === nombre).deuda_pendiente);
+    assert.equal(Math.round(deuda('Riccardo') * 100) / 100, 250);
+    assert.equal(Math.round(deuda('Iraida') * 100) / 100, 166.67);
+    assert.equal(Math.round(deuda('Ernesto') * 100) / 100, 83.33, 'su factura propia está pagada: solo cuenta su parte de la familia');
+    assert.equal(deuda('Sola'), 0);
+  });
+
+  test('las notificaciones avisan de los pagos atrasados NUEVOS y no de los pendientes viejos congelados', async () => {
+    await B.db`INSERT INTO invoices (client_id, concept, amount, due_on, status, source_system) VALUES (${B.id.Sola}, 'Pendiente viejo congelado', 40, '2020-01-01', 'pending', NULL)`;
+    const staff = await B.api.get('/api/notifications');
+    assert.equal(staff.estado, 200);
+    const pagos = staff.datos.filter(n => n.type === 'overdue' || n.type === 'payment');
+    assert.ok(pagos.some(n => /Riccardo/.test(n.title) && /FAC-0001/.test(n.body)), 'avisa de FAC-0001');
+    assert.ok(!pagos.some(n => /congelado/.test(n.body)), 'no avisa de la factura vieja');
+    const portal = await B.portalDe(B.id.Riccardo);
+    const cliente = await portal.get('/api/notifications');
+    assert.ok(cliente.datos.some(n => n.type === 'payment' && /FAC-0001/.test(n.body)));
+  });
 });

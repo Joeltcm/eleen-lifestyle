@@ -1872,13 +1872,18 @@ app.get('/api/clients', { preHandler: requireStaff }, async request => {
       -- Lo que se debe por las clases de esta persona, aunque el cobro salga a
       -- nombre de quien paga. El saldo se renueva igual —no se le cierra la
       -- puerta a nadie por un pago que entra tarde—, pero queda dicho.
-      COALESCE((
+      ${billingEngine.state === 'new' ? sql`COALESCE((
+        -- Fuente nueva: lo que falta pagar de las líneas de ESTA persona en facturas abiertas (su parte proporcional del saldo).
+        SELECT sum(l.amount * (GREATEST(bi.total - COALESCE((SELECT sum(a.amount) FROM billing_payment_applications a WHERE a.invoice_id = bi.id AND a.reversed_at IS NULL), 0), 0) / NULLIF(bi.total, 0)))
+        FROM billing_invoice_lines l JOIN billing_invoices bi ON bi.id = l.invoice_id
+        WHERE l.beneficiary_client_id = c.id AND bi.status IN ('pendiente', 'parcial') AND l.line_type = 'plan'
+      ), 0)::numeric(12,2)` : sql`COALESCE((
         SELECT sum(CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance
           ELSE GREATEST(i.amount - COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), 0), 0)
         END)
         FROM invoices i
         WHERE COALESCE(i.billed_for_client_id, i.client_id) = c.id AND i.status = 'pending'
-      ), 0)::numeric(12,2) AS deuda_pendiente
+      ), 0)::numeric(12,2)`} AS deuda_pendiente
       ,pp.id AS active_pause_id, pp.starts_on AS pause_started_on, pp.reason AS pause_reason,
       pp.package_id AS paused_package_id
     FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id
@@ -6373,6 +6378,20 @@ app.post('/api/push/subscriptions', { preHandler: requireAuth }, async (request,
   return reply.code(201).send(subscription);
 });
 
+// Avisos de pago desde la fuente nueva (estado `new`): facturas abiertas del PAGADOR, con la forma que ya usan las notificaciones.
+async function openNewInvoiceNotices(ownerId: string, paymentDays: number, clientId?: string) {
+  const rows = await sql`
+    SELECT i.due_on::text AS due_on, i.total::text AS amount, i.number, i.kind, i.cycle_start::text AS cycle_start, i.cycle_end::text AS cycle_end, p.full_name,
+      GREATEST(i.total - COALESCE((SELECT sum(a.amount) FROM billing_payment_applications a WHERE a.invoice_id = i.id AND a.reversed_at IS NULL), 0), 0)::text AS balance,
+      (i.due_on < current_date) AS atrasada, (current_date - i.due_on) AS dias_atraso
+    FROM billing_invoices i JOIN clients p ON p.id = i.payer_client_id
+    WHERE i.owner_id = ${ownerId} AND i.status IN ('pendiente', 'parcial') AND p.status <> 'paused'
+      AND (${clientId ?? null}::uuid IS NULL OR i.payer_client_id = ${clientId ?? null}::uuid)
+      AND i.due_on <= current_date + (${paymentDays})::integer ORDER BY i.due_on`;
+  return rows.map(row => ({ due_on: row.due_on, amount: row.amount, balance: row.balance, full_name: row.full_name, atrasada: row.atrasada, dias_atraso: row.dias_atraso,
+    concept: `${billingCode(row.number)} · ${billingKindText[row.kind as string] || row.kind} ${dmy(row.cycle_start)} → ${dmy(row.cycle_end)}` }));
+}
+
 app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const [preference] = await sql`SELECT * FROM notification_preferences WHERE user_id = ${auth.sub}`;
@@ -6381,7 +6400,9 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
     const [client] = await sql`SELECT * FROM clients WHERE portal_user_id = ${auth.sub}`;
     if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
     const sessions = await sql`SELECT starts_at, duration_minutes FROM sessions WHERE client_id = ${client.id} AND status = 'scheduled' AND NOT COALESCE(paused_hold, false) AND starts_at BETWEEN now() AND now() + ${`${sessionHours} hours`}::interval ORDER BY starts_at`;
-    const invoices = await sql`SELECT due_on, amount, concept,
+    const invoices = billingEngine.state === 'new'
+      ? await openNewInvoiceNotices(client.owner_id as string, paymentDays, client.id as string)
+      : await sql`SELECT due_on, amount, concept,
       GREATEST(amount - COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = invoices.id), CASE WHEN status = 'confirmed' THEN amount ELSE 0 END), 0) AS balance
       FROM invoices WHERE client_id = ${client.id} AND status = 'pending' AND source_system IS DISTINCT FROM 'zoho_invoice' AND due_on <= current_date + (${paymentDays})::integer ORDER BY due_on`;
     return [
@@ -6393,7 +6414,7 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
     SELECT s.starts_at, c.full_name FROM sessions s JOIN clients c ON c.id = s.client_id
     WHERE c.owner_id = ${auth.sub} AND s.status = 'scheduled' AND NOT COALESCE(s.paused_hold, false) AND s.starts_at BETWEEN now() AND now() + ${`${sessionHours} hours`}::interval ORDER BY s.starts_at
   `;
-  const invoices = await sql`
+  const invoices = billingEngine.state === 'new' ? await openNewInvoiceNotices(auth.sub, paymentDays) : await sql`
     SELECT i.due_on, i.amount, i.concept, c.full_name,
       GREATEST(i.amount - COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), CASE WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END), 0) AS balance,
       (i.due_on < current_date) AS atrasada,
@@ -6530,6 +6551,25 @@ async function dispatchReminders() {
         OR (u.role IN ('admin', 'trainer') AND c.owner_id = u.id)
       JOIN invoices i ON i.client_id = c.id
       WHERE np.browser_enabled = true AND i.status = 'pending'
+        -- Tras el corte (estado new) las facturas del sistema anterior ya no generan recordatorios: lo hacen las nuevas (consulta siguiente).
+        AND ${billingEngine.state === 'new' ? sql`false` : sql`true`}
+        AND i.due_on BETWEEN current_date - 30 AND current_date + np.payment_reminder_days
+        AND EXISTS (SELECT 1 FROM push_subscriptions ps WHERE ps.user_id = u.id AND ps.active = true)
+        AND NOT EXISTS (
+          SELECT 1 FROM notification_deliveries nd
+          WHERE nd.user_id = u.id AND nd.kind = 'payment' AND nd.reference_id = i.id
+      )
+    `,
+    sql<ReminderCandidate[]>`
+      SELECT u.id AS user_id, 'payment' AS kind, i.id AS reference_id, u.role, c.full_name,
+        i.due_on, i.total AS amount, ('FAC-' || lpad(i.number::text, 4, '0')) AS concept,
+        GREATEST(i.total - COALESCE((SELECT sum(a.amount) FROM billing_payment_applications a WHERE a.invoice_id = i.id AND a.reversed_at IS NULL), 0), 0) AS balance
+      FROM notification_preferences np
+      JOIN users u ON u.id = np.user_id AND u.active = true
+      JOIN clients c ON (u.role = 'client' AND c.portal_user_id = u.id)
+        OR (u.role IN ('admin', 'trainer') AND c.owner_id = u.id)
+      JOIN billing_invoices i ON i.payer_client_id = c.id
+      WHERE ${billingEngine.state === 'new' ? sql`true` : sql`false`} AND np.browser_enabled = true AND i.status IN ('pendiente', 'parcial') AND c.status <> 'paused'
         AND i.due_on BETWEEN current_date - 30 AND current_date + np.payment_reminder_days
         AND EXISTS (SELECT 1 FROM push_subscriptions ps WHERE ps.user_id = u.id AND ps.active = true)
         AND NOT EXISTS (
