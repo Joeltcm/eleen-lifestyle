@@ -30,3 +30,14 @@ test('app.js, sw.js, version.json e index.html llevan la misma versión', async 
   assert.equal(marcas.length, 7);
   assert.ok(marcas.every(v => v === enApp), `index.html tiene ${[...new Set(marcas)]} y app.js ${enApp}`);
 });
+
+test('la pestaña Cobros (nuevo) existe, es distinta de la de facturas y usa el vocabulario cobro = dinero recibido', async () => {
+  const html = await leer('index.html');
+  assert.match(html, /data-subtab="cobros-nuevo">Cobros \(nuevo\)</);
+  assert.match(html, /id="subpanel-cobros-nuevo"/);
+  const app = await leer('app.js');
+  assert.match(app, /nombre === 'cobros-nuevo'\) newBillingPayments\(\)/);
+  assert.match(app, /Cobro = dinero recibido/);
+  assert.match(app, /\/api\/billing\/payments/);
+  assert.match(app, /payment-applications\/\$\{button\.dataset\.reverse\}\/reverse/);
+});

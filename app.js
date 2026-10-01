@@ -1,4 +1,4 @@
-const APP_VERSION = '235';
+const APP_VERSION = '236';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -4129,7 +4129,7 @@ async function newBillingInvoices() {
       <td data-label="Pagado">${money.format(invoice.paid)}</td>
       <td data-label="Saldo">${money.format(invoice.balance)}</td>
       <td data-label="Estado">${escapeHtml(newBillingStatusText(invoice))}${invoice.status === 'anulada' && invoice.voidReason ? `<br><small>${escapeHtml(invoice.voidReason)}</small>` : ''}</td>
-      <td data-label=""><button class="secondary" type="button" data-new-invoice-pdf="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Ver PDF</button>${invoice.status === 'anulada' ? '' : ` <button class="secondary" type="button" data-new-invoice-void="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Anular</button>`}</td></tr>`).join('')}</tbody></table></div>`;
+      <td data-label=""><button class="secondary" type="button" data-new-invoice-pdf="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Ver PDF</button>${invoice.status === 'anulada' || invoice.paid > 0 ? '' : ` <button class="secondary" type="button" data-new-invoice-void="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Anular</button>`}</td></tr>`).join('')}</tbody></table></div>`;
     list.querySelectorAll('[data-new-invoice-pdf]').forEach(button => button.onclick = () => previewProtectedPdf(`/api/billing/invoices/${button.dataset.newInvoicePdf}/pdf`, `Factura ${button.dataset.code}`, `factura-${button.dataset.code}.pdf`));
     list.querySelectorAll('[data-new-invoice-void]').forEach(button => button.onclick = () => newBillingVoidDialog(button.dataset.newInvoiceVoid, button.dataset.code));
   } catch (error) { list.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; }
@@ -4197,6 +4197,153 @@ function newBillingInvoiceDialog() {
     catch (error) { toast(error.message, true); form.classList.remove('loading-state'); }
   };
 }
+// ── Cobros del módulo nuevo (1B-3) ───────────────────────────────────────────
+// COBRO = dinero recibido (no es una factura). Se aplica a una o varias facturas del
+// mismo pagador; lo que no se aplica queda como saldo a favor. Un cobro no se edita ni se
+// borra: una aplicación equivocada se REVIERTE y un cobro mal registrado se ANULA, ambos
+// con motivo.
+const newBillingMethods = ['Efectivo', 'Yappy', 'Transferencia bancaria', 'Tarjeta', 'Otro'];
+const newBillingPaymentStatus = { sin_aplicar: 'Sin aplicar', parcial: 'Aplicado en parte', aplicado: 'Aplicado', anulado: 'Anulado' };
+const newBillingPaymentFilters = { status: 'all', payerId: '' };
+const centsOf = value => Math.round(Number(value || 0) * 100);
+
+// Lista las facturas abiertas del pagador con un campo de importe por factura. Reparte
+// `getAvailable()` empezando por la más antigua; el usuario puede cambiar cualquier importe.
+async function newBillingAllocator(container, payerId, getAvailable) {
+  container.innerHTML = '<p class="empty">Cargando facturas abiertas…</p>';
+  let open = [];
+  try { open = (await api(`/api/billing/invoices?status=abierta&payerId=${payerId}`)).invoices.slice().sort((a, b) => a.cycleStart.localeCompare(b.cycleStart) || a.number - b.number); }
+  catch (error) { container.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; return { items: () => [], suggest: () => {} }; }
+  if (!open.length) { container.innerHTML = '<p class="empty">Este pagador no tiene facturas abiertas: el cobro quedará como saldo a favor.</p>'; return { items: () => [], suggest: () => {} }; }
+  container.innerHTML = `<div class="new-billing-allocs">${open.map(invoice => `<div class="new-billing-alloc" data-invoice="${invoice.id}">
+      <div><b>${escapeHtml(invoice.code)}</b><small>${fechaCorta(invoice.cycleStart)} → ${fechaCorta(invoice.cycleEnd)} · saldo ${money.format(invoice.balance)}${invoice.overdue ? ' · vencida' : ''}</small></div>
+      <input type="number" min="0" max="${invoice.balance}" step="0.01" value="0" aria-label="Importe para ${escapeHtml(invoice.code)}" data-balance="${invoice.balance}" /></div>`).join('')}
+    <p class="form-summary" data-alloc-summary></p></div>`;
+  const inputs = [...container.querySelectorAll('input')];
+  const summary = container.querySelector('[data-alloc-summary]');
+  const refresh = () => {
+    const used = inputs.reduce((sum, input) => sum + centsOf(input.value), 0);
+    const left = centsOf(getAvailable()) - used;
+    summary.textContent = `Aplicado ${money.format(used / 100)} · ${left >= 0 ? `queda como saldo a favor ${money.format(left / 100)}` : `excede lo disponible por ${money.format(-left / 100)}`}`;
+    summary.classList.toggle('error', left < 0);
+  };
+  const suggest = () => {
+    let left = centsOf(getAvailable());
+    inputs.forEach(input => { const take = Math.max(0, Math.min(left, centsOf(input.dataset.balance))); input.value = take ? (take / 100).toFixed(2) : '0'; left -= take; });
+    refresh();
+  };
+  inputs.forEach(input => input.addEventListener('input', refresh));
+  suggest();
+  return {
+    suggest,
+    items: () => inputs.map(input => ({ invoiceId: input.closest('[data-invoice]').dataset.invoice, amount: Number(input.value) })).filter(item => item.amount > 0)
+  };
+}
+
+async function newBillingPayments() {
+  const root = document.getElementById('cobros-nuevo-mount');
+  if (!root) return;
+  const payerOptions = data.clients.slice().sort((a, b) => a.name.localeCompare(b.name, 'es')).map(client => `<option value="${client.id}"${client.id === newBillingPaymentFilters.payerId ? ' selected' : ''}>${escapeHtml(client.name)}</option>`).join('');
+  root.innerHTML = `<article class="card"><div class="card-head"><div><h3>Cobros</h3><p id="new-payment-summary">Cargando…</p></div></div>
+    <p class="section-note">Cobro = dinero recibido. Se aplica a las facturas del mismo pagador; lo que no se aplica queda como saldo a favor. Un cobro no se edita: se revierte la aplicación o se anula el cobro, con motivo.</p>
+    <div class="subpanel-toolbar"><button class="primary" type="button" id="new-payment-create">+ Registrar cobro</button></div>
+    <div class="billing-period-bar"><label>Estado<select id="new-payment-status">${[['all', 'Todos'], ['available', 'Con saldo a favor'], ['voided', 'Anulados']].map(([value, text]) => `<option value="${value}"${value === newBillingPaymentFilters.status ? ' selected' : ''}>${text}</option>`).join('')}</select></label>
+      <label>Pagador<select id="new-payment-payer"><option value="">Todos</option>${payerOptions}</select></label></div>
+    <div id="new-payment-list"><p class="empty">Cargando cobros…</p></div></article>`;
+  document.getElementById('new-payment-create').onclick = () => newBillingPaymentDialog();
+  document.getElementById('new-payment-status').onchange = event => { newBillingPaymentFilters.status = event.target.value; newBillingPayments(); };
+  document.getElementById('new-payment-payer').onchange = event => { newBillingPaymentFilters.payerId = event.target.value; newBillingPayments(); };
+  const list = document.getElementById('new-payment-list');
+  try {
+    const query = new URLSearchParams({ status: newBillingPaymentFilters.status });
+    if (newBillingPaymentFilters.payerId) query.set('payerId', newBillingPaymentFilters.payerId);
+    const result = await api(`/api/billing/payments?${query}`);
+    document.getElementById('new-payment-summary').textContent = `${result.summary.count} cobros · Recibido ${money.format(result.summary.total)} · Aplicado ${money.format(result.summary.applied)} · Saldo a favor ${money.format(result.summary.available)}`;
+    if (!result.payments.length) { list.innerHTML = '<p class="empty">No hay cobros con este filtro.</p>'; return; }
+    list.innerHTML = `<div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Fecha</th><th>Pagador</th><th>Monto</th><th>Método</th><th>Referencia</th><th>Aplicado</th><th>Disponible</th><th>Estado</th><th></th></tr></thead><tbody>${result.payments.map(payment => `<tr>
+      <td data-label="Fecha">${fechaCorta(payment.paidOn)}</td>
+      <td data-label="Pagador">${escapeHtml(payment.payerName)}</td>
+      <td data-label="Monto">${money.format(payment.amount)}</td>
+      <td data-label="Método">${escapeHtml(payment.method)}</td>
+      <td data-label="Referencia">${escapeHtml(payment.reference || '—')}</td>
+      <td data-label="Aplicado">${money.format(payment.applied)}</td>
+      <td data-label="Disponible">${money.format(payment.available)}</td>
+      <td data-label="Estado">${escapeHtml(newBillingPaymentStatus[payment.status] || payment.status)}${payment.voidReason ? `<br><small>${escapeHtml(payment.voidReason)}</small>` : ''}</td>
+      <td data-label=""><button class="secondary" type="button" data-new-payment-open="${payment.id}">${payment.status === 'anulado' ? 'Ver' : 'Aplicar / ver'}</button></td></tr>`).join('')}</tbody></table></div>`;
+    list.querySelectorAll('[data-new-payment-open]').forEach(button => button.onclick = () => newBillingPaymentDetail(button.dataset.newPaymentOpen));
+  } catch (error) { list.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; }
+}
+
+function newBillingPaymentDialog() {
+  const clientsSorted = data.clients.slice().sort((a, b) => a.name.localeCompare(b.name, 'es'));
+  const box = document.createElement('div');
+  box.innerHTML = `<form id="new-payment-form"><p class="eyebrow">COBROS (NUEVO)</p><h2>Registrar cobro</h2>
+    <label>Pagador<select name="payerClientId" required><option value="">Elige al pagador</option>${clientsSorted.map(client => `<option value="${client.id}">${escapeHtml(client.name)}</option>`).join('')}</select><small>Quien entregó el dinero. En una familia es quien paga por todos.</small></label>
+    <label>Fecha del cobro<input name="paidOn" type="date" value="${dateKey(new Date())}" required /></label>
+    <label>Monto recibido (USD)<input name="amount" type="number" min="0.01" step="0.01" required /></label>
+    <label>Método<select name="method">${newBillingMethods.map(method => `<option>${method}</option>`).join('')}</select></label>
+    <label>Referencia<input name="reference" maxlength="160" placeholder="Opcional: número de transferencia, Yappy…" /></label>
+    <label>Notas<textarea name="notes" rows="2" maxlength="500"></textarea></label>
+    <p class="eyebrow" style="margin-top:14px">APLICAR A FACTURAS ABIERTAS</p><div id="new-payment-allocator"><p class="empty">Elige primero al pagador.</p></div>
+    <button class="primary wide-button">Registrar cobro</button></form>`;
+  openModal(box);
+  const form = box.querySelector('form'); const allocatorBox = box.querySelector('#new-payment-allocator');
+  let allocator = { items: () => [], suggest: () => {} };
+  const loadAllocator = async () => { allocator = form.elements.payerClientId.value ? await newBillingAllocator(allocatorBox, form.elements.payerClientId.value, () => form.elements.amount.value) : { items: () => [], suggest: () => {} }; };
+  form.elements.payerClientId.onchange = loadAllocator;
+  form.elements.amount.addEventListener('input', () => allocator.suggest());
+  form.onsubmit = async event => {
+    event.preventDefault();
+    const values = new FormData(form);
+    const body = { payerClientId: values.get('payerClientId'), paidOn: values.get('paidOn'), amount: Number(values.get('amount')), method: values.get('method') };
+    if (values.get('reference').trim()) body.reference = values.get('reference').trim();
+    if (values.get('notes').trim()) body.notes = values.get('notes').trim();
+    const applications = allocator.items(); if (applications.length) body.applications = applications;
+    try { form.classList.add('loading-state'); const result = await api('/api/billing/payments', { method: 'POST', body }); modal.close(); toast(`Cobro registrado${result.available > 0 ? ` · saldo a favor ${money.format(result.available)}` : ''}`); newBillingPayments(); }
+    catch (error) { toast(error.message, true); form.classList.remove('loading-state'); }
+  };
+}
+
+async function newBillingPaymentDetail(id) {
+  let payment;
+  try { payment = await api(`/api/billing/payments/${id}`); } catch (error) { return toast(error.message, true); }
+  const box = document.createElement('div');
+  const active = payment.applications.filter(item => !item.reversedAt);
+  box.innerHTML = `<div><p class="eyebrow">COBROS (NUEVO)</p><h2>${money.format(payment.amount)} · ${escapeHtml(payment.payerName)}</h2>
+    <p class="form-summary">${fechaCorta(payment.paidOn)} · ${escapeHtml(payment.method)}${payment.reference ? ` · ${escapeHtml(payment.reference)}` : ''}<br>${escapeHtml(newBillingPaymentStatus[payment.status] || payment.status)} · aplicado ${money.format(payment.applied)} · disponible ${money.format(payment.available)}${payment.voidReason ? `<br>Anulado: ${escapeHtml(payment.voidReason)}` : ''}</p>
+    <p class="eyebrow" style="margin-top:14px">APLICACIONES</p>
+    ${payment.applications.length ? `<div class="new-billing-allocs">${payment.applications.map(item => `<div class="new-billing-alloc"><div><b>${escapeHtml(item.invoiceCode)}</b><small>${money.format(item.amount)} · ${fechaCorta(item.appliedOn)}${item.reversedAt ? ` · revertida: ${escapeHtml(item.reversalReason || '')}` : ''}</small></div>${item.reversedAt ? '<span></span>' : `<button type="button" class="secondary" data-reverse="${item.id}" data-code="${escapeHtml(item.invoiceCode)}">Revertir</button>`}</div>`).join('')}</div>` : '<p class="empty">Todavía no se aplicó a ninguna factura.</p>'}
+    ${payment.status !== 'anulado' && payment.available > 0 ? `<p class="eyebrow" style="margin-top:14px">APLICAR EL SALDO A FAVOR (${money.format(payment.available)})</p><div id="new-payment-detail-alloc"></div><button class="primary wide-button" type="button" id="new-payment-apply">Aplicar</button>` : ''}
+    ${payment.status !== 'anulado' && !active.length ? '<button class="secondary wide-button" type="button" id="new-payment-void" style="margin-top:12px">Anular este cobro</button>' : ''}</div>`;
+  openModal(box);
+  const refreshAll = () => { modal.close(); newBillingPayments(); };
+  box.querySelectorAll('[data-reverse]').forEach(button => button.onclick = () => newBillingReasonDialog(`Revertir la aplicación a ${button.dataset.code}`, 'Revertir aplicación', async reason => {
+    await api(`/api/billing/payment-applications/${button.dataset.reverse}/reverse`, { method: 'POST', body: { reason } }); toast('Aplicación revertida'); refreshAll();
+  }));
+  const voidButton = box.querySelector('#new-payment-void');
+  if (voidButton) voidButton.onclick = () => newBillingReasonDialog('Anular el cobro', 'Anular cobro', async reason => {
+    await api(`/api/billing/payments/${id}/void`, { method: 'POST', body: { reason } }); toast('Cobro anulado'); refreshAll();
+  });
+  const allocBox = box.querySelector('#new-payment-detail-alloc');
+  if (allocBox) {
+    const allocator = await newBillingAllocator(allocBox, payment.payerClientId, () => payment.available);
+    box.querySelector('#new-payment-apply').onclick = async () => {
+      const applications = allocator.items();
+      if (!applications.length) return toast('Indica el importe de al menos una factura', true);
+      try { await api(`/api/billing/payments/${id}/applications`, { method: 'POST', body: { applications } }); toast('Cobro aplicado'); refreshAll(); } catch (error) { toast(error.message, true); }
+    };
+  }
+}
+
+function newBillingReasonDialog(title, action, onSubmit) {
+  const box = document.createElement('div');
+  box.innerHTML = `<form id="new-billing-reason-form"><p class="eyebrow">COBROS (NUEVO)</p><h2>${escapeHtml(title)}</h2><p class="section-note">Queda en el historial con su motivo; nada se borra.</p><label>Motivo<input name="reason" required minlength="3" maxlength="300" placeholder="Ej.: se aplicó a la factura equivocada" /></label><button class="primary wide-button">${escapeHtml(action)}</button></form>`;
+  openModal(box);
+  box.querySelector('form').onsubmit = async event => {
+    event.preventDefault();
+    try { await onSubmit(new FormData(event.target).get('reason')); } catch (error) { toast(error.message, true); }
+  };
+}
 // Sub-pestañas del área financiera: Cobros / Finanzas / Planes / Gastos.
 // Cada dataset en su propia pantalla, para no amontonar todo en una sola página
 // —sobre todo en el teléfono—. Finanzas y Gastos se pintan al abrir su pestaña.
@@ -4204,6 +4351,7 @@ function activarSubtab(nombre) {
   document.querySelectorAll('#billing .subtab').forEach(boton => boton.classList.toggle('active', boton.dataset.subtab === nombre));
   document.querySelectorAll('#billing .subpanel').forEach(panel => panel.classList.toggle('active', panel.id === `subpanel-${nombre}`));
   if (nombre === 'facturas-nuevo') newBillingInvoices();
+  if (nombre === 'cobros-nuevo') newBillingPayments();
   if (nombre === 'finanzas') financeDashboard();
   if (nombre === 'gastos') expensesManager();
 }
