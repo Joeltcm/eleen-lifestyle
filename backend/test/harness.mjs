@@ -62,29 +62,40 @@ export async function levantar() {
     throw new Error(`Fallaron las migraciones sobre una base vacía:\n${error.stdout || ''}${error.stderr || error.message}`);
   }
 
-  const puerto = 4000 + Math.floor(Math.random() * 1000);
-  const proceso = spawn('node', ['dist/server.js'], {
-    env: { ...entorno, PORT: String(puerto) },
-    cwd: new URL('..', import.meta.url).pathname,
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
-  let salida = '';
-  proceso.stdout.on('data', d => { salida += d; });
-  proceso.stderr.on('data', d => { salida += d; });
-
-  const base = `http://127.0.0.1:${puerto}`;
-  const limite = Date.now() + 30_000;
-  for (;;) {
-    if (Date.now() > limite) {
-      proceso.kill('SIGKILL');
-      await ejecutar('dropdb', ['--if-exists', nombreBase]).catch(() => {});
-      throw new Error(`El servidor no arrancó en 30 s:\n${salida.slice(-1500)}`);
+  // El puerto se elige al azar; si otro proceso (otra prueba, un servidor de demostración) ya lo ocupa, el servidor sale con EADDRINUSE y se reintenta con otro.
+  let proceso; let salida = ''; let puerto; let base; let arrancado = false;
+  for (let intento = 0; intento < 8 && !arrancado; intento += 1) {
+    puerto = 4000 + Math.floor(Math.random() * 4000);
+    salida = '';
+    let salio = false;
+    proceso = spawn('node', ['dist/server.js'], {
+      env: { ...entorno, PORT: String(puerto) },
+      cwd: new URL('..', import.meta.url).pathname,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    proceso.stdout.on('data', d => { salida += d; });
+    proceso.stderr.on('data', d => { salida += d; });
+    proceso.on('exit', () => { salio = true; });
+    base = `http://127.0.0.1:${puerto}`;
+    const limite = Date.now() + 30_000;
+    for (;;) {
+      if (salio) break;
+      if (Date.now() > limite) {
+        proceso.kill('SIGKILL');
+        await ejecutar('dropdb', ['--if-exists', nombreBase]).catch(() => {});
+        throw new Error(`El servidor no arrancó en 30 s:\n${salida.slice(-1500)}`);
+      }
+      try {
+        const r = await fetch(`${base}/health`);
+        // Solo vale si el que responde es NUESTRO proceso (no otro servidor que ya tenía ese puerto).
+        if (r.ok && !salio) { arrancado = true; break; }
+      } catch { /* todavía no escucha */ }
+      await new Promise(r => setTimeout(r, 200));
     }
-    try {
-      const r = await fetch(`${base}/health`);
-      if (r.ok) break;
-    } catch { /* todavía no escucha */ }
-    await new Promise(r => setTimeout(r, 200));
+  }
+  if (!arrancado) {
+    await ejecutar('dropdb', ['--if-exists', nombreBase]).catch(() => {});
+    throw new Error(`El servidor no arrancó tras varios intentos:\n${salida.slice(-1500)}`);
   }
 
   const parar = async () => {

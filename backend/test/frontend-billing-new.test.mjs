@@ -145,6 +145,7 @@ test('J-097: "Pago pendiente" en vez de "vencida", estados con color, sección E
   assert.match(app, /getElementById\('portal-compliance'\)/);
   assert.match(app, /complianceHero\.textContent = `\$\{overall\}%`/);
   assert.match(app, /Hola, \$\{welcomeName\}/);
+});
 
 test('E2: las tarifas tienen zona/especial y el plan de facturación ofrece sugerencias editables', async () => {
   const [html, app] = await Promise.all([leer('index.html'), leer('app.js')]);
