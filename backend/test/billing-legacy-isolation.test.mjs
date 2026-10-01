@@ -69,3 +69,21 @@ test('POST /api/packages y /api/packages/:id/renew responden 410 en estado new; 
   assert.equal((await N.api.get('/api/packages')).estado, 200);
   assert.deepEqual(await N.db`SELECT (SELECT count(*)::int FROM invoices) AS facturas, (SELECT count(*)::int FROM session_packages) AS paquetes, (SELECT count(*)::int FROM invoice_payments) AS cobros`, antes, 'ninguna escritura heredada');
 });
+
+test('X-019: el descuento por cancelación de la entrenadora se rechaza (409) en estado new y no deja un billing_credits huérfano; en legacy sí se crea', async () => {
+  const caso = async S => {
+    const c = await S.api.post('/api/clients', { fullName: `Descuento ${Math.random()}`, billingModel: 'monthly', standardPrice: 160, monthlySessionTarget: 8, cutoffDay: 15 });
+    const lote = await S.api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: [new Date(Date.now() + 3 * 86400_000).toISOString(), new Date(Date.now() + 4 * 86400_000).toISOString()], durationMinutes: 30, mode: 'Presencial' });
+    const [primera, segunda] = lote.datos.sesiones;
+    const cancelar = await S.api.delete(`/api/sessions/${primera.id}?rescheduled=false&by=trainer&resolution=discount&amount=20`);
+    // sin descuento sigue funcionando en cualquier estado
+    const sinDescuento = await S.api.delete(`/api/sessions/${segunda.id}?rescheduled=false&by=trainer&resolution=none`);
+    assert.equal(sinDescuento.estado, 200);
+    return { estado: cancelar.estado, mensaje: cancelar.datos.error, creditos: (await S.db`SELECT count(*)::int AS n FROM billing_credits WHERE client_id = ${c.datos.id}`)[0].n };
+  };
+  const l = await caso(L);
+  assert.deepEqual([l.estado, l.creditos], [200, 1], 'contraste: en legacy se crea el crédito');
+  const n = await caso(N);
+  assert.equal(n.estado, 409); assert.match(n.mensaje, /descuento por clase cancelada por la entrenadora todavía no se aplica en la facturación nueva/);
+  assert.equal(n.creditos, 0, 'nada huérfano');
+});

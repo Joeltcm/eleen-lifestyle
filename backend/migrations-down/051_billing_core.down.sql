@@ -7,12 +7,17 @@
 -- Se ejecuta a mano: psql "$DATABASE_URL" -f migrations-down/051_billing_core.down.sql
 BEGIN;
 DO $$
+DECLARE hay boolean := false; tabla text;
 BEGIN
-  IF to_regclass('billing_invoices') IS NOT NULL
-     AND EXISTS (SELECT 1 FROM billing_invoices)
-     AND COALESCE(current_setting('billing.allow_destructive_down', true), '') <> 'on' THEN
-    RAISE EXCEPTION 'billing_invoices tiene facturas emitidas: restaure desde el respaldo o active billing.allow_destructive_down = on sabiendo que se perderán';
-  END IF;
+  -- X-019: cualquier dato financiero (no solo facturas) basta para negarse: cobros sin aplicar, ajustes, aplicaciones, líneas o bitácora.
+  FOREACH tabla IN ARRAY ARRAY['billing_invoices', 'billing_payments', 'billing_payment_applications', 'billing_adjustments', 'billing_invoice_lines', 'billing_audit'] LOOP
+    IF to_regclass(tabla) IS NOT NULL THEN
+      EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I)', tabla) INTO hay;
+      IF hay AND COALESCE(current_setting('billing.allow_destructive_down', true), '') <> 'on' THEN
+        RAISE EXCEPTION '% tiene datos financieros: restaure desde el respaldo o active billing.allow_destructive_down = on sabiendo que se perderán', tabla;
+      END IF;
+    END IF;
+  END LOOP;
 END $$;
 DROP TABLE IF EXISTS billing_audit, billing_adjustments, billing_payment_applications,
   billing_payments, billing_invoice_lines, billing_invoices, billing_counters CASCADE;

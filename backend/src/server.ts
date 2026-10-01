@@ -370,6 +370,9 @@ async function calcularFacturaCredito(factura: FacturaCredito) {
   return { cycle, target, base, sesiones, billable, amount, paidAmount, lineItems, concept, status };
 }
 
+// X-019: el descuento por cancelación de la entrenadora vivía en billing_credits, que solo consume el sistema anterior. Fuera de legacy se rechaza con un aviso claro
+// (en vez de dejar un descuento huérfano que el cliente nunca vería); reprogramar o cancelar "sin descuento" sigue funcionando.
+const DESCUENTO_NO_DISPONIBLE = 'El descuento por clase cancelada por la entrenadora todavía no se aplica en la facturación nueva. Reprograma la clase o cancélala sin descuento.';
 // Reescribe las facturas VIEJAS de crédito. Fuera del estado legacy (X-018) no debe tocar nada: la fuente de verdad es el módulo nuevo y el archivo queda intacto.
 async function recalcularFacturasNoAnticipadas(ownerId?: string) {
   if (!billingEngine.legacyWrites) return 0;
@@ -4258,6 +4261,7 @@ app.patch('/api/sessions/:id/cancellation', { preHandler: requireStaff }, async 
   if (input.creditCharge && (input.cancelledBy !== 'client' || input.rescheduled)) return reply.code(400).send({ error: 'Sólo una cancelación del cliente no reprogramada puede cobrarse a crédito.' });
   const resolution = requestedResolution;
   if (input.rescheduled && resolution !== 'none') return reply.code(400).send({ error: 'Una sesión reprogramada no puede descontar ni generar compensación.' });
+  if (!billingEngine.legacyWrites && input.cancelledBy === 'trainer' && resolution === 'discount') return reply.code(409).send({ error: DESCUENTO_NO_DISPONIBLE });
   if (input.cancelledBy === 'client' && !input.rescheduled && !['debit', 'none'].includes(resolution)) return reply.code(400).send({ error: 'Para una cancelación del cliente solo se permite descontar la clase o dejarla sin efecto.' });
   if (input.cancelledBy === 'trainer' && resolution === 'debit') return reply.code(400).send({ error: 'Una cancelación de la entrenadora no puede descontar una clase del cliente.' });
   const result = await sql.begin(async transaction => {
@@ -4414,6 +4418,7 @@ app.delete('/api/sessions/:id', { preHandler: requireStaff }, async (request, re
   // reponer y descontar la empujaría a marcar cualquiera de las dos por salir
   // del paso, y eso ensucia el saldo o el cobro.
   const compensa = consulta.resolution === 'discount' ? 'discount' : 'none';
+  if (!billingEngine.legacyWrites && laCancelaEllaSola && compensa === 'discount') return reply.code(409).send({ error: DESCUENTO_NO_DISPONIBLE });
 
   const result = await sql.begin(async transaction => {
     const [actual] = await transaction`

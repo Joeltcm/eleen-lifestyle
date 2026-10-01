@@ -26,7 +26,7 @@ before(async () => {
 after(async () => { await db?.end({ timeout: 1 }).catch(() => {}); await servidor?.parar(); });
 
 test('la reversa de 051 se NIEGA a borrar facturas emitidas sin orden expresa, y no deja nada a medias', async () => {
-  await assert.rejects(psql(down('051_billing_core.down.sql')), /billing_invoices tiene facturas emitidas/);
+  await assert.rejects(psql(down('051_billing_core.down.sql')), /billing_invoices tiene datos financieros/);
   assert.equal((await db`SELECT count(*)::int AS n FROM billing_invoices`)[0].n, 1, 'la factura sigue ahí');
   assert.equal((await db`SELECT count(*)::int AS n FROM schema_migrations WHERE name = '051_billing_core.sql'`)[0].n, 1);
 });
@@ -42,4 +42,20 @@ test('con la orden expresa sí corren (y quitan el registro de la migración)', 
   await psql(down('050_billing_subscriptions.down.sql'), { permitir: true });
   assert.equal((await db`SELECT to_regclass('billing_subscriptions') AS t`)[0].t, null);
   assert.equal((await db`SELECT count(*)::int AS n FROM schema_migrations WHERE name IN ('050_billing_subscriptions.sql', '051_billing_core.sql')`)[0].n, 0);
+});
+
+test('X-019: un cobro SIN aplicar (sin ninguna factura) también protege la reversa 051', async () => {
+  // La prueba anterior ya corrió la reversa con la orden expresa: se vuelve a levantar una base nueva con solo un cobro.
+  const otro = await levantar();
+  const otroDb = postgres(otro.databaseUrl, { onnotice: () => {}, max: 2 });
+  try {
+    const a = cliente(otro.base);
+    await a.post('/api/auth/setup', CREDENCIALES, { 'x-setup-token': SETUP_TOKEN });
+    const l = await a.post('/api/auth/login', { email: CREDENCIALES.email, password: CREDENCIALES.password }); a.usarToken(l.datos.token);
+    const c = (await a.post('/api/clients', { fullName: 'Pago suelto', cutoffDay: 1 })).datos.id;
+    assert.equal((await a.post('/api/billing/payments', { payerClientId: c, amount: 50, method: 'Efectivo', paidOn: '2026-09-02' })).estado, 201);
+    assert.equal((await otroDb`SELECT count(*)::int AS n FROM billing_invoices`)[0].n, 0, 'sin facturas');
+    await assert.rejects(ejecutar('psql', ['-v', 'ON_ERROR_STOP=1', '-q', otro.databaseUrl, '-f', down('051_billing_core.down.sql')]), /billing_payments tiene datos financieros/);
+    assert.equal((await otroDb`SELECT count(*)::int AS n FROM billing_payments`)[0].n, 1, 'el cobro sigue ahí');
+  } finally { await otroDb.end({ timeout: 1 }).catch(() => {}); await otro.parar(); }
 });
