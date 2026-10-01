@@ -725,3 +725,15 @@ button.active-filter{background:#2f6f4f;color:#fff;border-color:#2f6f4f}
 .new-billing-metrics{grid-template-columns:repeat(3,1fr)}.new-billing-metrics strong{font-size:22px;white-space:nowrap}@media(max-width:720px){.new-billing-metrics{grid-template-columns:repeat(2,1fr)}.new-billing-metrics strong{font-size:18px}}
 
 .declarative-billing-history{margin-top:10px}.declarative-billing-history summary{cursor:pointer;font-size:12px;color:var(--muted,#7a6a72);padding:6px 0}
+
+/* Estados bien visibles (J-097): pago pendiente, pagada, pago parcial, anulada y en pausa. */
+.estado-chip{display:inline-block;padding:3px 10px;border-radius:99px;font:700 11px 'DM Sans',sans-serif;letter-spacing:.2px;white-space:nowrap;border:1px solid transparent}
+.estado-chip.pago-pendiente{background:#fff0d2;color:#8a5200;border-color:#f0c26c}
+.estado-chip.pagada{background:#e2f4e5;color:#226a38;border-color:#aedbb9}
+.estado-chip.parcial{background:#e5edfb;color:#294d92;border-color:#b3c6ea}
+.estado-chip.anulada{background:#eeeeee;color:#666;border-color:#d4d4d4}
+.estado-chip.en-pausa{background:#efe6fa;color:#5a3889;border-color:#c9b0ec}
+.status.estado-paused{background:#efe6fa;color:#5a3889;border:1px solid #c9b0ec;font-weight:700}
+.session-state.pausa{background:#efe6fa;color:#5a3889;font-weight:700}
+.session-chip.pausa{border-left:4px solid #8e63c7}
+.kpi-pendiente{border-color:#f0c26c!important;background:linear-gradient(145deg,#fff,#fff7e3)}

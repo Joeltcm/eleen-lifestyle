@@ -175,7 +175,7 @@ export function invoicePdf(invoice: PdfRecord, payments: PdfRecord[]) {
 }
 
 const billingKindLabel: Record<string, string> = { mensual: 'Mensualidad', credito: 'A crédito', clase_suelta: 'Clase suelta', paquete: 'Paquete', manual: 'Manual' };
-const billingStatusLabel: Record<string, string> = { pendiente: 'Pendiente', parcial: 'Pago parcial', pagada: 'Pagada', anulada: 'Anulada' };
+const billingStatusLabel: Record<string, string> = { pendiente: 'Pago pendiente', parcial: 'Pago parcial', pagada: 'Pagada', anulada: 'Anulada' };
 
 // Factura del módulo nuevo (1B-2): número FAC-, pagador, ciclo, una línea por
 // beneficiario, cobros aplicados y saldo. Mismo formato visual que el comprobante.
@@ -262,7 +262,7 @@ export function accountsReceivablePdf(rows: PdfRecord[], asOf: string) {
     const total = rows.reduce((sum, row) => sum + Number(row.balance_amount || 0), 0);
     const overdue = rows.filter(row => Number(row.days_overdue) > 0).reduce((sum, row) => sum + Number(row.balance_amount || 0), 0);
     const clients = new Set(rows.map(row => row.client_id)).size;
-    summaryBoxes(document, [{ label: 'Saldo total', value: money(total) }, { label: 'Saldo vencido', value: money(overdue) }, { label: 'Clientes', value: String(clients) }]);
+    summaryBoxes(document, [{ label: 'Saldo total', value: money(total) }, { label: 'Pago pendiente (fecha cumplida)', value: money(overdue) }, { label: 'Clientes', value: String(clients) }]);
     if (!rows.length) return void document.font('Helvetica').fontSize(10).fillColor(colors.muted).text('No existen cuentas por cobrar para la fecha seleccionada.');
     table(document, [
       { label: 'Cliente', key: 'full_name', width: 135 }, { label: 'Factura', key: 'invoice_number', width: 76 }, { label: 'Vence', key: 'due_on', width: 68, format: date },

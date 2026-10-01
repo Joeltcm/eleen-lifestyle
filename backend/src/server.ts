@@ -18,7 +18,7 @@ import { routineSuggestionsReady, suggestRoutine } from './routine-suggestions.j
 import { accountStatementPdf, accountsReceivablePdf, billingInvoicePdf, compliancePdf, invoicePdf, monthlyFinancePdf } from './billing-reports.js';
 import { fechaDeNegocioPanama, fechaPanamaDiasAtras } from './panama-date.js';
 import { resolveBillingEngine } from './billing-engine.js';
-import { planBillingGeneration, runBillingGeneration } from './billing-generator.js';
+import { planBillingGeneration, runBillingGeneration, shiftCutAfterPause } from './billing-generator.js';
 import { DEFAULT_IMPORT_MANIFEST, applyBatch, approveBatch, createPreviewBatch, getBatch, listBatches, reverseBatch, type ImportManifest } from './billing-import.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
@@ -1598,7 +1598,7 @@ app.get('/api/billing/reports/receivables', { preHandler: requireStaff }, async 
   const buckets = ['al_dia', '1-7', '8-30', '31+'].map(bucket => ({ bucket, count: detail.filter(row => row.bucket === bucket).length,
     balance: desdeCentavos(detail.filter(row => row.bucket === bucket).reduce((sum, row) => sum + centavos(row.balance), 0)) }));
   if (query.format === 'csv') {
-    const lines = [['Pagador', 'Factura', 'Modalidad', 'Ciclo', 'Vence', 'Total', 'Pagado', 'Saldo', 'Días vencida', 'Antigüedad'].map(csvCell).join(','),
+    const lines = [['Pagador', 'Factura', 'Modalidad', 'Ciclo', 'Vence', 'Total', 'Pagado', 'Saldo', 'Días con pago pendiente', 'Antigüedad'].map(csvCell).join(','),
       ...detail.map(row => [row.payer, row.code, row.kind, `${dmy(row.cycleStart)} → ${dmy(row.cycleEnd)}`, dmy(row.dueOn), row.total.toFixed(2), row.paid.toFixed(2), row.balance.toFixed(2), row.daysOverdue, row.bucket].map(csvCell).join(','))];
     reply.header('Content-Type', 'text/csv; charset=utf-8'); reply.header('Content-Disposition', `attachment; filename="cuentas-por-cobrar-${query.asOf}.csv"`);
     return `﻿${lines.join('\n')}`;
@@ -4234,7 +4234,9 @@ app.post('/api/client-pauses/:id/resume', { preHandler: requireStaff }, async (r
     await transaction`UPDATE memberships SET status = 'active' WHERE client_id = ${client.id} AND status = 'paused'`;
     if (pause.package_id) await transaction`UPDATE session_packages SET expires_on = CASE WHEN expires_on IS NULL THEN NULL ELSE expires_on + GREATEST(0, current_date - ${pause.starts_on}::date) END WHERE id = ${pause.package_id}`;
     await transaction`UPDATE sessions SET paused_hold = false, updated_at = now() WHERE client_id = ${client.id} AND paused_hold = true AND starts_at >= now()`;
-    return { pause: updatedPause };
+    // Facturación nueva: el corte se corre lo que duró la pausa (solo en estado `new`, donde el generador nuevo es la fuente).
+    const billing = billingEngine.newWrites ? await shiftCutAfterPause(transaction as any, auth.sub, client.id as string) : null;
+    return { pause: updatedPause, billing };
   });
   if ('error' in result) return reply.code(result.code || 400).send({ error: result.error });
   await extenderRecurrencias(auth.sub, true);

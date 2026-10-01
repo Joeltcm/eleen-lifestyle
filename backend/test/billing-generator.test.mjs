@@ -74,7 +74,7 @@ describe('mensualidad anticipada y familia', () => {
     assert.equal((await plan('2026-10-14')).filter(i => i.status === 'emitir').length, 0);
     const hoy = (await plan('2026-10-15')).filter(i => i.status === 'emitir');
     const r = hoy.find(i => i.payerId === riccardo);
-    assert.deepEqual([r.cycleStart, r.cycleEnd, r.issuedOn, r.dueOn, r.total], ['2026-10-15', '2026-11-15', '2026-10-15', '2026-10-15', 900]);
+    assert.deepEqual([r.cycleStart, r.cycleEnd, r.issuedOn, r.dueOn, r.total], ['2026-10-15', '2026-11-15', '2026-10-15', '2026-10-16', 900]);
     assert.deepEqual(r.lines.map(l => [l.beneficiaryName, l.amount]).sort(), [['Ernesto', 150], ['Iraida', 300], ['Riccardo', 450]]);
   });
 
@@ -108,13 +108,13 @@ describe('mensualidad anticipada y familia', () => {
     assert.deepEqual(p.map(i => [i.cycleStart, i.status]), [['2026-10-15', 'emitir'], ['2026-11-15', 'programada']]);
   });
 
-  test('emitir crea las facturas (origin auto, vence el día de emisión, numeración seguida) y es idempotente', async () => {
+  test('emitir crea las facturas (origin auto, nace el día de corte y VENCE AL DÍA SIGUIENTE, numeración seguida) y es idempotente', async () => {
     const [{ antes }] = await db`SELECT coalesce(max(number),0)::int AS antes FROM billing_invoices`;
     const r1 = await gen.runBillingGeneration(ownerId, '2026-10-15');
     assert.equal(r1.created.length, 2);
     assert.deepEqual(r1.created.map(c => c.code).sort(), [`FAC-${String(antes + 1).padStart(4, '0')}`, `FAC-${String(antes + 2).padStart(4, '0')}`]);
     const fam = (await api.get(`/api/billing/invoices?payerId=${riccardo}`)).datos.invoices.find(i => i.cycleStart === '2026-10-15');
-    assert.deepEqual([fam.origin, fam.status, fam.total, fam.dueOn, fam.issuedOn], ['auto', 'pendiente', 900, '2026-10-15', '2026-10-15']);
+    assert.deepEqual([fam.origin, fam.status, fam.total, fam.dueOn, fam.issuedOn], ['auto', 'pendiente', 900, '2026-10-16', '2026-10-15']);
     const r2 = await gen.runBillingGeneration(ownerId, '2026-10-15');
     assert.equal(r2.created.length, 0, 'una segunda corrida no duplica');
     const r3 = await gen.runBillingGeneration(ownerId, '2026-10-16');
@@ -198,9 +198,9 @@ describe('crédito (Julio): postpago por clases cobrables', () => {
     assert.match(tarde.reason, /hace 1 día/);
   });
 
-  test('cobra 5 clases a $25 = $125 (3 impartidas + 1 cancelación cobrable + la del día de corte); vence al cierre del ciclo', async () => {
+  test('cobra 5 clases a $25 = $125 (3 impartidas + 1 cancelación cobrable + la del día de corte); vence al día siguiente del corte', async () => {
     const j = (await plan('2026-10-31', 0, 21)).find(i => i.payerId === julio);
-    assert.deepEqual([j.cycleStart, j.cycleEnd, j.issuedOn, j.dueOn], ['2026-09-30', '2026-10-31', '2026-10-31', '2026-10-31']);
+    assert.deepEqual([j.cycleStart, j.cycleEnd, j.issuedOn, j.dueOn], ['2026-09-30', '2026-10-31', '2026-10-31', '2026-11-01']);
     assert.deepEqual([j.lines[0].quantity, j.lines[0].unitAmount, j.total], [5, 25, 125]);
     const antes = await gen.runBillingGeneration(ownerId, '2026-10-31', 20);
     assert.equal(antes.created.filter(c => c.payerName === 'Julio').length, 0, 'a las 20:00 todavía no');

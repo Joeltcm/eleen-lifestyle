@@ -1,4 +1,4 @@
-const APP_VERSION = '261';
+const APP_VERSION = '262';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -857,7 +857,7 @@ function renderBilling() {
   document.getElementById('plan-grid').innerHTML = data.plans.length ? data.plans.map(plan => `<article class="plan-card ${plan.active ? '' : 'inactive'}"><div><span class="commercial-label ${plan.billingModel === 'package' ? 'package-label' : ''}${plan.billingModel === 'single' ? ' single-label' : ''}">${modalidadPlan(plan.billingModel)}</span><h4>${escapeHtml(plan.name)}</h4><p>${escapeHtml(plan.description || (plan.billingModel === 'package' ? `${plan.sessionsIncluded} sesiones · ${plan.validityDays} días` : plan.billingModel === 'single' ? 'Se cobra por sesión' : `${plan.sessionsIncluded} sesiones / mes`))}</p></div><div class="plan-price"><strong>${money.format(plan.price)}</strong><small>${plan.active ? 'Disponible' : 'Inactivo'}</small></div><button class="text-button" data-edit-plan="${plan.id}">Editar</button></article>`).join('') : '<p class="empty">Crea el primer plan para asignarlo a tus clientes.</p>';
   document.getElementById('invoice-table').innerHTML = visibleInvoices.length ? visibleInvoices.map(invoice => {
     const parcial = invoice.status === 'pending' && invoice.paidAmount > 0 && invoice.balance > 0;
-    const label = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'void' ? 'Anulada' : parcial ? 'Pago parcial' : 'Pendiente';
+    const label = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'void' ? 'Anulada' : parcial ? 'Pago parcial' : 'Pago pendiente';
     const detalleFamiliar = detalleCobroFamiliar(invoice);
     const totalFamiliar = totalFamiliarDelCorte(invoice);
     const notaFamiliar = detalleFamiliar ? `<br><small class="invoice-family-note">${escapeHtml(detalleFamiliar)}</small>` : '';
@@ -4158,13 +4158,19 @@ document.querySelectorAll('[data-view-go]').forEach(button => button.addEventLis
 // sistema anterior y NO cambia lo que éste factura. El dinero recibido (cobros)
 // se registra aparte (1B-3).
 const newBillingKinds = { mensual: 'Mensualidad', credito: 'A crédito', clase_suelta: 'Clase suelta', paquete: 'Paquete', manual: 'Manual' };
-const newBillingStatusLabels = { pendiente: 'Pendiente', parcial: 'Pago parcial', pagada: 'Pagada', anulada: 'Anulada' };
+const newBillingStatusLabels = { pendiente: 'Pago pendiente', parcial: 'Pago parcial', pagada: 'Pagada', anulada: 'Anulada' };
+const newBillingStatusClass = { pendiente: 'pago-pendiente', parcial: 'parcial', pagada: 'pagada', anulada: 'anulada' };
 const newBillingFilters = { status: 'activa', clientId: '', month: '', cutDay: '' };
 const newBillingMonthNames = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
 const newBillingMonthText = value => { const [year, month] = value.split('-'); const name = newBillingMonthNames[Number(month) - 1]; return `${name[0].toUpperCase()}${name.slice(1)} ${year}`; };
 function newBillingStatusText(invoice) {
-  return invoice.overdue ? `${newBillingStatusLabels[invoice.status]} · vencida` : (newBillingStatusLabels[invoice.status] || invoice.status);
+  return newBillingStatusLabels[invoice.status] || invoice.status;
 }
+// Estado con color bien visible (J-097): pago pendiente = ámbar, pagada = verde, parcial = azul, anulada = gris.
+function newBillingStatusChip(invoice) {
+  return `<span class="estado-chip ${newBillingStatusClass[invoice.status] || ''}">${escapeHtml(newBillingStatusText(invoice))}</span>`;
+}
+const estadoPausaChip = texto => `<span class="estado-chip en-pausa">${escapeHtml(texto || 'En pausa')}</span>`;
 async function newBillingInvoices() {
   const root = document.getElementById('facturas-nuevo-mount');
   if (!root) return;
@@ -4190,14 +4196,14 @@ async function newBillingInvoices() {
       <label>Mes de emisión<select id="new-billing-month"><option value="">Todos</option>${monthOptions}</select></label>
       <label>Corte<select id="new-billing-cut"><option value="">Todos</option>${cutOptions}</select></label>
       <label>Cliente<select id="new-billing-client"><option value="">Todos</option>${clientOptions}</select></label>
-      <label>Estado<select id="new-billing-status">${[['activa', 'Vigentes'], ['pendiente', 'Pendientes'], ['parcial', 'Pago parcial'], ['pagada', 'Pagadas'], ['vencida', 'Vencidas'], ['anulada', 'Anuladas'], ['all', 'Todas (con anuladas)']].map(([value, text]) => `<option value="${value}"${value === f.status ? ' selected' : ''}>${text}</option>`).join('')}</select></label>
+      <label>Estado<select id="new-billing-status">${[['activa', 'Vigentes'], ['pendiente', 'Pago pendiente'], ['parcial', 'Pago parcial'], ['pagada', 'Pagadas'], ['vencida', 'Pago pendiente con fecha cumplida'], ['anulada', 'Anuladas'], ['all', 'Todas (con anuladas)']].map(([value, text]) => `<option value="${value}"${value === f.status ? ' selected' : ''}>${text}</option>`).join('')}</select></label>
       ${filtered ? '<button class="secondary" type="button" id="new-billing-clear">Quitar filtros</button>' : ''}</div>
     <div class="metrics new-billing-metrics">
       <article><span>Facturado</span><strong>${summary.count} · ${money.format(summary.total)}</strong></article>
       <article><span>Cobrado</span><strong>${summary.paymentsCount} · ${money.format(summary.paid)}</strong></article>
       <article><span>Saldo pendiente</span><strong>${money.format(summary.balance)}</strong></article>
       <article><span>Pagadas / pendientes</span><strong>${summary.paidCount} / ${summary.pendingCount}</strong></article>
-      <article><span>Vencidas</span><strong>${summary.overdueCount} · ${money.format(summary.overdueBalance)}</strong></article>
+      <article class="kpi-pendiente"><span>Pago pendiente con fecha cumplida</span><strong>${summary.overdueCount} · ${money.format(summary.overdueBalance)}</strong></article>
       <article><span>% cobrado</span><strong>${percent}%</strong></article></div>
     <div id="new-billing-list">${invoices.length ? `<div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Factura</th><th>Pagador</th><th>Ciclo</th><th>Líneas</th><th>Total</th><th>Cobro</th><th>Estado</th><th></th></tr></thead><tbody>${invoices.map(invoice => `<tr>
       <td data-label="Factura"><b>${escapeHtml(invoice.code)}</b><br><small>${escapeHtml(newBillingKinds[invoice.kind] || invoice.kind)} · corte ${invoice.cutDay}</small></td>
@@ -4206,7 +4212,7 @@ async function newBillingInvoices() {
       <td data-label="Líneas">${invoice.lines.map(line => `${escapeHtml(line.beneficiaryName)}: ${money.format(line.amount)}`).join('<br>')}</td>
       <td data-label="Total">${money.format(invoice.total)}</td>
       <td data-label="Cobro">${invoice.payments.length ? invoice.payments.map(payment => `${money.format(payment.amount)} · ${escapeHtml(payment.method)}<br><small>${fechaCorta(payment.paidOn)}</small>`).join('<br>') : 'Sin cobro'}${invoice.balance > 0 && invoice.paid > 0 ? `<br><small>saldo ${money.format(invoice.balance)}</small>` : ''}</td>
-      <td data-label="Estado">${escapeHtml(newBillingStatusText(invoice))}${invoice.status === 'anulada' && invoice.voidReason ? `<br><small>${escapeHtml(invoice.voidReason)}</small>` : ''}</td>
+      <td data-label="Estado">${newBillingStatusChip(invoice)}${invoice.status === 'anulada' && invoice.voidReason ? `<br><small>${escapeHtml(invoice.voidReason)}</small>` : ''}</td>
       <td data-label="">${invoice.status !== 'anulada' && invoice.balance > 0 ? `<button class="primary" type="button" data-new-invoice-pay="${invoice.id}">Registrar cobro</button> ` : ''}${invoice.status !== 'anulada' && ['mensual', 'paquete'].includes(invoice.kind) && invoice.lines.length > 1 ? `<button class="secondary" type="button" data-new-invoice-split="${invoice.id}">Corregir reparto</button> ` : ''}<button class="secondary" type="button" data-new-invoice-pdf="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Ver PDF</button>${invoice.status === 'anulada' || invoice.paid > 0 ? '' : ` <button class="secondary" type="button" data-new-invoice-void="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Anular</button>`}</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">No hay facturas con estos filtros.</p>'}</div></article>`;
   document.getElementById('new-billing-create').onclick = () => newBillingInvoiceDialog();
   const bind = (id, key) => { document.getElementById(id).onchange = event => { f[key] = event.target.value; newBillingInvoices(); }; };
@@ -4371,7 +4377,7 @@ async function newBillingAllocator(container, payerId, getAvailable, firstInvoic
   catch (error) { container.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; return { items: () => [], suggest: () => {} }; }
   if (!open.length) { container.innerHTML = '<p class="empty">Este pagador no tiene facturas abiertas: el cobro quedará como saldo a favor.</p>'; return { items: () => [], suggest: () => {} }; }
   container.innerHTML = `<div class="new-billing-allocs">${open.map(invoice => `<div class="new-billing-alloc" data-invoice="${invoice.id}">
-      <div><b>${escapeHtml(invoice.code)}</b><small>${fechaCorta(invoice.cycleStart)} → ${fechaCorta(invoice.cycleEnd)} · saldo ${money.format(invoice.balance)}${invoice.overdue ? ' · vencida' : ''}</small></div>
+      <div><b>${escapeHtml(invoice.code)}</b><small>${fechaCorta(invoice.cycleStart)} → ${fechaCorta(invoice.cycleEnd)} · saldo ${money.format(invoice.balance)}</small></div>
       <input type="number" min="0" max="${invoice.balance}" step="0.01" value="0" aria-label="Importe para ${escapeHtml(invoice.code)}" data-balance="${invoice.balance}" /></div>`).join('')}
     <p class="form-summary" data-alloc-summary></p></div>`;
   const inputs = [...container.querySelectorAll('input')];
@@ -4526,6 +4532,7 @@ async function newBillingUpcoming() {
     const scheduled = plan.plan.filter(item => item.status === 'programada').length;
     root.innerHTML = `<article class="card"><div class="card-head"><div><h3>Próximas facturas</h3><p>${toIssue} se emiten hoy · ${scheduled} programadas en los próximos ${plan.horizon} días · ${fechaCorta(readiness.today)}</p></div></div>
       ${engine.state === 'new' ? '' : `<p class="form-summary error"><b>Atención:</b> el generador nuevo no está activo (estado ${escapeHtml(engine.state)}). Lo que ves es solo una vista previa.</p>`}
+      ${(() => { const enPausa = data.clients.filter(client => client.statusRaw === 'paused'); return enPausa.length ? `<p class="eyebrow">EN PAUSA</p><div class="new-billing-allocs">${enPausa.map(client => `<div class="new-billing-alloc" style="grid-template-columns:1fr"><div><b>${estadoPausaChip('En pausa')} ${escapeHtml(client.name)}</b><small>Sin facturación mientras dure la pausa. Al reanudar, su día de corte se corre tantos días como duró y el ciclo sigue donde se detuvo. (A crédito: se factura lo ya dado al cerrar el ciclo.)</small></div></div>`).join('')}</div>` : ''; })()}
       <p class="eyebrow">ALERTAS</p>
       ${alerts.length ? `<div class="new-billing-allocs">${alerts.map(check => `<div class="new-billing-alloc" style="grid-template-columns:1fr"><div><b>${check.status === 'warn' ? '!' : '✗'} ${escapeHtml(check.label)}</b><small>${escapeHtml(check.detail)}</small>${check.items?.length ? `<small>${check.items.slice(0, 12).map(item => escapeHtml(newCutoverItemText(item))).join('<br>')}${check.items.length > 12 ? `<br>… y ${check.items.length - 12} más` : ''}</small>` : ''}</div></div>`).join('')}</div>` : '<p class="form-summary">✓ Todo en orden: cada cliente con cobro tiene su plan, cada pagador su factura de referencia y no hay ciclos atrasados.</p>'}
       <p class="eyebrow" style="margin-top:14px">LO QUE EMITIRÁ EL GENERADOR (PRÓXIMOS ${plan.horizon} DÍAS)</p>
@@ -4613,8 +4620,8 @@ async function newBillingReports() {
       body.innerHTML = table(['Mes', 'Cobros', 'Total', 'Por método'], r.months.map(row => [escapeHtml(row.month.split('-').reverse().join('-')), String(row.count), money.format(row.total), Object.entries(row.methods).map(([method, total]) => `${escapeHtml(method)}: ${money.format(total)}`).join('<br>')]));
     } else if (newReportState.report === 'delinquency') {
       const r = await api('/api/billing/reports/delinquency');
-      summary.textContent = `${r.payers.length} pagador(es) con facturas vencidas · ${money.format(r.total)} vencido`;
-      body.innerHTML = table(['Pagador', 'Saldo vencido', 'Más antigua', 'Facturas', 'Beneficiarios afectados'], r.payers.map(row => [escapeHtml(row.payer), money.format(row.balance), `${row.oldestDays} días`, row.invoices.map(invoice => `${escapeHtml(invoice.code)} (${fechaCorta(invoice.dueOn)})`).join('<br>'), row.beneficiaries.length ? row.beneficiaries.map(escapeHtml).join(', ') : '—']));
+      summary.textContent = `${r.payers.length} pagador(es) con pago pendiente · ${money.format(r.total)} por cobrar`;
+      body.innerHTML = table(['Pagador', 'Pago pendiente', 'Más antigua', 'Facturas', 'Beneficiarios afectados'], r.payers.map(row => [escapeHtml(row.payer), money.format(row.balance), `${row.oldestDays} días`, row.invoices.map(invoice => `${escapeHtml(invoice.code)} (${fechaCorta(invoice.dueOn)})`).join('<br>'), row.beneficiaries.length ? row.beneficiaries.map(escapeHtml).join(', ') : '—']));
     } else if (newReportState.report === 'unapplied') {
       const r = await api('/api/billing/payments?status=available');
       summary.textContent = `${r.payments.length} cobro(s) con saldo a favor · ${money.format(r.summary.available)}`;
@@ -5496,6 +5503,10 @@ function renderPortal() {
   const periodComplianceSessions = (portalData.complianceSessions || []).filter(item => portalSessionInPeriod(item.starts_at, period));
   const activities = portalActivities(periodComplianceSessions, period);
   const overall = activities.length ? Math.round(activities.reduce((sum, item) => sum + item.percent, 0) / activities.length) : 0;
+  // La tarjeta de saludo sigue el período elegido (mes o corte): antes quedaba fija en "Hola" y 0% porque nada la actualizaba.
+  const welcomeName = String(portalData.client?.full_name || '').trim().split(/\s+/)[0];
+  const welcomeTitle = document.getElementById('portal-welcome'); if (welcomeTitle) welcomeTitle.textContent = welcomeName ? `Hola, ${welcomeName}` : 'Hola';
+  const complianceHero = document.getElementById('portal-compliance'); if (complianceHero) complianceHero.textContent = `${overall}%`;
   const periodMeasured = periodComplianceSessions.filter(item => new Date(item.starts_at) <= today);
   const periodClientCancellations = periodMeasured.filter(item => item.status === 'cancelled' || item.status === 'no_show').length;
   const periodCancellationPercent = periodMeasured.length ? Math.round(periodClientCancellations / periodMeasured.length * 100) : 0;
@@ -5577,7 +5588,7 @@ function renderPortal() {
   }
   const invoicesSorted = historyInvoices;
   const invoiceDate = invoice => { const raw = invoice.issued_on || invoice.due_on; return raw ? new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeZone: 'America/Panama' }).format(new Date(`${String(raw).slice(0, 10)}T12:00:00-05:00`)) : '—'; };
-  document.getElementById('portal-invoices').innerHTML = invoicesSorted.length ? invoicesSorted.map(invoice => { const lines = (invoice.line_items || invoice.lineItems || []).map(line => `${escapeHtml(line.name || 'Sesión')} · ${money.format(Number(line.item_total || line.amount || 0))}`).join('<br>'); const estado = Number(invoice.amount) === 0 ? 'Sin cargo' : invoice.status === 'confirmed' ? 'Pagada' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'; return `<tr><td data-label="Concepto"><b>${escapeHtml(invoice.concept)}</b>${lines ? `<br><small class="invoice-line-detail">${lines}</small>` : ''}${invoice.invoice_number ? `<br><small>${escapeHtml(invoice.invoice_number)}</small>` : ''}</td><td data-label="Fecha">${invoiceDate(invoice)}</td><td data-label="Monto">${money.format(Number(invoice.amount))}</td><td data-label="Estado"><span class="payment-status ${invoice.status}">${estado}</span></td><td data-label="Comprobante"><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoice_number || invoice.id.slice(0, 8))}">Ver PDF</button></td></tr>`; }).join('') : '<tr><td colspan="5" class="empty">No hay facturas registradas.</td></tr>';
+  document.getElementById('portal-invoices').innerHTML = invoicesSorted.length ? invoicesSorted.map(invoice => { const lines = (invoice.line_items || invoice.lineItems || []).map(line => `${escapeHtml(line.name || 'Sesión')} · ${money.format(Number(line.item_total || line.amount || 0))}`).join('<br>'); const estado = Number(invoice.amount) === 0 ? 'Sin cargo' : invoice.status === 'confirmed' ? 'Pagada' : invoice.status === 'void' ? 'Anulada' : 'Pago pendiente'; return `<tr><td data-label="Concepto"><b>${escapeHtml(invoice.concept)}</b>${lines ? `<br><small class="invoice-line-detail">${lines}</small>` : ''}${invoice.invoice_number ? `<br><small>${escapeHtml(invoice.invoice_number)}</small>` : ''}</td><td data-label="Fecha">${invoiceDate(invoice)}</td><td data-label="Monto">${money.format(Number(invoice.amount))}</td><td data-label="Estado"><span class="estado-chip ${Number(invoice.amount) === 0 ? 'anulada' : invoice.status === 'confirmed' ? 'pagada' : invoice.status === 'void' ? 'anulada' : 'pago-pendiente'}">${estado}</span></td><td data-label="Comprobante"><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoice_number || invoice.id.slice(0, 8))}">Ver PDF</button></td></tr>`; }).join('') : '<tr><td colspan="5" class="empty">No hay facturas registradas.</td></tr>';
   const portalCount = document.getElementById('portal-notification-count'); portalCount.textContent = portalData.notifications.length; portalCount.hidden = !portalData.notifications.length;
 }
 async function loadPortalData() {

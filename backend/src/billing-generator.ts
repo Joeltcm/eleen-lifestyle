@@ -26,6 +26,8 @@ import { fechaDeNegocioPanama, horaDeNegocioPanama } from './panama-date.js';
 
 // Solo el día que toca (Joel, 01-10-2026): sin facturas "de rezago". El bucle corre cada 15 minutos, así que hay ~96 intentos ese día; si aun así no salió, se avisa y se crea a mano.
 export const RETRO_DAYS = 0;
+// Las facturas automáticas nacen el día de corte y VENCEN AL DÍA SIGUIENTE (Joel, 01-10-2026): hasta entonces figuran como "pendiente de pago".
+export const DUE_AFTER_DAYS = 1;
 // A crédito (Julio): se emite EL DÍA DEL CORTE (último día del mes), pero solo a partir de esta hora de Panamá, para que ya estén marcadas las clases de ese día (Joel, 01-10-2026).
 export const CREDIT_EMIT_HOUR = 21;
 
@@ -105,6 +107,31 @@ async function billableSessions(tx: Tx, beneficiaryId: string, startExclusive: s
   return Number(rows[0]?.n ?? 0);
 }
 
+// Días que el pagador estuvo en pausa (ya reanudada) con la pausa EMPEZADA dentro del último ciclo pagado: se suman a su fin de ciclo.
+async function pauseShiftDays(tx: Tx, payerId: string, cycleStart: string, cycleEnd: string) {
+  const rows = await tx`
+    SELECT COALESCE(sum(days_frozen), 0)::int AS days FROM client_package_pauses
+    WHERE client_id = ${payerId} AND status = 'resumed' AND starts_on >= ${cycleStart}::date AND starts_on <= ${cycleEnd}::date`;
+  return Number(rows[0]?.days ?? 0);
+}
+
+// Al REANUDAR una pausa: el día de corte del cliente pasa al día en que arranca su siguiente ciclo (el corte se corrió lo que duró la pausa).
+// Solo mensualidades que paga el propio cliente; devuelve null si no hay nada que mover.
+export async function shiftCutAfterPause(tx: Tx, ownerId: string, clientId: string): Promise<{ oldCutDay: number; newCutDay: number; nextCycleStart: string } | null> {
+  const [last] = await tx`
+    SELECT cycle_start::text AS cycle_start, cycle_end::text AS cycle_end FROM billing_invoices
+    WHERE owner_id = ${ownerId} AND payer_client_id = ${clientId} AND kind = 'mensual' AND status <> 'anulada' ORDER BY cycle_start DESC, number DESC LIMIT 1`;
+  if (!last) return null;
+  const shift = await pauseShiftDays(tx, clientId, last.cycle_start as string, last.cycle_end as string);
+  if (!shift) return null;
+  const nextCycleStart = addDays(last.cycle_end as string, shift);
+  const newCutDay = Number(nextCycleStart.slice(8, 10));
+  const [client] = await tx`SELECT billing_cutoff_day FROM clients WHERE id = ${clientId} AND owner_id = ${ownerId} FOR UPDATE`;
+  const oldCutDay = Number(client?.billing_cutoff_day) || 1;
+  if (oldCutDay !== newCutDay) await tx`UPDATE clients SET billing_cutoff_day = ${newCutDay}, updated_at = now() WHERE id = ${clientId} AND owner_id = ${ownerId}`;
+  return { oldCutDay, newCutDay, nextCycleStart };
+}
+
 // ── Plan (sin escribir) ──────────────────────────────────────────────────────
 export async function planBillingGeneration(tx: Tx, ownerId: string, today = fechaDeNegocioPanama(), horizonDays = 0, hour = horaDeNegocioPanama()): Promise<PlannedInvoice[]> {
   const subscriptions = await loadSubscriptions(tx, ownerId);
@@ -129,15 +156,21 @@ export async function planBillingGeneration(tx: Tx, ownerId: string, today = fec
       continue;
     }
     let refEnd = last.cycle_end as string;
+    // PAUSA A MEDIO TÉRMINO (Joel, opción 2): el corte se corre tantos días como duró la pausa; el ciclo sigue donde se detuvo.
+    // Solo para quien paga su propia mensualidad o paquete (la pausa de un beneficiario de familia solo retira su línea mientras dura).
+    if (kind !== 'credito') refEnd = addDays(refEnd, await pauseShiftDays(tx, payerId, last.cycle_start as string, last.cycle_end as string));
     let referenceInvoiceId = last.id as string; let referenceCode = billingCode(last.number);
     for (let guard = 0; guard < 24; guard += 1) {
       const cycleStart = refEnd;
       const packageDays = kind === 'paquete' ? (lines.find(line => line.cycleDays)?.cycleDays ?? 35) : null;
       const cycleEnd = kind === 'paquete' ? addDays(cycleStart, packageDays!) : nextCutAfter(cycleStart, payerCutDay);
       // Una línea cuenta si estaba vigente en el ciclo (anticipadas: al empezar; crédito: durante la ventana).
-      const active = lines.filter(line => line.startsOn <= (kind === 'credito' ? cycleEnd : cycleStart) && (!line.endsOn || line.endsOn >= cycleStart)
-        && line.beneficiaryStatus === 'active' && line.payerStatus === 'active');
+      const inForce = lines.filter(line => line.startsOn <= (kind === 'credito' ? cycleEnd : cycleStart) && (!line.endsOn || line.endsOn >= cycleStart));
+      const statusOk = inForce.filter(line => line.beneficiaryStatus === 'active' && line.payerStatus === 'active');
+      // A crédito se factura LO QUE YA SE DIO (clases cumplidas y cancelaciones cobradas) aunque el cliente esté ahora en pausa o inactivo; las anticipadas exigen cliente activo.
+      const active = kind === 'credito' ? inForce : statusOk;
       if (!active.length) break;
+      if (kind === 'credito' && !statusOk.length && cycleEnd > today) break;   // en pausa o inactivo: solo se factura lo ya dado, al cerrar el ciclo (sin filas "programadas" de relleno)
       // Cuándo toca emitirla: anticipadas al empezar el ciclo; crédito el día de corte (fin del ciclo), a partir de CREDIT_EMIT_HOUR.
       const due = kind === 'credito' ? cycleEnd : cycleStart;
       if (due > horizon) break;
@@ -169,7 +202,7 @@ export async function planBillingGeneration(tx: Tx, ownerId: string, today = fec
         reason = `Proyección con lo marcado hasta hoy: ${clases} ${clases === 1 ? 'clase' : 'clases'}. El importe final se confirma el ${cycleEnd.split('-').reverse().join('-')} desde las ${CREDIT_EMIT_HOUR}:00`;
       }
       if (kind === 'credito' && status === 'emitir' && total === 0) { status = 'sin_cargo'; reason = 'Sin clases cobrables en el ciclo: no hay nada que facturar'; }
-      planned.push({ ...base, cycleStart, cycleEnd, issuedOn, dueOn: issuedOn, lines: invoiceLines.filter(line => kind !== 'credito' || line.quantity > 0 || status === 'programada'), total,
+      planned.push({ ...base, cycleStart, cycleEnd, issuedOn, dueOn: addDays(issuedOn, DUE_AFTER_DAYS), lines: invoiceLines.filter(line => kind !== 'credito' || line.quantity > 0 || status === 'programada'), total,
         status, reason, referenceInvoiceId, referenceCode });
       // Para planear el ciclo siguiente se supone emitido este.
       refEnd = cycleEnd; referenceInvoiceId = '(plan)'; referenceCode = '(plan)';

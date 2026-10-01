@@ -133,3 +133,16 @@ test('E1: la sección de planes se llama Tarifas de referencia y avisa que no mo
   assert.match(html, /TARIFA DE REFERENCIA/);
   assert.doesNotMatch(html, /Planes comerciales/);
 });
+
+test('J-097: "Pago pendiente" en vez de "vencida", estados con color, sección En pausa en Próximas y la tarjeta de saludo del portal sigue el período', async () => {
+  const app = await leer('app.js'); const css = await leer('styles.css');
+  assert.match(app, /pendiente: 'Pago pendiente'/);
+  const textoEstado = app.slice(app.indexOf('function newBillingStatusText'), app.indexOf('function newBillingStatusChip'));
+  assert.doesNotMatch(textoEstado, /vencida/i, 'el estado de las facturas nuevas nunca dice vencida');
+  assert.match(app, /function newBillingStatusChip\(invoice\)/);
+  assert.match(app, /<p class="eyebrow">EN PAUSA<\/p>/);
+  for (const clase of ['pago-pendiente', 'pagada', 'parcial', 'anulada', 'en-pausa']) assert.match(css, new RegExp(`\\.estado-chip\\.${clase}`));
+  assert.match(app, /getElementById\('portal-compliance'\)/);
+  assert.match(app, /complianceHero\.textContent = `\$\{overall\}%`/);
+  assert.match(app, /Hola, \$\{welcomeName\}/);
+});
