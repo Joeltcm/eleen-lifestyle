@@ -1267,6 +1267,28 @@ describe('modalidad de pago y cobros pendientes', () => {
     const row = (await api.get('/api/clients')).datos.find(item => item.id === creado.datos.id);
     assert.equal(Number(row.standard_price), 35);
   });
+
+  test('un mensual sin membresía puede guardar otros datos si el monto no cambia', async () => {
+    const plan = await api.post('/api/plans', { name: 'Mensual sin membresía', billingModel: 'monthly', price: 460, sessionsIncluded: 12 });
+    const creado = await api.post('/api/clients', { fullName: 'Mensual sin membresía', planId: plan.datos.id, cutoffDay: 15 });
+    assert.equal(creado.estado, 201);
+    const clientId = creado.datos.id;
+    await db`DELETE FROM memberships WHERE client_id = ${clientId}`;
+
+    const guardado = await api.patch(`/api/clients/${clientId}`, {
+      fullName: 'Mensual sin membresía', phone: '6000-0000', standardPrice: 460
+    });
+    assert.equal(guardado.estado, 200);
+    assert.equal(guardado.datos.phone, '6000-0000');
+
+    const rechazado = await api.patch(`/api/clients/${clientId}`, {
+      fullName: 'Mensual sin membresía', standardPrice: 450
+    });
+    assert.equal(rechazado.estado, 409);
+    assert.match(rechazado.datos.error, /membresía activa/i);
+    const row = (await api.get('/api/clients')).datos.find(item => item.id === clientId);
+    assert.equal(Number(row.standard_price), 460, 'un cambio sin membresía no altera el precio');
+  });
 });
 
 describe('cobertura end-to-end de facturación y modalidad de pago', () => {

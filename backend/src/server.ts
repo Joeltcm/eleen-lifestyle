@@ -1065,8 +1065,9 @@ app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, repl
     if (tocaMontoMensual && antes.billing_model !== 'monthly') {
       sessionStateConflict('El monto mensual sólo aplica a clientes con mensualidad');
     }
+    const cambiaMontoMensual = tocaMontoMensual && Number(antes.standard_price) !== Number(montoMensualSolicitado);
     let membresiaMensual: { id: string } | undefined;
-    if (tocaMontoMensual) {
+    if (cambiaMontoMensual) {
       const membresias = await transaction`
         SELECT id FROM memberships
         WHERE client_id = ${id} AND status = 'active'
@@ -1083,7 +1084,7 @@ app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, repl
       billing_cutoff_day = CASE WHEN ${tocaCorte} THEN ${input.cutoffDay}::int ELSE billing_cutoff_day END,
       payment_mode = CASE WHEN ${tocaModalidad} THEN ${input.paymentMode} ELSE payment_mode END, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
 
-    if (tocaMontoMensual && Number(antes.standard_price) !== Number(montoMensualSolicitado)) {
+    if (cambiaMontoMensual) {
       await transaction`UPDATE memberships SET amount = ${montoMensualSolicitado} WHERE id = ${membresiaMensual!.id}`;
       await transaction`
         INSERT INTO audit_log (user_id, user_email, action, route, target_id, detail, ip)
