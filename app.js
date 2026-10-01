@@ -1,4 +1,4 @@
-const APP_VERSION = '261';
+const APP_VERSION = '262';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -266,7 +266,7 @@ async function loadData() {
   data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, kind: item.kind, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), expiresOn: item.expires_on || '', status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired', originInvoiceId: item.origin_invoice_id || null, originNumber: item.origin_invoice_number || '', originConcept: item.origin_concept || '', originSource: item.origin_source || '', originStatus: item.origin_status || '', originDate: item.origin_date ? dateOnly(item.origin_date) : '', renovacionPendiente: item.renovacion_pendiente || false, vencidoConSaldo: item.vencido_con_saldo || false, pagoPendiente: item.pago_pendiente || false, purchasedOn: item.purchased_on ? dateOnly(item.purchased_on) : '' }));
   data.sessions = sessions.map(sessionFromApi);
   data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: (item.assigned_client_ids || []).length, assignedClientIds: item.assigned_client_ids || [], sessions: item.sessions_per_week, dueOn: item.due_on || null, exercises: item.exercises || [] }));
-  data.plans = plans.map(item => ({ id: item.id, name: item.name, description: item.description || '', billingModel: item.billing_model, price: Number(item.price), sessionsIncluded: Number(item.sessions_included || 0), validityDays: Number(item.validity_days || 0), active: item.active }));
+  data.plans = plans.map(item => ({ id: item.id, name: item.name, description: item.description || '', billingModel: item.billing_model, price: Number(item.price), sessionsIncluded: Number(item.sessions_included || 0), validityDays: Number(item.validity_days || 0), zone: item.zone || '', specialFor: item.special_for || '', active: item.active }));
   data.compliance = compliance; data.notifications = notifications; data.googleCalendar = googleCalendar; billingAnalytics = null; billingAnalyticsLoadingYear = null; billingAnalyticsRequest += 1; showPendingBrowserNotification(notifications);
 }
 const initials = name => name.split(' ').slice(0, 2).map(word => word[0]).join('').toUpperCase();
@@ -854,7 +854,24 @@ function renderBilling() {
   document.getElementById('active-memberships').textContent = data.clients.filter(client => client.billingModel === 'monthly' && client.status === 'Activo').length;
   document.getElementById('active-packages').textContent = data.packages.filter(pack => pack.status === 'confirmed' && remainingSessions(pack) > 0).length;
   document.getElementById('billing-pending').textContent = money.format(pending);
-  document.getElementById('plan-grid').innerHTML = data.plans.length ? data.plans.map(plan => `<article class="plan-card ${plan.active ? '' : 'inactive'}"><div><span class="commercial-label ${plan.billingModel === 'package' ? 'package-label' : ''}${plan.billingModel === 'single' ? ' single-label' : ''}">${modalidadPlan(plan.billingModel)}</span><h4>${escapeHtml(plan.name)}</h4><p>${escapeHtml(plan.description || (plan.billingModel === 'package' ? `${plan.sessionsIncluded} sesiones · ${plan.validityDays} días` : plan.billingModel === 'single' ? 'Se cobra por sesión' : `${plan.sessionsIncluded} sesiones / mes`))}</p></div><div class="plan-price"><strong>${money.format(plan.price)}</strong><small>${plan.active ? 'Disponible' : 'Inactivo'}</small></div><button class="text-button" data-edit-plan="${plan.id}">Editar</button></article>`).join('') : '<p class="empty">Crea el primer plan para asignarlo a tus clientes.</p>';
+  const planZoneFilter = document.getElementById('plan-zone-filter');
+  const planSessionsFilter = document.getElementById('plan-sessions-filter');
+  const planZones = ['Costa del Este', 'Paitilla', 'San Francisco', 'La Cresta'];
+  if (planZoneFilter) {
+    const current = planZoneFilter.value;
+    planZoneFilter.replaceChildren(new Option('Todas las zonas', ''), ...planZones.map(zone => new Option(zone, zone)), ...data.plans.filter(plan => plan.zone && !planZones.includes(plan.zone)).map(plan => new Option(plan.zone, plan.zone)));
+    planZoneFilter.value = [...planZoneFilter.options].some(option => option.value === current) ? current : '';
+  }
+  if (planSessionsFilter) {
+    const current = planSessionsFilter.value;
+    const sessions = [...new Set(data.plans.map(plan => plan.sessionsIncluded).filter(Number))].sort((a, b) => a - b);
+    planSessionsFilter.replaceChildren(new Option('Todas las cantidades', ''), ...sessions.map(count => new Option(`${count} sesiones`, String(count))));
+    planSessionsFilter.value = sessions.some(count => String(count) === current) ? current : '';
+  }
+  if (planZoneFilter) planZoneFilter.onchange = renderBilling;
+  if (planSessionsFilter) planSessionsFilter.onchange = renderBilling;
+  const visiblePlans = data.plans.filter(plan => (!planZoneFilter?.value || plan.zone === planZoneFilter.value) && (!planSessionsFilter?.value || String(plan.sessionsIncluded) === planSessionsFilter.value));
+  document.getElementById('plan-grid').innerHTML = visiblePlans.length ? visiblePlans.map(plan => `<article class="plan-card ${plan.active ? '' : 'inactive'}"><div><span class="commercial-label ${plan.billingModel === 'package' ? 'package-label' : ''}${plan.billingModel === 'single' ? ' single-label' : ''}">${modalidadPlan(plan.billingModel)}</span>${plan.zone ? `<span class="plan-zone">${escapeHtml(plan.zone)}</span>` : ''}${plan.specialFor ? `<span class="plan-special">Tarifa especial · ${escapeHtml(plan.specialFor)}</span>` : ''}<h4>${escapeHtml(plan.name)}</h4><p>${escapeHtml(plan.description || (plan.billingModel === 'package' ? `${plan.sessionsIncluded} sesiones · ${plan.validityDays} días` : plan.billingModel === 'single' ? 'Se cobra por sesión' : `${plan.sessionsIncluded} sesiones / mes`))}</p></div><div class="plan-price"><strong>${money.format(plan.price)}</strong><small>${plan.active ? 'Disponible' : 'Inactivo'}</small></div><button class="text-button" data-edit-plan="${plan.id}">Editar</button></article>`).join('') : '<p class="empty">No hay tarifas con estos filtros.</p>';
   document.getElementById('invoice-table').innerHTML = visibleInvoices.length ? visibleInvoices.map(invoice => {
     const parcial = invoice.status === 'pending' && invoice.paidAmount > 0 && invoice.balance > 0;
     const label = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'void' ? 'Anulada' : parcial ? 'Pago parcial' : 'Pendiente';
@@ -1279,14 +1296,14 @@ function planEditor(plan = null) {
   if (plan) {
     document.getElementById('plan-form-title').textContent = 'Editar tarifa';
     form.elements.name.value = plan.name; form.elements.description.value = plan.description; form.elements.billingModel.value = plan.billingModel; form.elements.price.value = plan.price;
-    form.elements.sessionsIncluded.value = plan.sessionsIncluded || ''; form.elements.validityDays.value = plan.validityDays || 30; form.elements.active.checked = plan.active;
+    form.elements.sessionsIncluded.value = plan.sessionsIncluded || ''; form.elements.validityDays.value = plan.validityDays || 30; form.elements.zone.value = plan.zone || ''; form.elements.specialFor.value = plan.specialFor || ''; form.elements.active.checked = plan.active;
   }
   togglePackage();
   form.addEventListener('submit', async event => {
     event.preventDefault(); const values = new FormData(event.target); const billingModel = values.get('billingModel');
     try {
       event.target.classList.add('loading-state');
-      await api(plan ? `/api/plans/${plan.id}` : '/api/plans', { method: plan ? 'PATCH' : 'POST', body: { name: values.get('name'), description: values.get('description'), billingModel, price: Number(values.get('price')), sessionsIncluded: billingModel === 'single' ? undefined : Number(values.get('sessionsIncluded')), validityDays: billingModel === 'package' ? Number(values.get('validityDays')) : undefined, active: Boolean(values.get('active')) } });
+      await api(plan ? `/api/plans/${plan.id}` : '/api/plans', { method: plan ? 'PATCH' : 'POST', body: { name: values.get('name'), description: values.get('description'), billingModel, price: Number(values.get('price')), sessionsIncluded: billingModel === 'single' ? undefined : Number(values.get('sessionsIncluded')), validityDays: billingModel === 'package' ? Number(values.get('validityDays')) : undefined, zone: values.get('zone'), specialFor: values.get('specialFor'), active: Boolean(values.get('active')) } });
       await loadData(); renderAll(); modal.close(); toast(plan ? 'Plan actualizado' : 'Plan creado');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
@@ -3706,12 +3723,31 @@ function billingSubscriptionDialog(client, initial = null) {
   const allClients = data.clients;
   const line = initial || { beneficiaryClientId: client.id, payerClientId: client.paysForMeId || client.id, kind: client.billingModel === 'package' ? 'package' : client.paymentMode === 'no_anticipado' ? 'credit' : 'monthly', price: client.plan || client.creditSessionPrice || 25, startsOn: dateKey(new Date()), endsOn: null, cycleDays: client.billingModel === 'package' ? 35 : null, sessionsReference: client.monthlySessionTarget || client.sessionsIncluded || null };
   const editingAmount = Boolean(initial?.id);
+  const referenceModelFor = kind => kind === 'package' ? 'package' : kind === 'credit' ? 'single' : 'monthly';
+  const referencePlansFor = (kind, includeSpecial) => data.plans.filter(plan => plan.active && plan.billingModel === referenceModelFor(kind) && (includeSpecial || !plan.specialFor));
+  const referenceOption = plan => `${plan.name}${plan.zone ? ` · ${plan.zone}` : ''} · ${money.format(plan.price)}${plan.sessionsIncluded ? ` · ${plan.sessionsIncluded} sesiones` : ''}${plan.specialFor ? ` · especial para ${plan.specialFor}` : ''}`;
   const box = document.createElement('div');
-  box.innerHTML = `<form id="billing-subscription-form"><p class="eyebrow">PLAN DE FACTURACIÓN</p><h2>${editingAmount ? 'Cambiar monto' : 'Agregar concepto a facturar'}</h2><label>Beneficiario<select name="beneficiaryClientId">${allClients.map(item => `<option value="${item.id}"${item.id === line.beneficiaryClientId ? ' selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></label><label>Pagador<select name="payerClientId">${allClients.map(item => `<option value="${item.id}"${item.id === line.payerClientId ? ' selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></label><label>Tipo<select name="kind"${editingAmount ? ' disabled' : ''}><option value="monthly"${line.kind === 'monthly' ? ' selected' : ''}>Mensualidad</option><option value="credit"${line.kind === 'credit' ? ' selected' : ''}>A crédito</option><option value="package"${line.kind === 'package' ? ' selected' : ''}>Paquete</option></select></label><label>Monto<input name="price" type="number" min="0.01" step="0.01" required value="${Number(line.price || 0).toFixed(2)}" /></label><label>Desde${editingAmount ? ' <span class="muted">(desde cuándo rige el monto nuevo; debe ser posterior al inicio actual)</span>' : ''}<input name="startsOn" type="date" required value="${editingAmount ? '' : (line.startsOn || dateKey(new Date()))}" /></label><label>Hasta <span class="muted">(opcional)</span><input name="endsOn" type="date" value="${line.endsOn || ''}" /></label><label class="package-only">Días de ciclo<input name="cycleDays" type="number" min="1" max="366" value="${line.cycleDays || ''}" /></label><label>Sesiones de referencia <span class="muted">(opcional)</span><input name="sessionsReference" type="number" min="1" value="${line.sessionsReference || ''}" /></label><label class="checkbox-line"><input name="autoGenerate" type="checkbox"${line.autoGenerate !== false ? ' checked' : ''} /> Facturación automática</label><p class="section-note">Esta sección sólo registra el acuerdo comercial. No crea facturas, no cambia saldos y no modifica el monto mensual legado.</p><button class="primary wide-button">${editingAmount ? 'Guardar nuevo monto' : 'Confirmar concepto'}</button></form>`;
+  box.innerHTML = `<form id="billing-subscription-form"><p class="eyebrow">PLAN DE FACTURACIÓN</p><h2>${editingAmount ? 'Cambiar monto' : 'Agregar concepto a facturar'}</h2><label>Beneficiario<select name="beneficiaryClientId">${allClients.map(item => `<option value="${item.id}"${item.id === line.beneficiaryClientId ? ' selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></label><label>Pagador<select name="payerClientId">${allClients.map(item => `<option value="${item.id}"${item.id === line.payerClientId ? ' selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></label><label>Tipo<select name="kind"${editingAmount ? ' disabled' : ''}><option value="monthly"${line.kind === 'monthly' ? ' selected' : ''}>Mensualidad</option><option value="credit"${line.kind === 'credit' ? ' selected' : ''}>A crédito</option><option value="package"${line.kind === 'package' ? ' selected' : ''}>Paquete</option></select></label><fieldset class="billing-reference-picker"><legend>Tarifa de referencia</legend><label class="checkbox-line"><input name="showSpecialRates" type="checkbox" /> Mostrar tarifas especiales</label><select name="referencePlan"><option value="">Sin sugerencia</option></select><small>Solo prellena el monto y las sesiones; puedes modificarlos. No crea ningún vínculo con la tarifa.</small></fieldset><label>Monto<input name="price" type="number" min="0.01" step="0.01" required value="${Number(line.price || 0).toFixed(2)}" /></label><label>Desde${editingAmount ? ' <span class="muted">(desde cuándo rige el monto nuevo; debe ser posterior al inicio actual)</span>' : ''}<input name="startsOn" type="date" required value="${editingAmount ? '' : (line.startsOn || dateKey(new Date()))}" /></label><label>Hasta <span class="muted">(opcional)</span><input name="endsOn" type="date" value="${line.endsOn || ''}" /></label><label class="package-only">Días de ciclo<input name="cycleDays" type="number" min="1" max="366" value="${line.cycleDays || ''}" /></label><label>Sesiones de referencia <span class="muted">(opcional)</span><input name="sessionsReference" type="number" min="1" value="${line.sessionsReference || ''}" /></label><label class="checkbox-line"><input name="autoGenerate" type="checkbox"${line.autoGenerate !== false ? ' checked' : ''} /> Facturación automática</label><p class="section-note">Esta sección sólo registra el acuerdo comercial. No crea facturas, no cambia saldos y no modifica el monto mensual legado.</p><button class="primary wide-button">${editingAmount ? 'Guardar nuevo monto' : 'Confirmar concepto'}</button></form>`;
   openModal(box);
-  const form = box.querySelector('form'); const kind = form.elements.kind; const packageOnly = box.querySelector('.package-only');
+  const form = box.querySelector('form'); const kind = form.elements.kind; const packageOnly = box.querySelector('.package-only'); const referencePlan = form.elements.referencePlan; const showSpecialRates = form.elements.showSpecialRates;
+  const refreshReferenceOptions = () => {
+    const previous = referencePlan.value;
+    const options = referencePlansFor(kind.value, showSpecialRates.checked);
+    referencePlan.innerHTML = `<option value="">Sin sugerencia</option>${options.map(plan => `<option value="${plan.id}">${escapeHtml(referenceOption(plan))}</option>`).join('')}`;
+    referencePlan.value = options.some(plan => plan.id === previous) ? previous : '';
+  };
   const togglePackage = () => { packageOnly.hidden = kind.value !== 'package'; if (kind.value !== 'package') form.elements.cycleDays.value = ''; };
-  kind.onchange = togglePackage; togglePackage();
+  const applyReference = () => {
+    const selected = data.plans.find(plan => plan.id === referencePlan.value);
+    if (!selected) return;
+    form.elements.price.value = selected.price.toFixed(2);
+    form.elements.sessionsReference.value = selected.sessionsIncluded || '';
+    if (kind.value === 'package') form.elements.cycleDays.value = selected.validityDays || 30;
+  };
+  kind.onchange = () => { togglePackage(); refreshReferenceOptions(); };
+  showSpecialRates.onchange = refreshReferenceOptions;
+  referencePlan.onchange = applyReference;
+  togglePackage(); refreshReferenceOptions();
   form.onsubmit = async event => {
     event.preventDefault(); const values = new FormData(form); const body = { beneficiaryClientId: values.get('beneficiaryClientId'), payerClientId: values.get('payerClientId'), kind: values.get('kind'), price: Number(values.get('price')), startsOn: values.get('startsOn'), endsOn: values.get('endsOn') || null, cycleDays: values.get('cycleDays') ? Number(values.get('cycleDays')) : null, sessionsReference: values.get('sessionsReference') ? Number(values.get('sessionsReference')) : null, autoGenerate: values.get('autoGenerate') === 'on' };
     try { await api(editingAmount ? `/api/billing-subscriptions/${initial.id}` : `/api/clients/${client.id}/billing-subscriptions`, { method: editingAmount ? 'PATCH' : 'POST', body: editingAmount ? { price: body.price, startsOn: body.startsOn, endsOn: body.endsOn, cycleDays: body.cycleDays, sessionsReference: body.sessionsReference, autoGenerate: body.autoGenerate } : body }); modal.close(); toast(editingAmount ? 'Monto del concepto actualizado' : 'Concepto a facturar confirmado'); await loadBillingSubscriptionsEditor(client); } catch (error) { toast(error.message, true); }

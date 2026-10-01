@@ -150,6 +150,16 @@ describe('planes comerciales', () => {
     assert.equal(Number(datos.sessions_included), 8);
     assert.equal(Number(datos.validity_days), 60);
   });
+
+  test('una tarifa guarda zona y acuerdo especial como referencia del catálogo', async () => {
+    const creada = await api.post('/api/plans', { name: 'CDE especial de prueba', billingModel: 'monthly', price: 460, sessionsIncluded: 12, zone: 'Costa del Este', specialFor: 'Riccardo Francolini' });
+    assert.equal(creada.estado, 201);
+    assert.equal(creada.datos.zone, 'Costa del Este');
+    assert.equal(creada.datos.special_for, 'Riccardo Francolini');
+    const editada = await api.patch(`/api/plans/${creada.datos.id}`, { name: 'CDE especial de prueba', billingModel: 'monthly', price: 460, sessionsIncluded: 12, zone: 'Costa del Este', specialFor: '', active: true });
+    assert.equal(editada.estado, 200);
+    assert.equal(editada.datos.special_for, null, 'se puede convertir en tarifa estándar sin tocar clientes');
+  });
 });
 
 describe('clientes y cumplimiento', () => {

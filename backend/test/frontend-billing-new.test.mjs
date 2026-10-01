@@ -133,3 +133,14 @@ test('E1: la sección de planes se llama Tarifas de referencia y avisa que no mo
   assert.match(html, /TARIFA DE REFERENCIA/);
   assert.doesNotMatch(html, /Planes comerciales/);
 });
+
+test('E2: las tarifas tienen zona/especial y el plan de facturación ofrece sugerencias editables', async () => {
+  const [html, app] = await Promise.all([leer('index.html'), leer('app.js')]);
+  for (const zona of ['Costa del Este', 'Paitilla', 'San Francisco', 'La Cresta']) assert.match(html, new RegExp(zona));
+  assert.match(html, /name="specialFor"/);
+  assert.match(app, /plan-zone-filter/);
+  assert.match(app, /plan-sessions-filter/);
+  assert.match(app, /Mostrar tarifas especiales/);
+  assert.match(app, /No crea ningún vínculo con la tarifa/);
+  assert.match(app, /specialFor/);
+});

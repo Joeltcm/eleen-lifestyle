@@ -1871,6 +1871,8 @@ const planSchema = z.object({
   name: z.string().trim().min(2).max(80), description: z.string().trim().max(240).optional(),
   billingModel: z.enum(['monthly', 'package', 'single']), price: z.coerce.number().min(0),
   sessionsIncluded: z.coerce.number().int().positive().optional(), validityDays: z.coerce.number().int().positive().optional(),
+  zone: z.string().trim().max(80).optional().transform(value => value || null),
+  specialFor: z.string().trim().max(120).optional().transform(value => value || null),
   active: z.boolean().default(true)
 }).superRefine((plan, context) => {
   // La mensualidad también tiene un número de sesiones: es el que la
@@ -1893,8 +1895,8 @@ app.get('/api/plans', { preHandler: requireStaff }, async request => {
 app.post('/api/plans', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = planSchema.parse(request.body);
   const [plan] = await sql`
-    INSERT INTO service_plans (owner_id, name, description, billing_model, price, sessions_included, validity_days, active)
-    VALUES (${auth.sub}, ${input.name}, ${input.description || null}, ${input.billingModel}, ${input.price}, ${input.billingModel === 'single' ? null : input.sessionsIncluded!}, ${input.billingModel === 'package' ? input.validityDays || 30 : null}, ${input.active})
+    INSERT INTO service_plans (owner_id, name, description, billing_model, price, sessions_included, validity_days, zone, special_for, active)
+    VALUES (${auth.sub}, ${input.name}, ${input.description || null}, ${input.billingModel}, ${input.price}, ${input.billingModel === 'single' ? null : input.sessionsIncluded!}, ${input.billingModel === 'package' ? input.validityDays || 30 : null}, ${input.zone}, ${input.specialFor}, ${input.active})
     RETURNING *
   `;
   return reply.code(201).send(plan);
@@ -1905,7 +1907,7 @@ app.patch('/api/plans/:id', { preHandler: requireStaff }, async (request, reply)
   const [plan] = await sql`
     UPDATE service_plans SET name = ${input.name}, description = ${input.description || null}, billing_model = ${input.billingModel},
       price = ${input.price}, sessions_included = ${input.billingModel === 'single' ? null : input.sessionsIncluded!},
-      validity_days = ${input.billingModel === 'package' ? input.validityDays || 30 : null}, active = ${input.active}, updated_at = now()
+      validity_days = ${input.billingModel === 'package' ? input.validityDays || 30 : null}, zone = ${input.zone}, special_for = ${input.specialFor}, active = ${input.active}, updated_at = now()
     WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *
   `;
   if (!plan) return reply.code(404).send({ error: 'Plan no encontrado' });
