@@ -1,4 +1,4 @@
-const APP_VERSION = '256';
+const APP_VERSION = '257';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1822,7 +1822,7 @@ function editarHorarioFijo(regla, alGuardar) {
       </div>
       <label>Modalidad<select name="mode">${['Presencial', 'Virtual', 'Exterior'].map(m => `<option ${m === regla.mode ? 'selected' : ''}>${m}</option>`).join('')}</select></label>
       <label>Hasta (opcional)<input name="endsOn" type="date" value="${dateOnly(regla.ends_on)}" /><small>En blanco, sigue indefinidamente.</small></label>
-      <p class="commercial-note">Los días que quites retiran sus clases futuras que nadie haya tocado. Las ya marcadas o movidas se quedan.</p>
+      <p class="commercial-note">Los días que quites retiran sus clases futuras que nadie haya tocado. Las ya marcadas o movidas se quedan. Todos los días marcados comparten esta hora: para otra hora en otro día, quita ese día aquí y agrégalo como un horario aparte (+ Agregar horario fijo).</p>
       <button class="primary wide-button">Guardar horario</button>
     </form>`;
   openModal(box);
@@ -1840,7 +1840,7 @@ function editarHorarioFijo(regla, alGuardar) {
         mode: form.get('mode'), endsOn: form.get('endsOn') || null
       } });
       await loadData(); renderAll(); modal.close();
-      if (alGuardar) alGuardar();
+      recurrenceManager();
       toast(`Horario guardado · ${r.creadas} agendada${r.creadas === 1 ? '' : 's'}${r.retiradas ? ` · ${r.retiradas} retirada${r.retiradas === 1 ? '' : 's'}` : ''}`);
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
@@ -1930,20 +1930,71 @@ async function workingHoursEditor() {
   openModal(box, true);
 }
 
+// Alta de un horario fijo desde el administrador (antes solo se creaba escondido en "Agendar sesión"). Un cliente puede tener varios, uno por cada hora distinta.
+function nuevoHorarioFijo() {
+  const clientes = data.clients.filter(client => client.statusRaw === 'active').slice().sort((p, q) => p.name.localeCompare(q.name, 'es'));
+  const box = document.createElement('div');
+  box.innerHTML = `
+    <form id="nuevo-horario-form">
+      <p class="eyebrow">HORARIO FIJO</p>
+      <h2>Agregar horario fijo</h2>
+      <label>Cliente<select name="clientId" required><option value="">Elige al cliente</option>${clientes.map(client => `<option value="${client.id}">${escapeHtml(client.name)}</option>`).join('')}</select></label>
+      <fieldset class="repetir-semanal"><legend>Días</legend>
+        <div class="dias-semana" id="nuevo-dias">
+          ${[[1, 'lun'], [2, 'mar'], [3, 'mié'], [4, 'jue'], [5, 'vie'], [6, 'sáb'], [0, 'dom']].map(([valor, texto]) => `<label><input type="checkbox" value="${valor}" /><span>${texto}</span></label>`).join('')}
+        </div>
+      </fieldset>
+      <div class="form-row">
+        <label>Hora<input name="timeOfDay" type="time" required /></label>
+        <label>Duración<select name="durationMinutes">${[30, 45, 60, 75, 90, 120].map(m => `<option value="${m}" ${m === 60 ? 'selected' : ''}>${m} minutos</option>`).join('')}</select></label>
+      </div>
+      <label>Modalidad<select name="mode">${['Presencial', 'Virtual', 'Exterior'].map(m => `<option>${m}</option>`).join('')}</select></label>
+      <label>Hasta (opcional)<input name="endsOn" type="date" /><small>En blanco, sigue indefinidamente.</small></label>
+      <p class="commercial-note">Los días marcados comparten la hora. Si el mismo cliente entrena a otra hora otro día, agrega otro horario fijo para esa hora.</p>
+      <button class="primary wide-button">Guardar horario</button>
+    </form>`;
+  openModal(box);
+  document.getElementById('nuevo-horario-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    const dias = [...document.querySelectorAll('#nuevo-dias input:checked')].map(c => Number(c.value));
+    if (!dias.length) { toast('Marca al menos un día', true); return; }
+    const nombres = ['domingos', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábados'];
+    const cliente = clientes.find(client => client.id === form.get('clientId'));
+    if (!confirmarGuardado(`${cliente?.name || ''}\nLos ${dias.sort().map(d => nombres[d]).join(', ')} a las ${form.get('timeOfDay')}`)) return;
+    try {
+      event.target.classList.add('loading-state');
+      const r = await api('/api/session-recurrences', { method: 'POST', body: {
+        clientId: form.get('clientId'), weekdays: dias, timeOfDay: form.get('timeOfDay'), durationMinutes: Number(form.get('durationMinutes')),
+        mode: form.get('mode'), endsOn: form.get('endsOn') || null
+      } });
+      await loadData(); renderAll(); modal.close();
+      recurrenceManager();
+      toast(`Horario fijo guardado · ${r.creadas} sesion${r.creadas === 1 ? '' : 'es'} agendada${r.creadas === 1 ? '' : 's'}`);
+    } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
+  });
+}
+
 async function recurrenceManager() {
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">AGENDA</p><h2>Horarios fijos</h2>
-    <p style="color:#6f7b75;margin-top:-12px">Se repiten solos hasta que los detengas. Detener uno retira sus sesiones futuras y deja intactas las pasadas.</p>
-    <p style="color:#6f7b75;margin-top:-12px">Vuelve a crear los días en los que el cliente no tiene ninguna clase, dentro de las próximas ocho semanas. No toca los días en que sí entrena, aunque la clase se haya corrido de hora.</p>
-    <button type="button" class="secondary wide-button" id="rellenar-horarios">Rellenar días que falten</button>
+    <p style="color:#6f7b75;margin-top:-12px">Cada horario se repite solo, semana tras semana, hasta que lo detengas. Detener uno retira sus clases futuras y deja intactas las pasadas.</p>
+    <button type="button" class="primary wide-button" id="agregar-horario-fijo">+ Agregar horario fijo</button>
+    <p style="color:#6f7b75;margin-top:6px"><small>Todos los días de un horario comparten la misma hora. Si un cliente entrena a horas distintas (p. ej. lun y mar a las 17:30 y vie a las 10:00), agrega un horario por cada hora.</small></p>
     <div id="recurrencias-lista"><p class="empty">Cargando…</p></div>
+    <div class="actualizar-calendario" style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line, #e8dfe3)">
+      <button type="button" class="secondary wide-button" id="rellenar-horarios">Actualizar el calendario ahora</button>
+      <p style="color:#6f7b75;margin:6px 0 0"><small>El calendario se actualiza solo cada pocas horas con las próximas ocho semanas de cada horario. Pulsa aquí únicamente si acabas de cambiar un horario y todavía no ves sus clases. No toca los días en que el cliente ya tiene clase, aunque se haya corrido de hora.</small></p>
+    </div>
     <div id="horarios-diagnostico"></div>`;
   openModal(box, true);
+  document.getElementById('agregar-horario-fijo').onclick = () => nuevoHorarioFijo();
   const pintar = async () => {
     const destino = document.getElementById('recurrencias-lista');
     try {
       const reglas = await api('/api/session-recurrences');
       if (!destino?.isConnected) return;
+      reglas.sort((x, y) => String(x.full_name).localeCompare(String(y.full_name), 'es') || String(x.time_of_day).localeCompare(String(y.time_of_day)));
       destino.innerHTML = reglas.length ? `<div class="gasto-lista">${reglas.map(regla => {
         const dias = (regla.weekdays || []).map(d => DIAS_CORTOS[d]).join(' · ');
         const hora = String(regla.time_of_day).slice(0, 5);
@@ -1962,7 +2013,7 @@ async function recurrenceManager() {
         try {
           const r = await api('/api/session-recurrences/extend', { method: 'POST' });
           await loadData(); renderAll(); pintar();
-          toast(r.creadas ? `${r.creadas} sesion${r.creadas === 1 ? '' : 'es'} rellenada${r.creadas === 1 ? '' : 's'}` : 'No faltaba ningún día');
+          toast(r.creadas ? `Calendario actualizado · ${r.creadas} clase${r.creadas === 1 ? '' : 's'} agregada${r.creadas === 1 ? '' : 's'}` : 'El calendario ya estaba al día');
           // Los días que siguen vacíos, con el motivo. Sin esto sólo queda
           // mirar el calendario y adivinar por qué falta uno.
           const diagnostico = document.getElementById('horarios-diagnostico');
@@ -1970,7 +2021,7 @@ async function recurrenceManager() {
           if (r.fallidas?.length) toast(`${r.fallidas.length} horario${r.fallidas.length === 1 ? '' : 's'} dio error al rellenar`, true);
           const saltados = r.saltados || [];
           diagnostico.innerHTML = saltados.length ? `
-            <p class="eyebrow" style="margin-top:16px">DÍAS QUE SIGUEN VACÍOS</p>
+            <p class="eyebrow" style="margin-top:16px">DÍAS SIN CLASE Y POR QUÉ</p>
             ${saltados.map(fila => {
               const cuando = formatoDiaCorto(fila.dia);
               if (fila.marcada) {

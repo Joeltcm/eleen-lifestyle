@@ -115,3 +115,13 @@ test('Plan de facturación: "Corregir monto" existe como acción aparte de "Camb
   assert.match(app, /data-correct-billing="\$\{line\.id\}">Corregir monto</);
   assert.match(app, /\/api\/billing-subscriptions\/\$\{line\.id\}\/correct-price/);
 });
+
+test('Horarios fijos: se pueden AGREGAR desde el administrador (varios por cliente, uno por hora) y el botón de rellenar se explica sin jerga', async () => {
+  const app = await leer('app.js');
+  assert.match(app, /id="agregar-horario-fijo">\+ Agregar horario fijo</);
+  assert.match(app, /function nuevoHorarioFijo\(\)/);
+  assert.match(app, /api\('\/api\/session-recurrences', \{ method: 'POST'/);
+  assert.match(app, /lun y mar a las 17:30 y vie a las 10:00/);
+  assert.match(app, /id="rellenar-horarios">Actualizar el calendario ahora</);
+  assert.doesNotMatch(app, /Rellenar días que falten/);
+});
