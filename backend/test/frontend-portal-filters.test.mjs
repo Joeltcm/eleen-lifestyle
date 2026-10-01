@@ -43,6 +43,12 @@ test('Pagos del portal reutiliza los filtros de mes y corte y la frontera inclus
   assert.match(app, /from: cycle\.inicio/);
 });
 
+test('el aviso de deuda del portal no se recorta al período y las fechas de pagos son dd-mm-aaaa', async () => {
+  const app = await leer('app.js');
+  assert.match(app, /const pendingInvoices = \(portalData\.invoices \|\| \[\]\)\.filter\(invoice => invoice\.status === 'pending'\)/);
+  assert.match(app, /const invoiceDate = invoice => \{ const raw = invoice\.issued_on \|\| invoice\.due_on; return raw \? fechaCorta\(raw\) : '—'; \}/);
+});
+
 test('los marcadores de versión del portal coinciden entre sí y no retroceden de la 260 (no se fija un número: cada despliegue lo sube)', async () => {
   const [app, sw, version, html] = await Promise.all(['app.js', 'sw.js', 'version.json', 'index.html'].map(leer));
   const enApp = /const APP_VERSION = '(\d+)'/.exec(app)[1];

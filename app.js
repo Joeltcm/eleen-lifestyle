@@ -5616,7 +5616,9 @@ function renderPortal() {
   // de inicio es inclusiva: una factura emitida exactamente en el corte
   // pertenece a ese ciclo, igual que los demás datos de facturación.
   const historyInvoices = periodInvoices.slice().sort((a, b) => new Date(b.issued_on || b.due_on) - new Date(a.issued_on || a.due_on));
-  const pendingInvoices = historyInvoices.filter(invoice => invoice.status === 'pending');
+  // El aviso de deuda es global: cambiar el período de consulta no debe
+  // ocultar una factura pendiente de un ciclo anterior.
+  const pendingInvoices = (portalData.invoices || []).filter(invoice => invoice.status === 'pending');
   document.getElementById('portal-pending-payment').innerHTML = pendingInvoices.length ? `<div class="portal-payment-alert"><strong>Pago pendiente</strong><span>${pendingInvoices.length === 1 ? `Tienes 1 factura pendiente por ${money.format(Number(pendingInvoices[0].balance || pendingInvoices[0].amount))}.` : `Tienes ${pendingInvoices.length} facturas pendientes por ${money.format(pendingInvoices.reduce((sum, invoice) => sum + Number(invoice.balance || invoice.amount), 0))}.`}</span></div>` : '<div class="portal-payment-ok">No tienes pagos pendientes.</div>';
   // Beneficiario que no paga (módulo nuevo, tras el corte): solo ve si su plan está cubierto o si hay un pago pendiente de quien lo paga;
   // nunca montos, saldos ni el nombre del pagador.
@@ -5628,7 +5630,7 @@ function renderPortal() {
     else document.getElementById('portal-pending-payment').innerHTML = card;
   }
   const invoicesSorted = historyInvoices;
-  const invoiceDate = invoice => { const raw = invoice.issued_on || invoice.due_on; return raw ? new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeZone: 'America/Panama' }).format(new Date(`${String(raw).slice(0, 10)}T12:00:00-05:00`)) : '—'; };
+  const invoiceDate = invoice => { const raw = invoice.issued_on || invoice.due_on; return raw ? fechaCorta(raw) : '—'; };
   document.getElementById('portal-invoices').innerHTML = invoicesSorted.length ? invoicesSorted.map(invoice => { const lines = (invoice.line_items || invoice.lineItems || []).map(line => `${escapeHtml(line.name || 'Sesión')} · ${money.format(Number(line.item_total || line.amount || 0))}`).join('<br>'); const estado = Number(invoice.amount) === 0 ? 'Sin cargo' : invoice.status === 'confirmed' ? 'Pagada' : invoice.status === 'void' ? 'Anulada' : 'Pago pendiente'; return `<tr><td data-label="Concepto"><b>${escapeHtml(invoice.concept)}</b>${lines ? `<br><small class="invoice-line-detail">${lines}</small>` : ''}${invoice.invoice_number ? `<br><small>${escapeHtml(invoice.invoice_number)}</small>` : ''}</td><td data-label="Fecha">${invoiceDate(invoice)}</td><td data-label="Monto">${money.format(Number(invoice.amount))}</td><td data-label="Estado"><span class="estado-chip ${Number(invoice.amount) === 0 ? 'anulada' : invoice.status === 'confirmed' ? 'pagada' : invoice.status === 'void' ? 'anulada' : 'pago-pendiente'}">${estado}</span></td><td data-label="Comprobante"><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoice_number || invoice.id.slice(0, 8))}">Ver PDF</button></td></tr>`; }).join('') : '<tr><td colspan="5" class="empty">No hay facturas registradas.</td></tr>';
   const portalCount = document.getElementById('portal-notification-count'); portalCount.textContent = portalData.notifications.length; portalCount.hidden = !portalData.notifications.length;
 }
