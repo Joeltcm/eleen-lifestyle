@@ -666,7 +666,7 @@ const billingInvoiceInput = z.object({
   lines: z.array(billingInvoiceLineInput).min(1).max(30)
 });
 const billingInvoiceListQuery = z.object({
-  status: z.enum(['all', 'pendiente', 'parcial', 'pagada', 'anulada', 'vencida']).default('all'),
+  status: z.enum(['all', 'abierta', 'pendiente', 'parcial', 'pagada', 'anulada', 'vencida']).default('all'),
   kind: z.enum(billingInvoiceKinds).optional(),
   payerId: z.string().uuid().optional(),
   from: z.string().date().optional(),
@@ -719,7 +719,7 @@ app.get('/api/billing/invoices', { preHandler: requireStaff }, async request => 
     SELECT ${billingInvoiceColumns}
     FROM billing_invoices i JOIN clients p ON p.id = i.payer_client_id
     WHERE i.owner_id = $1
-      AND ($2::text = 'all' OR $2::text = 'vencida' OR i.status = $2)
+      AND ($2::text = 'all' OR $2::text = 'vencida' OR ($2::text = 'abierta' AND i.status IN ('pendiente', 'parcial')) OR i.status = $2)
       AND ($3::text IS NULL OR i.kind = $3)
       AND ($4::uuid IS NULL OR i.payer_client_id = $4)
       AND ($5::date IS NULL OR i.issued_on >= $5)
@@ -891,6 +891,241 @@ app.get('/api/billing/invoices/:id/pdf', { preHandler: requireStaff }, async (re
     FROM billing_payment_applications a JOIN billing_payments p ON p.id = a.payment_id
     WHERE a.invoice_id = ${id} ORDER BY a.created_at`;
   return sendPdf(reply, await billingInvoicePdf(row, lines as unknown as Record<string, any>[], applications as unknown as Record<string, any>[]), `factura-${billingCode(row.number)}.pdf`);
+});
+
+// ── Cobros del módulo nuevo (1B-3) ───────────────────────────────────────────
+// COBRO = dinero recibido. Se registra aparte de la factura y se APLICA a una o varias
+// facturas del mismo pagador; lo no aplicado queda como saldo a favor. Un cobro no se
+// edita ni se borra: una aplicación equivocada se REVIERTE (con motivo) y un cobro
+// mal registrado se ANULA (con motivo, tras revertir sus aplicaciones). El estado de
+// cada factura (pendiente / parcial / pagada) se recalcula en la misma transacción.
+const billingPaymentMethods = ['Efectivo', 'Yappy', 'Transferencia bancaria', 'Tarjeta', 'Otro'] as const;
+const billingApplicationItem = z.object({ invoiceId: z.string().uuid(), amount: z.coerce.number().positive().max(1_000_000) });
+const billingPaymentInput = z.object({
+  payerClientId: z.string().uuid(),
+  paidOn: z.string().date().optional(),
+  amount: z.coerce.number().positive().max(1_000_000),
+  method: z.enum(billingPaymentMethods),
+  reference: z.string().trim().max(160).optional(),
+  notes: z.string().trim().max(500).optional(),
+  applications: z.array(billingApplicationItem).max(30).optional()
+});
+const billingApplyInput = z.object({ applications: z.array(billingApplicationItem).min(1).max(30), appliedOn: z.string().date().optional() });
+const billingReasonInput = z.object({ reason: z.string().trim().min(3, 'Indique el motivo').max(300) });
+const billingPaymentListQuery = z.object({
+  status: z.enum(['all', 'available', 'voided']).default('all'),
+  payerId: z.string().uuid().optional(),
+  from: z.string().date().optional(),
+  to: z.string().date().optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(200)
+});
+
+const billingPaymentColumns = `p.id, p.payer_client_id, pc.full_name AS payer_name, p.paid_on::text AS paid_on, p.amount, p.method,
+  p.reference, p.notes, p.created_at, p.voided_at, p.void_reason,
+  COALESCE((SELECT sum(a.amount) FROM billing_payment_applications a WHERE a.payment_id = p.id AND a.reversed_at IS NULL), 0) AS applied`;
+
+function billingPaymentValue(row: Record<string, any>) {
+  const amount = Number(row.amount);
+  const applied = Number(row.applied ?? 0);
+  const voided = row.voided_at != null;
+  return {
+    id: row.id, payerClientId: row.payer_client_id, payerName: row.payer_name, paidOn: row.paid_on, amount,
+    method: row.method, reference: row.reference ?? null, notes: row.notes ?? null,
+    applied, available: voided ? 0 : desdeCentavos(centavos(amount) - centavos(applied)),
+    status: voided ? 'anulado' : centavos(applied) === 0 ? 'sin_aplicar' : centavos(applied) < centavos(amount) ? 'parcial' : 'aplicado',
+    voidedAt: row.voided_at ?? null, voidReason: row.void_reason ?? null, createdAt: row.created_at
+  };
+}
+
+class BillingConflict extends Error { statusCode = 409; }
+class BillingNotFound extends Error { statusCode = 404; }
+
+// Recalcula el estado de una factura según sus aplicaciones vigentes (misma transacción).
+async function refreshBillingInvoiceStatus(transaction: TransactionSql, invoiceId: string) {
+  const [invoice] = await transaction`SELECT id, total, status FROM billing_invoices WHERE id = ${invoiceId} FOR UPDATE`;
+  if (!invoice || invoice.status === 'anulada') return;
+  const [{ paid }] = await transaction`
+    SELECT COALESCE(sum(amount), 0) AS paid FROM billing_payment_applications WHERE invoice_id = ${invoiceId} AND reversed_at IS NULL`;
+  const total = centavos(Number(invoice.total)); const pagado = centavos(Number(paid));
+  const next = total > 0 && pagado >= total ? 'pagada' : pagado > 0 ? 'parcial' : 'pendiente';
+  if (next !== invoice.status) await transaction`UPDATE billing_invoices SET status = ${next} WHERE id = ${invoiceId}`;
+}
+
+// Aplica un cobro a facturas dentro de una transacción ya abierta. Valida con mensajes claros;
+// la base repite las mismas reglas como respaldo.
+async function applyBillingPayment(transaction: TransactionSql, ownerId: string, userId: string, paymentId: string,
+  items: { invoiceId: string; amount: number }[], appliedOn: string) {
+  const ids = items.map(item => item.invoiceId);
+  if (new Set(ids).size !== ids.length) throw Object.assign(new Error('Una factura solo puede aparecer una vez en la misma aplicación'), { statusCode: 400 });
+  const [payment] = await transaction`
+    SELECT id, payer_client_id, amount, voided_at FROM billing_payments WHERE id = ${paymentId} AND owner_id = ${ownerId} FOR UPDATE`;
+  if (!payment) throw new BillingNotFound('Cobro no encontrado');
+  if (payment.voided_at) throw new BillingConflict('El cobro está anulado');
+  const [{ applied }] = await transaction`
+    SELECT COALESCE(sum(amount), 0) AS applied FROM billing_payment_applications WHERE payment_id = ${paymentId} AND reversed_at IS NULL`;
+  let disponible = centavos(Number(payment.amount)) - centavos(Number(applied));
+  const aplicadas: { invoiceId: string; code: string; amount: number }[] = [];
+  for (const item of items) {
+    const [invoice] = await transaction`
+      SELECT id, number, payer_client_id, total, status FROM billing_invoices WHERE id = ${item.invoiceId} AND owner_id = ${ownerId} FOR UPDATE`;
+    if (!invoice) throw new BillingNotFound('Factura no encontrada');
+    const code = billingCode(invoice.number);
+    if (invoice.payer_client_id !== payment.payer_client_id) throw new BillingConflict(`${code} es de otro pagador: un cobro solo se aplica a facturas de su pagador`);
+    if (invoice.status === 'anulada') throw new BillingConflict(`${code} está anulada`);
+    const [{ paid }] = await transaction`
+      SELECT COALESCE(sum(amount), 0) AS paid FROM billing_payment_applications WHERE invoice_id = ${item.invoiceId} AND reversed_at IS NULL`;
+    const saldo = centavos(Number(invoice.total)) - centavos(Number(paid));
+    const monto = centavos(item.amount);
+    if (monto > saldo) throw new BillingConflict(`La aplicación supera el saldo de ${code} (${money(desdeCentavos(saldo))})`);
+    if (monto > disponible) throw new BillingConflict(`La aplicación supera lo disponible del cobro (${money(desdeCentavos(disponible))})`);
+    await transaction`
+      INSERT INTO billing_payment_applications (payment_id, invoice_id, amount, applied_on, created_by)
+      VALUES (${paymentId}, ${item.invoiceId}, ${desdeCentavos(monto)}, ${appliedOn}, ${userId})`;
+    disponible -= monto;
+    await refreshBillingInvoiceStatus(transaction, item.invoiceId);
+    aplicadas.push({ invoiceId: item.invoiceId, code, amount: desdeCentavos(monto) });
+  }
+  await auditBilling(transaction, ownerId, userId, 'APPLY_PAYMENT', 'payment', paymentId, { applications: aplicadas, available: desdeCentavos(disponible) });
+  return { applications: aplicadas, available: desdeCentavos(disponible) };
+}
+
+const money = (value: number) => `$${value.toFixed(2)}`;
+
+function billingDbError(error: unknown) {
+  const pg = error as { code?: string; message?: string };
+  // check_violation / restrict_violation lanzadas por las guardas de la base: mensaje claro, no un 500.
+  if (pg.code === '23514' || pg.code === '23001') return new BillingConflict(pg.message || 'La operación no cumple las reglas de facturación');
+  return error;
+}
+
+app.get('/api/billing/payments', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const query = billingPaymentListQuery.parse(request.query);
+  const rows = await sql.unsafe(`
+    SELECT ${billingPaymentColumns}
+    FROM billing_payments p JOIN clients pc ON pc.id = p.payer_client_id
+    WHERE p.owner_id = $1
+      AND ($2::uuid IS NULL OR p.payer_client_id = $2)
+      AND ($3::date IS NULL OR p.paid_on >= $3)
+      AND ($4::date IS NULL OR p.paid_on <= $4)
+      AND ($5::text <> 'voided' OR p.voided_at IS NOT NULL)
+    ORDER BY p.paid_on DESC, p.created_at DESC LIMIT $6`,
+    [auth.sub, query.payerId ?? null, query.from ?? null, query.to ?? null, query.status, query.limit]
+  ) as unknown as Record<string, any>[];
+  let payments = rows.map(billingPaymentValue);
+  if (query.status === 'available') payments = payments.filter(payment => payment.available > 0);
+  const live = payments.filter(payment => payment.status !== 'anulado');
+  return {
+    payments,
+    summary: {
+      count: payments.length,
+      total: desdeCentavos(live.reduce((sum, payment) => sum + centavos(payment.amount), 0)),
+      applied: desdeCentavos(live.reduce((sum, payment) => sum + centavos(payment.applied), 0)),
+      available: desdeCentavos(live.reduce((sum, payment) => sum + centavos(payment.available), 0))
+    }
+  };
+});
+
+app.get('/api/billing/payments/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [row] = await sql.unsafe(`
+    SELECT ${billingPaymentColumns} FROM billing_payments p JOIN clients pc ON pc.id = p.payer_client_id
+    WHERE p.id = $1 AND p.owner_id = $2`, [id, auth.sub]) as unknown as Record<string, any>[];
+  if (!row) return reply.code(404).send({ error: 'Cobro no encontrado' });
+  const applications = await sql`
+    SELECT a.id, a.invoice_id, i.number, a.amount, a.applied_on::text AS applied_on, a.reversed_at, a.reversal_reason
+    FROM billing_payment_applications a JOIN billing_invoices i ON i.id = a.invoice_id
+    WHERE a.payment_id = ${id} ORDER BY a.created_at`;
+  const audit = await sql`
+    SELECT at, action, detail FROM billing_audit WHERE owner_id = ${auth.sub} AND entity = 'payment' AND entity_id = ${id} ORDER BY at`;
+  return {
+    ...billingPaymentValue(row),
+    applications: applications.map(item => ({
+      id: item.id, invoiceId: item.invoice_id, invoiceCode: billingCode(item.number), amount: Number(item.amount),
+      appliedOn: item.applied_on, reversedAt: item.reversed_at, reversalReason: item.reversal_reason
+    })),
+    audit: audit.map(item => ({ at: item.at, action: item.action, detail: item.detail }))
+  };
+});
+
+app.post('/api/billing/payments', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const input = billingPaymentInput.parse(request.body);
+  const paidOn = input.paidOn ?? fechaDeNegocioPanama();
+  const [payer] = await sql`SELECT id FROM clients WHERE id = ${input.payerClientId} AND owner_id = ${auth.sub}`;
+  if (!payer) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  const amount = desdeCentavos(centavos(input.amount));
+  try {
+    const result = await sql.begin(async transaction => {
+      const [payment] = await transaction`
+        INSERT INTO billing_payments (owner_id, payer_client_id, paid_on, amount, method, reference, notes, created_by)
+        VALUES (${auth.sub}, ${input.payerClientId}, ${paidOn}, ${amount}, ${input.method}, ${input.reference || null}, ${input.notes || null}, ${auth.sub})
+        RETURNING id`;
+      await auditBilling(transaction, auth.sub, auth.sub, 'CREATE_PAYMENT', 'payment', payment.id, {
+        payerClientId: input.payerClientId, paidOn, amount, method: input.method, reference: input.reference || null
+      });
+      let available = amount;
+      if (input.applications?.length) {
+        available = (await applyBillingPayment(transaction, auth.sub, auth.sub, payment.id, input.applications, paidOn)).available;
+      }
+      return { id: payment.id, available };
+    });
+    return reply.code(201).send({ id: result.id, amount, available: result.available });
+  } catch (error) { throw billingDbError(error); }
+});
+
+app.post('/api/billing/payments/:id/applications', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = billingApplyInput.parse(request.body);
+  try {
+    const result = await sql.begin(transaction => applyBillingPayment(transaction, auth.sub, auth.sub, id, input.applications, input.appliedOn ?? fechaDeNegocioPanama()));
+    return reply.code(201).send(result);
+  } catch (error) { throw billingDbError(error); }
+});
+
+app.post('/api/billing/payment-applications/:id/reverse', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const { reason } = billingReasonInput.parse(request.body);
+  try {
+    const result = await sql.begin(async transaction => {
+      const [application] = await transaction`
+        SELECT a.id, a.payment_id, a.invoice_id, a.amount, a.reversed_at, i.number
+        FROM billing_payment_applications a
+        JOIN billing_payments p ON p.id = a.payment_id
+        JOIN billing_invoices i ON i.id = a.invoice_id
+        WHERE a.id = ${id} AND p.owner_id = ${auth.sub} FOR UPDATE OF a`;
+      if (!application) throw new BillingNotFound('Aplicación no encontrada');
+      if (application.reversed_at) throw new BillingConflict('La aplicación ya está revertida');
+      await transaction`UPDATE billing_payment_applications SET reversed_at = now(), reversed_by = ${auth.sub}, reversal_reason = ${reason} WHERE id = ${id}`;
+      await refreshBillingInvoiceStatus(transaction, application.invoice_id);
+      await auditBilling(transaction, auth.sub, auth.sub, 'REVERSE_APPLICATION', 'payment', application.payment_id, {
+        applicationId: id, invoice: billingCode(application.number), amount: Number(application.amount), reason
+      });
+      return { reversed: true, invoice: billingCode(application.number) };
+    });
+    return result;
+  } catch (error) { throw billingDbError(error); }
+});
+
+app.post('/api/billing/payments/:id/void', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const { reason } = billingReasonInput.parse(request.body);
+  try {
+    return await sql.begin(async transaction => {
+      const [payment] = await transaction`SELECT id, voided_at FROM billing_payments WHERE id = ${id} AND owner_id = ${auth.sub} FOR UPDATE`;
+      if (!payment) throw new BillingNotFound('Cobro no encontrado');
+      if (payment.voided_at) throw new BillingConflict('El cobro ya está anulado');
+      const [{ n }] = await transaction`SELECT count(*)::int AS n FROM billing_payment_applications WHERE payment_id = ${id} AND reversed_at IS NULL`;
+      if (n > 0) throw new BillingConflict('El cobro tiene aplicaciones vigentes: revierta primero esas aplicaciones, con su motivo');
+      await transaction`UPDATE billing_payments SET voided_at = now(), void_reason = ${reason}, voided_by = ${auth.sub} WHERE id = ${id}`;
+      await auditBilling(transaction, auth.sub, auth.sub, 'VOID_PAYMENT', 'payment', id, { reason });
+      return { voided: true };
+    });
+  } catch (error) { throw billingDbError(error); }
 });
 
 // Diagnóstico del estado operativo (solo lectura): permite comprobar desde fuera
