@@ -78,3 +78,10 @@ test('la pestaña Reportes (nuevo) existe, descarga con la sesión y el portal m
   assert.match(app, /portalData\.billingNotice/);
   assert.doesNotMatch(app, /billingNotice\.(amount|balance|payer)/, 'el aviso nunca muestra montos ni pagador');
 });
+
+test('cada factura con saldo ofrece "Registrar cobro": abre el formulario con el pagador, el saldo y esa factura primera', async () => {
+  const app = await leer('app.js');
+  assert.match(app, /data-new-invoice-pay="\$\{invoice\.id\}">Registrar cobro</);
+  assert.match(app, /newBillingPaymentDialog\(\{ payerId: invoice\.payerClientId, amount: invoice\.balance, invoiceId: invoice\.id \}\)/);
+  assert.match(app, /\(b\.id === firstInvoiceId\) - \(a\.id === firstInvoiceId\)/);
+});

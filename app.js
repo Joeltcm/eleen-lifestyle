@@ -1,4 +1,4 @@
-const APP_VERSION = '239';
+const APP_VERSION = '240';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -4129,7 +4129,8 @@ async function newBillingInvoices() {
       <td data-label="Pagado">${money.format(invoice.paid)}</td>
       <td data-label="Saldo">${money.format(invoice.balance)}</td>
       <td data-label="Estado">${escapeHtml(newBillingStatusText(invoice))}${invoice.status === 'anulada' && invoice.voidReason ? `<br><small>${escapeHtml(invoice.voidReason)}</small>` : ''}</td>
-      <td data-label=""><button class="secondary" type="button" data-new-invoice-pdf="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Ver PDF</button>${invoice.status === 'anulada' || invoice.paid > 0 ? '' : ` <button class="secondary" type="button" data-new-invoice-void="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Anular</button>`}</td></tr>`).join('')}</tbody></table></div>`;
+      <td data-label="">${invoice.status !== 'anulada' && invoice.balance > 0 ? `<button class="primary" type="button" data-new-invoice-pay="${invoice.id}">Registrar cobro</button> ` : ''}<button class="secondary" type="button" data-new-invoice-pdf="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Ver PDF</button>${invoice.status === 'anulada' || invoice.paid > 0 ? '' : ` <button class="secondary" type="button" data-new-invoice-void="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Anular</button>`}</td></tr>`).join('')}</tbody></table></div>`;
+    list.querySelectorAll('[data-new-invoice-pay]').forEach(button => button.onclick = () => { const invoice = result.invoices.find(item => item.id === button.dataset.newInvoicePay); newBillingPaymentDialog({ payerId: invoice.payerClientId, amount: invoice.balance, invoiceId: invoice.id }); });
     list.querySelectorAll('[data-new-invoice-pdf]').forEach(button => button.onclick = () => previewProtectedPdf(`/api/billing/invoices/${button.dataset.newInvoicePdf}/pdf`, `Factura ${button.dataset.code}`, `factura-${button.dataset.code}.pdf`));
     list.querySelectorAll('[data-new-invoice-void]').forEach(button => button.onclick = () => newBillingVoidDialog(button.dataset.newInvoiceVoid, button.dataset.code));
   } catch (error) { list.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; }
@@ -4209,10 +4210,10 @@ const centsOf = value => Math.round(Number(value || 0) * 100);
 
 // Lista las facturas abiertas del pagador con un campo de importe por factura. Reparte
 // `getAvailable()` empezando por la más antigua; el usuario puede cambiar cualquier importe.
-async function newBillingAllocator(container, payerId, getAvailable) {
+async function newBillingAllocator(container, payerId, getAvailable, firstInvoiceId = '') {
   container.innerHTML = '<p class="empty">Cargando facturas abiertas…</p>';
   let open = [];
-  try { open = (await api(`/api/billing/invoices?status=abierta&payerId=${payerId}`)).invoices.slice().sort((a, b) => a.cycleStart.localeCompare(b.cycleStart) || a.number - b.number); }
+  try { open = (await api(`/api/billing/invoices?status=abierta&payerId=${payerId}`)).invoices.slice().sort((a, b) => (b.id === firstInvoiceId) - (a.id === firstInvoiceId) || a.cycleStart.localeCompare(b.cycleStart) || a.number - b.number); }
   catch (error) { container.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; return { items: () => [], suggest: () => {} }; }
   if (!open.length) { container.innerHTML = '<p class="empty">Este pagador no tiene facturas abiertas: el cobro quedará como saldo a favor.</p>'; return { items: () => [], suggest: () => {} }; }
   container.innerHTML = `<div class="new-billing-allocs">${open.map(invoice => `<div class="new-billing-alloc" data-invoice="${invoice.id}">
@@ -4274,7 +4275,7 @@ async function newBillingPayments() {
   } catch (error) { list.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; }
 }
 
-function newBillingPaymentDialog() {
+function newBillingPaymentDialog(preset = {}) {
   const clientsSorted = data.clients.slice().sort((a, b) => a.name.localeCompare(b.name, 'es'));
   const box = document.createElement('div');
   box.innerHTML = `<form id="new-payment-form"><p class="eyebrow">COBROS (NUEVO)</p><h2>Registrar cobro</h2>
@@ -4289,8 +4290,9 @@ function newBillingPaymentDialog() {
   openModal(box);
   const form = box.querySelector('form'); const allocatorBox = box.querySelector('#new-payment-allocator');
   let allocator = { items: () => [], suggest: () => {} };
-  const loadAllocator = async () => { allocator = form.elements.payerClientId.value ? await newBillingAllocator(allocatorBox, form.elements.payerClientId.value, () => form.elements.amount.value) : { items: () => [], suggest: () => {} }; };
+  const loadAllocator = async () => { allocator = form.elements.payerClientId.value ? await newBillingAllocator(allocatorBox, form.elements.payerClientId.value, () => form.elements.amount.value, preset.invoiceId) : { items: () => [], suggest: () => {} }; };
   form.elements.payerClientId.onchange = loadAllocator;
+  if (preset.payerId) { form.elements.payerClientId.value = preset.payerId; if (preset.amount) form.elements.amount.value = Number(preset.amount).toFixed(2); loadAllocator(); }
   form.elements.amount.addEventListener('input', () => allocator.suggest());
   form.onsubmit = async event => {
     event.preventDefault();
@@ -4299,7 +4301,7 @@ function newBillingPaymentDialog() {
     if (values.get('reference').trim()) body.reference = values.get('reference').trim();
     if (values.get('notes').trim()) body.notes = values.get('notes').trim();
     const applications = allocator.items(); if (applications.length) body.applications = applications;
-    try { form.classList.add('loading-state'); const result = await api('/api/billing/payments', { method: 'POST', body }); modal.close(); toast(`Cobro registrado${result.available > 0 ? ` · saldo a favor ${money.format(result.available)}` : ''}`); newBillingPayments(); }
+    try { form.classList.add('loading-state'); const result = await api('/api/billing/payments', { method: 'POST', body }); modal.close(); toast(`Cobro registrado${result.available > 0 ? ` · saldo a favor ${money.format(result.available)}` : ''}`); if (document.getElementById('subpanel-facturas-nuevo')?.classList.contains('active')) newBillingInvoices(); else newBillingPayments(); }
     catch (error) { toast(error.message, true); form.classList.remove('loading-state'); }
   };
 }
