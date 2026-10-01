@@ -26,7 +26,7 @@ const referencia = async (payer, kind, cycleStart, cycleEnd, lines) => {
   assert.equal(r.estado, 201, JSON.stringify(r.datos));
   return r.datos;
 };
-const plan = async (today, horizon = 0) => db.begin(tx => gen.planBillingGeneration(tx, ownerId, today, horizon));
+const plan = async (today, horizon = 0, hora = 12) => db.begin(tx => gen.planBillingGeneration(tx, ownerId, today, horizon, hora));
 const deRiccardo = p => p.filter(i => i.payerId === riccardo);
 
 before(async () => {
@@ -180,29 +180,37 @@ describe('crédito (Julio): postpago por clases cobrables', () => {
     await sesion('2026-11-02T10:00:00-05:00');                         // del ciclo siguiente: no cuenta
   });
 
-  test('no se emite antes de cerrar el ciclo: sale el día SIGUIENTE al corte (31-10 → 01-11)', async () => {
-    assert.equal((await plan('2026-10-31')).filter(i => i.payerId === julio && i.status === 'emitir').length, 0);
-    const j = (await plan('2026-11-01')).find(i => i.payerId === julio);
-    assert.equal(j.status, 'emitir');
+  test('a crédito se emite el ÚLTIMO DÍA del mes (31-10), pero solo desde las 21:00; antes está programada y al día siguiente ya no sale sola', async () => {
+    assert.equal((await plan('2026-10-30', 5, 22)).find(i => i.payerId === julio).status, 'programada', 'el día antes no');
+    const temprano = (await plan('2026-10-31', 0, 20)).find(i => i.payerId === julio);
+    assert.equal(temprano.status, 'programada');
+    assert.match(temprano.reason, /Se emite hoy desde las 21:00/);
+    assert.equal((await plan('2026-10-31', 0, 21)).find(i => i.payerId === julio).status, 'emitir');
+    assert.equal((await plan('2026-10-31', 0, 23)).find(i => i.payerId === julio).status, 'emitir');
+    const tarde = (await plan('2026-11-01', 0, 1)).find(i => i.payerId === julio);
+    assert.equal(tarde.status, 'omitida', 'a las 01:00 del 01-11 ya no sale sola');
+    assert.match(tarde.reason, /hace 1 día/);
   });
 
   test('cobra 5 clases a $25 = $125 (3 impartidas + 1 cancelación cobrable + la del día de corte); vence al cierre del ciclo', async () => {
-    const j = (await plan('2026-11-01')).find(i => i.payerId === julio);
+    const j = (await plan('2026-10-31', 0, 21)).find(i => i.payerId === julio);
     assert.deepEqual([j.cycleStart, j.cycleEnd, j.issuedOn, j.dueOn], ['2026-09-30', '2026-10-31', '2026-10-31', '2026-10-31']);
     assert.deepEqual([j.lines[0].quantity, j.lines[0].unitAmount, j.total], [5, 25, 125]);
-    const r = await gen.runBillingGeneration(ownerId, '2026-11-01');
+    const antes = await gen.runBillingGeneration(ownerId, '2026-10-31', 20);
+    assert.equal(antes.created.filter(c => c.payerName === 'Julio').length, 0, 'a las 20:00 todavía no');
+    const r = await gen.runBillingGeneration(ownerId, '2026-10-31', 21);
     assert.equal(r.created.filter(c => c.payerName === 'Julio').length, 1);
     const fac = (await api.get(`/api/billing/invoices?payerId=${julio}`)).datos.invoices.find(i => i.cycleEnd === '2026-10-31');
     assert.deepEqual([fac.kind, fac.total, fac.origin], ['credito', 125, 'auto']);
   });
 
   test('el ciclo siguiente cobra su única clase ($25) y, sin clases cobrables, no se genera factura ("sin cargo")', async () => {
-    const dic = (await plan('2026-12-01')).find(i => i.payerId === julio);
+    const dic = (await plan('2026-11-30', 0, 21)).find(i => i.payerId === julio);
     assert.deepEqual([dic.status, dic.cycleStart, dic.cycleEnd, dic.total], ['emitir', '2026-10-31', '2026-11-30', 25], 'la clase del 02-11 es de este ciclo');
-    assert.equal((await gen.runBillingGeneration(ownerId, '2026-12-01')).created.filter(c => c.payerName === 'Julio').length, 1);
-    const ene = (await plan('2027-01-01')).find(i => i.payerId === julio);
+    assert.equal((await gen.runBillingGeneration(ownerId, '2026-11-30', 21)).created.filter(c => c.payerName === 'Julio').length, 1);
+    const ene = (await plan('2026-12-31', 0, 21)).find(i => i.payerId === julio);
     assert.deepEqual([ene.status, ene.total], ['sin_cargo', 0]);
-    assert.equal((await gen.runBillingGeneration(ownerId, '2027-01-01')).created.filter(c => c.payerName === 'Julio').length, 0);
+    assert.equal((await gen.runBillingGeneration(ownerId, '2026-12-31', 21)).created.filter(c => c.payerName === 'Julio').length, 0);
   });
 });
 

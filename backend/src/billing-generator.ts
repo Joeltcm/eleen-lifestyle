@@ -9,7 +9,8 @@
 //     El paquete usa su propia duración en días (Sara Djamous: 35).
 //   * El CRÉDITO (Julio) es POSTPAGO: al cerrar el ciclo cobra las clases realmente impartidas (más las
 //     cancelaciones que Eileen marcó como cobrables) × la tarifa por clase, en la ventana (corte anterior,
-//     corte]. El día de corte pertenece al ciclo que termina, así que la factura sale al día siguiente.
+//     corte]. El día de corte pertenece al ciclo que termina y la factura sale ESE MISMO DÍA, a partir de
+//     CREDIT_EMIT_HOUR (21:00 de Panamá), cuando las clases del día ya están marcadas.
 //   * Una familia es UNA factura del pagador con una línea por persona; quien tiene un plan propio con
 //     otro pagador (Ernesto) recibe además su propia factura.
 //   * Las líneas con la casilla "Facturación automática" desmarcada se ignoran; las de personas en pausa o
@@ -21,10 +22,12 @@
 // probar con un reloj fijo.
 import type { TransactionSql } from 'postgres';
 import { sql } from './db.js';
-import { fechaDeNegocioPanama } from './panama-date.js';
+import { fechaDeNegocioPanama, horaDeNegocioPanama } from './panama-date.js';
 
 // Solo el día que toca (Joel, 01-10-2026): sin facturas "de rezago". El bucle corre cada hora, así que hay 24 intentos ese día; si aun así no salió, se avisa y se crea a mano.
 export const RETRO_DAYS = 0;
+// A crédito (Julio): se emite EL DÍA DEL CORTE (último día del mes), pero solo a partir de esta hora de Panamá, para que ya estén marcadas las clases de ese día (Joel, 01-10-2026).
+export const CREDIT_EMIT_HOUR = 21;
 
 type Tx = TransactionSql<Record<string, unknown>>;
 type Kind = 'mensual' | 'credito' | 'paquete';
@@ -103,7 +106,7 @@ async function billableSessions(tx: Tx, beneficiaryId: string, startExclusive: s
 }
 
 // ── Plan (sin escribir) ──────────────────────────────────────────────────────
-export async function planBillingGeneration(tx: Tx, ownerId: string, today = fechaDeNegocioPanama(), horizonDays = 0): Promise<PlannedInvoice[]> {
+export async function planBillingGeneration(tx: Tx, ownerId: string, today = fechaDeNegocioPanama(), horizonDays = 0, hour = horaDeNegocioPanama()): Promise<PlannedInvoice[]> {
   const subscriptions = await loadSubscriptions(tx, ownerId);
   const groups = new Map<string, Subscription[]>();
   for (const subscription of subscriptions) {
@@ -135,12 +138,13 @@ export async function planBillingGeneration(tx: Tx, ownerId: string, today = fec
       const active = lines.filter(line => line.startsOn <= (kind === 'credito' ? cycleEnd : cycleStart) && (!line.endsOn || line.endsOn >= cycleStart)
         && line.beneficiaryStatus === 'active' && line.payerStatus === 'active');
       if (!active.length) break;
-      // Cuándo toca emitirla: anticipadas al empezar el ciclo; crédito al día siguiente de cerrar.
-      const due = kind === 'credito' ? addDays(cycleEnd, 1) : cycleStart;
+      // Cuándo toca emitirla: anticipadas al empezar el ciclo; crédito el día de corte (fin del ciclo), a partir de CREDIT_EMIT_HOUR.
+      const due = kind === 'credito' ? cycleEnd : cycleStart;
       if (due > horizon) break;
       const issuedOn = kind === 'credito' ? cycleEnd : cycleStart;
       let status: PlannedInvoice['status'] = due <= today ? 'emitir' : 'programada';
       let reason: string | null = null;
+      if (kind === 'credito' && due === today && hour < CREDIT_EMIT_HOUR) { status = 'programada'; reason = `Se emite hoy desde las ${CREDIT_EMIT_HOUR}:00, al cerrar el día de corte, con las clases ya marcadas`; }
       if (status === 'emitir' && daysBetween(due, today) > RETRO_DAYS) {
         status = 'omitida'; reason = `El ciclo ${kind === 'credito' ? 'cerró' : 'empezó'} hace ${daysBetween(due, today)} ${daysBetween(due, today) === 1 ? 'día' : 'días'}: las facturas automáticas solo se emiten el mismo día del corte; se crea a mano`;
       }
@@ -172,8 +176,8 @@ export type GenerationResult = { created: { code: string; invoiceId: string; pay
   skipped: { payerName: string; kind: Kind; status: PlannedInvoice['status']; reason: string | null }[] };
 
 // Emite lo que toca HOY. Cada factura va en su propia transacción: si una falla, las demás siguen.
-export async function runBillingGeneration(ownerId: string, today = fechaDeNegocioPanama()): Promise<GenerationResult> {
-  const plan = await sql.begin('isolation level repeatable read read only', tx => planBillingGeneration(tx as unknown as Tx, ownerId, today, 0));
+export async function runBillingGeneration(ownerId: string, today = fechaDeNegocioPanama(), hour = horaDeNegocioPanama()): Promise<GenerationResult> {
+  const plan = await sql.begin('isolation level repeatable read read only', tx => planBillingGeneration(tx as unknown as Tx, ownerId, today, 0, hour));
   const result: GenerationResult = { created: [], skipped: [] };
   for (const item of plan) {
     if (item.status !== 'emitir') { result.skipped.push({ payerName: item.payerName, kind: item.kind, status: item.status, reason: item.reason }); continue; }

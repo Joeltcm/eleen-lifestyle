@@ -26,3 +26,9 @@ export function fechaPanamaDiasAtras(days: number, value = new Date()): string {
   calendario.setUTCDate(calendario.getUTCDate() - days);
   return fechaDeNegocioPanama(calendario);
 }
+
+/** Hora del día (0-23) en Panamá, evaluada en el momento de la llamada. */
+export function horaDeNegocioPanama(value = new Date()): number {
+  const hora = new Intl.DateTimeFormat('en-US', { timeZone: TIME_ZONE, hour: 'numeric', hour12: false }).format(value);
+  return Number(hora) % 24;
+}
