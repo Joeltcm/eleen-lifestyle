@@ -52,3 +52,17 @@ test('mover de hora una clase (un lunes y un viernes) y actualizar el calendario
   const segunda = await api.post('/api/session-recurrences/extend', {});
   assert.equal(segunda.datos.creadas, 0, 'y volver a pulsarlo no crea nada');
 });
+
+test('la agenda recurrente permanece indefinida aunque llegue una fecha Hasta', async () => {
+  const creada = await api.post('/api/session-recurrences', {
+    clientId: cid, weekdays: [4], timeOfDay: '06:15', durationMinutes: 60, mode: 'Presencial', endsOn: '2099-12-31'
+  });
+  assert.equal(creada.estado, 201);
+  assert.equal(creada.datos.recurrence.ends_on, null, 'una agenda nueva no tiene fecha de fin');
+
+  const editada = await api.patch(`/api/session-recurrences/${creada.datos.recurrence.id}`, {
+    weekdays: [4], timeOfDay: '06:15', durationMinutes: 60, mode: 'Presencial', endsOn: '2099-12-31'
+  });
+  assert.equal(editada.estado, 200);
+  assert.equal(editada.datos.recurrence.ends_on, null, 'editar una agenda tampoco puede ponerle fecha de fin');
+});

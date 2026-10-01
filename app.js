@@ -1,4 +1,4 @@
-const APP_VERSION = '258';
+const APP_VERSION = '259';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1821,7 +1821,7 @@ function editarHorarioFijo(regla, alGuardar) {
         <label>Duración<select name="durationMinutes">${[30, 45, 60, 75, 90, 120].map(m => `<option value="${m}" ${Number(regla.duration_minutes) === m ? 'selected' : ''}>${m} minutos</option>`).join('')}</select></label>
       </div>
       <label>Modalidad<select name="mode">${['Presencial', 'Virtual', 'Exterior'].map(m => `<option ${m === regla.mode ? 'selected' : ''}>${m}</option>`).join('')}</select></label>
-      <label>Hasta (opcional)<input name="endsOn" type="date" value="${dateOnly(regla.ends_on)}" /><small>En blanco, sigue indefinidamente.</small></label>
+      <p class="section-note">Este horario es indefinido: seguirá generando clases hasta que Eileen lo detenga o marque al cliente como inactivo.</p>
       <p class="commercial-note">Los días que quites retiran sus clases futuras que nadie haya tocado. Las ya marcadas o movidas se quedan. Todos los días marcados comparten esta hora: para otra hora en otro día, quita ese día aquí y agrégalo como un horario aparte (+ Agregar horario fijo).</p>
       <button class="primary wide-button">Guardar horario</button>
     </form>`;
@@ -1837,7 +1837,7 @@ function editarHorarioFijo(regla, alGuardar) {
       event.target.classList.add('loading-state');
       const r = await api(`/api/session-recurrences/${regla.id}`, { method: 'PATCH', body: {
         weekdays: dias, timeOfDay: form.get('timeOfDay'), durationMinutes: Number(form.get('durationMinutes')),
-        mode: form.get('mode'), endsOn: form.get('endsOn') || null
+        mode: form.get('mode')
       } });
       await loadData(); renderAll(); modal.close();
       recurrenceManager();
@@ -1949,7 +1949,7 @@ function nuevoHorarioFijo() {
         <label>Duración<select name="durationMinutes">${[30, 45, 60, 75, 90, 120].map(m => `<option value="${m}" ${m === 60 ? 'selected' : ''}>${m} minutos</option>`).join('')}</select></label>
       </div>
       <label>Modalidad<select name="mode">${['Presencial', 'Virtual', 'Exterior'].map(m => `<option>${m}</option>`).join('')}</select></label>
-      <label>Hasta (opcional)<input name="endsOn" type="date" /><small>En blanco, sigue indefinidamente.</small></label>
+      <p class="section-note">Este horario no tiene fecha de finalización: seguirá generando clases hasta que Eileen lo detenga o marque al cliente como inactivo.</p>
       <p class="commercial-note">Los días marcados comparten la hora. Si el mismo cliente entrena a otra hora otro día, agrega otro horario fijo para esa hora.</p>
       <button class="primary wide-button">Guardar horario</button>
     </form>`;
@@ -1966,7 +1966,7 @@ function nuevoHorarioFijo() {
       event.target.classList.add('loading-state');
       const r = await api('/api/session-recurrences', { method: 'POST', body: {
         clientId: form.get('clientId'), weekdays: dias, timeOfDay: form.get('timeOfDay'), durationMinutes: Number(form.get('durationMinutes')),
-        mode: form.get('mode'), endsOn: form.get('endsOn') || null
+        mode: form.get('mode')
       } });
       await loadData(); renderAll(); modal.close();
       recurrenceManager();

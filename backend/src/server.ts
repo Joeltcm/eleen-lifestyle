@@ -3864,9 +3864,7 @@ const recurrenceSchema = z.object({
   timeOfDay: z.string().regex(/^\d{2}:\d{2}$/, 'Hora inválida'),
   durationMinutes: z.coerce.number().int().min(15).max(480).default(60),
   mode: z.string().default('Presencial'),
-  notes: z.string().optional(),
-  endsOn: z.union([z.literal(''), z.null(), z.string().date()]).optional()
-    .transform(valor => (valor === '' || valor === undefined ? null : valor))
+  notes: z.string().optional()
 });
 
 app.post('/api/session-recurrences', { preHandler: requireStaff }, async (request, reply) => {
@@ -3878,7 +3876,7 @@ app.post('/api/session-recurrences', { preHandler: requireStaff }, async (reques
   const [regla] = await sql`
     INSERT INTO session_recurrences (client_id, routine_id, weekdays, time_of_day, duration_minutes, mode, notes, ends_on)
     VALUES (${input.clientId}, ${input.routineId || null}, ${[...new Set(input.weekdays)].sort()},
-      ${input.timeOfDay}::time, ${input.durationMinutes}, ${input.mode}, ${input.notes || null}, ${input.endsOn}::date)
+      ${input.timeOfDay}::time, ${input.durationMinutes}, ${input.mode}, ${input.notes || null}, NULL)
     RETURNING *
   `;
   const { creadas } = await extenderRecurrencias(auth.sub);
@@ -4009,9 +4007,7 @@ const recurrenceEditSchema = z.object({
   timeOfDay: z.string().regex(/^\d{2}:\d{2}$/, 'Hora inválida'),
   durationMinutes: z.coerce.number().int().min(15).max(480),
   mode: z.string().min(1),
-  notes: z.string().optional().nullable(),
-  endsOn: z.union([z.literal(''), z.null(), z.string().date()]).optional()
-    .transform(valor => (valor === '' || valor === undefined ? null : valor))
+  notes: z.string().optional().nullable()
 });
 
 app.patch('/api/session-recurrences/:id', { preHandler: requireStaff }, async (request, reply) => {
@@ -4023,7 +4019,7 @@ app.patch('/api/session-recurrences/:id', { preHandler: requireStaff }, async (r
   const [regla] = await sql`
     UPDATE session_recurrences r
     SET weekdays = ${dias}, time_of_day = ${input.timeOfDay}::time, duration_minutes = ${input.durationMinutes},
-      mode = ${input.mode}, notes = ${input.notes || null}, ends_on = ${input.endsOn}::date, updated_at = now()
+      mode = ${input.mode}, notes = ${input.notes || null}, ends_on = NULL, updated_at = now()
     FROM clients c
     WHERE r.id = ${id} AND c.id = r.client_id AND c.owner_id = ${auth.sub} AND r.active
     RETURNING r.*
