@@ -4275,7 +4275,8 @@ app.patch('/api/sessions/:id/cancellation', { preHandler: requireStaff }, async 
     if (session.cancellation_resolution === 'discount') {
       const [credit] = await transaction`SELECT applied_invoice_id FROM billing_credits WHERE session_id = ${id} ORDER BY created_at DESC LIMIT 1`;
       if (credit?.applied_invoice_id) return { error: 'El descuento ya fue aplicado a una factura; no se puede revertir automáticamente.', code: 409 };
-      await transaction`DELETE FROM billing_credits WHERE session_id = ${id} AND applied_invoice_id IS NULL`;
+      // X-020: fuera de legacy no se tocan las filas heredadas de billing_credits.
+      if (billingEngine.legacyWrites) await transaction`DELETE FROM billing_credits WHERE session_id = ${id} AND applied_invoice_id IS NULL`;
     }
     const isCreditClient = session.payment_mode === 'no_anticipado';
     if (isCreditClient && resolution === 'debit') return { error: 'Los clientes a crédito no descuentan una bolsa; decide si se cobra la cancelación.', code: 400 };
@@ -4324,7 +4325,8 @@ app.post('/api/sessions/:id/reactivate', { preHandler: requireStaff }, async (re
     if (session.cancellation_resolution === 'discount') {
       const [credit] = await transaction`SELECT applied_invoice_id FROM billing_credits WHERE session_id = ${id} ORDER BY created_at DESC LIMIT 1`;
       if (credit?.applied_invoice_id) return { error: 'El descuento de esta cancelación ya se aplicó a una factura; no se puede reactivar automáticamente.', code: 409 };
-      await transaction`DELETE FROM billing_credits WHERE session_id = ${id} AND applied_invoice_id IS NULL`;
+      // X-020: fuera de legacy no se tocan las filas heredadas de billing_credits.
+      if (billingEngine.legacyWrites) await transaction`DELETE FROM billing_credits WHERE session_id = ${id} AND applied_invoice_id IS NULL`;
     }
     // Deshacer la clase de reposición. Si ya se usó, quitarla descuadraría el
     // saldo: se avisa y no se reactiva.

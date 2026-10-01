@@ -87,3 +87,28 @@ test('X-019: el descuento por cancelación de la entrenadora se rechaza (409) en
   assert.equal(n.estado, 409); assert.match(n.mensaje, /descuento por clase cancelada por la entrenadora todavía no se aplica en la facturación nueva/);
   assert.equal(n.creditos, 0, 'nada huérfano');
 });
+
+test('X-020: editar una cancelación o reactivar una sesión NO borra créditos heredados en estado new (en legacy sí los limpia)', async () => {
+  const caso = async S => {
+    const c = await S.api.post('/api/clients', { fullName: `Heredado ${Math.random()}`, billingModel: 'monthly', standardPrice: 160, monthlySessionTarget: 8, cutoffDay: 15 });
+    const lote = await S.api.post('/api/sessions/batch', { clientId: c.datos.id, startsAt: [new Date(Date.now() - 2 * 86400_000).toISOString()], durationMinutes: 30, mode: 'Presencial' });
+    const sesion = lote.datos.sesiones[0].id;
+    assert.equal((await S.api.delete(`/api/sessions/${sesion}?rescheduled=false&by=trainer&resolution=none`)).estado, 200);
+    // Una sesión que quedó marcada con descuento en la etapa anterior, con su crédito pendiente.
+    await S.db`UPDATE sessions SET cancellation_resolution = 'discount' WHERE id = ${sesion}`;
+    await S.db`INSERT INTO billing_credits (client_id, session_id, concept, amount) VALUES (${c.datos.id}, ${sesion}, 'heredado', 20)`;
+    const editar = await S.api.patch(`/api/sessions/${sesion}/cancellation`, { cancelledBy: 'trainer', rescheduled: false, resolution: 'none' });
+    assert.equal(editar.estado, 200, JSON.stringify(editar.datos));
+    const trasEditar = (await S.db`SELECT count(*)::int AS n FROM billing_credits WHERE session_id = ${sesion}`)[0].n;
+    await S.db`UPDATE sessions SET cancellation_resolution = 'discount' WHERE id = ${sesion}`;
+    await S.db`INSERT INTO billing_credits (client_id, session_id, concept, amount) VALUES (${c.datos.id}, ${sesion}, 'heredado 2', 5) ON CONFLICT DO NOTHING`;
+    const reactivar = await S.api.post(`/api/sessions/${sesion}/reactivate`, {});
+    const trasReactivar = (await S.db`SELECT count(*)::int AS n FROM billing_credits WHERE session_id = ${sesion}`)[0].n;
+    return { trasEditar, reactivar: reactivar.estado, trasReactivar };
+  };
+  const l = await caso(L);
+  assert.equal(l.trasEditar, 0, 'contraste: en legacy se limpia el crédito pendiente al editar');
+  const n = await caso(N);
+  assert.equal(n.trasEditar, 1, 'en new el crédito heredado queda intacto al editar');
+  assert.ok(n.trasReactivar >= 1, 'y también al reactivar');
+});
