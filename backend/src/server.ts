@@ -18,6 +18,7 @@ import { routineSuggestionsReady, suggestRoutine } from './routine-suggestions.j
 import { accountStatementPdf, accountsReceivablePdf, billingInvoicePdf, compliancePdf, invoicePdf, monthlyFinancePdf } from './billing-reports.js';
 import { fechaDeNegocioPanama, fechaPanamaDiasAtras } from './panama-date.js';
 import { resolveBillingEngine } from './billing-engine.js';
+import { DEFAULT_IMPORT_MANIFEST, applyBatch, approveBatch, createPreviewBatch, getBatch, listBatches, reverseBatch, type ImportManifest } from './billing-import.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
 const app = Fastify({ logger: true, trustProxy: true });
@@ -1126,6 +1127,89 @@ app.post('/api/billing/payments/:id/void', { preHandler: requireStaff }, async (
       return { voided: true };
     });
   } catch (error) { throw billingDbError(error); }
+});
+
+// ── Carga inicial: cargador con vista previa (1B-4) ──────────────────────────
+// Lleva al módulo nuevo lo que cuadra del sistema anterior. NO modifica el sistema anterior.
+// Vista previa -> aprobación (por hash) -> aplicación (solo con el generador viejo apagado) ->
+// reversión (solo si nada cambió después). Ver billing-import.ts.
+const importDate = z.string().date();
+const importManifestInput = z.object({
+  name: z.string().trim().min(1).max(200),
+  entries: z.array(z.object({
+    key: z.string().trim().min(1).max(80), label: z.string().trim().min(1).max(200), payer: z.string().trim().min(1).max(200),
+    kind: z.enum(['mensual', 'credito', 'clase_suelta', 'paquete', 'manual']),
+    cycleStart: importDate, cycleEnd: importDate, cutDay: z.coerce.number().int().min(1).max(31).optional(),
+    issuedOn: importDate.optional(), dueOn: importDate.optional(), amountFrom: z.literal('legacy').optional(),
+    lines: z.array(z.object({
+      beneficiary: z.string().trim().min(1).max(200), description: z.string().trim().max(200).optional(),
+      amount: z.coerce.number().min(0).max(100000).optional(), sessionsReference: z.coerce.number().int().positive().max(1000).optional()
+    })).min(1).max(30),
+    payment: z.object({
+      paidOn: importDate, method: z.enum(billingPaymentMethods), amount: z.coerce.number().positive().max(1_000_000), reference: z.string().trim().max(160).optional()
+    }).optional()
+  })).min(1).max(200),
+  exclusions: z.array(z.object({ key: z.string().trim().min(1).max(80), label: z.string().trim().min(1).max(200), reason: z.string().trim().min(1).max(500) })).max(200)
+});
+
+function importBatchValue(batch: Record<string, any>, items?: Record<string, any>[]) {
+  return {
+    id: batch.id, status: batch.status, previewHash: batch.preview_hash, manifestHash: batch.manifest_hash, totals: batch.totals,
+    sourceInfo: batch.source_info, counterBefore: batch.counter_before, counterAfter: batch.counter_after,
+    createdAt: batch.created_at, approvedAt: batch.approved_at, appliedAt: batch.applied_at, reversedAt: batch.reversed_at,
+    reversalReason: batch.reversal_reason, failureReason: batch.failure_reason,
+    manifestName: batch.manifest?.name ?? null,
+    items: items?.map(item => ({
+      seq: item.seq, kind: item.kind, decision: item.decision, key: item.key, label: item.label, externalId: item.external_id,
+      reasons: item.reasons, data: item.data, sourceIds: item.source_ids,
+      destinationInvoiceId: item.destination_invoice_id ?? null, destinationPaymentId: item.destination_payment_id ?? null
+    }))
+  };
+}
+
+app.get('/api/billing/imports/default-manifest', { preHandler: requireStaff }, async () => DEFAULT_IMPORT_MANIFEST);
+
+app.get('/api/billing/imports', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const rows = await listBatches(auth.sub);
+  return { batches: rows.map(row => ({ id: row.id, status: row.status, previewHash: row.preview_hash, totals: row.totals, counterBefore: row.counter_before, counterAfter: row.counter_after,
+    createdAt: row.created_at, approvedAt: row.approved_at, appliedAt: row.applied_at, reversedAt: row.reversed_at })) };
+});
+
+app.post('/api/billing/imports/preview', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const body = z.object({ manifest: importManifestInput.optional() }).parse(request.body ?? {});
+  const manifest = (body.manifest ?? DEFAULT_IMPORT_MANIFEST) as ImportManifest;
+  const created = await createPreviewBatch(auth.sub, auth.sub, manifest);
+  const { batch, items } = await getBatch(auth.sub, created.id);
+  return reply.code(201).send({ ...importBatchValue(batch, items as unknown as Record<string, any>[]), engine: billingEngine });
+});
+
+app.get('/api/billing/imports/:id', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const { batch, items } = await getBatch(auth.sub, id);
+  return { ...importBatchValue(batch, items as unknown as Record<string, any>[]), engine: billingEngine };
+});
+
+app.post('/api/billing/imports/:id/approve', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const { previewHash } = z.object({ previewHash: z.string().regex(/^[0-9a-f]{64}$/) }).parse(request.body);
+  return approveBatch(auth.sub, auth.sub, id, previewHash);
+});
+
+app.post('/api/billing/imports/:id/apply', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  return applyBatch(auth.sub, auth.sub, id, { legacyWrites: billingEngine.legacyWrites });
+});
+
+app.post('/api/billing/imports/:id/reverse', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const { reason } = billingReasonInput.parse(request.body);
+  return reverseBatch(auth.sub, auth.sub, id, reason);
 });
 
 // Diagnóstico del estado operativo (solo lectura): permite comprobar desde fuera

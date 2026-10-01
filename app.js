@@ -1,4 +1,4 @@
-const APP_VERSION = '236';
+const APP_VERSION = '237';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -4344,6 +4344,95 @@ function newBillingReasonDialog(title, action, onSubmit) {
     try { await onSubmit(new FormData(event.target).get('reason')); } catch (error) { toast(error.message, true); }
   };
 }
+// ── Carga inicial (1B-4) ─────────────────────────────────────────────────────
+// Lleva al módulo nuevo lo que CUADRA del sistema anterior. Vista previa -> aprobación (por hash)
+// -> aplicación (solo con el generador viejo apagado) -> reversión (solo si nada cambió). El
+// sistema anterior solo se LEE; nunca se modifica.
+const newImportDecision = { incluir: 'Se cargará', revisar: 'Requiere revisión', excluir: 'Excluida', ya_aplicado: 'Ya cargada' };
+const newImportStatus = { preview: 'Vista previa', approved: 'Aprobada', applied: 'Aplicada', reversed: 'Revertida', failed: 'Fallida', superseded: 'Reemplazada' };
+let newImportCurrent = null;
+// dd-mm-aaaa y hora de 12 h (a. m./p. m.) en horario de Panamá, sin depender del idioma del navegador.
+function fechaHoraPanama(value, withTime = true) {
+  const date = new Date(value); if (Number.isNaN(date.getTime())) return '';
+  const [y, m, d] = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Panama', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date).split('-');
+  if (!withTime) return `${d}-${m}-${y}`;
+  const hora = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Panama', hour: 'numeric', minute: '2-digit', hour12: true }).format(date).replace('AM', 'a. m.').replace('PM', 'p. m.');
+  return `${d}-${m}-${y} ${hora}`;
+}
+const importCode = number => number ? `FAC-${String(number).padStart(4, '0')}` : '—';
+
+async function newBillingImport(batchId = null) {
+  const root = document.getElementById('carga-inicial-mount');
+  if (!root) return;
+  root.innerHTML = '<article class="card"><p class="empty">Cargando…</p></article>';
+  try {
+    const list = await api('/api/billing/imports');
+    const id = batchId || newImportCurrent || (list.batches.find(batch => ['preview', 'approved', 'applied'].includes(batch.status)) || list.batches[0] || {}).id;
+    newImportCurrent = id || null;
+    const batch = id ? await api(`/api/billing/imports/${id}`) : null;
+    const engine = batch ? batch.engine : (await api('/api/billing/engine-status'));
+    renderNewBillingImport(root, batch, engine, list.batches);
+  } catch (error) { root.innerHTML = `<article class="card"><p class="empty">${escapeHtml(error.message)}</p></article>`; }
+}
+
+function renderNewBillingImport(root, batch, engine, batches) {
+  const t = batch?.totals || {};
+  const included = (batch?.items || []).filter(item => item.decision === 'incluir' || item.decision === 'ya_aplicado');
+  const review = (batch?.items || []).filter(item => item.decision === 'revisar');
+  const excluded = (batch?.items || []).filter(item => item.decision === 'excluir');
+  const canApply = batch && batch.status === 'approved' && !engine.legacyWrites;
+  const actions = !batch ? '' : batch.status === 'preview' ? '<button class="primary" type="button" id="new-import-approve">Aprobar esta vista previa</button>'
+    : batch.status === 'approved' ? `<button class="primary" type="button" id="new-import-apply"${canApply ? '' : ' disabled'}>Aplicar la carga</button>${canApply ? '' : '<p class="section-note">No se puede aplicar mientras el generador del sistema anterior siga activo (estado: ' + escapeHtml(engine.state) + '). Se apaga en el corte, con tu orden.</p>'}`
+    : batch.status === 'applied' ? '<button class="secondary" type="button" id="new-import-reverse">Revertir la carga</button>' : '';
+  root.innerHTML = `<article class="card"><div class="card-head"><div><h3>Carga inicial</h3><p>${batch ? `${escapeHtml(newImportStatus[batch.status] || batch.status)} · ${escapeHtml(batch.manifestName || '')}` : 'Aún no hay una vista previa'}</p></div></div>
+    <p class="section-note">Lleva al módulo nuevo lo que cuadra del sistema anterior. El sistema anterior solo se lee: nunca se modifica. Primero se genera una vista previa, tú la apruebas y solo entonces se aplica.</p>
+    <div class="subpanel-toolbar"><button class="${batch ? 'secondary' : 'primary'}" type="button" id="new-import-preview">${batch ? 'Generar una vista previa nueva' : 'Generar vista previa'}</button></div>
+    ${batch ? `<p class="eyebrow">1 · FUENTE Y LÍMITE</p><p class="form-summary">${escapeHtml(batch.sourceInfo?.source || '')}<br>Vista previa del ${escapeHtml(batch.sourceInfo?.generatedAt ? fechaHoraPanama(batch.sourceInfo.generatedAt) : '')} · hash <code>${escapeHtml(batch.previewHash.slice(0, 12))}…</code> · numeración desde ${importCode(t.firstNumber)} hasta ${importCode(t.lastNumber)}<br>Generador del sistema anterior: <b>${engine.legacyWrites ? 'activo' : 'apagado'}</b> (estado ${escapeHtml(engine.state)})</p>
+    <p class="eyebrow" style="margin-top:14px">2 · TOTALES</p><div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Facturas a crear</span><strong>${t.invoices ?? 0} · ${money.format(t.invoicesTotal || 0)}</strong></article><article><span>Cobros a crear</span><strong>${t.payments ?? 0} · ${money.format(t.paymentsTotal || 0)}</strong></article><article><span>Saldo pendiente inicial</span><strong>${money.format(t.openBalance || 0)}</strong></article><article><span>Pagadas / pendientes</span><strong>${t.paid ?? 0} / ${t.pending ?? 0}</strong></article><article><span>Por revisar</span><strong>${t.review ?? 0}</strong></article><article><span>Excluidas · ya cargadas</span><strong>${t.excluded ?? 0} · ${t.alreadyApplied ?? 0}</strong></article></div>
+    <p class="eyebrow" style="margin-top:14px">3 · LO QUE SE CREARÁ</p>
+    ${included.length ? `<div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Factura</th><th>Pagador</th><th>Ciclo</th><th>Líneas</th><th>Total</th><th>Cobro</th><th>Estado</th><th>Origen</th></tr></thead><tbody>${included.map(item => `<tr>
+      <td data-label="Factura"><b>${item.decision === 'ya_aplicado' ? 'Ya cargada' : importCode(item.data.projectedNumber)}</b><br><small>${escapeHtml(newBillingKinds[item.data.kind] || item.data.kind)}</small></td>
+      <td data-label="Pagador">${escapeHtml(item.data.payer.name)}</td>
+      <td data-label="Ciclo">${fechaCorta(item.data.cycleStart)} → ${fechaCorta(item.data.cycleEnd)}</td>
+      <td data-label="Líneas">${item.data.lines.map(line => `${escapeHtml(line.beneficiary)}: ${money.format(line.amount)}`).join('<br>')}</td>
+      <td data-label="Total">${money.format(item.data.total)}</td>
+      <td data-label="Cobro">${item.data.payment ? `${money.format(item.data.payment.amount)} · ${escapeHtml(item.data.payment.method)}<br><small>${fechaCorta(item.data.payment.paidOn)}</small>` : 'Sin cobro'}</td>
+      <td data-label="Estado">${escapeHtml(newBillingStatusLabels[item.data.status] || item.data.status)}</td>
+      <td data-label="Origen"><small>${item.sourceIds.payments?.length || 0} cobro(s) y ${item.sourceIds.invoices?.length || 0} factura(s) del sistema anterior</small></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">No hay nada que cargar en esta vista previa.</p>'}
+    ${review.length ? `<p class="eyebrow" style="margin-top:14px">REQUIEREN REVISIÓN (NO SE CARGAN)</p><div class="new-billing-allocs">${review.map(item => `<div class="new-billing-alloc"><div><b>${escapeHtml(item.label)}</b><small>${item.reasons.map(escapeHtml).join('<br>')}</small></div></div>`).join('')}</div>` : ''}
+    <p class="eyebrow" style="margin-top:14px">4 · EXCLUIDAS (LAS CARGAS JOEL A MANO)</p><div class="new-billing-allocs">${excluded.map(item => `<div class="new-billing-alloc"><div><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.reasons[0] || '')}</small></div></div>`).join('')}</div>
+    <div class="subpanel-toolbar" style="margin-top:14px">${actions}</div>` : ''}
+    ${batches.length > 1 ? `<p class="eyebrow" style="margin-top:14px">LOTES ANTERIORES</p><div class="new-billing-allocs">${batches.map(item => `<div class="new-billing-alloc"><div><b>${escapeHtml(newImportStatus[item.status] || item.status)}</b><small>${escapeHtml(fechaHoraPanama(item.createdAt, false))} · ${item.totals?.invoices ?? 0} facturas · ${money.format(item.totals?.invoicesTotal || 0)}</small></div><button class="secondary" type="button" data-import-open="${item.id}">Ver</button></div>`).join('')}</div>` : ''}</article>`;
+  document.getElementById('new-import-preview').onclick = async event => {
+    event.target.disabled = true;
+    try { const created = await api('/api/billing/imports/preview', { method: 'POST', body: {} }); newImportCurrent = created.id; toast('Vista previa generada'); newBillingImport(created.id); } catch (error) { toast(error.message, true); event.target.disabled = false; }
+  };
+  root.querySelectorAll('[data-import-open]').forEach(button => button.onclick = () => { newImportCurrent = button.dataset.importOpen; newBillingImport(newImportCurrent); });
+  const approve = document.getElementById('new-import-approve');
+  if (approve) approve.onclick = () => newBillingImportConfirm('Aprobar la vista previa', `Vas a aprobar ${t.invoices} facturas por ${money.format(t.invoicesTotal || 0)} y ${t.payments} cobros por ${money.format(t.paymentsTotal || 0)}. Aprobar NO carga nada todavía: la carga se aplica en el corte, con tu orden y con el generador anterior apagado.`, 'APROBAR', 'Aprobar', async () => {
+    const result = await api(`/api/billing/imports/${batch.id}/approve`, { method: 'POST', body: { previewHash: batch.previewHash } }); toast(`Vista previa aprobada${result.review ? ` · ${result.review} entrada(s) por revisar quedan fuera` : ''}`); newBillingImport(batch.id);
+  });
+  const apply = document.getElementById('new-import-apply');
+  if (apply) apply.onclick = () => newBillingImportConfirm('Aplicar la carga', `Se crearán ${t.invoices} facturas (${importCode(t.firstNumber)} a ${importCode(t.lastNumber)}) y ${t.payments} cobros, todo en una sola operación. El sistema anterior no se modifica.`, 'APLICAR', 'Aplicar', async () => {
+    const result = await api(`/api/billing/imports/${batch.id}/apply`, { method: 'POST', body: {} }); toast(`Carga aplicada: ${result.created.length} facturas`); newBillingImport(batch.id);
+  });
+  const reverse = document.getElementById('new-import-reverse');
+  if (reverse) reverse.onclick = () => newBillingReasonDialog('Revertir la carga', 'Revertir carga', async reason => {
+    const result = await api(`/api/billing/imports/${batch.id}/reverse`, { method: 'POST', body: { reason } }); modal.close(); toast(`Carga revertida: ${result.invoices} facturas y ${result.payments} cobros retirados`); newBillingImport(batch.id);
+  });
+}
+
+// Confirmación explícita: hay que escribir la palabra (APROBAR / APLICAR) para continuar.
+function newBillingImportConfirm(title, message, word, action, onConfirm) {
+  const box = document.createElement('div');
+  box.innerHTML = `<form id="new-import-confirm-form"><p class="eyebrow">CARGA INICIAL</p><h2>${escapeHtml(title)}</h2><p class="section-note">${escapeHtml(message)}</p><label>Escribe ${escapeHtml(word)} para confirmar<input name="word" required autocomplete="off" /></label><button class="primary wide-button">${escapeHtml(action)}</button></form>`;
+  openModal(box);
+  box.querySelector('form').onsubmit = async event => {
+    event.preventDefault();
+    if (new FormData(event.target).get('word').trim().toUpperCase() !== word) return toast(`Escribe ${word} tal cual para confirmar`, true);
+    try { await onConfirm(); modal.close(); } catch (error) { toast(error.message, true); }
+  };
+}
 // Sub-pestañas del área financiera: Cobros / Finanzas / Planes / Gastos.
 // Cada dataset en su propia pantalla, para no amontonar todo en una sola página
 // —sobre todo en el teléfono—. Finanzas y Gastos se pintan al abrir su pestaña.
@@ -4352,6 +4441,7 @@ function activarSubtab(nombre) {
   document.querySelectorAll('#billing .subpanel').forEach(panel => panel.classList.toggle('active', panel.id === `subpanel-${nombre}`));
   if (nombre === 'facturas-nuevo') newBillingInvoices();
   if (nombre === 'cobros-nuevo') newBillingPayments();
+  if (nombre === 'carga-inicial') newBillingImport();
   if (nombre === 'finanzas') financeDashboard();
   if (nombre === 'gastos') expensesManager();
 }
