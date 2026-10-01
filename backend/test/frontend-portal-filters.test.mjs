@@ -32,6 +32,23 @@ test('los filtros de informes conservan el corte anterior y excluyen el día de 
   assert.match(app, /portalCutOffset > -PORTAL_MAX_CUT_HISTORY/);
 });
 
+test('Pagos del portal reutiliza los filtros de mes y corte y la frontera inclusiva de facturas', async () => {
+  const [app, html] = await Promise.all(['app.js', 'index.html'].map(leer));
+  assert.match(html, /id="portal-billing-period"/);
+  assert.match(html, /Facturas del período seleccionado/);
+  assert.match(app, /portalPeriodControlsMarkup\('portal-billing-period'\)/);
+  assert.match(app, /bindPortalPeriodControls\('portal-billing-period'\)/);
+  assert.match(app, /const historyInvoices = periodInvoices\.slice\(\)/);
+  assert.match(app, /const periodInvoices = portalPeriodInvoices\(period\)/);
+  assert.match(app, /from: cycle\.inicio/);
+});
+
+test('el aviso de deuda del portal no se recorta al período y las fechas de pagos son dd-mm-aaaa', async () => {
+  const app = await leer('app.js');
+  assert.match(app, /const pendingInvoices = \(portalData\.invoices \|\| \[\]\)\.filter\(invoice => invoice\.status === 'pending'\)/);
+  assert.match(app, /const invoiceDate = invoice => \{ const raw = invoice\.issued_on \|\| invoice\.due_on; return raw \? fechaCorta\(raw\) : '—'; \}/);
+});
+
 test('los marcadores de versión del portal coinciden entre sí y no retroceden de la 260 (no se fija un número: cada despliegue lo sube)', async () => {
   const [app, sw, version, html] = await Promise.all(['app.js', 'sw.js', 'version.json', 'index.html'].map(leer));
   const enApp = /const APP_VERSION = '(\d+)'/.exec(app)[1];
