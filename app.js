@@ -1,4 +1,4 @@
-const APP_VERSION = '257';
+const APP_VERSION = '260';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1821,7 +1821,7 @@ function editarHorarioFijo(regla, alGuardar) {
         <label>Duración<select name="durationMinutes">${[30, 45, 60, 75, 90, 120].map(m => `<option value="${m}" ${Number(regla.duration_minutes) === m ? 'selected' : ''}>${m} minutos</option>`).join('')}</select></label>
       </div>
       <label>Modalidad<select name="mode">${['Presencial', 'Virtual', 'Exterior'].map(m => `<option ${m === regla.mode ? 'selected' : ''}>${m}</option>`).join('')}</select></label>
-      <label>Hasta (opcional)<input name="endsOn" type="date" value="${dateOnly(regla.ends_on)}" /><small>En blanco, sigue indefinidamente.</small></label>
+      <p class="section-note">Este horario es indefinido: seguirá generando clases hasta que Eileen lo detenga o marque al cliente como inactivo.</p>
       <p class="commercial-note">Los días que quites retiran sus clases futuras que nadie haya tocado. Las ya marcadas o movidas se quedan. Todos los días marcados comparten esta hora: para otra hora en otro día, quita ese día aquí y agrégalo como un horario aparte (+ Agregar horario fijo).</p>
       <button class="primary wide-button">Guardar horario</button>
     </form>`;
@@ -1837,7 +1837,7 @@ function editarHorarioFijo(regla, alGuardar) {
       event.target.classList.add('loading-state');
       const r = await api(`/api/session-recurrences/${regla.id}`, { method: 'PATCH', body: {
         weekdays: dias, timeOfDay: form.get('timeOfDay'), durationMinutes: Number(form.get('durationMinutes')),
-        mode: form.get('mode'), endsOn: form.get('endsOn') || null
+        mode: form.get('mode')
       } });
       await loadData(); renderAll(); modal.close();
       recurrenceManager();
@@ -1949,7 +1949,7 @@ function nuevoHorarioFijo() {
         <label>Duración<select name="durationMinutes">${[30, 45, 60, 75, 90, 120].map(m => `<option value="${m}" ${m === 60 ? 'selected' : ''}>${m} minutos</option>`).join('')}</select></label>
       </div>
       <label>Modalidad<select name="mode">${['Presencial', 'Virtual', 'Exterior'].map(m => `<option>${m}</option>`).join('')}</select></label>
-      <label>Hasta (opcional)<input name="endsOn" type="date" /><small>En blanco, sigue indefinidamente.</small></label>
+      <p class="section-note">Este horario no tiene fecha de finalización: seguirá generando clases hasta que Eileen lo detenga o marque al cliente como inactivo.</p>
       <p class="commercial-note">Los días marcados comparten la hora. Si el mismo cliente entrena a otra hora otro día, agrega otro horario fijo para esa hora.</p>
       <button class="primary wide-button">Guardar horario</button>
     </form>`;
@@ -1966,7 +1966,7 @@ function nuevoHorarioFijo() {
       event.target.classList.add('loading-state');
       const r = await api('/api/session-recurrences', { method: 'POST', body: {
         clientId: form.get('clientId'), weekdays: dias, timeOfDay: form.get('timeOfDay'), durationMinutes: Number(form.get('durationMinutes')),
-        mode: form.get('mode'), endsOn: form.get('endsOn') || null
+        mode: form.get('mode')
       } });
       await loadData(); renderAll(); modal.close();
       recurrenceManager();
@@ -4549,6 +4549,10 @@ function fechaHoraPanama(value, withTime = true) {
   const hora = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Panama', hour: 'numeric', minute: '2-digit', hour12: true }).format(date).replace('AM', 'a. m.').replace('PM', 'p. m.');
   return `${d}-${m}-${y} ${hora}`;
 }
+function horaPanama(value) {
+  const date = new Date(value); if (Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Panama', hour: '2-digit', minute: '2-digit', hour12: false }).format(date);
+}
 
 // ── Reportes del módulo nuevo (1B-5) ─────────────────────────────────────────
 // Estado de cuenta por pagador, cuentas por cobrar con antigüedad, cobrado por mes y método, morosidad con los beneficiarios
@@ -5108,6 +5112,7 @@ const portalSession = item => ({
 const monthLabel = date => new Intl.DateTimeFormat('es-PA', { month: 'short' }).format(date).replace('.', '');
 const portalDaysInMonth = (year, month) => new Date(year, month + 1, 0).getDate();
 const portalCutoffDate = (year, month, cutoff) => `${year}-${String(month + 1).padStart(2, '0')}-${String(Math.min(cutoff, portalDaysInMonth(year, month))).padStart(2, '0')}`;
+const PORTAL_MAX_CUT_HISTORY = 12;
 function portalCycle(offset = 0) {
   const cutoff = Math.max(1, Number(portalData?.client?.billing_cutoff_day) || 1);
   const now = dateKey(today);
@@ -5124,12 +5129,13 @@ function portalCycle(offset = 0) {
 function portalPeriod() {
   if (portalPeriodMode === 'cutoff') {
     const cycle = portalCycle(portalCutOffset);
-    const label = portalCutOffset === 0 ? 'Corte actual' : `Corte anterior · ${Math.abs(portalCutOffset)}`;
+    const label = portalCutOffset === 0 ? 'Corte actual' : portalCutOffset === -1 ? 'Corte anterior' : `Corte de hace ${Math.abs(portalCutOffset)}`;
     // El resto del portal filtra por `from`/`to`; portalCycle conserva
-    // `inicio`/`vence` porque esos nombres describen mejor un saldo. Si no
-    // hacemos esta traducción, el corte aparece sin fechas y todas sus
-    // tarjetas quedan en cero aunque existan sesiones y cobros.
-    return { ...cycle, from: cycle.inicio, to: cycle.vence, sessionsFromExclusive: cycle.inicio, label, kind: 'cutoff' };
+    // `from` permanece inclusivo para facturas, pagos y paquetes: una factura
+    // anticipada puede estar fechada exactamente el día de inicio del ciclo.
+    // Las sesiones usan su propia frontera exclusiva y los textos muestran el
+    // día siguiente para no prometer un día que no entra en asistencia.
+    return { ...cycle, from: cycle.inicio, labelFrom: addDaysIso(cycle.inicio, 1), to: cycle.vence, sessionsFromExclusive: cycle.inicio, label, kind: 'cutoff' };
   }
   const [year, month] = portalPeriodMonth.split('-').map(Number);
   const last = new Date(year, month, 0).getDate();
@@ -5163,6 +5169,49 @@ function portalPeriodPackages(period = portalPeriod()) {
     return (!purchased || purchased <= period.to) && (!expires || expires >= period.from);
   });
   return packages.sort((a, b) => String(b.purchased_on || '').localeCompare(String(a.purchased_on || '')));
+}
+function portalPeriodControlsMarkup(prefix = 'portal-report-period') {
+  const cutoff = portalPeriodMode === 'cutoff';
+  const currentMonth = dateKey(today).slice(0, 7);
+  const modeLabel = cutoff ? 'Corte seleccionado' : 'Mes seleccionado';
+  const cutoffButton = cutoff ? 'Volver al mes' : 'Ver corte actual';
+  const previousLabel = cutoff ? '‹ Corte anterior' : '‹ Mes anterior';
+  const nextLabel = cutoff ? 'Corte siguiente ›' : 'Mes siguiente ›';
+  const currentLabel = cutoff && portalCutOffset === 0 ? 'Corte actual' : cutoff ? 'Volver al corte actual' : 'Mes actual';
+  return `<div class="portal-period-controls portal-report-period-controls" id="${prefix}-controls" aria-label="Filtros de asistencia"><div class="portal-period-copy"><p class="eyebrow">CONSULTA TU PERÍODO</p><strong>${modeLabel}</strong><small>Elige mes o corte para actualizar el informe.</small></div><label for="${prefix}-month">Mes<input type="month" id="${prefix}-month" value="${portalPeriodMonth}" max="${currentMonth}"${cutoff ? ' disabled' : ''} /></label><button type="button" class="primary portal-cutoff-button${cutoff ? ' active-filter' : ''}" id="${prefix}-cutoff">${cutoffButton}</button><div class="portal-period-nav" aria-label="Navegar períodos"><button type="button" class="secondary" id="${prefix}-previous" aria-label="${cutoff ? 'Corte anterior' : 'Mes anterior'}"${cutoff && portalCutOffset <= -PORTAL_MAX_CUT_HISTORY ? ' disabled' : ''}>${previousLabel}</button><button type="button" class="secondary" id="${prefix}-current">${currentLabel}</button><button type="button" class="secondary" id="${prefix}-next" aria-label="${cutoff ? 'Corte siguiente' : 'Mes siguiente'}"${cutoff ? (portalCutOffset === 0 ? ' disabled' : '') : (portalPeriodMonth >= currentMonth ? ' disabled' : '')}>${nextLabel}</button></div></div>`;
+}
+function updatePortalPeriodFromMonth(value) {
+  portalPeriodMonth = value || dateKey(today).slice(0, 7);
+  portalPeriodMode = 'month';
+  portalCutOffset = 0;
+  renderPortal();
+}
+function movePortalPeriod(direction) {
+  if (portalPeriodMode === 'cutoff') {
+    if ((direction < 0 && portalCutOffset > -PORTAL_MAX_CUT_HISTORY) || (direction > 0 && portalCutOffset < 0)) portalCutOffset += direction;
+  } else {
+    const [year, month] = portalPeriodMonth.split('-').map(Number);
+    const candidate = new Date(year, month - 1 + direction, 1, 12);
+    const candidateMonth = `${candidate.getFullYear()}-${String(candidate.getMonth() + 1).padStart(2, '0')}`;
+    const currentMonth = dateKey(today).slice(0, 7);
+    portalPeriodMonth = direction > 0 && candidateMonth > currentMonth ? currentMonth : candidateMonth;
+  }
+  renderPortal();
+}
+function bindPortalPeriodControls(prefix) {
+  document.getElementById(`${prefix}-month`)?.addEventListener('change', event => updatePortalPeriodFromMonth(event.target.value));
+  document.getElementById(`${prefix}-cutoff`)?.addEventListener('click', () => {
+    portalPeriodMode = portalPeriodMode === 'cutoff' ? 'month' : 'cutoff';
+    portalCutOffset = 0;
+    renderPortal();
+  });
+  document.getElementById(`${prefix}-previous`)?.addEventListener('click', () => movePortalPeriod(-1));
+  document.getElementById(`${prefix}-next`)?.addEventListener('click', () => movePortalPeriod(1));
+  document.getElementById(`${prefix}-current`)?.addEventListener('click', () => {
+    if (portalPeriodMode === 'cutoff') portalCutOffset = 0;
+    else portalPeriodMonth = dateKey(today).slice(0, 7);
+    renderPortal();
+  });
 }
 function portalActivities(sessions = null, period = null) {
   const source = sessions || (portalData?.complianceSessions || []).filter(item => !period || portalSessionInPeriod(item.starts_at, period));
@@ -5383,6 +5432,9 @@ function portalAttendanceReport(sessions = portalPeriodSessions()) {
   const cancelled = measured.filter(item => item.status === 'no_show'
     || (item.status === 'cancelled' && item.cancellation_kind === 'not_rescheduled' && (item.cancelled_by || 'client') === 'client')).length;
   const reprogrammed = past.filter(item => item.reprogramada).length;
+  // "Pendientes" mantiene el significado operativo de la tabla: son sesiones
+  // pasadas que vencieron sin marcar. Las futuras permanecen agendadas y no se
+  // mezclan en este contador.
   const pending = past.filter(item => item.status === 'scheduled').length;
   const denominator = measured.length;
   const points = measured.reduce((sum, item) => sum + (item.status === 'completed' ? Number(item.completion_percent || 0) : 0), 0);
@@ -5391,16 +5443,17 @@ function portalAttendanceReport(sessions = portalPeriodSessions()) {
   const rows = past.slice().sort((a, b) => new Date(b.starts_at) - new Date(a.starts_at)).slice(0, 30).map(item => {
     const estado = item.reprogramada ? 'Reprogramada' : item.credit_charge ? 'Cancelación cobrada' : item.status === 'completed' ? 'Asistió' : item.status === 'cancelled' || item.status === 'no_show' ? 'Cancelada' : 'Pendiente';
     const detalle = item.credit_charge ? ` · ${money.format(Number(portalData.client?.credit_session_price || 25))}` : '';
-    return `<tr><td data-label="Fecha">${new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeZone: 'America/Panama' }).format(new Date(item.starts_at))}</td><td data-label="Hora">${new Intl.DateTimeFormat('es-PA', { timeStyle: 'short', timeZone: 'America/Panama' }).format(new Date(item.starts_at))}</td><td data-label="Sesión">${escapeHtml(item.routine_title || 'Entrenamiento')}</td><td data-label="Estado"><span class="payment-status ${item.status}">${estado}${detalle}</span></td></tr>`;
+    return `<tr><td data-label="Fecha">${fechaHoraPanama(item.starts_at, false)}</td><td data-label="Hora">${horaPanama(item.starts_at)}</td><td data-label="Sesión">${escapeHtml(item.routine_title || 'Entrenamiento')}</td><td data-label="Estado"><span class="payment-status ${item.status}">${estado}${detalle}</span></td></tr>`;
   }).join('');
-  return `<section class="portal-report-section"><div class="card-head"><div><h3>Asistencia y cancelaciones</h3><p>${period.label} · ${fechaCorta(period.from)} al ${fechaCorta(period.to)}</p></div><span class="portal-report-period"><b>${completed}/${denominator || 0} · ${percent}% cumplimiento</b><small>${cancelled}/${denominator || 0} · ${cancelledPercent}% cancelaciones</small></span></div><div class="portal-report-stats"><article><strong>${completed}</strong><span>Asistencias</span></article><article><strong>${cancelled}</strong><span>Cancelaciones cliente</span></article><article><strong>${reprogrammed}</strong><span>Reprogramadas</span></article><article><strong>${pending}</strong><span>Pendientes</span></article></div><div class="table-wrap"><table class="stack-mobile portal-attendance-table"><thead><tr><th>Fecha</th><th>Hora</th><th>Sesión</th><th>Estado</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">Todavía no hay sesiones registradas en este período.</td></tr>'}</tbody></table></div></section>`;
+  return `<section class="portal-report-section"><div class="card-head"><div><h3>Asistencia y cancelaciones</h3><p>${period.label} · ${fechaCorta(period.labelFrom || period.from)} al ${fechaCorta(period.to)}</p></div><span class="portal-report-period"><b>${completed}/${denominator || 0} · ${percent}% cumplimiento</b><small>${cancelled}/${denominator || 0} · ${cancelledPercent}% cancelaciones</small></span></div><div class="portal-report-stats"><article><strong>${completed}</strong><span>Asistencias</span></article><article><strong>${cancelled}</strong><span>Cancelaciones cliente</span></article><article><strong>${reprogrammed}</strong><span>Reprogramadas</span></article><article><strong>${pending}</strong><span>Pendientes</span></article></div><div class="table-wrap"><table class="stack-mobile portal-attendance-table"><thead><tr><th>Fecha</th><th>Hora</th><th>Sesión</th><th>Estado</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">Todavía no hay sesiones registradas en este período.</td></tr>'}</tbody></table></div></section>`;
 }
 function renderPortalReports() {
   const informes = document.getElementById('portal-reports-list'); if (!informes) return;
   const weights = Array.isArray(portalData.weightLogs) ? portalData.weightLogs : [];
   const history = weights.slice().sort((a, b) => new Date(b.measured_at) - new Date(a.measured_at));
   const weightRows = history.slice(0, 20).map(item => `<tr><td data-label="Fecha">${String(item.measured_at).slice(0, 10)}</td><td data-label="Peso">${portalWeightLabel(item)}</td><td data-label="Origen">Registro personal</td><td data-label="Acciones"><button type="button" class="secondary" data-delete-weight="${item.id}">Eliminar</button></td></tr>`).join('');
-  informes.innerHTML = `${portalAttendanceReport()}<section class="portal-report-section"><div class="card-head"><div><h3>Evolución de peso</h3><p>Registros personales, separados de tus InBody.</p></div><label class="portal-unit-select">Mostrar en<select id="portal-weight-unit"><option value="kg" ${portalWeightUnit === 'kg' ? 'selected' : ''}>kg</option><option value="lb" ${portalWeightUnit === 'lb' ? 'selected' : ''}>lb</option></select></label></div>${portalWeightLineChart(weights)}${history.length ? `<div class="table-wrap"><table class="stack-mobile portal-weight-table"><thead><tr><th>Fecha</th><th>Peso</th><th>Origen</th><th>Acciones</th></tr></thead><tbody>${weightRows}</tbody></table></div>` : '<p class="empty">Aún no tienes registros de peso.</p>'}</section><section class="portal-report-downloads"><article class="card portal-report"><div><h3>Mi cumplimiento</h3><p>Descarga un PDF con tu avance.</p></div><button class="secondary" data-portal-report="compliance">Descargar PDF</button></article><article class="card portal-report"><div><h3>Estado de cuenta</h3><p>Lo facturado, pagado y pendiente.</p></div><button class="secondary" data-portal-report="statement">Descargar PDF</button></article></section>`;
+  informes.innerHTML = `${portalPeriodControlsMarkup()}${portalAttendanceReport()}<section class="portal-report-section"><div class="card-head"><div><h3>Evolución de peso</h3><p>Registros personales, separados de tus InBody.</p></div><label class="portal-unit-select">Mostrar en<select id="portal-weight-unit"><option value="kg" ${portalWeightUnit === 'kg' ? 'selected' : ''}>kg</option><option value="lb" ${portalWeightUnit === 'lb' ? 'selected' : ''}>lb</option></select></label></div>${portalWeightLineChart(weights)}${history.length ? `<div class="table-wrap"><table class="stack-mobile portal-weight-table"><thead><tr><th>Fecha</th><th>Peso</th><th>Origen</th><th>Acciones</th></tr></thead><tbody>${weightRows}</tbody></table></div>` : '<p class="empty">Aún no tienes registros de peso.</p>'}</section><section class="portal-report-downloads"><article class="card portal-report"><div><h3>Mi cumplimiento</h3><p>Descarga un PDF con tu avance.</p></div><button class="secondary" data-portal-report="compliance">Descargar PDF</button></article><article class="card portal-report"><div><h3>Estado de cuenta</h3><p>Lo facturado, pagado y pendiente.</p></div><button class="secondary" data-portal-report="statement">Descargar PDF</button></article></section>`;
+  bindPortalPeriodControls('portal-report-period');
   document.getElementById('portal-weight-unit').onchange = event => { portalWeightUnit = event.target.value; renderPortalReports(); };
   informes.querySelectorAll('[data-delete-weight]').forEach(button => button.onclick = async () => { if (!confirm('¿Eliminar este registro de peso?')) return; try { await api(`/api/portal/weight-logs/${button.dataset.deleteWeight}`, { method: 'DELETE' }); await loadPortalData(); toast('Registro eliminado'); } catch (error) { toast(error.message, true); } });
   informes.querySelectorAll('[data-portal-report]').forEach(button => button.onclick = async () => {
@@ -5428,7 +5481,7 @@ function renderPortal() {
   const periodNext = document.getElementById('portal-period-next');
   if (periodMonthInput) periodMonthInput.value = portalPeriodMonth;
   if (periodLabel) periodLabel.textContent = period.kind === 'cutoff' ? `${period.label} · día ${client.billing_cutoff_day}` : period.label;
-  if (periodDates) periodDates.textContent = `${fechaCorta(period.from)} al ${fechaCorta(period.to)}`;
+  if (periodDates) periodDates.textContent = `${fechaCorta(period.labelFrom || period.from)} al ${fechaCorta(period.to)}`;
   if (periodCutoffButton) {
     periodCutoffButton.textContent = portalPeriodMode === 'cutoff' ? 'Volver al mes' : 'Ver corte actual';
     periodCutoffButton.classList.toggle('active-filter', portalPeriodMode === 'cutoff');
@@ -5550,43 +5603,7 @@ document.querySelectorAll('[data-portal-view]').forEach(link => link.addEventLis
 document.querySelectorAll('[data-portal-view-go]').forEach(link => link.addEventListener('click', event => { event.preventDefault(); portalNavigate(link.dataset.portalViewGo); }));
 document.getElementById('portal-notification-button').addEventListener('click', () => notificationCenter(true));
 document.getElementById('portal-add-weight').addEventListener('click', portalWeightModal);
-document.getElementById('portal-period-month')?.addEventListener('change', event => {
-  portalPeriodMonth = event.target.value || dateKey(today).slice(0, 7);
-  portalPeriodMode = 'month';
-  portalCutOffset = 0;
-  renderPortal();
-});
-document.getElementById('portal-period-cutoff')?.addEventListener('click', () => {
-  portalPeriodMode = portalPeriodMode === 'cutoff' ? 'month' : 'cutoff';
-  portalCutOffset = 0;
-  renderPortal();
-});
-document.getElementById('portal-period-previous')?.addEventListener('click', () => {
-  if (portalPeriodMode === 'cutoff') portalCutOffset -= 1;
-  else {
-    const [year, month] = portalPeriodMonth.split('-').map(Number);
-    const previous = new Date(year, month - 2, 1, 12);
-    portalPeriodMonth = `${previous.getFullYear()}-${String(previous.getMonth() + 1).padStart(2, '0')}`;
-  }
-  renderPortal();
-});
-document.getElementById('portal-period-next')?.addEventListener('click', () => {
-  if (portalPeriodMode === 'cutoff') {
-    if (portalCutOffset < 0) portalCutOffset += 1;
-  } else {
-    const currentMonth = dateKey(today).slice(0, 7);
-    const [year, month] = portalPeriodMonth.split('-').map(Number);
-    const next = new Date(year, month, 1, 12);
-    const candidate = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}`;
-    portalPeriodMonth = candidate > currentMonth ? currentMonth : candidate;
-  }
-  renderPortal();
-});
-document.getElementById('portal-period-current')?.addEventListener('click', () => {
-  if (portalPeriodMode === 'cutoff') portalCutOffset = 0;
-  else portalPeriodMonth = dateKey(today).slice(0, 7);
-  renderPortal();
-});
+bindPortalPeriodControls('portal-period');
 document.addEventListener('submit', async event => {
   const routineForm = event.target.closest('[data-portal-routine]'); const sessionForm = event.target.closest('[data-portal-session]'); if (!routineForm && !sessionForm) return;
   event.preventDefault(); const form = routineForm || sessionForm; const completed = form.elements.completed.checked; const completionPercent = completed ? Number(form.elements.completionPercent.value) : 0;
