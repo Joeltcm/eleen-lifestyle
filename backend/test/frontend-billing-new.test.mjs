@@ -65,3 +65,16 @@ test('la pestaña Corte existe, no enciende ni apaga nada y explica los interrup
   assert.match(app, /\/api\/billing\/cutover\/readiness/);
   assert.match(app, /Crear los \$\{proposed\.lines\.length\} planes propuestos/);
 });
+
+test('la pestaña Reportes (nuevo) existe, descarga con la sesión y el portal muestra el aviso del beneficiario sin montos', async () => {
+  const html = await leer('index.html');
+  assert.match(html, /data-subtab="reportes-nuevo">Reportes \(nuevo\)</);
+  assert.match(html, /id="subpanel-reportes-nuevo"/);
+  const app = await leer('app.js');
+  assert.match(app, /nombre === 'reportes-nuevo'\) newBillingReports\(\)/);
+  assert.match(app, /\/api\/billing\/reports\/receivables/);
+  assert.match(app, /\/api\/billing\/reports\/delinquency/);
+  assert.match(app, /Authorization: `Bearer \$\{authToken\}`/);
+  assert.match(app, /portalData\.billingNotice/);
+  assert.doesNotMatch(app, /billingNotice\.(amount|balance|payer)/, 'el aviso nunca muestra montos ni pagador');
+});

@@ -1,4 +1,4 @@
-const APP_VERSION = '238';
+const APP_VERSION = '239';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -4485,6 +4485,78 @@ async function newBillingCutover() {
   } catch (error) { root.innerHTML = `<article class="card"><p class="empty">${escapeHtml(error.message)}</p></article>`; }
 }
 function addDaysIso(iso, days) { const base = new Date(`${iso}T12:00:00Z`); base.setUTCDate(base.getUTCDate() + days); return base.toISOString().slice(0, 10); }
+// ── Reportes del módulo nuevo (1B-5) ─────────────────────────────────────────
+// Estado de cuenta por pagador, cuentas por cobrar con antigüedad, cobrado por mes y método, morosidad con los beneficiarios
+// afectados, pagos sin aplicar y la bitácora. Todo sale de las tablas nuevas; los CSV y el PDF se descargan con la sesión.
+const newReportState = { report: 'receivables', payerId: '', from: '', to: '', year: '', asOf: '' };
+const newReportOptions = [['receivables', 'Cuentas por cobrar'], ['statement', 'Estado de cuenta por pagador'], ['collections', 'Cobrado por mes y método'], ['delinquency', 'Morosidad'], ['unapplied', 'Pagos sin aplicar'], ['audit', 'Bitácora de cambios']];
+const newAgingLabels = { al_dia: 'Al día', '1-7': '1 a 7 días', '8-30': '8 a 30 días', '31+': 'Más de 30 días' };
+
+async function newBillingDownload(path, filename) {
+  try {
+    const response = await fetch(`${API_BASE}${path}`, { headers: { Authorization: `Bearer ${authToken}` } });
+    if (!response.ok) throw new Error('No se pudo generar el archivo');
+    const blobUrl = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a'); link.href = blobUrl; link.download = filename; link.click(); URL.revokeObjectURL(blobUrl);
+  } catch (error) { toast(error.message, true); }
+}
+
+async function newBillingReports() {
+  const root = document.getElementById('reportes-nuevo-mount');
+  if (!root) return;
+  const hoy = dateKey(new Date());
+  if (!newReportState.to) { newReportState.to = hoy; newReportState.from = dateKey(new Date(Date.now() - 180 * 86_400_000)); newReportState.year = hoy.slice(0, 4); newReportState.asOf = hoy; }
+  const payers = data.clients.slice().sort((a, b) => a.name.localeCompare(b.name, 'es'));
+  if (!newReportState.payerId && payers[0]) newReportState.payerId = payers[0].id;
+  root.innerHTML = `<article class="card"><div class="card-head"><div><h3>Reportes</h3><p id="new-report-summary">Cargando…</p></div></div>
+    <p class="section-note">Salen solo de las facturas y cobros del módulo nuevo. Los importes están en USD y las fechas en dd-mm-aaaa.</p>
+    <div class="billing-period-bar"><label>Reporte<select id="new-report-kind">${newReportOptions.map(([value, text]) => `<option value="${value}"${value === newReportState.report ? ' selected' : ''}>${text}</option>`).join('')}</select></label>
+      ${newReportState.report === 'statement' ? `<label>Pagador<select id="new-report-payer">${payers.map(client => `<option value="${client.id}"${client.id === newReportState.payerId ? ' selected' : ''}>${escapeHtml(client.name)}</option>`).join('')}</select></label><label>Desde<input type="date" id="new-report-from" value="${newReportState.from}" /></label><label>Hasta<input type="date" id="new-report-to" value="${newReportState.to}" /></label>` : ''}
+      ${newReportState.report === 'receivables' ? `<label>Al día<input type="date" id="new-report-asof" value="${newReportState.asOf}" /></label>` : ''}
+      ${newReportState.report === 'collections' ? `<label>Año<input type="number" id="new-report-year" min="2020" max="2100" value="${newReportState.year}" /></label>` : ''}</div>
+    <div class="subpanel-toolbar" id="new-report-actions"></div><div id="new-report-body"><p class="empty">Cargando…</p></div></article>`;
+  const rerender = () => newBillingReports();
+  document.getElementById('new-report-kind').onchange = event => { newReportState.report = event.target.value; rerender(); };
+  const bind = (id, key) => { const element = document.getElementById(id); if (element) element.onchange = event => { newReportState[key] = event.target.value; rerender(); }; };
+  bind('new-report-payer', 'payerId'); bind('new-report-from', 'from'); bind('new-report-to', 'to'); bind('new-report-asof', 'asOf'); bind('new-report-year', 'year');
+  const body = document.getElementById('new-report-body'); const summary = document.getElementById('new-report-summary'); const actions = document.getElementById('new-report-actions');
+  const button = (text, onClick) => { const element = document.createElement('button'); element.type = 'button'; element.className = 'secondary'; element.textContent = text; element.onclick = onClick; actions.appendChild(element); };
+  const table = (head, rows) => rows.length ? `<div class="table-wrap"><table class="stack-mobile"><thead><tr>${head.map(label => `<th>${label}</th>`).join('')}</tr></thead><tbody>${rows.map(cells => `<tr>${cells.map((cell, index) => `<td data-label="${head[index]}">${cell}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : '<p class="empty">No hay datos para este reporte.</p>';
+  try {
+    if (newReportState.report === 'receivables') {
+      const r = await api(`/api/billing/reports/receivables?asOf=${newReportState.asOf}`);
+      summary.textContent = `${r.rows.length} facturas con saldo · Total por cobrar ${money.format(r.total)}`;
+      button('Descargar CSV', () => newBillingDownload(`/api/billing/reports/receivables?asOf=${newReportState.asOf}&format=csv`, `cuentas-por-cobrar-${newReportState.asOf}.csv`));
+      body.innerHTML = `<div class="metrics" style="grid-template-columns:repeat(2,1fr)">${r.buckets.map(bucket => `<article><span>${newAgingLabels[bucket.bucket]}</span><strong>${money.format(bucket.balance)}</strong><small>${bucket.count} factura(s)</small></article>`).join('')}</div>` +
+        table(['Pagador', 'Factura', 'Ciclo', 'Vence', 'Total', 'Pagado', 'Saldo', 'Antigüedad'], r.rows.map(row => [escapeHtml(row.payer), escapeHtml(row.code), `${fechaCorta(row.cycleStart)} → ${fechaCorta(row.cycleEnd)}`, fechaCorta(row.dueOn), money.format(row.total), money.format(row.paid), money.format(row.balance), `${newAgingLabels[row.bucket]}${row.daysOverdue ? ` · ${row.daysOverdue} d` : ''}`]));
+    } else if (newReportState.report === 'statement') {
+      const query = `from=${newReportState.from}&to=${newReportState.to}`;
+      const r = await api(`/api/billing/accounts/${newReportState.payerId}/statement?${query}`);
+      summary.textContent = `${r.client.full_name} · Facturado ${money.format(r.totals.invoiced)} · Cobrado ${money.format(r.totals.received)} · Saldo ${money.format(r.totals.balance)}`;
+      button('Ver PDF', () => previewProtectedPdf(`/api/billing/accounts/${newReportState.payerId}/statement?${query}&format=pdf`, `Estado de cuenta · ${r.client.full_name}`, `estado-de-cuenta-${newReportState.from}-${newReportState.to}.pdf`));
+      button('Descargar CSV', () => newBillingDownload(`/api/billing/accounts/${newReportState.payerId}/statement?${query}&format=csv`, `estado-de-cuenta-${newReportState.from}-${newReportState.to}.csv`));
+      body.innerHTML = '<p class="eyebrow">FACTURAS</p>' + table(['Fecha', 'Factura', 'Concepto', 'Facturado', 'Pagado', 'Saldo'], r.rows.map(row => [fechaCorta(row.issued_on), escapeHtml(row.invoice_number), escapeHtml(row.concept), money.format(row.amount), money.format(row.paid_amount), money.format(row.balance_amount)])) +
+        '<p class="eyebrow" style="margin-top:14px">COBROS</p>' + table(['Fecha', 'Método', 'Referencia', 'Monto', 'Aplicado', 'A favor'], r.payments.map(row => [fechaCorta(row.paid_on), escapeHtml(row.method), escapeHtml(row.reference || '—'), money.format(row.amount), money.format(row.applied), money.format(row.available)]));
+    } else if (newReportState.report === 'collections') {
+      const r = await api(`/api/billing/reports/collections?year=${newReportState.year}`);
+      summary.textContent = `${r.year} · Cobrado ${money.format(r.total)}`;
+      button('Descargar CSV', () => newBillingDownload(`/api/billing/reports/collections?year=${newReportState.year}&format=csv`, `cobrado-${newReportState.year}.csv`));
+      body.innerHTML = table(['Mes', 'Cobros', 'Total', 'Por método'], r.months.map(row => [escapeHtml(row.month.split('-').reverse().join('-')), String(row.count), money.format(row.total), Object.entries(row.methods).map(([method, total]) => `${escapeHtml(method)}: ${money.format(total)}`).join('<br>')]));
+    } else if (newReportState.report === 'delinquency') {
+      const r = await api('/api/billing/reports/delinquency');
+      summary.textContent = `${r.payers.length} pagador(es) con facturas vencidas · ${money.format(r.total)} vencido`;
+      body.innerHTML = table(['Pagador', 'Saldo vencido', 'Más antigua', 'Facturas', 'Beneficiarios afectados'], r.payers.map(row => [escapeHtml(row.payer), money.format(row.balance), `${row.oldestDays} días`, row.invoices.map(invoice => `${escapeHtml(invoice.code)} (${fechaCorta(invoice.dueOn)})`).join('<br>'), row.beneficiaries.length ? row.beneficiaries.map(escapeHtml).join(', ') : '—']));
+    } else if (newReportState.report === 'unapplied') {
+      const r = await api('/api/billing/payments?status=available');
+      summary.textContent = `${r.payments.length} cobro(s) con saldo a favor · ${money.format(r.summary.available)}`;
+      body.innerHTML = table(['Fecha', 'Pagador', 'Monto', 'Método', 'Aplicado', 'A favor'], r.payments.map(row => [fechaCorta(row.paidOn), escapeHtml(row.payerName), money.format(row.amount), escapeHtml(row.method), money.format(row.applied), money.format(row.available)]));
+    } else {
+      const r = await api('/api/billing/audit?limit=100');
+      summary.textContent = `Últimos ${r.entries.length} cambios`;
+      body.innerHTML = table(['Fecha y hora', 'Acción', 'Quién', 'Detalle'], r.entries.map(row => [escapeHtml(fechaHoraPanama(row.at)), escapeHtml(row.action), escapeHtml(row.user), `<small style="overflow-wrap:anywhere;word-break:break-word">${escapeHtml(JSON.stringify(row.detail).slice(0, 160))}</small>`]));
+    }
+  } catch (error) { body.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; summary.textContent = ''; }
+}
 // Sub-pestañas del área financiera: Cobros / Finanzas / Planes / Gastos.
 // Cada dataset en su propia pantalla, para no amontonar todo en una sola página
 // —sobre todo en el teléfono—. Finanzas y Gastos se pintan al abrir su pestaña.
@@ -4495,6 +4567,7 @@ function activarSubtab(nombre) {
   if (nombre === 'cobros-nuevo') newBillingPayments();
   if (nombre === 'carga-inicial') newBillingImport();
   if (nombre === 'corte') newBillingCutover();
+  if (nombre === 'reportes-nuevo') newBillingReports();
   if (nombre === 'finanzas') financeDashboard();
   if (nombre === 'gastos') expensesManager();
 }
@@ -5375,6 +5448,15 @@ function renderPortal() {
   const historyInvoices = (portalData.invoices || []).slice().sort((a, b) => new Date(b.issued_on || b.due_on) - new Date(a.issued_on || a.due_on));
   const pendingInvoices = historyInvoices.filter(invoice => invoice.status === 'pending');
   document.getElementById('portal-pending-payment').innerHTML = pendingInvoices.length ? `<div class="portal-payment-alert"><strong>Pago pendiente</strong><span>${pendingInvoices.length === 1 ? `Tienes 1 factura pendiente por ${money.format(Number(pendingInvoices[0].balance || pendingInvoices[0].amount))}.` : `Tienes ${pendingInvoices.length} facturas pendientes por ${money.format(pendingInvoices.reduce((sum, invoice) => sum + Number(invoice.balance || invoice.amount), 0))}.`}</span></div>` : '<div class="portal-payment-ok">No tienes pagos pendientes.</div>';
+  // Beneficiario que no paga (módulo nuevo, tras el corte): solo ve si su plan está cubierto o si hay un pago pendiente de quien lo paga;
+  // nunca montos, saldos ni el nombre del pagador.
+  if (portalData.billingNotice) {
+    const pendiente = portalData.billingNotice.kind === 'pago_pendiente';
+    const card = `<div class="${pendiente ? 'portal-payment-alert' : 'portal-payment-ok'}">${pendiente ? '<strong>Pago pendiente</strong><span>' : '<span>'}${escapeHtml(portalData.billingNotice.message)}</span></div>`;
+    // Sin facturas propias, el aviso REEMPLAZA el "No tienes pagos pendientes" (dos mensajes seguidos se contradecirían).
+    if (pendingInvoices.length) document.getElementById('portal-pending-payment').insertAdjacentHTML('beforeend', `<div style="margin-top:10px">${card}</div>`);
+    else document.getElementById('portal-pending-payment').innerHTML = card;
+  }
   const invoicesSorted = historyInvoices;
   const invoiceDate = invoice => { const raw = invoice.issued_on || invoice.due_on; return raw ? new Intl.DateTimeFormat('es-PA', { dateStyle: 'medium', timeZone: 'America/Panama' }).format(new Date(`${String(raw).slice(0, 10)}T12:00:00-05:00`)) : '—'; };
   document.getElementById('portal-invoices').innerHTML = invoicesSorted.length ? invoicesSorted.map(invoice => { const lines = (invoice.line_items || invoice.lineItems || []).map(line => `${escapeHtml(line.name || 'Sesión')} · ${money.format(Number(line.item_total || line.amount || 0))}`).join('<br>'); const estado = Number(invoice.amount) === 0 ? 'Sin cargo' : invoice.status === 'confirmed' ? 'Pagada' : invoice.status === 'void' ? 'Anulada' : 'Pendiente'; return `<tr><td data-label="Concepto"><b>${escapeHtml(invoice.concept)}</b>${lines ? `<br><small class="invoice-line-detail">${lines}</small>` : ''}${invoice.invoice_number ? `<br><small>${escapeHtml(invoice.invoice_number)}</small>` : ''}</td><td data-label="Fecha">${invoiceDate(invoice)}</td><td data-label="Monto">${money.format(Number(invoice.amount))}</td><td data-label="Estado"><span class="payment-status ${invoice.status}">${estado}</span></td><td data-label="Comprobante"><button class="secondary session-use" data-invoice-pdf="${invoice.id}" data-invoice-number="${escapeHtml(invoice.invoice_number || invoice.id.slice(0, 8))}">Ver PDF</button></td></tr>`; }).join('') : '<tr><td colspan="5" class="empty">No hay facturas registradas.</td></tr>';

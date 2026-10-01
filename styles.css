@@ -717,3 +717,6 @@ button.active-filter{background:#2f6f4f;color:#fff;border-color:#2f6f4f}
 .new-billing-alloc button{justify-self:end}
 .form-summary.error{color:#a14a4a}
 @media(max-width:600px){.new-billing-alloc{grid-template-columns:1fr}.new-billing-alloc button{justify-self:stretch}}
+
+/* Reportes del módulo nuevo (1B-5): ninguna celda debe ensanchar la tabla en el teléfono */
+#reportes-nuevo-mount td{overflow-wrap:anywhere;word-break:break-word;min-width:0}

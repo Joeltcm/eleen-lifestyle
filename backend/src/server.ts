@@ -1358,6 +1358,166 @@ app.get('/api/billing/cutover/readiness', { preHandler: requireStaff }, async re
   return { today, engine: billingEngine, ready: !checks.some(check => check.status === 'fail'), checks, summary };
 });
 
+// ── Fuente unificada de ingresos (1B-5) ──
+// Septiembre de 2026 es el inicio en limpio (D-02): hasta el corte los ingresos salen del sistema anterior; en el estado `new`
+// salen de los pagos anteriores a esa fecha (historia de Zoho y agosto) MÁS los cobros del módulo nuevo. Los cobros viejos de
+// septiembre en adelante se ignoran porque la carga inicial ya los trajo (o Joel los reingresó a mano): sumarlos duplicaría.
+const NEW_BILLING_CLEAN_START = '2026-09-01';
+function incomePaymentsSource(ownerId: string) {
+  if (billingEngine.state !== 'new') {
+    return sql`(SELECT p.id, p.client_id, p.paid_on, p.amount, p.method, p.reference FROM invoice_payments p JOIN clients c0 ON c0.id = p.client_id WHERE c0.owner_id = ${ownerId})`;
+  }
+  return sql`(
+    SELECT p.id, p.client_id, p.paid_on, p.amount, p.method, p.reference FROM invoice_payments p JOIN clients c0 ON c0.id = p.client_id
+      WHERE c0.owner_id = ${ownerId} AND p.paid_on < ${NEW_BILLING_CLEAN_START}::date
+    UNION ALL
+    SELECT bp.id, bp.payer_client_id, bp.paid_on, bp.amount, bp.method, bp.reference FROM billing_payments bp
+      WHERE bp.owner_id = ${ownerId} AND bp.voided_at IS NULL)`;
+}
+
+// ── Estado de cuenta, reportes y aviso al beneficiario del módulo nuevo (1B-5) ──
+// Leen SOLO las tablas billing_*. El portal y los PDF pasan a leerlas cuando el estado operativo es `new` (tras el corte);
+// antes siguen leyendo el sistema anterior, para no mostrar nada a medias.
+const billingKindText: Record<string, string> = { mensual: 'Mensualidad', credito: 'Sesiones a crédito', paquete: 'Paquete', clase_suelta: 'Clase suelta', manual: 'Factura' };
+const dmy = (iso: unknown) => { const [y, m, d] = String(iso).slice(0, 10).split('-'); return `${d}-${m}-${y}`; };
+const agingBucket = (daysOverdue: number) => daysOverdue <= 0 ? 'al_dia' : daysOverdue <= 7 ? '1-7' : daysOverdue <= 30 ? '8-30' : '31+';
+
+async function newAccountStatementData(ownerId: string, payerId: string, from: string, to: string) {
+  const [payer] = await sql`SELECT id::text AS id, full_name, email FROM clients WHERE id = ${payerId} AND owner_id = ${ownerId}`;
+  if (!payer) return null;
+  const invoices = await sql`
+    SELECT i.id::text AS id, i.number, i.kind, i.cycle_start::text AS cycle_start, i.cycle_end::text AS cycle_end, i.issued_on::text AS issued_on, i.due_on::text AS due_on,
+      i.total::text AS total, i.status,
+      COALESCE((SELECT sum(a.amount) FROM billing_payment_applications a WHERE a.invoice_id = i.id AND a.reversed_at IS NULL), 0)::text AS paid
+    FROM billing_invoices i
+    WHERE i.owner_id = ${ownerId} AND i.payer_client_id = ${payerId} AND i.status <> 'anulada' AND i.issued_on BETWEEN ${from}::date AND ${to}::date
+    ORDER BY i.issued_on, i.number`;
+  const payments = await sql`
+    SELECT p.id::text AS id, p.paid_on::text AS paid_on, p.amount::text AS amount, p.method, p.reference,
+      COALESCE((SELECT sum(a.amount) FROM billing_payment_applications a WHERE a.payment_id = p.id AND a.reversed_at IS NULL), 0)::text AS applied
+    FROM billing_payments p
+    WHERE p.owner_id = ${ownerId} AND p.payer_client_id = ${payerId} AND p.voided_at IS NULL AND p.paid_on BETWEEN ${from}::date AND ${to}::date
+    ORDER BY p.paid_on, p.created_at`;
+  const rows = invoices.map(row => ({
+    id: row.id, issued_on: row.issued_on, due_on: row.due_on, invoice_number: billingCode(row.number),
+    concept: `${billingKindText[row.kind as string] || row.kind} · ${dmy(row.cycle_start)} → ${dmy(row.cycle_end)}`,
+    amount: Number(row.total), paid_amount: Number(row.paid), balance_amount: desdeCentavos(centavos(Number(row.total)) - centavos(Number(row.paid))), status: row.status
+  }));
+  return { client: { id: payer.id, full_name: payer.full_name, email: payer.email }, rows,
+    payments: payments.map(row => ({ id: row.id, paid_on: row.paid_on, amount: Number(row.amount), method: row.method, reference: row.reference, applied: Number(row.applied),
+      available: desdeCentavos(centavos(Number(row.amount)) - centavos(Number(row.applied))) })) };
+}
+
+app.get('/api/billing/accounts/:payerId/statement', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const payerId = z.string().uuid().parse((request.params as { payerId: string }).payerId);
+  const query = z.object({
+    from: z.string().date().default(() => fechaPanamaDiasAtras(180)), to: z.string().date().default(() => fechaDeNegocioPanama()),
+    format: z.enum(['json', 'csv', 'pdf']).default('json')
+  }).parse(request.query);
+  const report = await newAccountStatementData(auth.sub, payerId, query.from, query.to);
+  if (!report) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  const totals = {
+    invoiced: desdeCentavos(report.rows.reduce((sum, row) => sum + centavos(row.amount), 0)),
+    paid: desdeCentavos(report.rows.reduce((sum, row) => sum + centavos(row.paid_amount), 0)),
+    balance: desdeCentavos(report.rows.reduce((sum, row) => sum + centavos(row.balance_amount), 0)),
+    received: desdeCentavos(report.payments.reduce((sum, row) => sum + centavos(row.amount), 0)),
+    unapplied: desdeCentavos(report.payments.reduce((sum, row) => sum + centavos(row.available), 0))
+  };
+  if (query.format === 'pdf') return sendPdf(reply, await accountStatementPdf(report.client, report.rows, query.from, query.to), `estado-de-cuenta-${report.client.full_name.replace(/\s+/g, '-')}-${query.from}-${query.to}.pdf`);
+  if (query.format === 'csv') {
+    const lines = [['Tipo', 'Fecha', 'Documento', 'Concepto', 'Facturado', 'Cobrado/aplicado', 'Saldo'].map(csvCell).join(','),
+      ...report.rows.map(row => ['Factura', dmy(row.issued_on), row.invoice_number, row.concept, row.amount.toFixed(2), row.paid_amount.toFixed(2), row.balance_amount.toFixed(2)].map(csvCell).join(',')),
+      ...report.payments.map(row => ['Cobro', dmy(row.paid_on), row.method, row.reference || '', '', row.amount.toFixed(2), row.available.toFixed(2)].map(csvCell).join(','))];
+    reply.header('Content-Type', 'text/csv; charset=utf-8'); reply.header('Content-Disposition', `attachment; filename="estado-de-cuenta-${query.from}-${query.to}.csv"`);
+    return `﻿${lines.join('\n')}`;
+  }
+  return { ...report, from: query.from, to: query.to, totals };
+});
+
+app.get('/api/billing/reports/receivables', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const query = z.object({ asOf: z.string().date().default(() => fechaDeNegocioPanama()), format: z.enum(['json', 'csv']).default('json') }).parse(request.query);
+  const rows = await sql`
+    SELECT i.id::text AS id, i.number, i.kind, i.payer_client_id::text AS payer_id, p.full_name AS payer, i.cycle_start::text AS cycle_start, i.cycle_end::text AS cycle_end,
+      i.due_on::text AS due_on, i.total::text AS total, i.status,
+      COALESCE((SELECT sum(a.amount) FROM billing_payment_applications a WHERE a.invoice_id = i.id AND a.reversed_at IS NULL), 0)::text AS paid
+    FROM billing_invoices i JOIN clients p ON p.id = i.payer_client_id
+    WHERE i.owner_id = ${auth.sub} AND i.status IN ('pendiente', 'parcial') ORDER BY i.due_on, i.number`;
+  const detail = rows.map(row => {
+    const balance = desdeCentavos(centavos(Number(row.total)) - centavos(Number(row.paid)));
+    const daysOverdue = Math.max(0, Math.round((Date.parse(`${query.asOf}T12:00:00Z`) - Date.parse(`${String(row.due_on)}T12:00:00Z`)) / 86_400_000));
+    return { code: billingCode(row.number), payerId: row.payer_id, payer: row.payer, kind: row.kind, cycleStart: row.cycle_start, cycleEnd: row.cycle_end, dueOn: row.due_on,
+      total: Number(row.total), paid: Number(row.paid), balance, daysOverdue, bucket: agingBucket(daysOverdue) };
+  }).filter(row => row.balance > 0);
+  const buckets = ['al_dia', '1-7', '8-30', '31+'].map(bucket => ({ bucket, count: detail.filter(row => row.bucket === bucket).length,
+    balance: desdeCentavos(detail.filter(row => row.bucket === bucket).reduce((sum, row) => sum + centavos(row.balance), 0)) }));
+  if (query.format === 'csv') {
+    const lines = [['Pagador', 'Factura', 'Modalidad', 'Ciclo', 'Vence', 'Total', 'Pagado', 'Saldo', 'Días vencida', 'Antigüedad'].map(csvCell).join(','),
+      ...detail.map(row => [row.payer, row.code, row.kind, `${dmy(row.cycleStart)} → ${dmy(row.cycleEnd)}`, dmy(row.dueOn), row.total.toFixed(2), row.paid.toFixed(2), row.balance.toFixed(2), row.daysOverdue, row.bucket].map(csvCell).join(','))];
+    reply.header('Content-Type', 'text/csv; charset=utf-8'); reply.header('Content-Disposition', `attachment; filename="cuentas-por-cobrar-${query.asOf}.csv"`);
+    return `﻿${lines.join('\n')}`;
+  }
+  return { asOf: query.asOf, rows: detail, buckets, total: desdeCentavos(detail.reduce((sum, row) => sum + centavos(row.balance), 0)) };
+});
+
+app.get('/api/billing/reports/collections', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const query = z.object({ year: z.coerce.number().int().min(2020).max(2100).default(() => Number(fechaDeNegocioPanama().slice(0, 4))), format: z.enum(['json', 'csv']).default('json') }).parse(request.query);
+  const rows = await sql`
+    SELECT to_char(p.paid_on, 'YYYY-MM') AS month, p.method, count(*)::int AS count, sum(p.amount)::text AS total
+    FROM billing_payments p WHERE p.owner_id = ${auth.sub} AND p.voided_at IS NULL AND extract(year FROM p.paid_on) = ${query.year}
+    GROUP BY 1, 2 ORDER BY 1, 2`;
+  const byMonth = new Map<string, { month: string; total: number; count: number; methods: Record<string, number> }>();
+  for (const row of rows) {
+    const entry = byMonth.get(row.month as string) ?? { month: row.month as string, total: 0, count: 0, methods: {} };
+    entry.total = desdeCentavos(centavos(entry.total) + centavos(Number(row.total))); entry.count += Number(row.count);
+    entry.methods[row.method as string] = Number(row.total); byMonth.set(row.month as string, entry);
+  }
+  const months = [...byMonth.values()];
+  if (query.format === 'csv') {
+    const lines = [['Mes', 'Método', 'Cobros', 'Total'].map(csvCell).join(','), ...rows.map(row => [row.month, row.method, row.count, Number(row.total).toFixed(2)].map(csvCell).join(','))];
+    reply.header('Content-Type', 'text/csv; charset=utf-8'); reply.header('Content-Disposition', `attachment; filename="cobrado-${query.year}.csv"`);
+    return `﻿${lines.join('\n')}`;
+  }
+  return { year: query.year, months, total: desdeCentavos(months.reduce((sum, row) => sum + centavos(row.total), 0)) };
+});
+
+// Morosidad: pagadores con facturas vencidas (vence ANTES de hoy) y los beneficiarios que ese atraso toca.
+app.get('/api/billing/reports/delinquency', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const today = fechaDeNegocioPanama();
+  const rows = await sql`
+    SELECT i.id::text AS id, i.number, i.payer_client_id::text AS payer_id, p.full_name AS payer, i.due_on::text AS due_on, i.total::text AS total,
+      COALESCE((SELECT sum(a.amount) FROM billing_payment_applications a WHERE a.invoice_id = i.id AND a.reversed_at IS NULL), 0)::text AS paid,
+      COALESCE((SELECT array_agg(DISTINCT b.full_name ORDER BY b.full_name) FROM billing_invoice_lines l JOIN clients b ON b.id = l.beneficiary_client_id
+        WHERE l.invoice_id = i.id AND l.beneficiary_client_id <> i.payer_client_id), ARRAY[]::text[]) AS beneficiaries
+    FROM billing_invoices i JOIN clients p ON p.id = i.payer_client_id
+    WHERE i.owner_id = ${auth.sub} AND i.status IN ('pendiente', 'parcial') AND i.due_on < ${today}::date ORDER BY i.due_on, p.full_name`;
+  const payers = new Map<string, { payerId: string; payer: string; balance: number; oldestDays: number; invoices: { code: string; dueOn: string; balance: number; daysOverdue: number }[]; beneficiaries: Set<string> }>();
+  for (const row of rows) {
+    const balance = desdeCentavos(centavos(Number(row.total)) - centavos(Number(row.paid)));
+    if (balance <= 0) continue;
+    const days = Math.round((Date.parse(`${today}T12:00:00Z`) - Date.parse(`${String(row.due_on)}T12:00:00Z`)) / 86_400_000);
+    const entry = payers.get(row.payer_id as string) ?? { payerId: row.payer_id as string, payer: row.payer as string, balance: 0, oldestDays: 0, invoices: [], beneficiaries: new Set<string>() };
+    entry.balance = desdeCentavos(centavos(entry.balance) + centavos(balance)); entry.oldestDays = Math.max(entry.oldestDays, days);
+    entry.invoices.push({ code: billingCode(row.number), dueOn: row.due_on as string, balance, daysOverdue: days });
+    for (const name of (row.beneficiaries as string[])) entry.beneficiaries.add(name);
+    payers.set(row.payer_id as string, entry);
+  }
+  const list = [...payers.values()].map(entry => ({ ...entry, beneficiaries: [...entry.beneficiaries] })).sort((a, b) => b.oldestDays - a.oldestDays);
+  return { today, payers: list, total: desdeCentavos(list.reduce((sum, entry) => sum + centavos(entry.balance), 0)) };
+});
+
+app.get('/api/billing/audit', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const { limit } = z.object({ limit: z.coerce.number().int().min(1).max(500).default(100) }).parse(request.query);
+  const rows = await sql`
+    SELECT a.at, a.action, a.entity, a.entity_id::text AS entity_id, a.detail, u.email AS user_email
+    FROM billing_audit a LEFT JOIN users u ON u.id = a.user_id WHERE a.owner_id = ${auth.sub} ORDER BY a.at DESC, a.id DESC LIMIT ${limit}`;
+  return { entries: rows.map(row => ({ at: row.at, action: row.action, entity: row.entity, entityId: row.entity_id, detail: row.detail, user: row.user_email ?? 'automático' })) };
+});
+
 // Diagnóstico del estado operativo (solo lectura): permite comprobar desde fuera
 // qué generador está escribiendo.
 app.get('/api/billing/engine-status', { preHandler: requireStaff }, async () => billingEngine);
@@ -4524,8 +4684,45 @@ function sendPdf(reply: any, buffer: Buffer, fileName: string) {
   return reply.send(buffer);
 }
 
+// Tras el corte (estado `new`) el listado que alimenta el resumen y las fichas mezcla la historia anterior a septiembre de 2026
+// (archivo del sistema anterior) con las facturas nuevas, con la MISMA forma que las viejas para que las pantallas no cambien.
+async function newBillingInvoicesAsLegacy(ownerId: string) {
+  const rows = await sql`
+    SELECT i.id::text AS id, i.payer_client_id::text AS client_id, i.number, i.kind, i.origin, i.cycle_start::text AS cycle_start, i.cycle_end::text AS cycle_end,
+      i.issued_on::text AS issued_on, i.due_on::text AS due_on, i.total::text AS total, i.status, i.notes, i.created_at, p.full_name,
+      COALESCE((SELECT sum(a.amount) FROM billing_payment_applications a WHERE a.invoice_id = i.id AND a.reversed_at IS NULL), 0)::text AS paid,
+      (SELECT pm.method FROM billing_payment_applications a JOIN billing_payments pm ON pm.id = a.payment_id WHERE a.invoice_id = i.id AND a.reversed_at IS NULL ORDER BY a.created_at DESC LIMIT 1) AS method
+    FROM billing_invoices i JOIN clients p ON p.id = i.payer_client_id
+    WHERE i.owner_id = ${ownerId} AND i.status <> 'anulada' ORDER BY i.created_at DESC`;
+  return rows.map(row => {
+    const total = Number(row.total); const paid = Number(row.paid); const balance = desdeCentavos(centavos(total) - centavos(paid));
+    return {
+      id: row.id, client_id: row.client_id, package_id: null, concept: `${billingKindText[row.kind as string] || row.kind} · ${dmy(row.cycle_start)} → ${dmy(row.cycle_end)}`,
+      amount: total, currency: 'USD', due_on: row.due_on, status: row.status === 'pagada' ? 'confirmed' : 'pending', payment_method: row.method ?? null, payment_reference: null,
+      confirmed_at: null, created_at: row.created_at, source_system: 'billing_new', external_id: null, invoice_number: billingCode(row.number), issued_on: row.issued_on,
+      subtotal: total, tax_total: 0, balance, line_items: [], external_status: null, notes: row.notes ?? null, billing_period: null, auto_generated: row.origin === 'auto',
+      billed_for_client_id: null, full_name: row.full_name, billed_for_name: null, credit_invoice: row.kind === 'credito', coverage_applied: 0,
+      paid_amount: paid, balance_amount: balance, coverage_start: row.issued_on
+    };
+  });
+}
+
 app.get('/api/invoices', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
+  if (billingEngine.state === 'new') {
+    const history = await sql`
+      SELECT i.id, i.client_id, i.package_id, i.concept, i.amount, i.currency, i.due_on, i.status, i.payment_method, i.payment_reference, i.confirmed_at, i.created_at, i.source_system,
+        i.external_id, i.invoice_number, i.issued_on, i.subtotal, i.tax_total, i.balance, i.line_items, i.external_status, i.notes, i.external_updated_at, i.billing_period, i.auto_generated,
+        i.billed_for_client_id, c.full_name, beneficiario.full_name AS billed_for_name, false AS credit_invoice, 0 AS coverage_applied,
+        CASE WHEN i.source_system = 'zoho_invoice' THEN GREATEST(i.amount - i.balance, 0)
+          ELSE COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), CASE WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END) END AS paid_amount,
+        CASE WHEN i.source_system = 'zoho_invoice' THEN i.balance
+          ELSE GREATEST(i.amount - COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), CASE WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END), 0) END AS balance_amount,
+        COALESCE(i.issued_on, i.due_on) AS coverage_start
+      FROM invoices i JOIN clients c ON c.id = i.client_id LEFT JOIN clients beneficiario ON beneficiario.id = COALESCE(i.billed_for_client_id, i.client_id)
+      WHERE c.owner_id = ${auth.sub} AND COALESCE(i.issued_on, i.due_on, i.created_at::date) < ${NEW_BILLING_CLEAN_START}::date ORDER BY i.created_at DESC`;
+    return [...(await newBillingInvoicesAsLegacy(auth.sub)), ...history];
+  }
   // Sin source_payload: es el JSON crudo que devolvió Zoho por cada factura y
   // no se necesita para la lista. line_items sí se devuelve: las facturas a
   // crédito deben mostrar qué sesiones y qué cancelaciones se cobraron.
@@ -4569,19 +4766,20 @@ app.get('/api/billing/analytics', { preHandler: requireStaff }, async request =>
     sql`
       SELECT EXTRACT(month FROM p.paid_on)::integer AS month,
         count(*)::integer AS invoice_count, COALESCE(sum(p.amount), 0)::numeric AS amount
-      FROM invoice_payments p JOIN clients c ON c.id = p.client_id
-      WHERE c.owner_id = ${auth.sub} AND p.paid_on >= ${start}::date AND p.paid_on < ${end}::date
+      FROM ${incomePaymentsSource(auth.sub)} p
+      WHERE p.paid_on >= ${start}::date AND p.paid_on < ${end}::date
       GROUP BY 1 ORDER BY 1
     `,
     sql`
       WITH received_payments AS (
         SELECT p.client_id, p.amount, p.paid_on
-        FROM invoice_payments p JOIN clients c ON c.id = p.client_id
-        WHERE c.owner_id = ${auth.sub} AND p.paid_on >= ${start}::date AND p.paid_on < ${end}::date
+        FROM ${incomePaymentsSource(auth.sub)} p
+        WHERE p.paid_on >= ${start}::date AND p.paid_on < ${end}::date
         UNION ALL
         SELECT i.client_id, i.amount, COALESCE(i.confirmed_at::date, i.issued_on, i.due_on) AS paid_on
         FROM invoices i JOIN clients c ON c.id = i.client_id
         WHERE c.owner_id = ${auth.sub} AND i.status = 'confirmed' AND i.source_system IS DISTINCT FROM 'zoho_invoice'
+          AND ${billingEngine.state === 'new' ? sql`false` : sql`true`}
           AND COALESCE(i.confirmed_at::date, i.issued_on, i.due_on) >= ${start}::date
           AND COALESCE(i.confirmed_at::date, i.issued_on, i.due_on) < ${end}::date
       )
@@ -5413,7 +5611,7 @@ app.get('/api/finance/summary', { preHandler: requireStaff }, async request => {
     // fija inventaría años vacíos por delante.
     const [primero] = await sql`
       SELECT least(
-        COALESCE((SELECT min(p.paid_on) FROM invoice_payments p JOIN clients c ON c.id = p.client_id WHERE c.owner_id = ${auth.sub}), current_date),
+        COALESCE((SELECT min(p.paid_on) FROM ${incomePaymentsSource(auth.sub)} p), current_date),
         COALESCE((SELECT min(spent_on) FROM expenses WHERE owner_id = ${auth.sub}), current_date)
       ) AS inicio
     `;
@@ -5444,8 +5642,8 @@ app.get('/api/finance/summary', { preHandler: requireStaff }, async request => {
     sql`
       SELECT to_char(date_trunc('month', p.paid_on), 'YYYY-MM') AS month,
         COALESCE(sum(p.amount), 0)::numeric AS total, count(*)::int AS cantidad
-      FROM invoice_payments p JOIN clients c ON c.id = p.client_id
-      WHERE c.owner_id = ${auth.sub} AND p.paid_on >= ${inicio}::date
+      FROM ${incomePaymentsSource(auth.sub)} p
+      WHERE p.paid_on >= ${inicio}::date
         AND (${fin}::date IS NULL OR p.paid_on <= ${fin}::date)
       GROUP BY 1
     `,
@@ -5541,10 +5739,12 @@ async function monthlyFinanceData(ownerId: string, month: string, categoryId?: s
     sql`
       SELECT p.paid_on AS fecha, c.full_name AS cliente, p.method AS metodo, p.reference AS referencia,
         p.amount::numeric AS monto,
-        (SELECT i.concept FROM payment_allocations pa JOIN invoices i ON i.id = pa.invoice_id
-          WHERE pa.payment_id = p.id ORDER BY pa.amount DESC LIMIT 1) AS concepto
-      FROM invoice_payments p JOIN clients c ON c.id = p.client_id
-      WHERE c.owner_id = ${ownerId} AND p.paid_on >= ${from}::date AND p.paid_on <= ${to}::date
+        COALESCE((SELECT i.concept FROM payment_allocations pa JOIN invoices i ON i.id = pa.invoice_id
+          WHERE pa.payment_id = p.id ORDER BY pa.amount DESC LIMIT 1),
+          (SELECT string_agg(DISTINCT 'FAC-' || lpad(bi.number::text, 4, '0'), ', ') FROM billing_payment_applications bpa JOIN billing_invoices bi ON bi.id = bpa.invoice_id
+            WHERE bpa.payment_id = p.id AND bpa.reversed_at IS NULL)) AS concepto
+      FROM ${incomePaymentsSource(ownerId)} p JOIN clients c ON c.id = p.client_id
+      WHERE p.paid_on >= ${from}::date AND p.paid_on <= ${to}::date
       ORDER BY p.paid_on
     `,
     sql`
@@ -6418,6 +6618,43 @@ async function portalClient(userId: string) {
   return client;
 }
 
+// Portal con la fuente nueva (solo en estado `new`): el PAGADOR ve sus facturas con la misma forma que las del sistema anterior (el portal
+// no cambia) y el BENEFICIARIO que no paga solo ve uno de dos avisos, sin montos, sin saldos y sin el nombre del pagador.
+async function portalBillingFromNewSource(clientId: string, ownerId: string) {
+  const invoices = await sql`
+    SELECT i.id::text AS id, i.number, i.kind, i.cycle_start::text AS cycle_start, i.cycle_end::text AS cycle_end, i.issued_on::text AS issued_on, i.due_on::text AS due_on,
+      i.total::text AS total, i.status,
+      COALESCE((SELECT sum(a.amount) FROM billing_payment_applications a WHERE a.invoice_id = i.id AND a.reversed_at IS NULL), 0)::text AS paid,
+      (SELECT p.method FROM billing_payment_applications a JOIN billing_payments p ON p.id = a.payment_id WHERE a.invoice_id = i.id AND a.reversed_at IS NULL ORDER BY a.created_at DESC LIMIT 1) AS method
+    FROM billing_invoices i WHERE i.owner_id = ${ownerId} AND i.payer_client_id = ${clientId} AND i.status <> 'anulada' ORDER BY i.issued_on DESC, i.number DESC`;
+  const lines = invoices.length ? await sql`
+    SELECT l.invoice_id::text AS invoice_id, b.full_name, l.description, l.quantity::text AS quantity, l.unit_amount::text AS unit_amount, l.amount::text AS amount
+    FROM billing_invoice_lines l JOIN clients b ON b.id = l.beneficiary_client_id WHERE l.invoice_id IN ${sql(invoices.map(row => row.id as string))} ORDER BY b.full_name` : [];
+  const asLegacy = invoices.map(row => {
+    const total = Number(row.total); const paid = Number(row.paid);
+    return {
+      id: row.id, concept: `${billingKindText[row.kind as string] || row.kind} · ${dmy(row.cycle_start)} → ${dmy(row.cycle_end)}`, amount: total, currency: 'USD', due_on: row.due_on,
+      status: row.status === 'pagada' ? 'confirmed' : 'pending', payment_method: row.method ?? null, invoice_number: billingCode(row.number), issued_on: row.issued_on,
+      line_items: lines.filter(line => line.invoice_id === row.id).map(line => ({ name: `${line.full_name} · ${line.description}`, quantity: Number(line.quantity), rate: Number(line.unit_amount), item_total: Number(line.amount) })),
+      balance: desdeCentavos(centavos(total) - centavos(paid))
+    };
+  });
+  // Aviso al beneficiario: cubierto por OTRO pagador; "pago pendiente" desde el DÍA SIGUIENTE al vencimiento, sin gracia (O-1).
+  const today = fechaDeNegocioPanama();
+  const covered = await sql`
+    SELECT 1 FROM billing_subscriptions s WHERE s.owner_id = ${ownerId} AND s.beneficiary_client_id = ${clientId} AND s.payer_client_id <> ${clientId}
+      AND s.starts_on <= ${today}::date AND (s.ends_on IS NULL OR s.ends_on >= ${today}::date) LIMIT 1`;
+  let notice: { kind: 'cubierta' | 'pago_pendiente'; message: string } | null = null;
+  if (covered.length) {
+    const [overdue] = await sql`
+      SELECT 1 FROM billing_invoices i JOIN billing_invoice_lines l ON l.invoice_id = i.id
+      WHERE i.owner_id = ${ownerId} AND l.beneficiary_client_id = ${clientId} AND i.payer_client_id <> ${clientId} AND l.line_type = 'plan'
+        AND i.status IN ('pendiente', 'parcial') AND i.due_on < ${today}::date LIMIT 1`;
+    notice = overdue ? { kind: 'pago_pendiente', message: 'La cuenta de quien paga tu plan tiene un pago pendiente.' } : { kind: 'cubierta', message: 'Tu mensualidad está cubierta.' };
+  }
+  return { invoices: asLegacy, notice };
+}
+
 app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, reply) => {
   const auth = request.user as AuthUser;
   if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
@@ -6491,7 +6728,12 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   const privateBusySlots = busySlots.map(slot => slot.is_mine
     ? { id: slot.id, starts_at: slot.starts_at, duration_minutes: slot.duration_minutes, is_mine: true }
     : { starts_at: slot.starts_at, duration_minutes: slot.duration_minutes, is_mine: false });
-  return { client: profile, invoices, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, exercises, packages, credits, weightLogs };
+  // Tras el corte (estado `new`) el portal lee la facturación nueva y ya no muestra saldos de clases (D-14).
+  if (billingEngine.state === 'new') {
+    const fromNew = await portalBillingFromNewSource(client.id as string, client.owner_id as string);
+    return { client: profile, invoices: fromNew.invoices, billingNotice: fromNew.notice, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, exercises, packages: [], credits: [], weightLogs };
+  }
+  return { client: profile, invoices, billingNotice: null, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, exercises, packages, credits, weightLogs };
 });
 
 const clientWeightLogSchema = z.object({
@@ -6573,7 +6815,9 @@ app.get('/api/portal/reports/account-statement.pdf', { preHandler: requireAuth }
     from: z.string().date().default(() => fechaPanamaDiasAtras(180)),
     to: z.string().date().default(() => fechaDeNegocioPanama())
   }).parse(request.query);
-  const report = await accountStatementData(client.owner_id as string, { clientId: client.id as string, ...rango });
+  const report = billingEngine.state === 'new'
+    ? await newAccountStatementData(client.owner_id as string, client.id as string, rango.from, rango.to)
+    : await accountStatementData(client.owner_id as string, { clientId: client.id as string, ...rango });
   if (!report) return reply.code(404).send({ error: 'Cliente no encontrado' });
   return sendPdf(reply, await accountStatementPdf(report.client, report.rows, rango.from, rango.to), `estado-de-cuenta-${rango.from}-${rango.to}.pdf`);
 });
