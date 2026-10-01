@@ -32,12 +32,13 @@ test('los filtros de informes conservan el corte anterior y excluyen el día de 
   assert.match(app, /portalCutOffset > -PORTAL_MAX_CUT_HISTORY/);
 });
 
-test('el portal sube todos sus marcadores a la versión 260', async () => {
+test('los marcadores de versión del portal coinciden entre sí y no retroceden de la 260 (no se fija un número: cada despliegue lo sube)', async () => {
   const [app, sw, version, html] = await Promise.all(['app.js', 'sw.js', 'version.json', 'index.html'].map(leer));
-  assert.equal(/const APP_VERSION = '(\d+)'/.exec(app)[1], '260');
-  assert.equal(/const VERSION = '(\d+)'/.exec(sw)[1], '260');
-  assert.equal(JSON.parse(version).version, '260');
+  const enApp = /const APP_VERSION = '(\d+)'/.exec(app)[1];
+  assert.ok(Number(enApp) >= 260);
+  assert.equal(/const VERSION = '(\d+)'/.exec(sw)[1], enApp);
+  assert.equal(JSON.parse(version).version, enApp);
   const marcas = [...html.matchAll(/\?v=(\d+)/g)].map(match => match[1]);
   assert.equal(marcas.length, 7);
-  assert.ok(marcas.every(value => value === '260'));
+  assert.ok(marcas.every(value => value === enApp));
 });
