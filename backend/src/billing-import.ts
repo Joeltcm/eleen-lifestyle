@@ -27,6 +27,8 @@ export type ImportEntry = {
   cycleStart: string; cycleEnd: string; cutDay?: number; issuedOn?: string; dueOn?: string;
   lines: ImportLine[];
   amountFrom?: 'legacy'; // el total sale de la factura vieja pendiente (crédito de Julio): se muestra para revalidarlo
+  // Decisión explícita de Joel: se carga como PENDIENTE aunque el sistema anterior no la respalde (texto = el motivo).
+  allowWithoutEvidence?: string;
   payment?: ImportPayment;
 };
 export type ImportExclusion = { key: string; label: string; reason: string };
@@ -67,9 +69,9 @@ export const DEFAULT_IMPORT_MANIFEST: ImportManifest = {
         { beneficiary: 'Julieta Galindo', description: 'Julieta', amount: 150 },
         { beneficiary: 'Juan de Diego padre', description: 'Juan de Diego padre', amount: 150 }
       ], payment: { paidOn: '2026-09-26', method: 'Yappy', amount: 300 } },
-    // Gila pagó (J-055): la FECHA y el método se toman del cobro registrado en el sistema anterior (dentro de su ciclo).
-    { key: 'gila-2026-09', label: 'Gila Falic · 28-09 (pagada el 01-10)', payer: 'Gila Falic', kind: 'mensual', cycleStart: '2026-09-28', cycleEnd: '2026-10-28',
-      lines: [{ beneficiary: 'Gila Falic', description: 'Mensualidad', amount: 240 }], payment: { paidOn: 'legacy', method: 'legacy', amount: 240 } },
+    // Gila: el cobro NO está registrado todavía; Joel (J-058) pidió dejarlo abierto para confirmarlo con Eileen.
+    { key: 'gila-2026-09', label: 'Gila Falic · 28-09 (pendiente: se confirma con Eileen)', payer: 'Gila Falic', kind: 'mensual', cycleStart: '2026-09-28', cycleEnd: '2026-10-28',
+      lines: [{ beneficiary: 'Gila Falic', description: 'Mensualidad', amount: 240 }], allowWithoutEvidence: 'Cobro abierto: se confirma con Eileen (J-058). El sistema anterior no trae su factura ni su cobro.' },
     { key: 'julio-2026-09', label: 'Julio Alvarez · crédito (31-08, 30-09]', payer: 'Julio Alvarez', kind: 'credito', cycleStart: '2026-08-31', cycleEnd: '2026-09-30', amountFrom: 'legacy',
       lines: [{ beneficiary: 'Julio Alvarez', description: 'Sesiones cobrables del ciclo' }] }
   ],
@@ -80,9 +82,9 @@ export const DEFAULT_IMPORT_MANIFEST: ImportManifest = {
   ],
   // Joel pidió incluirlas (J-056): una factura de clase suelta y su cobro por cada clase pagada desde el 01-09-2026.
   singleClasses: [
-    { key: 'susie', label: 'Susie Asís (clases sueltas)', client: 'Susie Asís', since: '2026-09-01' },
+    { key: 'susie', label: 'Susie Asís (clases sueltas)', client: 'Susie Asís', since: '2026-09-01', accept: [{ date: '2026-09-13', amount: 30 }] },
     { key: 'reina', label: 'Reina Yohoros (clases sueltas)', client: 'Reina Yohoros', since: '2026-09-01' },
-    { key: 'sara-hidrie', label: 'Sara Hidrie (clases sueltas)', client: 'Sara Hidrie', since: '2026-09-01' }
+    { key: 'sara-hidrie', label: 'Sara Hidrie (clases sueltas)', client: 'Sara Hidrie', since: '2026-09-01', accept: [{ date: '2026-09-14', amount: 40 }] }
   ]
 };
 
@@ -207,6 +209,7 @@ export async function buildImportPreview(tx: Tx, ownerId: string, manifest: Impo
     let alreadyApplied = false;
     let resolvedMethod: string | null = null;
     let resolvedPaidOn: string | null = null;
+    const notes: string[] = [];
 
     if (payer.error === undefined) {
       if (entry.payment) {
@@ -246,7 +249,10 @@ export async function buildImportPreview(tx: Tx, ownerId: string, manifest: Impo
         const sum = pending.reduce((acc, row) => acc + cents(row.amount), 0);
         sourceIds.invoices = pending.map(row => row.id as string).sort();
         legacyAmount = fromCents(sum);
-        if (!pending.length) reasons.push(`No hay una factura pendiente de ${entry.payer} para ese ciclo en el sistema anterior`);
+        if (!pending.length) {
+          if (entry.allowWithoutEvidence) notes.push(entry.allowWithoutEvidence);
+          else reasons.push(`No hay una factura pendiente de ${entry.payer} para ese ciclo en el sistema anterior`);
+        }
         else if (entry.amountFrom === 'legacy') { total = sum; if (lines.length === 1) { lines[0].unitAmount = fromCents(sum); lines[0].amount = fromCents(sum); } }
         else if (sum !== total) reasons.push(`La factura pendiente del sistema anterior no coincide: hay ${fromCents(sum).toFixed(2)} y se esperaban ${fromCents(total).toFixed(2)}`);
       }
@@ -269,6 +275,7 @@ export async function buildImportPreview(tx: Tx, ownerId: string, manifest: Impo
       issuedOn, dueOn: entry.dueOn ?? issuedOn, lines, total: fromCents(total), legacyAmount,
       payment: entry.payment ? { paidOn: resolvedPaidOn ?? entry.payment.paidOn, method: resolvedMethod ?? entry.payment.method, amount: entry.payment.amount, reference: entry.payment.reference ?? null } : null,
       status: entry.payment && cents(entry.payment.amount) >= total ? 'pagada' : entry.payment ? 'parcial' : 'pendiente',
+      note: notes.length ? notes.join(' ') : null,
       projectedNumber: null
     };
     if (decision === 'incluir') { projected += 1; data.projectedNumber = projected; }
@@ -428,7 +435,7 @@ export async function applyBatch(ownerId: string, userId: string, batchId: strin
       const [invoice] = await tx`
         INSERT INTO billing_invoices (owner_id, number, payer_client_id, kind, origin, cycle_start, cycle_end, cut_day, issued_on, due_on, total, notes, created_by, source_system, external_id)
         VALUES (${ownerId}, ${n}, ${d.payer.id}, ${d.kind}, 'carga_inicial', ${d.cycleStart}, ${d.cycleEnd}, ${d.cutDay}, ${d.issuedOn}, ${d.dueOn}, ${d.total},
-          ${`Carga inicial (lote ${batchId.slice(0, 8)})`}, ${userId}, 'legacy_import', ${item.externalId})
+          ${`Carga inicial (lote ${batchId.slice(0, 8)})${d.note ? `. ${d.note}` : ''}`}, ${userId}, 'legacy_import', ${item.externalId})
         RETURNING id::text AS id`;
       for (const line of d.lines) {
         await tx`

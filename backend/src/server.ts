@@ -1140,7 +1140,7 @@ const importManifestInput = z.object({
     key: z.string().trim().min(1).max(80), label: z.string().trim().min(1).max(200), payer: z.string().trim().min(1).max(200),
     kind: z.enum(['mensual', 'credito', 'clase_suelta', 'paquete', 'manual']),
     cycleStart: importDate, cycleEnd: importDate, cutDay: z.coerce.number().int().min(1).max(31).optional(),
-    issuedOn: importDate.optional(), dueOn: importDate.optional(), amountFrom: z.literal('legacy').optional(),
+    issuedOn: importDate.optional(), dueOn: importDate.optional(), amountFrom: z.literal('legacy').optional(), allowWithoutEvidence: z.string().trim().min(3).max(300).optional(),
     lines: z.array(z.object({
       beneficiary: z.string().trim().min(1).max(200), description: z.string().trim().max(200).optional(),
       amount: z.coerce.number().min(0).max(100000).optional(), sessionsReference: z.coerce.number().int().positive().max(1000).optional()
