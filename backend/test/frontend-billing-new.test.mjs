@@ -42,28 +42,18 @@ test('la pestaña Cobros existe, es distinta de la de facturas y usa el vocabula
   assert.match(app, /payment-applications\/\$\{button\.dataset\.reverse\}\/reverse/);
 });
 
-test('la pestaña Carga inicial existe, confirma con una palabra y muestra fechas dd-mm-aaaa en hora de Panamá', async () => {
+test('1B-8: Carga inicial y Corte ya no son pestañas; Próximas muestra alertas y lo que emitirá el generador, y la hora de Panamá sigue disponible', async () => {
   const html = await leer('index.html');
-  assert.match(html, /data-subtab="carga-inicial">Carga inicial</);
-  assert.match(html, /id="subpanel-carga-inicial"/);
+  assert.doesNotMatch(html, /data-subtab="carga-inicial"|data-subtab="corte"/);
+  assert.match(html, /data-subtab="proximas">Próximas</);
+  assert.match(html, /id="subpanel-proximas"/);
   const app = await leer('app.js');
-  assert.match(app, /nombre === 'carga-inicial'\) newBillingImport\(\)/);
-  assert.match(app, /\/api\/billing\/imports\/preview/);
-  assert.match(app, /Escribe \$\{escapeHtml\(word\)\} para confirmar/);
-  assert.match(app, /function fechaHoraPanama/);
-  assert.doesNotMatch(app, /toLocaleString\('es-PA'[^)]*\)\.replace\(\/\\\/\/g/);
-});
-
-test('la pestaña Corte existe, no enciende ni apaga nada y explica los interruptores de Railway', async () => {
-  const html = await leer('index.html');
-  assert.match(html, /data-subtab="corte">Corte</);
-  assert.match(html, /id="subpanel-corte"/);
-  const app = await leer('app.js');
-  assert.match(app, /nombre === 'corte'\) newBillingCutover\(\)/);
-  assert.match(app, /LEGACY_BILLING_GENERATION=off/);
-  assert.match(app, /NEW_BILLING_GENERATION=on/);
+  assert.match(app, /nombre === 'proximas'\) newBillingUpcoming\(\)/);
+  assert.match(app, /\/api\/billing\/generation\/plan/);
   assert.match(app, /\/api\/billing\/cutover\/readiness/);
-  assert.match(app, /Crear los \$\{proposed\.lines\.length\} planes propuestos/);
+  assert.doesNotMatch(app, /newBillingImport|LEGACY_BILLING_GENERATION=off/, 'ya no hay pantalla de carga ni guía de corte');
+  assert.match(app, /function fechaHoraPanama/, 'la bitácora de Reportes la sigue usando');
+  assert.doesNotMatch(app, /toLocaleString\('es-PA'[^)]*\)\.replace\(\/\\\/\/g/);
 });
 
 test('la pestaña Reportes existe, descarga con la sesión y el portal muestra el aviso del beneficiario sin montos', async () => {

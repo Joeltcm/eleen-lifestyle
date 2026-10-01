@@ -1,4 +1,4 @@
-const APP_VERSION = '245';
+const APP_VERSION = '246';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -4408,107 +4408,12 @@ function newBillingReasonDialog(title, action, onSubmit) {
     try { await onSubmit(new FormData(event.target).get('reason')); } catch (error) { toast(error.message, true); }
   };
 }
-// ── Carga inicial (1B-4) ─────────────────────────────────────────────────────
-// Lleva al módulo nuevo lo que CUADRA del sistema anterior. Vista previa -> aprobación (por hash)
-// -> aplicación (solo con el generador viejo apagado) -> reversión (solo si nada cambió). El
-// sistema anterior solo se LEE; nunca se modifica.
-const newImportDecision = { incluir: 'Se cargará', revisar: 'Requiere revisión', excluir: 'Excluida', ya_aplicado: 'Ya cargada' };
-const newImportStatus = { preview: 'Vista previa', approved: 'Aprobada', applied: 'Aplicada', reversed: 'Revertida', failed: 'Fallida', superseded: 'Reemplazada' };
-let newImportCurrent = null;
-// dd-mm-aaaa y hora de 12 h (a. m./p. m.) en horario de Panamá, sin depender del idioma del navegador.
-function fechaHoraPanama(value, withTime = true) {
-  const date = new Date(value); if (Number.isNaN(date.getTime())) return '';
-  const [y, m, d] = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Panama', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date).split('-');
-  if (!withTime) return `${d}-${m}-${y}`;
-  const hora = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Panama', hour: 'numeric', minute: '2-digit', hour12: true }).format(date).replace('AM', 'a. m.').replace('PM', 'p. m.');
-  return `${d}-${m}-${y} ${hora}`;
-}
-const importCode = number => number ? `FAC-${String(number).padStart(4, '0')}` : '—';
-
-async function newBillingImport(batchId = null) {
-  const root = document.getElementById('carga-inicial-mount');
-  if (!root) return;
-  root.innerHTML = '<article class="card"><p class="empty">Cargando…</p></article>';
-  try {
-    const list = await api('/api/billing/imports');
-    const id = batchId || newImportCurrent || (list.batches.find(batch => ['preview', 'approved', 'applied'].includes(batch.status)) || list.batches[0] || {}).id;
-    newImportCurrent = id || null;
-    const batch = id ? await api(`/api/billing/imports/${id}`) : null;
-    const engine = batch ? batch.engine : (await api('/api/billing/engine-status'));
-    renderNewBillingImport(root, batch, engine, list.batches);
-  } catch (error) { root.innerHTML = `<article class="card"><p class="empty">${escapeHtml(error.message)}</p></article>`; }
-}
-
-function renderNewBillingImport(root, batch, engine, batches) {
-  const t = batch?.totals || {};
-  const included = (batch?.items || []).filter(item => item.decision === 'incluir' || item.decision === 'ya_aplicado');
-  const review = (batch?.items || []).filter(item => item.decision === 'revisar');
-  const excluded = (batch?.items || []).filter(item => item.decision === 'excluir');
-  const canApply = batch && batch.status === 'approved' && !engine.legacyWrites;
-  const actions = !batch ? '' : batch.status === 'preview' ? '<button class="primary" type="button" id="new-import-approve">Aprobar esta vista previa</button>'
-    : batch.status === 'approved' ? `<button class="primary" type="button" id="new-import-apply"${canApply ? '' : ' disabled'}>Aplicar la carga</button>${canApply ? '' : '<p class="section-note">No se puede aplicar mientras el generador del sistema anterior siga activo (estado: ' + escapeHtml(engine.state) + '). Se apaga en el corte, con tu orden.</p>'}`
-    : batch.status === 'applied' ? '<button class="secondary" type="button" id="new-import-reverse">Revertir la carga</button>' : '';
-  root.innerHTML = `<article class="card"><div class="card-head"><div><h3>Carga inicial</h3><p>${batch ? `${escapeHtml(newImportStatus[batch.status] || batch.status)} · ${escapeHtml(batch.manifestName || '')}` : 'Aún no hay una vista previa'}</p></div></div>
-    <p class="section-note">Lleva al módulo nuevo lo que cuadra del sistema anterior. El sistema anterior solo se lee: nunca se modifica. Primero se genera una vista previa, tú la apruebas y solo entonces se aplica.</p>
-    <div class="subpanel-toolbar"><button class="${batch ? 'secondary' : 'primary'}" type="button" id="new-import-preview">${batch ? 'Generar una vista previa nueva' : 'Generar vista previa'}</button></div>
-    ${batch ? `<p class="eyebrow">1 · FUENTE Y LÍMITE</p><p class="form-summary">${escapeHtml(batch.sourceInfo?.source || '')}<br>Vista previa del ${escapeHtml(batch.sourceInfo?.generatedAt ? fechaHoraPanama(batch.sourceInfo.generatedAt) : '')} · hash <code>${escapeHtml(batch.previewHash.slice(0, 12))}…</code> · numeración desde ${importCode(t.firstNumber)} hasta ${importCode(t.lastNumber)}<br>Generador del sistema anterior: <b>${engine.legacyWrites ? 'activo' : 'apagado'}</b> (estado ${escapeHtml(engine.state)})</p>
-    <p class="eyebrow" style="margin-top:14px">2 · TOTALES</p><div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Facturas a crear</span><strong>${t.invoices ?? 0} · ${money.format(t.invoicesTotal || 0)}</strong></article><article><span>Cobros a crear</span><strong>${t.payments ?? 0} · ${money.format(t.paymentsTotal || 0)}</strong></article><article><span>Saldo pendiente inicial</span><strong>${money.format(t.openBalance || 0)}</strong></article><article><span>Pagadas / pendientes</span><strong>${t.paid ?? 0} / ${t.pending ?? 0}</strong></article><article><span>Por revisar</span><strong>${t.review ?? 0}</strong></article><article><span>Excluidas · ya cargadas</span><strong>${t.excluded ?? 0} · ${t.alreadyApplied ?? 0}</strong></article></div>
-    <p class="eyebrow" style="margin-top:14px">3 · LO QUE SE CREARÁ</p>
-    ${included.length ? `<div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Factura</th><th>Pagador</th><th>Ciclo</th><th>Líneas</th><th>Total</th><th>Cobro</th><th>Estado</th><th>Origen</th></tr></thead><tbody>${included.map(item => `<tr>
-      <td data-label="Factura"><b>${item.decision === 'ya_aplicado' ? 'Ya cargada' : importCode(item.data.projectedNumber)}</b><br><small>${escapeHtml(newBillingKinds[item.data.kind] || item.data.kind)}</small></td>
-      <td data-label="Pagador">${escapeHtml(item.data.payer.name)}</td>
-      <td data-label="Ciclo">${fechaCorta(item.data.cycleStart)} → ${fechaCorta(item.data.cycleEnd)}</td>
-      <td data-label="Líneas">${item.data.lines.map(line => `${escapeHtml(line.beneficiary)}: ${money.format(line.amount)}`).join('<br>')}</td>
-      <td data-label="Total">${money.format(item.data.total)}</td>
-      <td data-label="Cobro">${item.data.payment ? `${money.format(item.data.payment.amount)} · ${escapeHtml(item.data.payment.method)}<br><small>${fechaCorta(item.data.payment.paidOn)}</small>` : 'Sin cobro'}</td>
-      <td data-label="Estado">${escapeHtml(newBillingStatusLabels[item.data.status] || item.data.status)}</td>
-      <td data-label="Origen"><small>${item.sourceIds.payments?.length || 0} cobro(s) y ${item.sourceIds.invoices?.length || 0} factura(s) del sistema anterior</small></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">No hay nada que cargar en esta vista previa.</p>'}
-    ${review.length ? `<p class="eyebrow" style="margin-top:14px">REQUIEREN REVISIÓN (NO SE CARGAN)</p><div class="new-billing-allocs">${review.map(item => `<div class="new-billing-alloc"><div><b>${escapeHtml(item.label)}</b><small>${item.reasons.map(escapeHtml).join('<br>')}</small></div></div>`).join('')}</div>` : ''}
-    <p class="eyebrow" style="margin-top:14px">4 · EXCLUIDAS (LAS CARGAS JOEL A MANO)</p><div class="new-billing-allocs">${excluded.map(item => `<div class="new-billing-alloc"><div><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.reasons[0] || '')}</small></div></div>`).join('')}</div>
-    <div class="subpanel-toolbar" style="margin-top:14px">${actions}</div>` : ''}
-    ${batches.length > 1 ? `<p class="eyebrow" style="margin-top:14px">LOTES ANTERIORES</p><div class="new-billing-allocs">${batches.map(item => `<div class="new-billing-alloc"><div><b>${escapeHtml(newImportStatus[item.status] || item.status)}</b><small>${escapeHtml(fechaHoraPanama(item.createdAt, false))} · ${item.totals?.invoices ?? 0} facturas · ${money.format(item.totals?.invoicesTotal || 0)}</small></div><button class="secondary" type="button" data-import-open="${item.id}">Ver</button></div>`).join('')}</div>` : ''}</article>`;
-  document.getElementById('new-import-preview').onclick = async event => {
-    event.target.disabled = true;
-    try { const created = await api('/api/billing/imports/preview', { method: 'POST', body: {} }); newImportCurrent = created.id; toast('Vista previa generada'); newBillingImport(created.id); } catch (error) { toast(error.message, true); event.target.disabled = false; }
-  };
-  root.querySelectorAll('[data-import-open]').forEach(button => button.onclick = () => { newImportCurrent = button.dataset.importOpen; newBillingImport(newImportCurrent); });
-  const approve = document.getElementById('new-import-approve');
-  if (approve) approve.onclick = () => newBillingImportConfirm('Aprobar la vista previa', `Vas a aprobar ${t.invoices} facturas por ${money.format(t.invoicesTotal || 0)} y ${t.payments} cobros por ${money.format(t.paymentsTotal || 0)}. Aprobar NO carga nada todavía: la carga se aplica en el corte, con tu orden y con el generador anterior apagado.`, 'APROBAR', 'Aprobar', async () => {
-    const result = await api(`/api/billing/imports/${batch.id}/approve`, { method: 'POST', body: { previewHash: batch.previewHash } }); toast(`Vista previa aprobada${result.review ? ` · ${result.review} entrada(s) por revisar quedan fuera` : ''}`); newBillingImport(batch.id);
-  });
-  const apply = document.getElementById('new-import-apply');
-  if (apply) apply.onclick = () => newBillingImportConfirm('Aplicar la carga', `Se crearán ${t.invoices} facturas (${importCode(t.firstNumber)} a ${importCode(t.lastNumber)}) y ${t.payments} cobros, todo en una sola operación. El sistema anterior no se modifica.`, 'APLICAR', 'Aplicar', async () => {
-    const result = await api(`/api/billing/imports/${batch.id}/apply`, { method: 'POST', body: {} }); toast(`Carga aplicada: ${result.created.length} facturas`); newBillingImport(batch.id);
-  });
-  const reverse = document.getElementById('new-import-reverse');
-  if (reverse) reverse.onclick = () => newBillingReasonDialog('Revertir la carga', 'Revertir carga', async reason => {
-    const result = await api(`/api/billing/imports/${batch.id}/reverse`, { method: 'POST', body: { reason } }); modal.close(); toast(`Carga revertida: ${result.invoices} facturas y ${result.payments} cobros retirados`); newBillingImport(batch.id);
-  });
-}
-
-// Confirmación explícita: hay que escribir la palabra (APROBAR / APLICAR) para continuar.
-function newBillingImportConfirm(title, message, word, action, onConfirm) {
-  const box = document.createElement('div');
-  box.innerHTML = `<form id="new-import-confirm-form"><p class="eyebrow">CARGA INICIAL</p><h2>${escapeHtml(title)}</h2><p class="section-note">${escapeHtml(message)}</p><label>Escribe ${escapeHtml(word)} para confirmar<input name="word" required autocomplete="off" /></label><button class="primary wide-button">${escapeHtml(action)}</button></form>`;
-  openModal(box);
-  box.querySelector('form').onsubmit = async event => {
-    event.preventDefault();
-    if (new FormData(event.target).get('word').trim().toUpperCase() !== word) return toast(`Escribe ${word} tal cual para confirmar`, true);
-    try { await onConfirm(); modal.close(); } catch (error) { toast(error.message, true); }
-  };
-}
-// ── Corte (1B-6) ─────────────────────────────────────────────────────────────
-// Prepara el paso del generador anterior al nuevo: estado operativo, lista de comprobación, planes de
-// facturación propuestos, lo que emitiría el generador nuevo y la guía del corte. Aquí NO se apaga ni se
-// enciende nada: los interruptores viven en Railway y los acciona Joel en el momento.
+// ── Próximas facturas (1B-6) ─────────────────────────────────────────────────
+// Lo que el generador emitirá en los próximos 35 días y las alertas que impedirían emitir bien (cliente con cobro sin plan, pagador sin factura
+// de referencia, línea que se perdería de una factura, ciclo atrasado). Es la pantalla de vigilancia de todos los días; el corte y la carga inicial ya se hicieron.
 const newCutoverKinds = { monthly: 'Mensualidad', credit: 'A crédito', package: 'Paquete', mensual: 'Mensualidad', credito: 'A crédito', paquete: 'Paquete' };
 const newCutoverPlanStatus = { emitir: 'Se emite hoy', programada: 'Programada', omitida: 'Omitida (se crea a mano)', sin_cargo: 'Sin cargo', sin_referencia: 'Sin factura previa' };
-const newCutoverEngineText = {
-  legacy: 'El generador del sistema anterior está activo y el nuevo apagado. Es la situación actual hasta el corte.',
-  shadow: 'El generador anterior escribe y el nuevo solo calcula (modo sombra).',
-  maintenance: 'Mantenimiento: ningún generador escribe. Es el momento de aprobar y aplicar la carga.',
-  new: 'El generador nuevo está activo y el anterior apagado: el corte ya se hizo.'
-};
+const newUpcomingAlertKeys = ['plans', 'reference', 'dropped-lines', 'omitted'];
 function newCutoverItemText(item) {
   return Object.entries(item).map(([key, value]) => {
     if (typeof value === 'number') return /price|amount/i.test(key) ? money.format(value) : String(value);
@@ -4517,38 +4422,42 @@ function newCutoverItemText(item) {
   }).filter(Boolean).join(' · ');
 }
 
-async function newBillingCutover() {
-  const root = document.getElementById('corte-mount');
+async function newBillingUpcoming() {
+  const root = document.getElementById('proximas-mount');
   if (!root) return;
   root.innerHTML = '<article class="card"><p class="empty">Cargando…</p></article>';
   try {
-    const [readiness, plan, proposed] = await Promise.all([api('/api/billing/cutover/readiness'), api('/api/billing/generation/plan?horizon=35'), api('/api/billing/cutover/proposed-lines')]);
+    const [readiness, plan] = await Promise.all([api('/api/billing/cutover/readiness'), api('/api/billing/generation/plan?horizon=35')]);
     const engine = readiness.engine;
-    const icon = status => status === 'ok' ? '✓' : status === 'warn' ? '!' : '✗';
-    root.innerHTML = `<article class="card"><div class="card-head"><div><h3>Corte</h3><p>${readiness.ready ? 'Todo lo imprescindible está en orden' : 'Faltan cosas antes del corte'} · ${fechaCorta(readiness.today)}</p></div></div>
-      <p class="section-note">Aquí se prepara el paso del generador anterior al nuevo. Esta pantalla no apaga ni enciende nada: los interruptores están en Railway y los accionas tú, en el momento.</p>
-      <p class="eyebrow">1 · ESTADO OPERATIVO</p><p class="form-summary"><b>${escapeHtml(engine.state)}</b> · ${escapeHtml(newCutoverEngineText[engine.state] || engine.message)}${engine.conflict ? '<br><b>¡Conflicto de configuración!</b> Los dos generadores estaban activos; se dejaron apagados.' : ''}<br>Generador anterior: <b>${engine.legacyWrites ? 'activo' : 'apagado'}</b> · Generador nuevo: <b>${engine.newWrites ? 'activo' : engine.newComputes ? 'solo calcula' : 'apagado'}</b></p>
-      <p class="eyebrow" style="margin-top:14px">2 · LISTA DE COMPROBACIÓN</p>
-      <div class="new-billing-allocs">${readiness.checks.map(check => `<div class="new-billing-alloc" style="grid-template-columns:1fr"><div><b>${icon(check.status)} ${escapeHtml(check.label)}</b><small>${escapeHtml(check.detail)}</small>${check.items?.length ? `<small>${check.items.slice(0, 12).map(item => escapeHtml(newCutoverItemText(item))).join('<br>')}${check.items.length > 12 ? `<br>… y ${check.items.length - 12} más` : ''}</small>` : ''}</div></div>`).join('')}</div>
-      <p class="eyebrow" style="margin-top:14px">3 · PLANES DE FACTURACIÓN PROPUESTOS</p>
-      ${proposed.lines.length ? `<p class="section-note">Estos clientes activos con cobro todavía no tienen un plan de facturación. Se proponen leyendo su expediente actual (monto, pagador y corte); revisa y confirma. Lo que el expediente no puede expresar —por ejemplo el plan propio de Ernesto o el paquete de 35 días de Sara— se agrega a mano en su expediente.</p><div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Beneficiario</th><th>Pagador</th><th>Modalidad</th><th>Monto</th><th>Desde</th></tr></thead><tbody>${proposed.lines.map(line => `<tr><td data-label="Beneficiario">${escapeHtml(line.beneficiaryName)}</td><td data-label="Pagador">${escapeHtml(line.payerName)}</td><td data-label="Modalidad">${escapeHtml(newCutoverKinds[line.kind] || line.kind)}${line.cycleDays ? ` · ${line.cycleDays} días` : ''}</td><td data-label="Monto">${money.format(line.price)}${line.kind === 'credit' ? ' por clase' : ''}</td><td data-label="Desde">${fechaCorta(line.startsOn)}</td></tr>`).join('')}</tbody></table></div><div class="subpanel-toolbar"><button class="primary" type="button" id="new-cutover-create">Crear los ${proposed.lines.length} planes propuestos</button></div>` : '<p class="empty">No hay planes pendientes por proponer.</p>'}
-      <p class="eyebrow" style="margin-top:14px">4 · LO QUE EMITIRÍA EL GENERADOR NUEVO (PRÓXIMOS ${plan.horizon} DÍAS)</p>
-      ${plan.plan.length ? `<div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Emisión</th><th>Pagador</th><th>Modalidad</th><th>Ciclo</th><th>Líneas</th><th>Total</th><th>Estado</th></tr></thead><tbody>${plan.plan.map(item => `<tr><td data-label="Emisión">${item.status === 'sin_referencia' ? '—' : fechaCorta(item.kind === 'credito' ? (item.cycleEnd && addDaysIso(item.cycleEnd, 1)) : item.cycleStart)}</td><td data-label="Pagador">${escapeHtml(item.payerName)}</td><td data-label="Modalidad">${escapeHtml(newCutoverKinds[item.kind] || item.kind)}</td><td data-label="Ciclo">${item.status === 'sin_referencia' ? '—' : `${fechaCorta(item.cycleStart)} → ${fechaCorta(item.cycleEnd)}`}</td><td data-label="Líneas">${item.lines.map(line => `${escapeHtml(line.beneficiaryName)}: ${money.format(line.amount)}`).join('<br>') || '—'}</td><td data-label="Total">${money.format(item.total)}</td><td data-label="Estado">${escapeHtml(newCutoverPlanStatus[item.status] || item.status)}${item.reason ? `<br><small>${escapeHtml(item.reason)}</small>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">El generador nuevo no tiene nada que emitir en este período.</p>'}
-      <div class="subpanel-toolbar"><button class="secondary" type="button" id="new-cutover-run"${engine.newWrites ? '' : ' disabled'}>Generar ahora lo que toca hoy</button></div>${engine.newWrites ? '' : '<p class="section-note">El generador nuevo solo escribe cuando el corte lo activa; hasta entonces este plan es solo una vista previa.</p>'}
-      <p class="eyebrow" style="margin-top:14px">5 · GUÍA DEL CORTE</p>
-      <ol class="section-note" style="padding-left:20px"><li>Comprueba que la lista de arriba no tenga ✗ y que entiendes cada !.</li><li>Actualiza la lista de la Carga inicial con lo que el sistema anterior emitió hasta hoy y genera una vista previa nueva: debe dar 0 por revisar.</li><li>Confirma que hay un respaldo reciente de la base (el respaldo diario o uno manual).</li><li>En Railway, servicio de la API → Variables: pon <code>LEGACY_BILLING_GENERATION=off</code>. El servicio se reinicia y el estado pasa a mantenimiento.</li><li>En Carga inicial: Aprobar y Aplicar la carga. Revisa Facturas (nuevo) y Cobros (nuevo) contra tu estado de cuenta.</li><li>En Railway: <code>NEW_BILLING_GENERATION=on</code>. El estado pasa a <b>new</b> y el generador nuevo emite desde el siguiente corte.</li><li>Reversa: antes del paso 6 se puede revertir la carga; para volver al sistema anterior, <code>LEGACY_BILLING_GENERATION=on</code> y <code>NEW_BILLING_GENERATION=off</code>.</li></ol></article>`;
-    const create = document.getElementById('new-cutover-create');
-    if (create) create.onclick = () => newBillingImportConfirm('Crear los planes propuestos', `Se crearán ${proposed.lines.length} planes de facturación leídos de los expedientes actuales. No emiten facturas por sí solos: solo declaran el acuerdo para el generador nuevo.`, 'CREAR', 'Crear planes', async () => {
-      const result = await api('/api/billing/cutover/proposed-lines/apply', { method: 'POST', body: { confirm: true } }); toast(`${result.count} planes creados`); newBillingCutover();
-    });
-    const run = document.getElementById('new-cutover-run');
+    const alerts = readiness.checks.filter(check => newUpcomingAlertKeys.includes(check.key) && check.status !== 'ok');
+    const toIssue = plan.plan.filter(item => item.status === 'emitir').length;
+    const scheduled = plan.plan.filter(item => item.status === 'programada').length;
+    root.innerHTML = `<article class="card"><div class="card-head"><div><h3>Próximas facturas</h3><p>${toIssue} se emiten hoy · ${scheduled} programadas en los próximos ${plan.horizon} días · ${fechaCorta(readiness.today)}</p></div></div>
+      ${engine.state === 'new' ? '' : `<p class="form-summary error"><b>Atención:</b> el generador nuevo no está activo (estado ${escapeHtml(engine.state)}). Lo que ves es solo una vista previa.</p>`}
+      <p class="eyebrow">ALERTAS</p>
+      ${alerts.length ? `<div class="new-billing-allocs">${alerts.map(check => `<div class="new-billing-alloc" style="grid-template-columns:1fr"><div><b>${check.status === 'warn' ? '!' : '✗'} ${escapeHtml(check.label)}</b><small>${escapeHtml(check.detail)}</small>${check.items?.length ? `<small>${check.items.slice(0, 12).map(item => escapeHtml(newCutoverItemText(item))).join('<br>')}${check.items.length > 12 ? `<br>… y ${check.items.length - 12} más` : ''}</small>` : ''}</div></div>`).join('')}</div>` : '<p class="form-summary">✓ Todo en orden: cada cliente con cobro tiene su plan, cada pagador su factura de referencia y no hay ciclos atrasados.</p>'}
+      <p class="eyebrow" style="margin-top:14px">LO QUE EMITIRÁ EL GENERADOR (PRÓXIMOS ${plan.horizon} DÍAS)</p>
+      ${plan.plan.length ? `<div class="table-wrap"><table class="stack-mobile"><thead><tr><th>Emisión</th><th>Pagador</th><th>Modalidad</th><th>Ciclo</th><th>Líneas</th><th>Total</th><th>Estado</th></tr></thead><tbody>${plan.plan.map(item => `<tr><td data-label="Emisión">${item.status === 'sin_referencia' ? '—' : fechaCorta(item.kind === 'credito' ? (item.cycleEnd && addDaysIso(item.cycleEnd, 1)) : item.cycleStart)}</td><td data-label="Pagador">${escapeHtml(item.payerName)}</td><td data-label="Modalidad">${escapeHtml(newCutoverKinds[item.kind] || item.kind)}</td><td data-label="Ciclo">${item.status === 'sin_referencia' ? '—' : `${fechaCorta(item.cycleStart)} → ${fechaCorta(item.cycleEnd)}`}</td><td data-label="Líneas">${item.lines.map(line => `${escapeHtml(line.beneficiaryName)}: ${money.format(line.amount)}`).join('<br>') || '—'}</td><td data-label="Total">${money.format(item.total)}</td><td data-label="Estado">${escapeHtml(newCutoverPlanStatus[item.status] || item.status)}${item.reason ? `<br><small>${escapeHtml(item.reason)}</small>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">No hay nada programado en este período.</p>'}
+      <p class="section-note">El generador corre solo todos los días. Los créditos (a crédito) se calculan con las clases marcadas en Asistencia al cierre del ciclo. Si una factura no salió el día que tocaba, puedes generarla aquí (hasta 3 días de atraso).</p>
+      <div class="subpanel-toolbar"><button class="secondary" type="button" id="new-upcoming-run"${engine.newWrites ? '' : ' disabled'}>Generar ahora lo que toca hoy</button></div></article>`;
+    const run = document.getElementById('new-upcoming-run');
     if (run && engine.newWrites) run.onclick = async () => {
       run.disabled = true;
-      try { const result = await api('/api/billing/generation/run', { method: 'POST', body: {} }); toast(`${result.created.length} factura(s) generada(s)`); newBillingCutover(); } catch (error) { toast(error.message, true); run.disabled = false; }
+      try { const result = await api('/api/billing/generation/run', { method: 'POST', body: {} }); toast(`${result.created.length} factura(s) generada(s)`); newBillingUpcoming(); } catch (error) { toast(error.message, true); run.disabled = false; }
     };
   } catch (error) { root.innerHTML = `<article class="card"><p class="empty">${escapeHtml(error.message)}</p></article>`; }
 }
 function addDaysIso(iso, days) { const base = new Date(`${iso}T12:00:00Z`); base.setUTCDate(base.getUTCDate() + days); return base.toISOString().slice(0, 10); }
+
+// dd-mm-aaaa y hora de 12 h (a. m./p. m.) en horario de Panamá, sin depender del idioma del navegador.
+function fechaHoraPanama(value, withTime = true) {
+  const date = new Date(value); if (Number.isNaN(date.getTime())) return '';
+  const [y, m, d] = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Panama', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date).split('-');
+  if (!withTime) return `${d}-${m}-${y}`;
+  const hora = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Panama', hour: 'numeric', minute: '2-digit', hour12: true }).format(date).replace('AM', 'a. m.').replace('PM', 'p. m.');
+  return `${d}-${m}-${y} ${hora}`;
+}
+
 // ── Reportes del módulo nuevo (1B-5) ─────────────────────────────────────────
 // Estado de cuenta por pagador, cuentas por cobrar con antigüedad, cobrado por mes y método, morosidad con los beneficiarios
 // afectados, pagos sin aplicar y la bitácora. Todo sale de las tablas nuevas; los CSV y el PDF se descargan con la sesión.
@@ -4629,8 +4538,7 @@ function activarSubtab(nombre) {
   document.querySelectorAll('#billing .subpanel').forEach(panel => panel.classList.toggle('active', panel.id === `subpanel-${nombre}`));
   if (nombre === 'facturas-nuevo') newBillingInvoices();
   if (nombre === 'cobros-nuevo') newBillingPayments();
-  if (nombre === 'carga-inicial') newBillingImport();
-  if (nombre === 'corte') newBillingCutover();
+  if (nombre === 'proximas') newBillingUpcoming();
   if (nombre === 'reportes-nuevo') newBillingReports();
   if (nombre === 'archivo') newBillingArchive();
   if (nombre === 'finanzas') financeDashboard();
