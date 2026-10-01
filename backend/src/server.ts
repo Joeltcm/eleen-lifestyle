@@ -1146,7 +1146,7 @@ const importManifestInput = z.object({
       amount: z.coerce.number().min(0).max(100000).optional(), sessionsReference: z.coerce.number().int().positive().max(1000).optional()
     })).min(1).max(30),
     payment: z.object({
-      paidOn: importDate, method: z.enum(billingPaymentMethods), amount: z.coerce.number().positive().max(1_000_000), reference: z.string().trim().max(160).optional()
+      paidOn: importDate, method: z.enum([...billingPaymentMethods, 'legacy'] as const), amount: z.coerce.number().positive().max(1_000_000), reference: z.string().trim().max(160).optional()
     }).optional()
   })).min(1).max(200),
   exclusions: z.array(z.object({ key: z.string().trim().min(1).max(80), label: z.string().trim().min(1).max(200), reason: z.string().trim().min(1).max(500) })).max(200)

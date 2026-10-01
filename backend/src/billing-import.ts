@@ -20,7 +20,7 @@ import { sql } from './db.js';
 
 // ── Tipos del manifiesto ─────────────────────────────────────────────────────
 export type ImportLine = { beneficiary: string; description?: string; amount?: number; sessionsReference?: number };
-export type ImportPayment = { paidOn: string; method: 'Efectivo' | 'Yappy' | 'Transferencia bancaria' | 'Tarjeta' | 'Otro'; amount: number; reference?: string };
+export type ImportPayment = { paidOn: string; method: 'Efectivo' | 'Yappy' | 'Transferencia bancaria' | 'Tarjeta' | 'Otro' | 'legacy'; amount: number; reference?: string };
 export type ImportEntry = {
   key: string; label: string; payer: string;
   kind: 'mensual' | 'credito' | 'clase_suelta' | 'paquete' | 'manual';
@@ -63,8 +63,9 @@ export const DEFAULT_IMPORT_MANIFEST: ImportManifest = {
         { beneficiary: 'Julieta Galindo', description: 'Julieta', amount: 150 },
         { beneficiary: 'Juan de Diego padre', description: 'Juan de Diego padre', amount: 150 }
       ], payment: { paidOn: '2026-09-26', method: 'Yappy', amount: 300 } },
-    { key: 'gila-2026-09', label: 'Gila Falic · pendiente', payer: 'Gila Falic', kind: 'mensual', cycleStart: '2026-09-28', cycleEnd: '2026-10-28',
-      lines: [{ beneficiary: 'Gila Falic', description: 'Mensualidad', amount: 240 }] },
+    // Gila pagó el 01-10-2026 (J-055): el método se toma del cobro registrado en el sistema anterior.
+    { key: 'gila-2026-09', label: 'Gila Falic · 28-09 (pagada el 01-10)', payer: 'Gila Falic', kind: 'mensual', cycleStart: '2026-09-28', cycleEnd: '2026-10-28',
+      lines: [{ beneficiary: 'Gila Falic', description: 'Mensualidad', amount: 240 }], payment: { paidOn: '2026-10-01', method: 'legacy', amount: 240 } },
     { key: 'julio-2026-09', label: 'Julio Alvarez · crédito (31-08, 30-09]', payer: 'Julio Alvarez', kind: 'credito', cycleStart: '2026-08-31', cycleEnd: '2026-09-30', amountFrom: 'legacy',
       lines: [{ beneficiary: 'Julio Alvarez', description: 'Sesiones cobrables del ciclo' }] }
   ],
@@ -185,11 +186,22 @@ export async function buildImportPreview(tx: Tx, ownerId: string, manifest: Impo
     let total = cents(entry.lines.reduce((sum, line) => sum + Number(line.amount ?? 0), 0));
     let legacyAmount: number | null = null;
     let alreadyApplied = false;
+    let resolvedMethod: string | null = null;
 
     if (payer.error === undefined) {
       if (entry.payment) {
-        if (!METHODS.includes(entry.payment.method)) reasons.push(`Método de pago no válido: ${entry.payment.method}`);
         const found = await legacyPayments(tx, payer.id, entry.payment.paidOn);
+        // El método del cobro tiene que coincidir con el registrado en el sistema anterior (si éste lo trae).
+        const legacyMethods = [...new Set(found.map(row => String(row.method ?? '').trim()).filter(Boolean))];
+        let method: string = entry.payment.method;
+        if (entry.payment.method === 'legacy') {
+          if (legacyMethods.length === 1 && METHODS.some(candidate => candidate.toLowerCase() === legacyMethods[0].toLowerCase())) method = METHODS.find(candidate => candidate.toLowerCase() === legacyMethods[0].toLowerCase())!;
+          else reasons.push(legacyMethods.length ? `El método del cobro en el sistema anterior no es utilizable: ${legacyMethods.join(', ')}` : 'El cobro del sistema anterior no trae método');
+        } else {
+          if (!METHODS.includes(method)) reasons.push(`Método de pago no válido: ${method}`);
+          if (legacyMethods.length && !legacyMethods.every(candidate => candidate.toLowerCase() === method.toLowerCase())) reasons.push(`El método del cobro no coincide: la lista dice ${method} y el sistema anterior ${legacyMethods.join(', ')}`);
+        }
+        resolvedMethod = method;
         const sum = found.reduce((acc, row) => acc + cents(row.amount), 0);
         sourceIds.payments = found.map(row => row.id as string).sort();
         if (!found.length) reasons.push(`No hay un cobro de ${entry.payer} del ${entry.payment.paidOn} en el sistema anterior`);
@@ -222,7 +234,7 @@ export async function buildImportPreview(tx: Tx, ownerId: string, manifest: Impo
       kind: entry.kind, cycleStart: entry.cycleStart, cycleEnd: entry.cycleEnd,
       cutDay: entry.cutDay ?? (payer.error === undefined ? payer.cutDay : null) ?? Number(entry.cycleStart.slice(8, 10)),
       issuedOn, dueOn: entry.dueOn ?? issuedOn, lines, total: fromCents(total), legacyAmount,
-      payment: entry.payment ? { paidOn: entry.payment.paidOn, method: entry.payment.method, amount: entry.payment.amount, reference: entry.payment.reference ?? null } : null,
+      payment: entry.payment ? { paidOn: entry.payment.paidOn, method: resolvedMethod ?? entry.payment.method, amount: entry.payment.amount, reference: entry.payment.reference ?? null } : null,
       status: entry.payment && cents(entry.payment.amount) >= total ? 'pagada' : entry.payment ? 'parcial' : 'pendiente',
       projectedNumber: null
     };

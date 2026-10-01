@@ -52,8 +52,9 @@ async function preparar(servidor) {
   await cobro(c('Eduardo Díaz'), 175, '2026-09-28', 'Transferencia bancaria', [[e1, 175]]); await cobro(c('Eduardo Díaz'), 175, '2026-09-28', 'Transferencia bancaria', [[e2, 175]]);
   // Julieta: factura vieja mal etiquetada (vence 15-10) pagada un día tarde
   f = await factura(c('Julieta Galindo'), c('Julieta Galindo'), 'Mensualidad', 300, '2026-10-15', 'confirmed'); await cobro(c('Julieta Galindo'), 300, '2026-09-26', 'Yappy', [[f, 300]]);
-  // Pendientes: Gila y Julio (crédito, monto vivo)
-  await factura(c('Gila Falic'), c('Gila Falic'), 'Mensualidad', 240, '2026-09-28', 'pending');
+  // Gila pagó el 01-10 (J-055): factura vieja confirmada y cobro del 01-10
+  f = await factura(c('Gila Falic'), c('Gila Falic'), 'Mensualidad', 240, '2026-09-28', 'confirmed'); await cobro(c('Gila Falic'), 240, '2026-10-01', 'Yappy', [[f, 240]]);
+  // Pendientes: Julio (crédito, monto vivo)
   await factura(c('Julio Alvarez'), c('Julio Alvarez'), 'Sesiones a crédito', 275, '2026-09-30', 'pending');
   // Excluidos de la carga: tienen datos viejos pero no deben cargarse
   f = await factura(c('Michelle Behar'), c('Michelle Behar'), 'Mensualidad', 280, '2026-10-15', 'confirmed'); await cobro(c('Michelle Behar'), 280, '2026-09-15', 'Yappy', [[f, 280]]);
@@ -85,7 +86,7 @@ const preview = async ctx => (await ctx.api.post('/api/billing/imports/preview',
 const porClave = (p, key) => p.items.find(i => i.key === key);
 
 describe('vista previa (solo lectura)', () => {
-  test('con la lista aprobada propone 10 facturas por $3.585, 6 cobros por $2.370 y $1.215 pendientes', async () => {
+  test('con la lista aprobada propone 10 facturas por $3.585, 7 cobros por $2.610 y $975 pendientes', async () => {
     const antes = await snapshotLegacy(A.db);
     const r = await A.api.post('/api/billing/imports/preview', {});
     assert.equal(r.estado, 201);
@@ -93,8 +94,8 @@ describe('vista previa (solo lectura)', () => {
     assert.equal(p.status, 'preview');
     assert.match(p.previewHash, /^[0-9a-f]{64}$/);
     assert.deepEqual([p.totals.invoices, p.totals.invoicesTotal, p.totals.payments, p.totals.paymentsTotal, p.totals.openBalance],
-      [10, 3585, 6, 2370, 1215]);
-    assert.deepEqual([p.totals.paid, p.totals.pending, p.totals.review, p.totals.excluded, p.totals.firstNumber, p.totals.lastNumber], [6, 4, 0, 6, 1, 10]);
+      [10, 3585, 7, 2610, 975]);
+    assert.deepEqual([p.totals.paid, p.totals.pending, p.totals.review, p.totals.excluded, p.totals.firstNumber, p.totals.lastNumber], [7, 3, 0, 6, 1, 10]);
     assert.deepEqual(await snapshotLegacy(A.db), antes, 'la vista previa no escribe en el sistema anterior');
     const [{ n }] = await A.db`SELECT (SELECT count(*) FROM billing_invoices)::int + (SELECT count(*) FROM billing_payments)::int AS n`;
     assert.equal(n, 0, 'la vista previa no crea facturas ni cobros');
@@ -155,12 +156,12 @@ describe('vista previa (solo lectura)', () => {
 
   test('un monto distinto del esperado o un cliente que no existe también pasan a "revisar"', async () => {
     const manifest = { name: 'prueba', exclusions: [], entries: [
-      { key: 'mal-monto', label: 'Gila con monto distinto', payer: 'Gila Falic', kind: 'mensual', cycleStart: '2026-09-28', cycleEnd: '2026-10-28', lines: [{ beneficiary: 'Gila Falic', amount: 999 }] },
+      { key: 'mal-monto', label: 'Sandy octubre con monto distinto', payer: 'Sandy Asis', kind: 'mensual', cycleStart: '2026-10-01', cycleEnd: '2026-11-01', lines: [{ beneficiary: 'Sandy Asis', amount: 999 }] },
       { key: 'sin-cliente', label: 'Cliente inexistente', payer: 'Nadie Conocido', kind: 'mensual', cycleStart: '2026-09-28', cycleEnd: '2026-10-28', lines: [{ beneficiary: 'Nadie Conocido', amount: 10 }] }
     ] };
     const r = await A.api.post('/api/billing/imports/preview', { manifest });
     assert.equal(r.estado, 201);
-    assert.match(r.datos.items[0].reasons[0], /no coincide: hay 240\.00 y se esperaban 999\.00/);
+    assert.match(r.datos.items[0].reasons[0], /no coincide: hay 300\.00 y se esperaban 999\.00/);
     assert.match(r.datos.items[1].reasons.join('|'), /No se encontró al cliente "Nadie Conocido"/);
     assert.equal(r.datos.totals.invoices, 0);
   });
@@ -215,6 +216,35 @@ describe('nombres de clientes: coincidencia robusta y sin adivinar', () => {
   });
 });
 
+describe('método de pago: se toma del sistema anterior o se valida contra él', () => {
+  test('Gila pagó el 01-10: se propone pagada, con el método registrado en el sistema anterior', async () => {
+    const g = porClave(await preview(A), 'gila-2026-09');
+    assert.equal(g.decision, 'incluir');
+    assert.equal(g.data.status, 'pagada');
+    assert.deepEqual([g.data.payment.paidOn, g.data.payment.method, g.data.payment.amount], ['2026-10-01', 'Yappy', 240]);
+  });
+
+  test('si la lista dice un método y el sistema anterior otro, la entrada pasa a "revisar"', async () => {
+    const manifest = { name: 'prueba', exclusions: [], entries: [
+      { key: 'metodo-distinto', label: 'Sandy con método equivocado', payer: 'Sandy Asis', kind: 'mensual', cycleStart: '2026-09-01', cycleEnd: '2026-10-01',
+        lines: [{ beneficiary: 'Sandy Asis', amount: 300 }], payment: { paidOn: '2026-09-01', method: 'Efectivo', amount: 300 } }
+    ] };
+    const r = await A.api.post('/api/billing/imports/preview', { manifest });
+    assert.equal(r.datos.items[0].decision, 'revisar');
+    assert.match(r.datos.items[0].reasons[0], /El método del cobro no coincide: la lista dice Efectivo y el sistema anterior Yappy/);
+  });
+
+  test('un cobro viejo sin método no se puede tomar como "legacy"', async () => {
+    await A.db`UPDATE invoice_payments SET method = NULL WHERE client_id = ${A.id['Gila Falic']}`;
+    try {
+      const g = porClave(await preview(A), 'gila-2026-09');
+      assert.equal(g.decision, 'revisar');
+      assert.match(g.reasons[0], /no trae método/);
+    } finally { await A.db`UPDATE invoice_payments SET method = 'Yappy' WHERE client_id = ${A.id['Gila Falic']}`; }
+  });
+});
+
+
 describe('aprobar y aplicar: las puertas', () => {
   test('aprobar exige el hash exacto; un lote anterior queda reemplazado', async () => {
     const viejo = await preview(A); const nuevo = await preview(A);
@@ -245,7 +275,7 @@ describe('aprobar y aplicar: las puertas', () => {
 
 describe('aplicar (generador viejo apagado)', () => {
   let lote;
-  test('aplica la lista: 10 facturas numeradas 1..10, 6 cobros, estados correctos y el sistema viejo intacto', async () => {
+  test('aplica la lista: 10 facturas numeradas 1..10, 7 cobros, estados correctos y el sistema viejo intacto', async () => {
     const antes = await snapshotLegacy(B.db);
     lote = await preview(B);
     assert.equal((await B.api.post(`/api/billing/imports/${lote.id}/approve`, { previewHash: lote.previewHash })).estado, 200);
@@ -256,11 +286,11 @@ describe('aplicar (generador viejo apagado)', () => {
     const f = await B.api.get('/api/billing/invoices?limit=50');
     assert.equal(f.datos.invoices.length, 10);
     assert.equal(f.datos.summary.total, 3585);
-    assert.equal(f.datos.summary.balance, 1215);
-    assert.deepEqual(f.datos.invoices.reduce((acc, i) => { acc[i.status] = (acc[i.status] ?? 0) + 1; return acc; }, {}), { pagada: 6, pendiente: 4 });
+    assert.equal(f.datos.summary.balance, 975);
+    assert.deepEqual(f.datos.invoices.reduce((acc, i) => { acc[i.status] = (acc[i.status] ?? 0) + 1; return acc; }, {}), { pagada: 7, pendiente: 3 });
     assert.ok(f.datos.invoices.every(i => i.origin === 'carga_inicial'));
     const p = await B.api.get('/api/billing/payments?limit=50');
-    assert.deepEqual([p.datos.payments.length, p.datos.summary.total, p.datos.summary.applied, p.datos.summary.available], [6, 2370, 2370, 0]);
+    assert.deepEqual([p.datos.payments.length, p.datos.summary.total, p.datos.summary.applied, p.datos.summary.available], [7, 2610, 2610, 0]);
     assert.deepEqual(await snapshotLegacy(B.db), antes, 'aplicar no modifica ninguna tabla del sistema anterior');
   });
 
@@ -327,7 +357,7 @@ describe('reversión y cambios de última hora (servidor aparte, generador viejo
     assert.equal((await C.api.post(`/api/billing/imports/${p.id}/reverse`, { reason: ' ' })).estado, 400);
     const r = await C.api.post(`/api/billing/imports/${p.id}/reverse`, { reason: 'La lista estaba desactualizada' });
     assert.equal(r.estado, 200, JSON.stringify(r.datos));
-    assert.deepEqual([r.datos.invoices, r.datos.payments, r.datos.counter], [10, 6, 0]);
+    assert.deepEqual([r.datos.invoices, r.datos.payments, r.datos.counter], [10, 7, 0]);
     const [n] = await C.db`SELECT (SELECT count(*) FROM billing_invoices)::int AS facturas, (SELECT count(*) FROM billing_invoice_lines)::int AS lineas,
       (SELECT count(*) FROM billing_payments)::int AS cobros, (SELECT count(*) FROM billing_payment_applications)::int AS aplicaciones,
       (SELECT last_number FROM billing_counters)::int AS contador`;
