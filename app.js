@@ -1,4 +1,4 @@
-const APP_VERSION = '255';
+const APP_VERSION = '256';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -332,8 +332,8 @@ const movimientosDelCiclo = client => {
   if (client.canceladasPorElla) partes.push(`${client.canceladasPorElla} cancelada${client.canceladasPorElla === 1 ? '' : 's'} por ti`);
   // El crédito pendiente va aparte del "este mes": no caduca con el ciclo,
   // sigue debiéndose hasta que baje un cobro.
-  const credito = client.creditoPendiente > 0
-    ? `<small class="ciclo-movimientos credito">${money.format(client.creditoPendiente)} de descuento pendiente para su próximo cobro</small>` : '';
+  // Ya no se dan descuentos en dinero por clases canceladas (acuerdos de mensualidad/paquete fijo): no se muestra un "descuento pendiente" que nada va a aplicar.
+  const credito = '';
   return `${partes.length ? `<small class="ciclo-movimientos">Este mes: ${partes.join(' · ')}</small>` : ''}${credito}`;
 };
 // Colocar una reposición en un hueco libre.
@@ -1722,7 +1722,7 @@ function cancelSessionDialog(sesion) {
       <button class="secondary wide-button" id="cancela-cliente">La cancela el cliente</button>
       <p class="section-note">Cuenta en su historial del mes y puede afectar su cumplimiento.</p>
       <button class="secondary wide-button" id="cancela-entrenadora">La cancelo yo</button>
-      <p class="section-note">No toca su cumplimiento ni su contador. Se le repone o se le descuenta.</p>
+      <p class="section-note">No toca su cumplimiento ni su contador, y no descuenta clase ni dinero: se reprograma o se cancela sin más.</p>
       <p class="section-note">Si la agendaste por error, cierra esto y usa <b>Eliminar</b>: desaparece sin contar como incumplida.</p>`;
     box.querySelector('#cancela-cliente').onclick = preguntarDestinoCliente;
     box.querySelector('#cancela-entrenadora').onclick = preguntarCompensacion;
@@ -1754,16 +1754,9 @@ function cancelSessionDialog(sesion) {
       <p style="color:#6f7b75">La cancelas tú. ¿Qué hacemos?</p>
       <button class="secondary wide-button" id="compensar-reprogramar">Marcar para reprogramar</button>
       <p class="section-note">La nueva sesión se descontará del saldo mensual o paquete que corresponda a su fecha. No se crea un saldo de reposición.</p>
-      <button class="secondary wide-button" id="compensar-descuento">Descontar del próximo cobro</button>
-      <p class="section-note">${porClase > 0
-        ? `Deja un crédito de <b>${money.format(porClase)}</b> —su mensualidad entre las clases que incluye— que baja el cobro del mes que viene.`
-        : 'Su plan no dice cuántas clases incluye, así que no se puede calcular el valor de una. Configúraselo o repón la clase.'}</p>
       <button class="secondary wide-button" id="compensar-nada">Ninguna de las dos por ahora</button>
-      <p class="section-note">Se cancela sin más. Su cumplimiento no se toca igualmente, y siempre puedes reponerle o descontarle después.</p>`;
+      <p class="section-note">Se cancela sin más. No descuenta ni toca su cumplimiento; puedes reponerla después.</p>`;
     box.querySelector('#compensar-reprogramar').onclick = () => cancelar({ reprogramada: true, quien: 'trainer', compensa: 'none' });
-    const descuento = box.querySelector('#compensar-descuento');
-    descuento.disabled = !(porClase > 0);
-    descuento.onclick = () => cancelar({ reprogramada: false, quien: 'trainer', compensa: 'discount' });
     box.querySelector('#compensar-nada').onclick = () => cancelar({ reprogramada: false, quien: 'trainer', compensa: 'none' });
   };
 
@@ -1795,7 +1788,7 @@ function editCancellationDialog(sesion) {
   const by = sesion.cancelledBy || 'client';
   const res = esCredito ? 'none' : (sesion.cancellationResolution || (sesion.cancellationKind === 'rescheduled' ? 'none' : by === 'client' ? 'debit' : 'none'));
   const resolution = res === 'makeup' ? 'none' : res;
-  box.innerHTML = `<form id="edit-cancellation-form"><p class="eyebrow">AGENDA</p><h2>Editar cancelación</h2><p class="form-summary"><b>${escapeHtml(sesion.client)}</b><br>${sesion.date} · ${sesion.time}</p><label>Quién canceló<select name="by"><option value="client" ${by === 'client' ? 'selected' : ''}>El cliente</option><option value="trainer" ${by === 'trainer' ? 'selected' : ''}>La entrenadora</option></select></label><label>¿Se reprogramó?<select name="rescheduled"><option value="false" ${sesion.cancellationKind !== 'rescheduled' ? 'selected' : ''}>No, perdió la clase</option><option value="true" ${sesion.cancellationKind === 'rescheduled' ? 'selected' : ''}>Sí, se reprogramará</option></select></label>${esCredito ? `<label class="completion-check"><input type="checkbox" name="creditCharge" ${sesion.creditCharge ? 'checked' : ''} /> <span>Cobrar cancelación (${money.format(tarifaCredito)})</span></label><p class="section-note">Sólo aplica si la canceló el cliente y no se reprograma. Se mostrará en la factura y el portal.</p>` : `<label>Resolución<select name="resolution"><option value="debit" ${resolution === 'debit' ? 'selected' : ''}>Descontar del paquete</option><option value="none" ${resolution === 'none' ? 'selected' : ''}>Sin reposición ni descuento</option><option value="discount" ${resolution === 'discount' ? 'selected' : ''}>Crédito para próximo cobro</option></select></label>`}<p class="section-note">La sesión nueva, si se reprograma, consumirá el saldo mensual o paquete que corresponda a su fecha. No se crean saldos de reposición.</p><button class="primary wide-button">Guardar cambios</button></form>`;
+  box.innerHTML = `<form id="edit-cancellation-form"><p class="eyebrow">AGENDA</p><h2>Editar cancelación</h2><p class="form-summary"><b>${escapeHtml(sesion.client)}</b><br>${sesion.date} · ${sesion.time}</p><label>Quién canceló<select name="by"><option value="client" ${by === 'client' ? 'selected' : ''}>El cliente</option><option value="trainer" ${by === 'trainer' ? 'selected' : ''}>La entrenadora</option></select></label><label>¿Se reprogramó?<select name="rescheduled"><option value="false" ${sesion.cancellationKind !== 'rescheduled' ? 'selected' : ''}>No, perdió la clase</option><option value="true" ${sesion.cancellationKind === 'rescheduled' ? 'selected' : ''}>Sí, se reprogramará</option></select></label>${esCredito ? `<label class="completion-check"><input type="checkbox" name="creditCharge" ${sesion.creditCharge ? 'checked' : ''} /> <span>Cobrar cancelación (${money.format(tarifaCredito)})</span></label><p class="section-note">Sólo aplica si la canceló el cliente y no se reprograma. Se mostrará en la factura y el portal.</p>` : `<label>Resolución<select name="resolution"><option value="debit" ${resolution === 'debit' ? 'selected' : ''}>Descontar del paquete</option><option value="none" ${resolution === 'none' ? 'selected' : ''}>Sin reposición ni descuento</option>${resolution === 'discount' ? '<option value="discount" selected>Crédito para próximo cobro (anterior; ya no se ofrece)</option>' : ''}</select></label>`}<p class="section-note">La sesión nueva, si se reprograma, consumirá el saldo mensual o paquete que corresponda a su fecha. No se crean saldos de reposición.</p><button class="primary wide-button">Guardar cambios</button></form>`;
   openModal(box, true);
   box.querySelector('form').addEventListener('submit', async event => {
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); button.disabled = true;
