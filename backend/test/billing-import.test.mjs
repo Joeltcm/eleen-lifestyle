@@ -10,7 +10,7 @@ import postgres from 'postgres';
 import { CREDENCIALES, SETUP_TOKEN, cliente, levantar } from './harness.mjs';
 
 const NOMBRES = ['Sandy Asis', 'Sally Dayan Safdi', 'Riccardo Francolini', 'Iraida de Francolini', 'Ernesto de Diego', 'Eduardo Díaz', 'Beatris Díaz',
-  'Julieta Galindo', 'Juan de Diego padre', 'Gila Falic', 'Julio Alvarez', 'Michelle Behar', 'Milo Asís', 'Sara Djamous'];
+  'Julieta Galindo', 'Juan de Diego padre', 'Gila Falic', 'Julio Alvarez', 'Michelle Behar', 'Milo Asís', 'Sara Djamous', 'Susie Asís', 'Reina Yohoros', 'Sara Hidrie'];
 
 async function levantarCon(entorno) {
   const previo = {};
@@ -56,6 +56,11 @@ async function preparar(servidor) {
   f = await factura(c('Gila Falic'), c('Gila Falic'), 'Mensualidad', 240, '2026-09-28', 'confirmed'); await cobro(c('Gila Falic'), 240, '2026-10-01', 'Yappy', [[f, 240]]);
   // Pendientes: Julio (crédito, monto vivo)
   await factura(c('Julio Alvarez'), c('Julio Alvarez'), 'Sesiones a crédito', 275, '2026-09-30', 'pending');
+  // Clases sueltas (J-056): una factura vieja confirmada y un cobro por cada clase
+  const clase = async (nombre, monto, fecha, metodo = 'Yappy') => { const inv = await factura(c(nombre), c(nombre), 'Sesión individual', monto, fecha, 'confirmed'); await cobro(c(nombre), monto, fecha, metodo, [[inv, monto]]); };
+  await clase('Susie Asís', 35, '2026-09-05'); await clase('Susie Asís', 35, '2026-09-12');
+  for (const [monto, fecha] of [[90, '2026-09-07'], [60, '2026-09-17'], [90, '2026-09-23'], [20, '2026-09-30']]) await clase('Reina Yohoros', monto, fecha);
+  await clase('Sara Hidrie', 30, '2026-09-08', 'Efectivo'); await clase('Sara Hidrie', 30, '2026-09-15', 'Efectivo'); await clase('Sara Hidrie', 30, '2026-09-22', 'Efectivo');
   // Excluidos de la carga: tienen datos viejos pero no deben cargarse
   f = await factura(c('Michelle Behar'), c('Michelle Behar'), 'Mensualidad', 280, '2026-10-15', 'confirmed'); await cobro(c('Michelle Behar'), 280, '2026-09-15', 'Yappy', [[f, 280]]);
   await cobro(c('Milo Asís'), 120, '2026-08-28', 'Yappy', []);
@@ -86,7 +91,7 @@ const preview = async ctx => (await ctx.api.post('/api/billing/imports/preview',
 const porClave = (p, key) => p.items.find(i => i.key === key);
 
 describe('vista previa (solo lectura)', () => {
-  test('con la lista aprobada propone 10 facturas por $3.585, 7 cobros por $2.610 y $975 pendientes', async () => {
+  test('con la lista aprobada propone 19 facturas por $4.005, 16 cobros por $3.030 y $975 pendientes', async () => {
     const antes = await snapshotLegacy(A.db);
     const r = await A.api.post('/api/billing/imports/preview', {});
     assert.equal(r.estado, 201);
@@ -94,8 +99,8 @@ describe('vista previa (solo lectura)', () => {
     assert.equal(p.status, 'preview');
     assert.match(p.previewHash, /^[0-9a-f]{64}$/);
     assert.deepEqual([p.totals.invoices, p.totals.invoicesTotal, p.totals.payments, p.totals.paymentsTotal, p.totals.openBalance],
-      [10, 3585, 7, 2610, 975]);
-    assert.deepEqual([p.totals.paid, p.totals.pending, p.totals.review, p.totals.excluded, p.totals.firstNumber, p.totals.lastNumber], [7, 3, 0, 6, 1, 10]);
+      [19, 4005, 16, 3030, 975]);
+    assert.deepEqual([p.totals.paid, p.totals.pending, p.totals.review, p.totals.excluded, p.totals.firstNumber, p.totals.lastNumber], [16, 3, 0, 3, 1, 19]);
     assert.deepEqual(await snapshotLegacy(A.db), antes, 'la vista previa no escribe en el sistema anterior');
     const [{ n }] = await A.db`SELECT (SELECT count(*) FROM billing_invoices)::int + (SELECT count(*) FROM billing_payments)::int AS n`;
     assert.equal(n, 0, 'la vista previa no crea facturas ni cobros');
@@ -128,10 +133,10 @@ describe('vista previa (solo lectura)', () => {
     assert.equal(j.data.kind, 'credito');
   });
 
-  test('los excluidos se listan con su motivo y no se proponen (Michelle, Milo, Sara Djamous, clases sueltas)', async () => {
+  test('los excluidos se listan con su motivo y no se proponen (Michelle, Milo, Sara Djamous)', async () => {
     const p = await preview(A);
     const excluidos = p.items.filter(i => i.decision === 'excluir');
-    assert.deepEqual(excluidos.map(i => i.key).sort(), ['michelle', 'milo', 'reina', 'sara-djamous', 'sara-hidrie', 'susie']);
+    assert.deepEqual(excluidos.map(i => i.key).sort(), ['michelle', 'milo', 'sara-djamous']);
     assert.ok(excluidos.every(i => i.reasons[0].length > 10));
     assert.ok(!p.items.some(i => i.decision === 'incluir' && /michelle|milo|sara-djamous/.test(i.key)));
   });
@@ -144,9 +149,9 @@ describe('vista previa (solo lectura)', () => {
       const s = porClave(p, 'sally-2026-09');
       assert.equal(s.decision, 'revisar');
       assert.match(s.reasons[0], /No hay un cobro de Sally Dayan Safdi del 2026-09-02/);
-      assert.equal(p.totals.invoices, 9);
+      assert.equal(p.totals.invoices, 18);
       assert.equal(p.totals.review, 1);
-      assert.equal(p.totals.lastNumber, 9, 'los números proyectados se recorren sin huecos');
+      assert.equal(p.totals.lastNumber, 18, 'los números proyectados se recorren sin huecos');
     } finally {
       const [pay] = await A.db`INSERT INTO invoice_payments (client_id, amount, paid_on, method, source_system, external_id) VALUES (${A.id['Sally Dayan Safdi']}, ${borrado.amount}, ${borrado.paid_on}, ${borrado.method}, 'eileen', 'restaurado') RETURNING id`;
       const [inv] = await A.db`SELECT id FROM invoices WHERE client_id = ${A.id['Sally Dayan Safdi']} AND status = 'confirmed'`;
@@ -189,7 +194,7 @@ describe('nombres de clientes: coincidencia robusta y sin adivinar', () => {
       const p = await preview(A);
       assert.equal(porClave(p, 'sally-2026-09').decision, 'incluir');
       assert.equal(porClave(p, 'sally-2026-10').decision, 'incluir');
-      assert.equal(p.totals.invoices, 10);
+      assert.equal(p.totals.invoices, 19);
     } finally { await renombrar('Sally Dayan Safdi'); }
   });
 
@@ -201,7 +206,7 @@ describe('nombres de clientes: coincidencia robusta y sin adivinar', () => {
       assert.equal(s.decision, 'revisar');
       assert.equal(s.reasons.length, 1, 'el mismo nombre no se repite como payer y beneficiario');
       assert.match(s.reasons[0], /No se encontró al cliente "Sally Dayan Safdi"\. ¿Será "Sally Safdie"\?/);
-      assert.equal(p.totals.invoices, 8);
+      assert.equal(p.totals.invoices, 17);
       assert.equal(p.totals.review, 2);
     } finally { await renombrar('Sally Dayan Safdi'); }
   });
@@ -213,6 +218,52 @@ describe('nombres de clientes: coincidencia robusta y sin adivinar', () => {
       assert.equal(g.decision, 'revisar');
       assert.match(g.reasons[0], /Hay más de un cliente llamado "Gila Falic"/);
     } finally { await A.db`DELETE FROM clients WHERE id = ${gemelo}`; }
+  });
+});
+
+describe('clases sueltas de Susie, Reina y Sara Hidrie (J-056)', () => {
+  test('cada clase pagada es UNA factura clase_suelta y UN cobro, con fecha, monto y método del cobro viejo', async () => {
+    const p = await preview(A);
+    const reina = p.items.filter(i => i.key.startsWith('reina:'));
+    assert.equal(reina.length, 4);
+    assert.deepEqual(reina.map(i => [i.data.payment.paidOn, i.data.total, i.data.payment.method]),
+      [['2026-09-07', 90, 'Yappy'], ['2026-09-17', 60, 'Yappy'], ['2026-09-23', 90, 'Yappy'], ['2026-09-30', 20, 'Yappy']]);
+    assert.ok(reina.every(i => i.decision === 'incluir' && i.data.kind === 'clase_suelta' && i.data.cycleStart === i.data.cycleEnd && i.data.status === 'pagada'));
+    assert.equal(p.items.filter(i => i.key.startsWith('susie:')).length, 2);
+    const sara = p.items.filter(i => i.key.startsWith('sara-hidrie:'));
+    assert.equal(sara.length, 3);
+    assert.ok(sara.every(i => i.data.payment.method === 'Efectivo'));
+    assert.equal(reina.reduce((n, i) => n + i.data.total, 0), 260);
+  });
+
+  test('las que no encajan (pendiente, sin cobro, con dos cobros o de mensualidad) quedan por revisar', async () => {
+    const reina = A.id['Reina Yohoros'];
+    const [pendiente] = await A.db`INSERT INTO invoices (client_id, billed_for_client_id, concept, amount, due_on, status, source_system) VALUES (${reina}, ${reina}, 'Sesión individual', 50, '2026-09-25', 'pending', 'eileen') RETURNING id`;
+    const [sinCobro] = await A.db`INSERT INTO invoices (client_id, billed_for_client_id, concept, amount, due_on, status, source_system) VALUES (${reina}, ${reina}, 'Sesión individual', 45, '2026-09-26', 'confirmed', 'eileen') RETURNING id`;
+    const [mensual] = await A.db`INSERT INTO invoices (client_id, billed_for_client_id, concept, amount, due_on, status, source_system) VALUES (${reina}, ${reina}, 'Mensualidad', 80, '2026-09-27', 'confirmed', 'eileen') RETURNING id`;
+    try {
+      const p = await preview(A);
+      const por = id => p.items.find(i => i.key === `reina:${id}`);
+      assert.match(por(pendiente.id).reasons[0], /pendiente de cobro/);
+      assert.match(por(sinCobro.id).reasons.join('|'), /No tiene un cobro aplicado/);
+      assert.match(por(mensual.id).reasons.join('|'), /No parece una clase suelta/);
+      assert.ok([pendiente, sinCobro, mensual].every(r => por(r.id).decision === 'revisar'));
+      assert.equal(p.totals.invoices, 19, 'las dudosas no suman a lo que se carga');
+      assert.equal(p.totals.review, 3);
+    } finally { await A.db`DELETE FROM invoices WHERE id IN (${pendiente.id}, ${sinCobro.id}, ${mensual.id})`; }
+  });
+
+  test('si el cliente no existe se avisa una vez y las demás personas siguen adelante', async () => {
+    const manifest = { name: 'prueba', entries: [], exclusions: [], singleClasses: [{ key: 'nadie', label: 'Nadie (clases sueltas)', client: 'Persona Inexistente', since: '2026-09-01' },
+      { key: 'reina', label: 'Reina (clases sueltas)', client: 'Reina Yohoros', since: '2026-09-01' }] };
+    // un manifiesto sin entradas mensuales no pasa la validación (mínimo 1): se prueba con una entrada válida
+    manifest.entries = [{ key: 'sandy-oct', label: 'Sandy octubre', payer: 'Sandy Asis', kind: 'mensual', cycleStart: '2026-10-01', cycleEnd: '2026-11-01', lines: [{ beneficiary: 'Sandy Asis', amount: 300 }] }];
+    const r = await A.api.post('/api/billing/imports/preview', { manifest });
+    assert.equal(r.estado, 201);
+    const sinCliente = r.datos.items.find(i => i.key === 'nadie:cliente');
+    assert.equal(sinCliente.decision, 'revisar');
+    assert.match(sinCliente.reasons[0], /No se encontró al cliente "Persona Inexistente"/);
+    assert.equal(r.datos.items.filter(i => i.key.startsWith('reina:') && i.decision === 'incluir').length, 4);
   });
 });
 
@@ -275,22 +326,22 @@ describe('aprobar y aplicar: las puertas', () => {
 
 describe('aplicar (generador viejo apagado)', () => {
   let lote;
-  test('aplica la lista: 10 facturas numeradas 1..10, 7 cobros, estados correctos y el sistema viejo intacto', async () => {
+  test('aplica la lista: 19 facturas numeradas 1..19, 16 cobros, estados correctos y el sistema viejo intacto', async () => {
     const antes = await snapshotLegacy(B.db);
     lote = await preview(B);
     assert.equal((await B.api.post(`/api/billing/imports/${lote.id}/approve`, { previewHash: lote.previewHash })).estado, 200);
     const r = await B.api.post(`/api/billing/imports/${lote.id}/apply`, {});
     assert.equal(r.estado, 200, JSON.stringify(r.datos));
-    assert.equal(r.datos.created.length, 10);
-    assert.deepEqual(r.datos.created.map(c => c.code), Array.from({ length: 10 }, (_, i) => `FAC-${String(i + 1).padStart(4, '0')}`));
+    assert.equal(r.datos.created.length, 19);
+    assert.deepEqual(r.datos.created.map(c => c.code), Array.from({ length: 19 }, (_, i) => `FAC-${String(i + 1).padStart(4, '0')}`));
     const f = await B.api.get('/api/billing/invoices?limit=50');
-    assert.equal(f.datos.invoices.length, 10);
-    assert.equal(f.datos.summary.total, 3585);
+    assert.equal(f.datos.invoices.length, 19);
+    assert.equal(f.datos.summary.total, 4005);
     assert.equal(f.datos.summary.balance, 975);
-    assert.deepEqual(f.datos.invoices.reduce((acc, i) => { acc[i.status] = (acc[i.status] ?? 0) + 1; return acc; }, {}), { pagada: 7, pendiente: 3 });
+    assert.deepEqual(f.datos.invoices.reduce((acc, i) => { acc[i.status] = (acc[i.status] ?? 0) + 1; return acc; }, {}), { pagada: 16, pendiente: 3 });
     assert.ok(f.datos.invoices.every(i => i.origin === 'carga_inicial'));
     const p = await B.api.get('/api/billing/payments?limit=50');
-    assert.deepEqual([p.datos.payments.length, p.datos.summary.total, p.datos.summary.applied, p.datos.summary.available], [7, 2610, 2610, 0]);
+    assert.deepEqual([p.datos.payments.length, p.datos.summary.total, p.datos.summary.applied, p.datos.summary.available], [16, 3030, 3030, 0]);
     assert.deepEqual(await snapshotLegacy(B.db), antes, 'aplicar no modifica ninguna tabla del sistema anterior');
   });
 
@@ -314,11 +365,11 @@ describe('aplicar (generador viejo apagado)', () => {
   test('es idempotente: una vista previa nueva marca todo como ya aplicado y aplicar crea cero filas', async () => {
     const p = await preview(B);
     assert.equal(p.totals.invoices, 0);
-    assert.equal(p.totals.alreadyApplied, 10);
+    assert.equal(p.totals.alreadyApplied, 19);
     assert.equal((await B.api.post(`/api/billing/imports/${p.id}/approve`, { previewHash: p.previewHash })).estado, 200);
     assert.equal((await B.api.post(`/api/billing/imports/${p.id}/apply`, {})).estado, 200);
     const [{ n, c }] = await B.db`SELECT (SELECT count(*) FROM billing_invoices)::int AS n, (SELECT last_number FROM billing_counters)::int AS c`;
-    assert.deepEqual([n, c], [10, 10]);
+    assert.deepEqual([n, c], [19, 19]);
   });
 
   test('un lote aplicado no se aplica otra vez', async () => {
@@ -333,10 +384,10 @@ describe('aplicar (generador viejo apagado)', () => {
 
 describe('reversión del lote', () => {
   test('se bloquea si ya se emitió otra factura después de la carga', async () => {
-    const lote = (await B.api.get('/api/billing/imports')).datos.batches.find(b => b.status === 'applied' && b.totals.invoices === 10);
+    const lote = (await B.api.get('/api/billing/imports')).datos.batches.find(b => b.status === 'applied' && b.totals.invoices === 19);
     const manual = await B.api.post('/api/billing/invoices', { payerClientId: B.id['Michelle Behar'], kind: 'manual', issuedOn: '2026-10-01',
       lines: [{ beneficiaryClientId: B.id['Michelle Behar'], unitAmount: 280, description: 'Manual de Joel' }] });
-    assert.equal(manual.datos.number, 11);
+    assert.equal(manual.datos.number, 20);
     const r = await B.api.post(`/api/billing/imports/${lote.id}/reverse`, { reason: 'Prueba' });
     assert.equal(r.estado, 409);
     assert.match(r.datos.error, /Ya se emitieron facturas después de la carga/);
@@ -357,7 +408,7 @@ describe('reversión y cambios de última hora (servidor aparte, generador viejo
     assert.equal((await C.api.post(`/api/billing/imports/${p.id}/reverse`, { reason: ' ' })).estado, 400);
     const r = await C.api.post(`/api/billing/imports/${p.id}/reverse`, { reason: 'La lista estaba desactualizada' });
     assert.equal(r.estado, 200, JSON.stringify(r.datos));
-    assert.deepEqual([r.datos.invoices, r.datos.payments, r.datos.counter], [10, 7, 0]);
+    assert.deepEqual([r.datos.invoices, r.datos.payments, r.datos.counter], [19, 16, 0]);
     const [n] = await C.db`SELECT (SELECT count(*) FROM billing_invoices)::int AS facturas, (SELECT count(*) FROM billing_invoice_lines)::int AS lineas,
       (SELECT count(*) FROM billing_payments)::int AS cobros, (SELECT count(*) FROM billing_payment_applications)::int AS aplicaciones,
       (SELECT last_number FROM billing_counters)::int AS contador`;
@@ -368,7 +419,7 @@ describe('reversión y cambios de última hora (servidor aparte, generador viejo
     assert.deepEqual(acciones, ['IMPORT_APPLY', 'IMPORT_REVERSE'], 'la bitácora conserva lo ocurrido');
     // y se puede volver a cargar con los mismos números 1..10
     const q = await preview(C);
-    assert.deepEqual([q.totals.firstNumber, q.totals.lastNumber], [1, 10]);
+    assert.deepEqual([q.totals.firstNumber, q.totals.lastNumber], [1, 19]);
   });
 
   test('si se emitió una factura después de aprobar, aplicar se rechaza: el contador ya no es el de la vista previa', async () => {

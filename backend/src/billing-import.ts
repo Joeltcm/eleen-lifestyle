@@ -30,7 +30,11 @@ export type ImportEntry = {
   payment?: ImportPayment;
 };
 export type ImportExclusion = { key: string; label: string; reason: string };
-export type ImportManifest = { name: string; entries: ImportEntry[]; exclusions: ImportExclusion[] };
+// Clientes de clases sueltas (Susie, Reina, Sara Hidrie): cada factura vieja pagada desde `since` se carga como UNA
+// factura `clase_suelta` con su cobro, tomando fecha, monto, método y referencia del cobro viejo. Si una no encaja
+// (pendiente, sin cobro, con más de un cobro, de mensualidad o paquete) NO se carga y queda "revisar".
+export type ImportSingleClasses = { key: string; label: string; client: string; since: string };
+export type ImportManifest = { name: string; entries: ImportEntry[]; exclusions: ImportExclusion[]; singleClasses?: ImportSingleClasses[] };
 
 // Lista aprobada de la carga inicial (diseño 8.1 y 8.2, J-045/J-047/J-051). Al acercarse el corte hay
 // que ACTUALIZARLA con los ciclos vigentes ese día; la vista previa muestra cualquier diferencia.
@@ -72,10 +76,13 @@ export const DEFAULT_IMPORT_MANIFEST: ImportManifest = {
   exclusions: [
     { key: 'michelle', label: 'Michelle Behar', reason: 'Etiqueta, periodo y fecha de la factura no concuerdan con el ciclo confirmado: la carga Joel a mano (J-045).' },
     { key: 'milo', label: 'Milo Asís', reason: 'Falta el segundo cobro declarado del 28-09 y no se reconstruyen con seguridad ambos ciclos: la carga Joel a mano (J-045).' },
-    { key: 'sara-djamous', label: 'Sara Djamous', reason: 'Fechas de ciclo, compra, vencimiento y factura pendiente no concuerdan: la carga Joel a mano (J-045).' },
-    { key: 'susie', label: 'Susie Asís (clases sueltas)', reason: 'Clases sueltas excluidas por decisión de Joel (J-025/J-026).' },
-    { key: 'reina', label: 'Reina Yohoros (clases sueltas)', reason: 'Clases sueltas excluidas por decisión de Joel (J-025).' },
-    { key: 'sara-hidrie', label: 'Sara Hidrie (clases sueltas)', reason: 'Clases sueltas excluidas por decisión de Joel (J-026).' }
+    { key: 'sara-djamous', label: 'Sara Djamous', reason: 'Fechas de ciclo, compra, vencimiento y factura pendiente no concuerdan: la carga Joel a mano (J-045).' }
+  ],
+  // Joel pidió incluirlas (J-056): una factura de clase suelta y su cobro por cada clase pagada desde el 01-09-2026.
+  singleClasses: [
+    { key: 'susie', label: 'Susie Asís (clases sueltas)', client: 'Susie Asís', since: '2026-09-01' },
+    { key: 'reina', label: 'Reina Yohoros (clases sueltas)', client: 'Reina Yohoros', since: '2026-09-01' },
+    { key: 'sara-hidrie', label: 'Sara Hidrie (clases sueltas)', client: 'Sara Hidrie', since: '2026-09-01' }
   ]
 };
 
@@ -242,6 +249,58 @@ export async function buildImportPreview(tx: Tx, ownerId: string, manifest: Impo
     items.push({ seq, kind: 'invoice', decision, key: entry.key, label: entry.label, externalId, reasons, data, sourceIds });
   }
 
+  // Clases sueltas: una factura y un cobro por cada factura vieja pagada de esa persona desde `since`.
+  for (const single of manifest.singleClasses ?? []) {
+    const person = resolveClient(clientIndex, single.client);
+    if (person.error !== undefined) {
+      seq += 1;
+      items.push({ seq, kind: 'invoice', decision: 'revisar', key: `${single.key}:cliente`, label: single.label, externalId: null, reasons: [person.error], data: {}, sourceIds: {} });
+      continue;
+    }
+    const legacy = await tx`
+      SELECT i.id::text AS id, i.concept, i.amount::text AS amount, i.status, i.package_id::text AS package_id
+      FROM invoices i
+      WHERE i.client_id = ${person.id} AND COALESCE(i.billed_for_client_id, i.client_id) = ${person.id}
+        AND i.status <> 'void' AND i.due_on >= ${single.since}::date
+      ORDER BY i.due_on, i.created_at, i.id`;
+    const rows: { invoice: Record<string, any>; payments: Record<string, any>[] }[] = [];
+    for (const invoice of legacy) {
+      const payments = await tx`
+        SELECT p.id::text AS id, p.amount::text AS amount, p.paid_on::text AS paid_on, p.method, p.reference
+        FROM payment_allocations a JOIN invoice_payments p ON p.id = a.payment_id WHERE a.invoice_id = ${invoice.id}`;
+      rows.push({ invoice, payments: payments as unknown as Record<string, any>[] });
+    }
+    // Primero por fecha de cobro (la fecha declarada), para que la numeración siga el orden de las clases.
+    rows.sort((a, b) => String(a.payments[0]?.paid_on ?? '9999').localeCompare(String(b.payments[0]?.paid_on ?? '9999')));
+    for (const { invoice, payments } of rows) {
+      seq += 1;
+      const reasons: string[] = [];
+      const externalId = `import:single:${invoice.id}`;
+      const amount = cents(invoice.amount);
+      if (invoice.status !== 'confirmed') reasons.push('La clase suelta está pendiente de cobro en el sistema anterior');
+      if (/mensual|paquete/i.test(String(invoice.concept ?? '')) || invoice.package_id) reasons.push('No parece una clase suelta (concepto de mensualidad o paquete)');
+      if (payments.length !== 1) reasons.push(payments.length === 0 ? 'No tiene un cobro aplicado en el sistema anterior' : `Tiene ${payments.length} cobros aplicados: se revisa a mano`);
+      const payment = payments[0];
+      if (payment && cents(payment.amount) !== amount) reasons.push(`El cobro (${fromCents(cents(payment.amount)).toFixed(2)}) no coincide con la factura (${fromCents(amount).toFixed(2)})`);
+      const method = payment ? METHODS.find(candidate => candidate.toLowerCase() === String(payment.method ?? '').trim().toLowerCase()) : undefined;
+      if (payment && !method) reasons.push(payment.method ? `Método de pago no utilizable: ${payment.method}` : 'El cobro del sistema anterior no trae método');
+      if (amount <= 0) reasons.push('El importe debe ser mayor que cero');
+      const [exists] = await tx`SELECT 1 AS yes FROM billing_invoices WHERE owner_id = ${ownerId} AND external_id = ${externalId}`;
+      const decision: Item['decision'] = exists ? 'ya_aplicado' : reasons.length ? 'revisar' : 'incluir';
+      const paidOn = payment ? String(payment.paid_on) : null;
+      const data: Record<string, any> = paidOn ? {
+        payer: { id: person.id, name: person.name }, kind: 'clase_suelta', cycleStart: paidOn, cycleEnd: paidOn, cutDay: Number(paidOn.slice(8, 10)),
+        issuedOn: paidOn, dueOn: paidOn,
+        lines: [{ beneficiaryId: person.id, beneficiary: person.name, description: String(invoice.concept ?? 'Sesión individual') || 'Sesión individual', quantity: 1, unitAmount: fromCents(amount), amount: fromCents(amount), sessionsReference: null }],
+        total: fromCents(amount), legacyAmount: null,
+        payment: { paidOn, method: method ?? payment!.method, amount: fromCents(amount), reference: payment!.reference ?? null }, status: 'pagada', projectedNumber: null
+      } : { payer: { id: person.id, name: person.name }, kind: 'clase_suelta', total: fromCents(amount), lines: [], payment: null, status: 'pendiente', projectedNumber: null };
+      if (decision === 'incluir') { projected += 1; data.projectedNumber = projected; }
+      items.push({ seq, kind: 'invoice', decision, key: `${single.key}:${invoice.id}`, label: `${single.label} · ${paidOn ?? 'sin fecha'} · ${fromCents(amount).toFixed(2)}`, externalId, reasons, data,
+        sourceIds: { payments: payments.map(row => row.id as string), invoices: [invoice.id as string] } });
+    }
+  }
+
   for (const exclusion of manifest.exclusions) {
     seq += 1;
     items.push({ seq, kind: 'exclusion', decision: 'excluir', key: exclusion.key, label: exclusion.label, externalId: null, reasons: [exclusion.reason], data: {}, sourceIds: {} });
@@ -334,7 +393,7 @@ export async function applyBatch(ownerId: string, userId: string, batchId: strin
       throw new ImportConflict('Los datos cambiaron desde que se aprobó la vista previa: genere una nueva y revísela');
     }
 
-    const created: { key: string; code: string; invoiceId: string; paymentId: string | null }[] = [];
+    const created: { key: string; externalId: string; code: string; invoiceId: string; paymentId: string | null }[] = [];
     for (const item of fresh.items.filter(candidate => candidate.decision === 'incluir')) {
       const d = item.data;
       const [{ n }] = await tx`SELECT billing_next_number(${ownerId}) AS n`;
@@ -363,13 +422,13 @@ export async function applyBatch(ownerId: string, userId: string, batchId: strin
       }
       await tx`UPDATE billing_import_items SET destination_invoice_id = ${invoice.id}, destination_payment_id = ${paymentId}
         WHERE batch_id = ${batchId} AND seq = ${item.seq}`;
-      created.push({ key: item.key, code: `FAC-${String(n).padStart(4, '0')}`, invoiceId: invoice.id as string, paymentId });
+      created.push({ key: item.key, externalId: item.externalId as string, code: `FAC-${String(n).padStart(4, '0')}`, invoiceId: invoice.id as string, paymentId });
     }
 
     // Conteos y totales dentro de la misma transacción: si no coinciden con la vista previa, no queda nada.
     const [check] = await tx`
       SELECT count(*)::int AS invoices, COALESCE(sum(total), 0)::numeric AS total FROM billing_invoices
-      WHERE owner_id = ${ownerId} AND source_system = 'legacy_import' AND external_id IN ${tx(created.length ? created.map(row => `import:${row.key}`) : [''])}`;
+      WHERE owner_id = ${ownerId} AND source_system = 'legacy_import' AND external_id IN ${tx(created.length ? created.map(row => row.externalId) : [''])}`;
     if (check.invoices !== fresh.totals.invoices || cents(check.total) !== cents(fresh.totals.invoicesTotal)) {
       throw new ImportConflict('Los totales creados no coinciden con la vista previa: se canceló toda la carga');
     }
