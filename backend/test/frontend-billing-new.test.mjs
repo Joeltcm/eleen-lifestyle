@@ -103,3 +103,9 @@ test('Corregir reparto: botón en cada factura de varias personas y diálogo que
   assert.match(app, /\/api\/billing\/invoices\/\$\{invoice\.id\}\/redistribute/);
   assert.match(app, /debe seguir sumando/);
 });
+
+test('Plan de facturación: las líneas ya cerradas van en un historial plegado, no mezcladas con las vigentes', async () => {
+  const app = await leer('app.js');
+  assert.match(app, /Historial de montos anteriores/);
+  assert.match(app, /line\.endsOn && line\.endsOn < hoy/);
+});
