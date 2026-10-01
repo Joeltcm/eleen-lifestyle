@@ -20,7 +20,7 @@ import { sql } from './db.js';
 
 // ── Tipos del manifiesto ─────────────────────────────────────────────────────
 export type ImportLine = { beneficiary: string; description?: string; amount?: number; sessionsReference?: number };
-export type ImportPayment = { paidOn: string; method: 'Efectivo' | 'Yappy' | 'Transferencia bancaria' | 'Tarjeta' | 'Otro' | 'legacy'; amount: number; reference?: string };
+export type ImportPayment = { paidOn: string | 'legacy'; method: 'Efectivo' | 'Yappy' | 'Transferencia bancaria' | 'Tarjeta' | 'Otro' | 'legacy'; amount: number; reference?: string };
 export type ImportEntry = {
   key: string; label: string; payer: string;
   kind: 'mensual' | 'credito' | 'clase_suelta' | 'paquete' | 'manual';
@@ -33,7 +33,7 @@ export type ImportExclusion = { key: string; label: string; reason: string };
 // Clientes de clases sueltas (Susie, Reina, Sara Hidrie): cada factura vieja pagada desde `since` se carga como UNA
 // factura `clase_suelta` con su cobro, tomando fecha, monto, método y referencia del cobro viejo. Si una no encaja
 // (pendiente, sin cobro, con más de un cobro, de mensualidad o paquete) NO se carga y queda "revisar".
-export type ImportSingleClasses = { key: string; label: string; client: string; since: string };
+export type ImportSingleClasses = { key: string; label: string; client: string; since: string; accept?: { date: string; amount: number }[] };
 export type ImportManifest = { name: string; entries: ImportEntry[]; exclusions: ImportExclusion[]; singleClasses?: ImportSingleClasses[] };
 
 // Lista aprobada de la carga inicial (diseño 8.1 y 8.2, J-045/J-047/J-051). Al acercarse el corte hay
@@ -67,9 +67,9 @@ export const DEFAULT_IMPORT_MANIFEST: ImportManifest = {
         { beneficiary: 'Julieta Galindo', description: 'Julieta', amount: 150 },
         { beneficiary: 'Juan de Diego padre', description: 'Juan de Diego padre', amount: 150 }
       ], payment: { paidOn: '2026-09-26', method: 'Yappy', amount: 300 } },
-    // Gila pagó el 01-10-2026 (J-055): el método se toma del cobro registrado en el sistema anterior.
+    // Gila pagó (J-055): la FECHA y el método se toman del cobro registrado en el sistema anterior (dentro de su ciclo).
     { key: 'gila-2026-09', label: 'Gila Falic · 28-09 (pagada el 01-10)', payer: 'Gila Falic', kind: 'mensual', cycleStart: '2026-09-28', cycleEnd: '2026-10-28',
-      lines: [{ beneficiary: 'Gila Falic', description: 'Mensualidad', amount: 240 }], payment: { paidOn: '2026-10-01', method: 'legacy', amount: 240 } },
+      lines: [{ beneficiary: 'Gila Falic', description: 'Mensualidad', amount: 240 }], payment: { paidOn: 'legacy', method: 'legacy', amount: 240 } },
     { key: 'julio-2026-09', label: 'Julio Alvarez · crédito (31-08, 30-09]', payer: 'Julio Alvarez', kind: 'credito', cycleStart: '2026-08-31', cycleEnd: '2026-09-30', amountFrom: 'legacy',
       lines: [{ beneficiary: 'Julio Alvarez', description: 'Sesiones cobrables del ciclo' }] }
   ],
@@ -87,6 +87,7 @@ export const DEFAULT_IMPORT_MANIFEST: ImportManifest = {
 };
 
 // ── Utilidades ───────────────────────────────────────────────────────────────
+const dates0 = (rows: Record<string, any>[]) => [...new Set(rows.map(row => String(row.paid_on)))];
 const cents = (value: unknown) => Math.round(Number(value ?? 0) * 100);
 const fromCents = (value: number) => value / 100;
 const METHODS = ['Efectivo', 'Yappy', 'Transferencia bancaria', 'Tarjeta', 'Otro'];
@@ -148,6 +149,17 @@ async function legacyPayments(tx: Tx, payerId: string, paidOn: string) {
     WHERE p.paid_on = ${paidOn}::date
       AND (p.client_id = ${payerId} OR i.client_id = ${payerId} OR i.billed_for_client_id = ${payerId})`;
 }
+// Cobros del pagador aplicados a facturas viejas de ese ciclo, sin fijar la fecha (para "paidOn: legacy").
+async function legacyPaymentsInWindow(tx: Tx, payerId: string, cycleStart: string, cycleEnd: string) {
+  return tx`
+    SELECT DISTINCT p.id::text AS id, p.amount::text AS amount, p.paid_on::text AS paid_on, p.method
+    FROM invoice_payments p
+    JOIN payment_allocations a ON a.payment_id = p.id
+    JOIN invoices i ON i.id = a.invoice_id
+    WHERE (i.client_id = ${payerId} OR i.billed_for_client_id = ${payerId})
+      AND i.due_on BETWEEN (${cycleStart}::date - 35) AND ${cycleEnd}::date
+      AND p.paid_on BETWEEN (${cycleStart}::date - 7) AND ${cycleEnd}::date`;
+}
 async function legacyAllocatedInvoices(tx: Tx, paymentIds: string[]) {
   if (!paymentIds.length) return [] as string[];
   const rows = await tx`SELECT DISTINCT invoice_id::text AS id FROM payment_allocations WHERE payment_id IN ${tx(paymentIds)}`;
@@ -194,25 +206,39 @@ export async function buildImportPreview(tx: Tx, ownerId: string, manifest: Impo
     let legacyAmount: number | null = null;
     let alreadyApplied = false;
     let resolvedMethod: string | null = null;
+    let resolvedPaidOn: string | null = null;
 
     if (payer.error === undefined) {
       if (entry.payment) {
-        const found = await legacyPayments(tx, payer.id, entry.payment.paidOn);
-        // El método del cobro tiene que coincidir con el registrado en el sistema anterior (si éste lo trae).
-        const legacyMethods = [...new Set(found.map(row => String(row.method ?? '').trim()).filter(Boolean))];
-        let method: string = entry.payment.method;
-        if (entry.payment.method === 'legacy') {
-          if (legacyMethods.length === 1 && METHODS.some(candidate => candidate.toLowerCase() === legacyMethods[0].toLowerCase())) method = METHODS.find(candidate => candidate.toLowerCase() === legacyMethods[0].toLowerCase())!;
-          else reasons.push(legacyMethods.length ? `El método del cobro en el sistema anterior no es utilizable: ${legacyMethods.join(', ')}` : 'El cobro del sistema anterior no trae método');
-        } else {
-          if (!METHODS.includes(method)) reasons.push(`Método de pago no válido: ${method}`);
-          if (legacyMethods.length && !legacyMethods.every(candidate => candidate.toLowerCase() === method.toLowerCase())) reasons.push(`El método del cobro no coincide: la lista dice ${method} y el sistema anterior ${legacyMethods.join(', ')}`);
+        const declared = entry.payment.paidOn;
+        const found = declared === 'legacy'
+          ? await legacyPaymentsInWindow(tx, payer.id, entry.cycleStart, entry.cycleEnd)
+          : await legacyPayments(tx, payer.id, declared);
+        let paidOn: string | null = declared === 'legacy' ? null : declared;
+        if (declared === 'legacy') {
+          const dates = [...new Set(found.map(row => String(row.paid_on)))];
+          if (dates.length === 1) paidOn = dates[0];
+          else if (dates.length > 1) reasons.push(`Hay cobros de ${entry.payer} en varias fechas (${dates.sort().join(', ')}): indique cuál es`);
         }
-        resolvedMethod = method;
         const sum = found.reduce((acc, row) => acc + cents(row.amount), 0);
         sourceIds.payments = found.map(row => row.id as string).sort();
-        if (!found.length) reasons.push(`No hay un cobro de ${entry.payer} del ${entry.payment.paidOn} en el sistema anterior`);
-        else if (sum !== cents(entry.payment.amount)) reasons.push(`El cobro del sistema anterior no coincide: hay ${fromCents(sum).toFixed(2)} y se esperaban ${entry.payment.amount.toFixed(2)}`);
+        if (!found.length) {
+          reasons.push(declared === 'legacy' ? `No hay un cobro de ${entry.payer} para ese ciclo en el sistema anterior` : `No hay un cobro de ${entry.payer} del ${declared} en el sistema anterior`);
+        } else {
+          // El método tiene que coincidir con el registrado en el sistema anterior (si éste lo trae).
+          const legacyMethods = [...new Set(found.map(row => String(row.method ?? '').trim()).filter(Boolean))];
+          let method: string = entry.payment.method;
+          if (entry.payment.method === 'legacy') {
+            if (legacyMethods.length === 1 && METHODS.some(candidate => candidate.toLowerCase() === legacyMethods[0].toLowerCase())) method = METHODS.find(candidate => candidate.toLowerCase() === legacyMethods[0].toLowerCase())!;
+            else reasons.push(legacyMethods.length ? `El método del cobro en el sistema anterior no es utilizable: ${legacyMethods.join(', ')}` : 'El cobro del sistema anterior no trae método');
+          } else {
+            if (!METHODS.includes(method)) reasons.push(`Método de pago no válido: ${method}`);
+            if (legacyMethods.length && !legacyMethods.every(candidate => candidate.toLowerCase() === method.toLowerCase())) reasons.push(`El método del cobro no coincide: la lista dice ${method} y el sistema anterior ${legacyMethods.join(', ')}`);
+          }
+          resolvedMethod = method;
+          if (sum !== cents(entry.payment.amount) && (declared !== 'legacy' || dates0(found).length === 1)) reasons.push(`El cobro del sistema anterior no coincide: hay ${fromCents(sum).toFixed(2)} y se esperaban ${entry.payment.amount.toFixed(2)}`);
+        }
+        resolvedPaidOn = paidOn;
         sourceIds.invoices = (await legacyAllocatedInvoices(tx, sourceIds.payments)).sort();
         if (cents(entry.payment.amount) > total && entry.amountFrom !== 'legacy') reasons.push('El cobro supera el total de la factura');
       } else {
@@ -241,7 +267,7 @@ export async function buildImportPreview(tx: Tx, ownerId: string, manifest: Impo
       kind: entry.kind, cycleStart: entry.cycleStart, cycleEnd: entry.cycleEnd,
       cutDay: entry.cutDay ?? (payer.error === undefined ? payer.cutDay : null) ?? Number(entry.cycleStart.slice(8, 10)),
       issuedOn, dueOn: entry.dueOn ?? issuedOn, lines, total: fromCents(total), legacyAmount,
-      payment: entry.payment ? { paidOn: entry.payment.paidOn, method: resolvedMethod ?? entry.payment.method, amount: entry.payment.amount, reference: entry.payment.reference ?? null } : null,
+      payment: entry.payment ? { paidOn: resolvedPaidOn ?? entry.payment.paidOn, method: resolvedMethod ?? entry.payment.method, amount: entry.payment.amount, reference: entry.payment.reference ?? null } : null,
       status: entry.payment && cents(entry.payment.amount) >= total ? 'pagada' : entry.payment ? 'parcial' : 'pendiente',
       projectedNumber: null
     };
@@ -278,7 +304,8 @@ export async function buildImportPreview(tx: Tx, ownerId: string, manifest: Impo
       const externalId = `import:single:${invoice.id}`;
       const amount = cents(invoice.amount);
       if (invoice.status !== 'confirmed') reasons.push('La clase suelta está pendiente de cobro en el sistema anterior');
-      if (/mensual|paquete/i.test(String(invoice.concept ?? '')) || invoice.package_id) reasons.push('No parece una clase suelta (concepto de mensualidad o paquete)');
+      const accepted = (single.accept ?? []).some(rule => payments[0] && String(payments[0].paid_on) === rule.date && cents(rule.amount) === amount);
+      if (!accepted && (/mensual|paquete/i.test(String(invoice.concept ?? '')) || invoice.package_id)) reasons.push('No parece una clase suelta (concepto de mensualidad o paquete)');
       if (payments.length !== 1) reasons.push(payments.length === 0 ? 'No tiene un cobro aplicado en el sistema anterior' : `Tiene ${payments.length} cobros aplicados: se revisa a mano`);
       const payment = payments[0];
       if (payment && cents(payment.amount) !== amount) reasons.push(`El cobro (${fromCents(cents(payment.amount)).toFixed(2)}) no coincide con la factura (${fromCents(amount).toFixed(2)})`);

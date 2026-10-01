@@ -253,6 +253,26 @@ describe('clases sueltas de Susie, Reina y Sara Hidrie (J-056)', () => {
     } finally { await A.db`DELETE FROM invoices WHERE id IN (${pendiente.id}, ${sinCobro.id}, ${mensual.id})`; }
   });
 
+  test('una clase suelta registrada con concepto de paquete queda por revisar y Joel puede aceptarla por fecha y monto', async () => {
+    const susie = A.id['Susie Asís'];
+    const [inv] = await A.db`INSERT INTO invoices (client_id, billed_for_client_id, concept, amount, due_on, status, source_system) VALUES (${susie}, ${susie}, 'Paquete 1 clase', 30, '2026-09-13', 'confirmed', 'eileen') RETURNING id`;
+    const [pay] = await A.db`INSERT INTO invoice_payments (client_id, amount, paid_on, method, source_system, external_id) VALUES (${susie}, 30, '2026-09-13', 'Yappy', 'eileen', 'susie-paquete') RETURNING id`;
+    await A.db`INSERT INTO payment_allocations (payment_id, invoice_id, amount) VALUES (${pay.id}, ${inv.id}, 30)`;
+    try {
+      const sin = (await preview(A)).items.find(i => i.key === `susie:${inv.id}`);
+      assert.equal(sin.decision, 'revisar');
+      assert.match(sin.reasons[0], /No parece una clase suelta/);
+      const manifest = { name: 'prueba', exclusions: [], entries: [{ key: 'sandy-oct', label: 'Sandy octubre', payer: 'Sandy Asis', kind: 'mensual', cycleStart: '2026-10-01', cycleEnd: '2026-11-01', lines: [{ beneficiary: 'Sandy Asis', amount: 300 }] }],
+        singleClasses: [{ key: 'susie', label: 'Susie', client: 'Susie Asís', since: '2026-09-01', accept: [{ date: '2026-09-13', amount: 30 }] }] };
+      const r = await A.api.post('/api/billing/imports/preview', { manifest });
+      const aceptada = r.datos.items.find(i => i.key === `susie:${inv.id}`);
+      assert.equal(aceptada.decision, 'incluir');
+      assert.deepEqual([aceptada.data.kind, aceptada.data.total, aceptada.data.payment.paidOn], ['clase_suelta', 30, '2026-09-13']);
+    } finally {
+      await A.db`DELETE FROM payment_allocations WHERE payment_id = ${pay.id}`; await A.db`DELETE FROM invoice_payments WHERE id = ${pay.id}`; await A.db`DELETE FROM invoices WHERE id = ${inv.id}`;
+    }
+  });
+
   test('si el cliente no existe se avisa una vez y las demás personas siguen adelante', async () => {
     const manifest = { name: 'prueba', entries: [], exclusions: [], singleClasses: [{ key: 'nadie', label: 'Nadie (clases sueltas)', client: 'Persona Inexistente', since: '2026-09-01' },
       { key: 'reina', label: 'Reina (clases sueltas)', client: 'Reina Yohoros', since: '2026-09-01' }] };
@@ -283,6 +303,46 @@ describe('método de pago: se toma del sistema anterior o se valida contra él',
     const r = await A.api.post('/api/billing/imports/preview', { manifest });
     assert.equal(r.datos.items[0].decision, 'revisar');
     assert.match(r.datos.items[0].reasons[0], /El método del cobro no coincide: la lista dice Efectivo y el sistema anterior Yappy/);
+  });
+
+  test('la fecha del cobro de Gila se toma del sistema anterior: si pagó el 30-09 se carga con el 30-09', async () => {
+    await A.db`UPDATE invoice_payments SET paid_on = '2026-09-30' WHERE client_id = ${A.id['Gila Falic']}`;
+    try {
+      const g = porClave(await preview(A), 'gila-2026-09');
+      assert.equal(g.decision, 'incluir');
+      assert.equal(g.data.payment.paidOn, '2026-09-30');
+    } finally { await A.db`UPDATE invoice_payments SET paid_on = '2026-10-01' WHERE client_id = ${A.id['Gila Falic']}`; }
+  });
+
+  test('si los cobros de Gila están en varias fechas, no se adivina cuál: pasa a "revisar"', async () => {
+    const gila = A.id['Gila Falic'];
+    const [inv] = await A.db`SELECT id FROM invoices WHERE client_id = ${gila}`;
+    await A.db`UPDATE invoice_payments SET amount = 140 WHERE client_id = ${gila}`;
+    const [extra] = await A.db`INSERT INTO invoice_payments (client_id, amount, paid_on, method, source_system, external_id) VALUES (${gila}, 100, '2026-09-29', 'Yappy', 'eileen', 'gila-extra') RETURNING id`;
+    await A.db`INSERT INTO payment_allocations (payment_id, invoice_id, amount) VALUES (${extra.id}, ${inv.id}, 100)`;
+    try {
+      const g = porClave(await preview(A), 'gila-2026-09');
+      assert.equal(g.decision, 'revisar');
+      assert.match(g.reasons.join('|'), /varias fechas \(2026-09-29, 2026-10-01\)/);
+    } finally {
+      await A.db`DELETE FROM payment_allocations WHERE payment_id = ${extra.id}`; await A.db`DELETE FROM invoice_payments WHERE id = ${extra.id}`;
+      await A.db`UPDATE invoice_payments SET amount = 240 WHERE client_id = ${gila}`;
+    }
+  });
+
+  test('sin ningún cobro de Gila se da UNA sola razón clara (no "sin método" encima)', async () => {
+    const gila = A.id['Gila Falic'];
+    const [pago] = await A.db`SELECT id, amount, paid_on::text AS paid_on, method FROM invoice_payments WHERE client_id = ${gila}`;
+    const [inv] = await A.db`SELECT id FROM invoices WHERE client_id = ${gila}`;
+    await A.db`DELETE FROM payment_allocations WHERE payment_id = ${pago.id}`; await A.db`DELETE FROM invoice_payments WHERE id = ${pago.id}`;
+    try {
+      const g = porClave(await preview(A), 'gila-2026-09');
+      assert.equal(g.decision, 'revisar');
+      assert.deepEqual(g.reasons, ['No hay un cobro de Gila Falic para ese ciclo en el sistema anterior']);
+    } finally {
+      const [nuevo] = await A.db`INSERT INTO invoice_payments (client_id, amount, paid_on, method, source_system, external_id) VALUES (${gila}, ${pago.amount}, ${pago.paid_on}, ${pago.method}, 'eileen', 'gila-restaurado') RETURNING id`;
+      await A.db`INSERT INTO payment_allocations (payment_id, invoice_id, amount) VALUES (${nuevo.id}, ${inv.id}, 240)`;
+    }
   });
 
   test('un cobro viejo sin método no se puede tomar como "legacy"', async () => {
