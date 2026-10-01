@@ -125,3 +125,11 @@ test('Horarios fijos: se pueden AGREGAR desde el administrador (varios por clien
   assert.match(app, /id="rellenar-horarios">Actualizar el calendario ahora</);
   assert.doesNotMatch(app, /Rellenar días que falten/);
 });
+
+test('E1: la sección de planes se llama Tarifas de referencia y avisa que no modifica a los clientes', async () => {
+  const html = await leer('index.html');
+  assert.match(html, /<h3>Tarifas de referencia<\/h3>/);
+  assert.match(html, /Cambiar una tarifa no modifica a los clientes que ya la tienen/);
+  assert.match(html, /TARIFA DE REFERENCIA/);
+  assert.doesNotMatch(html, /Planes comerciales/);
+});

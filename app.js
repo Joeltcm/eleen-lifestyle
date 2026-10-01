@@ -1,4 +1,4 @@
-const APP_VERSION = '260';
+const APP_VERSION = '261';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1277,7 +1277,7 @@ function planEditor(plan = null) {
   };
   model.addEventListener('change', togglePackage);
   if (plan) {
-    document.getElementById('plan-form-title').textContent = 'Editar plan';
+    document.getElementById('plan-form-title').textContent = 'Editar tarifa';
     form.elements.name.value = plan.name; form.elements.description.value = plan.description; form.elements.billingModel.value = plan.billingModel; form.elements.price.value = plan.price;
     form.elements.sessionsIncluded.value = plan.sessionsIncluded || ''; form.elements.validityDays.value = plan.validityDays || 30; form.elements.active.checked = plan.active;
   }

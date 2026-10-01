@@ -3273,15 +3273,19 @@ describe('alerta de pago atrasado', () => {
   });
 });
 
-describe('editar un plan propaga el precio', () => {
-  test('cambiar el precio del plan actualiza el expediente de sus clientes', async () => {
-    const plan = await api.post('/api/plans', { name: 'Propaga precio', billingModel: 'monthly', price: 30, sessionsIncluded: 8 });
-    const c = await api.post('/api/clients', { fullName: 'Toma el precio del plan', planId: plan.datos.id, cutoffDay: 1 });
+describe('editar una tarifa de referencia NO propaga el precio a los clientes (E1, J-092)', () => {
+  test('cambiar el precio de la tarifa deja intacto el expediente de quien ya la tiene; los clientes nuevos sí toman el precio nuevo', async () => {
+    const plan = await api.post('/api/plans', { name: 'Tarifa de referencia', billingModel: 'monthly', price: 30, sessionsIncluded: 8 });
+    const c = await api.post('/api/clients', { fullName: 'Conserva su precio', planId: plan.datos.id, cutoffDay: 1 });
     const antes = (await api.get('/api/clients')).datos.find(x => x.id === c.datos.id);
     assert.equal(Number(antes.standard_price), 30, 'nace con el precio de asignación');
-    await api.patch(`/api/plans/${plan.datos.id}`, { name: 'Propaga precio', billingModel: 'monthly', price: 35, sessionsIncluded: 8, active: true });
+    const editar = await api.patch(`/api/plans/${plan.datos.id}`, { name: 'Tarifa de referencia', billingModel: 'monthly', price: 35, sessionsIncluded: 8, active: true });
+    assert.equal(editar.estado, 200); assert.equal(Number(editar.datos.price), 35, 'la tarifa sí cambia');
     const despues = (await api.get('/api/clients')).datos.find(x => x.id === c.datos.id);
-    assert.equal(Number(despues.standard_price), 35, 'al editar el plan, el expediente toma el precio nuevo');
+    assert.equal(Number(despues.standard_price), 30, 'el cliente ya asignado conserva su precio');
+    const nuevo = await api.post('/api/clients', { fullName: 'Nace con la tarifa nueva', planId: plan.datos.id, cutoffDay: 1 });
+    const nace = (await api.get('/api/clients')).datos.find(x => x.id === nuevo.datos.id);
+    assert.equal(Number(nace.standard_price), 35, 'un cliente nuevo toma el precio vigente de la tarifa');
   });
 });
 
