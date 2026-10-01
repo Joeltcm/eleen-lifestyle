@@ -47,6 +47,7 @@ test('sin filtros trae todas con sus líneas y cobros, los totales del panel y l
   assert.equal(r.invoices.length, 4);
   const riccardo = r.invoices.find(f => f.payerName === 'Riccardo');
   assert.deepEqual(riccardo.lines.map(l => [l.beneficiaryName, l.amount]), [['Iraida', 300], ['Riccardo', 450]]);
+  assert.deepEqual(riccardo.lines.map(l => l.beneficiaryClientId).sort(), [id.Iraida, id.Riccardo].sort(), 'cada línea trae el id de la persona (lo usa Corregir reparto)');
   assert.deepEqual(riccardo.payments.map(p => [p.method, p.amount, p.paidOn]), [['Yappy', 750, '2026-09-16']]);
   assert.deepEqual(r.meta, { months: ['2026-09', '2026-10'], cutDays: [1, 15, 28] });
   assert.deepEqual(

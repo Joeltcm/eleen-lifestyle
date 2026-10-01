@@ -1,4 +1,4 @@
-const APP_VERSION = '247';
+const APP_VERSION = '248';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -4145,7 +4145,7 @@ async function newBillingInvoices() {
       <td data-label="Total">${money.format(invoice.total)}</td>
       <td data-label="Cobro">${invoice.payments.length ? invoice.payments.map(payment => `${money.format(payment.amount)} · ${escapeHtml(payment.method)}<br><small>${fechaCorta(payment.paidOn)}</small>`).join('<br>') : 'Sin cobro'}${invoice.balance > 0 && invoice.paid > 0 ? `<br><small>saldo ${money.format(invoice.balance)}</small>` : ''}</td>
       <td data-label="Estado">${escapeHtml(newBillingStatusText(invoice))}${invoice.status === 'anulada' && invoice.voidReason ? `<br><small>${escapeHtml(invoice.voidReason)}</small>` : ''}</td>
-      <td data-label="">${invoice.status !== 'anulada' && invoice.balance > 0 ? `<button class="primary" type="button" data-new-invoice-pay="${invoice.id}">Registrar cobro</button> ` : ''}<button class="secondary" type="button" data-new-invoice-pdf="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Ver PDF</button>${invoice.status === 'anulada' || invoice.paid > 0 ? '' : ` <button class="secondary" type="button" data-new-invoice-void="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Anular</button>`}</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">No hay facturas con estos filtros.</p>'}</div></article>`;
+      <td data-label="">${invoice.status !== 'anulada' && invoice.balance > 0 ? `<button class="primary" type="button" data-new-invoice-pay="${invoice.id}">Registrar cobro</button> ` : ''}${invoice.status !== 'anulada' && ['mensual', 'paquete'].includes(invoice.kind) && invoice.lines.length > 1 ? `<button class="secondary" type="button" data-new-invoice-split="${invoice.id}">Corregir reparto</button> ` : ''}<button class="secondary" type="button" data-new-invoice-pdf="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Ver PDF</button>${invoice.status === 'anulada' || invoice.paid > 0 ? '' : ` <button class="secondary" type="button" data-new-invoice-void="${invoice.id}" data-code="${escapeHtml(invoice.code)}">Anular</button>`}</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">No hay facturas con estos filtros.</p>'}</div></article>`;
   document.getElementById('new-billing-create').onclick = () => newBillingInvoiceDialog();
   const bind = (id, key) => { document.getElementById(id).onchange = event => { f[key] = event.target.value; newBillingInvoices(); }; };
   bind('new-billing-month', 'month'); bind('new-billing-cut', 'cutDay'); bind('new-billing-client', 'clientId'); bind('new-billing-status', 'status');
@@ -4153,6 +4153,7 @@ async function newBillingInvoices() {
   if (clear) clear.onclick = () => { Object.assign(f, { status: 'all', clientId: '', month: '', cutDay: '' }); newBillingInvoices(); };
   const list = document.getElementById('new-billing-list');
   list.querySelectorAll('[data-new-invoice-pay]').forEach(button => button.onclick = () => { const invoice = invoices.find(item => item.id === button.dataset.newInvoicePay); newBillingPaymentDialog({ payerId: invoice.payerClientId, amount: invoice.balance, invoiceId: invoice.id }); });
+  list.querySelectorAll('[data-new-invoice-split]').forEach(button => button.onclick = () => newBillingSplitDialog(invoices.find(item => item.id === button.dataset.newInvoiceSplit)));
   list.querySelectorAll('[data-new-invoice-pdf]').forEach(button => button.onclick = () => previewProtectedPdf(`/api/billing/invoices/${button.dataset.newInvoicePdf}/pdf`, `Factura ${button.dataset.code}`, `factura-${button.dataset.code}.pdf`));
   list.querySelectorAll('[data-new-invoice-void]').forEach(button => button.onclick = () => newBillingVoidDialog(button.dataset.newInvoiceVoid, button.dataset.code));
 }
@@ -4196,6 +4197,35 @@ async function newBillingArchive() {
   bind('new-archive-month', 'month'); bind('new-archive-client', 'clientId'); bind('new-archive-status', 'status');
   const clear = document.getElementById('new-archive-clear');
   if (clear) clear.onclick = () => { Object.assign(f, { month: '', status: '', clientId: '' }); newBillingArchive(); };
+}
+// Corregir el reparto por persona de una factura ya emitida (aunque esté pagada) SIN cambiar su total: el servidor revierte los cobros aplicados, anula la factura,
+// emite una nueva con el mismo ciclo y fechas, y vuelve a aplicar los mismos cobros, todo en una sola operación.
+function newBillingSplitDialog(invoice) {
+  const box = document.createElement('div');
+  box.innerHTML = `<form id="new-split-form"><p class="eyebrow">FACTURAS</p><h2>Corregir reparto de ${escapeHtml(invoice.code)}</h2>
+    <p class="section-note">El total de ${money.format(invoice.total)} no cambia: solo cómo se reparte entre las personas. ${invoice.paid > 0 ? `Los ${money.format(invoice.paid)} ya cobrados se vuelven a aplicar solos a la factura nueva. ` : ''}La factura actual queda anulada con su motivo y la nueva toma el siguiente número, con el mismo ciclo y fechas.</p>
+    ${invoice.lines.map(line => `<label>${escapeHtml(line.beneficiaryName)}<input name="line" data-beneficiary="${line.beneficiaryClientId}" type="number" min="0.01" step="0.01" required value="${Number(line.amount).toFixed(2)}" /></label>`).join('')}
+    <p class="form-summary" id="new-split-total"></p>
+    <label>Motivo<input name="reason" required minlength="3" maxlength="300" value="Reparto por persona corregido" /></label>
+    <button class="primary wide-button">Corregir reparto</button></form>`;
+  openModal(box);
+  const form = box.querySelector('form'); const summary = form.querySelector('#new-split-total');
+  const inputs = [...form.querySelectorAll('[name=line]')];
+  const refresh = () => {
+    const sum = inputs.reduce((total, input) => total + centsOf(input.value), 0); const target = centsOf(invoice.total);
+    summary.textContent = sum === target ? `Total ${money.format(sum / 100)} ✓` : `Suma ${money.format(sum / 100)}; debe seguir sumando ${money.format(target / 100)}`;
+    summary.classList.toggle('error', sum !== target);
+  };
+  inputs.forEach(input => input.addEventListener('input', refresh)); refresh();
+  form.onsubmit = async event => {
+    event.preventDefault();
+    const body = { reason: form.elements.reason.value, lines: inputs.map(input => ({ beneficiaryClientId: input.dataset.beneficiary, amount: Number(input.value) })) };
+    try {
+      form.classList.add('loading-state');
+      const result = await api(`/api/billing/invoices/${invoice.id}/redistribute`, { method: 'POST', body });
+      modal.close(); toast(`${result.oldCode} reemplazada por ${result.newCode}`); newBillingInvoices();
+    } catch (error) { toast(error.message, true); form.classList.remove('loading-state'); }
+  };
 }
 function newBillingVoidDialog(id, code) {
   const box = document.createElement('div');

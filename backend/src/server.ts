@@ -761,7 +761,7 @@ app.get('/api/billing/invoices', { preHandler: requireStaff }, async request => 
   // Panel: líneas y cobros aplicados de cada factura, totales y los meses/cortes que existen (sin filtros).
   const ids = invoices.map(invoice => invoice.id as string);
   const lineRows = ids.length ? await sql`
-    SELECT l.invoice_id::text AS invoice_id, c.full_name AS beneficiary_name, l.amount::text AS amount
+    SELECT l.invoice_id::text AS invoice_id, l.beneficiary_client_id::text AS beneficiary_id, c.full_name AS beneficiary_name, l.amount::text AS amount
     FROM billing_invoice_lines l JOIN clients c ON c.id = l.beneficiary_client_id
     WHERE l.invoice_id IN ${sql(ids)} ORDER BY c.full_name, l.line_type` : [];
   const paymentRows = ids.length ? await sql`
@@ -770,7 +770,7 @@ app.get('/api/billing/invoices', { preHandler: requireStaff }, async request => 
     WHERE a.invoice_id IN ${sql(ids)} AND a.reversed_at IS NULL ORDER BY p.paid_on, a.created_at` : [];
   const detailed: Record<string, any>[] = invoices.map(invoice => ({
     ...invoice,
-    lines: lineRows.filter(row => row.invoice_id === invoice.id).map(row => ({ beneficiaryName: row.beneficiary_name as string, amount: Number(row.amount) })),
+    lines: lineRows.filter(row => row.invoice_id === invoice.id).map(row => ({ beneficiaryClientId: row.beneficiary_id as string, beneficiaryName: row.beneficiary_name as string, amount: Number(row.amount) })),
     payments: paymentRows.filter(row => row.invoice_id === invoice.id).map(row => ({ paymentId: row.payment_id as string, paidOn: row.paid_on as string, method: row.method as string, amount: Number(row.amount) }))
   }));
   const active = detailed.filter(invoice => invoice.status !== 'anulada');
@@ -923,6 +923,70 @@ app.post('/api/billing/invoices/:id/void', { preHandler: requireStaff }, async (
     return reply.code(409).send({ error: result.message });
   }
   return { voided: true, code: billingCode(result.number) };
+});
+
+// Corrige el REPARTO por persona de una factura ya emitida (aunque esté pagada) sin cambiar su total: en una sola transacción revierte las aplicaciones de cobro,
+// anula la factura vieja con motivo, emite una nueva con el mismo ciclo, fechas y pagador y las líneas corregidas, y vuelve a aplicar los mismos cobros. Si algo falla no queda nada a medias.
+const billingRedistributeInput = z.object({
+  reason: z.string().trim().min(3, 'Indique el motivo').max(300),
+  lines: z.array(z.object({ beneficiaryClientId: z.string().uuid(), amount: z.coerce.number().positive().max(100000) })).min(1).max(30)
+});
+app.post('/api/billing/invoices/:id/redistribute', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = billingRedistributeInput.parse(request.body);
+  try {
+    const result = await sql.begin(async transaction => {
+      const [old] = await transaction`
+        SELECT id, number, payer_client_id, kind, cycle_start::text AS cycle_start, cycle_end::text AS cycle_end, cut_day, issued_on::text AS issued_on, due_on::text AS due_on, total, status, notes
+        FROM billing_invoices WHERE id = ${id} AND owner_id = ${auth.sub} FOR UPDATE`;
+      if (!old) throw new BillingNotFound('Factura no encontrada');
+      if (old.status === 'anulada') throw new BillingConflict('La factura está anulada');
+      if (!['mensual', 'paquete'].includes(old.kind as string)) throw new BillingConflict('Solo se corrige el reparto de mensualidades y paquetes');
+      const total = desdeCentavos(input.lines.reduce((sum, line) => sum + centavos(line.amount), 0));
+      if (centavos(total) !== centavos(Number(old.total))) {
+        throw Object.assign(new Error(`El reparto debe seguir sumando ${money(Number(old.total))} (suma ${money(total)}); si el total cambia, anula la factura y crea otra`), { statusCode: 400 });
+      }
+      const beneficiaries = input.lines.map(line => line.beneficiaryClientId);
+      if (new Set(beneficiaries).size !== beneficiaries.length) throw Object.assign(new Error('Una persona solo puede aparecer una vez'), { statusCode: 400 });
+      const owned = await transaction`SELECT id FROM clients WHERE owner_id = ${auth.sub} AND id IN ${transaction(beneficiaries)}`;
+      if (owned.length !== beneficiaries.length) throw new BillingNotFound('Cliente no encontrado');
+      const oldLines = await transaction`SELECT beneficiary_client_id::text AS beneficiary, plan_id, description, sessions_reference, amount FROM billing_invoice_lines WHERE invoice_id = ${id} AND line_type = 'plan'`;
+      const applications = await transaction`
+        SELECT id, payment_id::text AS payment_id, amount, applied_on::text AS applied_on FROM billing_payment_applications
+        WHERE invoice_id = ${id} AND reversed_at IS NULL ORDER BY created_at FOR UPDATE`;
+      const oldCode = billingCode(old.number);
+      for (const application of applications) {
+        await transaction`UPDATE billing_payment_applications SET reversed_at = now(), reversed_by = ${auth.sub}, reversal_reason = ${`Reparto corregido: ${input.reason}`} WHERE id = ${application.id}`;
+      }
+      await transaction`UPDATE billing_invoices SET status = 'anulada', void_reason = ${`Reparto corregido (la reemplaza una factura nueva): ${input.reason}`}, voided_at = now(), voided_by = ${auth.sub} WHERE id = ${id}`;
+      const [{ n }] = await transaction`SELECT billing_next_number(${auth.sub}) AS n`;
+      const [created] = await transaction`
+        INSERT INTO billing_invoices (owner_id, number, payer_client_id, kind, origin, cycle_start, cycle_end, cut_day, issued_on, due_on, total, notes, created_by)
+        VALUES (${auth.sub}, ${n}, ${old.payer_client_id}, ${old.kind}, 'manual', ${old.cycle_start}, ${old.cycle_end}, ${old.cut_day}, ${old.issued_on}, ${old.due_on}, ${total},
+          ${`Reemplaza a ${oldCode}: reparto por persona corregido. ${input.reason}`}, ${auth.sub})
+        RETURNING id, number`;
+      for (const line of input.lines) {
+        const previous = oldLines.find(item => item.beneficiary === line.beneficiaryClientId);
+        await transaction`
+          INSERT INTO billing_invoice_lines (invoice_id, beneficiary_client_id, plan_id, line_type, description, quantity, unit_amount, amount, sessions_reference)
+          VALUES (${created.id}, ${line.beneficiaryClientId}, ${previous?.plan_id ?? null}, 'plan', ${previous?.description ?? (old.kind === 'paquete' ? 'Paquete' : 'Mensualidad')}, 1, ${line.amount}, ${line.amount}, ${previous?.sessions_reference ?? null})`;
+      }
+      const byPayment = new Map<string, { amount: number; appliedOn: string }>();
+      for (const application of applications) {
+        const current = byPayment.get(application.payment_id as string);
+        byPayment.set(application.payment_id as string, { amount: desdeCentavos(centavos(current?.amount ?? 0) + centavos(Number(application.amount))), appliedOn: current?.appliedOn ?? (application.applied_on as string) });
+      }
+      for (const [paymentId, item] of byPayment) await applyBillingPayment(transaction, auth.sub, auth.sub, paymentId, [{ invoiceId: created.id as string, amount: item.amount }], item.appliedOn);
+      const newCode = billingCode(created.number);
+      await auditBilling(transaction, auth.sub, auth.sub, 'REDISTRIBUTE_INVOICE', 'invoice', created.id as string, {
+        replaced: oldCode, replacement: newCode, reason: input.reason, total,
+        before: oldLines.map(item => ({ beneficiary: item.beneficiary, amount: Number(item.amount) })), after: input.lines, reappliedPayments: byPayment.size
+      });
+      return { oldCode, newCode, newId: created.id as string, total, reappliedPayments: byPayment.size };
+    });
+    return reply.code(201).send(result);
+  } catch (error) { throw billingDbError(error); }
 });
 
 app.get('/api/billing/invoices/:id/pdf', { preHandler: requireStaff }, async (request, reply) => {

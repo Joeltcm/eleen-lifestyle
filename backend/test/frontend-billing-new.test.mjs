@@ -92,7 +92,14 @@ test('Historial Zoho: pestaña de solo lectura con filtros y sin botones que esc
   assert.match(html, /id="subpanel-archivo"/);
   const app = await leer('app.js');
   assert.match(app, /nombre === 'archivo'\) newBillingArchive\(\)/);
-  const cuerpo = app.slice(app.indexOf('async function newBillingArchive()'), app.indexOf('function newBillingVoidDialog('));
+  const cuerpo = app.slice(app.indexOf('async function newBillingArchive()'), app.indexOf('// Corregir el reparto por persona'));
   assert.doesNotMatch(cuerpo, /method: '(POST|PATCH|PUT|DELETE)'/, 'el archivo no escribe nada');
   for (const id of ['new-archive-month', 'new-archive-client', 'new-archive-status']) assert.match(cuerpo, new RegExp(id));
+});
+
+test('Corregir reparto: botón en cada factura de varias personas y diálogo que exige que el total no cambie', async () => {
+  const app = await leer('app.js');
+  assert.match(app, /data-new-invoice-split="\$\{invoice\.id\}">Corregir reparto</);
+  assert.match(app, /\/api\/billing\/invoices\/\$\{invoice\.id\}\/redistribute/);
+  assert.match(app, /debe seguir sumando/);
 });
