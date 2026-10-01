@@ -1,4 +1,4 @@
-const APP_VERSION = '240';
+const APP_VERSION = '241';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -4171,7 +4171,7 @@ function newBillingInvoiceDialog() {
   };
   const addLine = () => {
     const row = document.createElement('div'); row.className = 'new-billing-line';
-    row.innerHTML = `<select name="beneficiaryClientId" required><option value="">Beneficiario</option>${options()}</select><input name="description" placeholder="Concepto" maxlength="200" /><input name="quantity" type="number" min="0.01" step="0.01" value="1" aria-label="Cantidad" /><input name="unitAmount" type="number" step="0.01" placeholder="Importe" required aria-label="Importe" /><input name="sessionsReference" type="number" min="1" placeholder="Clases (ref.)" aria-label="Clases de referencia" /><button type="button" class="secondary">Quitar persona</button>`;
+    row.innerHTML = `<select name="beneficiaryClientId" required><option value="">Beneficiario</option>${options()}</select><input name="description" placeholder="Concepto (ej.: Paquete 12 sesiones)" maxlength="200" /><label class="new-billing-field">Cantidad<input name="quantity" type="number" min="0.01" step="0.01" value="1" aria-label="Cantidad" /><small>Casi siempre 1</small></label><label class="new-billing-field">Importe por unidad (USD)<input name="unitAmount" type="number" step="0.01" placeholder="Ej.: 420" required aria-label="Importe" /><small>Lo que cuesta, ej. 420</small></label><label class="new-billing-field">Clases de referencia<input name="sessionsReference" type="number" min="1" placeholder="Opcional" aria-label="Clases de referencia" /><small>Solo informativo</small></label><button type="button" class="secondary">Quitar persona</button>`;
     row.querySelector('button').onclick = () => { if (linesBox.children.length > 1) { row.remove(); recalc(); } };
     row.addEventListener('input', recalc); linesBox.appendChild(row);
   };

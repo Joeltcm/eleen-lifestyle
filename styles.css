@@ -707,7 +707,8 @@ button.active-filter{background:#2f6f4f;color:#fff;border-color:#2f6f4f}
    así que la fila nunca usa más de dos columnas (sin desbordamiento horizontal). */
 .new-billing-line{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;padding:10px;border-radius:12px;background:#fdfafb;box-shadow:0 2px 8px #6d4a590d}
 .new-billing-line select,.new-billing-line input{min-width:0;width:100%;box-sizing:border-box}
-.new-billing-line select,.new-billing-line input[name=description],.new-billing-line button{grid-column:1/-1}
+.new-billing-line select,.new-billing-line input[name=description],.new-billing-line button,.new-billing-line .new-billing-field:last-of-type{grid-column:1/-1}
+.new-billing-field{display:grid;gap:3px;font-size:.78rem;font-weight:600}.new-billing-field small{font-weight:400;color:var(--muted,#7a6a72)}
 
 /* Cobros del módulo nuevo (1B-3): reparto del cobro entre facturas abiertas */
 .new-billing-allocs{display:grid;gap:8px;margin:8px 0}
