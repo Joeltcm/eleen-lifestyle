@@ -17,6 +17,7 @@ import { complianceCompletionExpression, complianceSessionCondition } from './co
 import { routineSuggestionsReady, suggestRoutine } from './routine-suggestions.js';
 import { accountStatementPdf, accountsReceivablePdf, compliancePdf, invoicePdf, monthlyFinancePdf } from './billing-reports.js';
 import { fechaDeNegocioPanama, fechaPanamaDiasAtras } from './panama-date.js';
+import { resolveBillingEngine } from './billing-engine.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
 const app = Fastify({ logger: true, trustProxy: true });
@@ -72,6 +73,9 @@ async function requireStaff(request: FastifyRequest) {
   }
   return user;
 }
+
+// Estado operativo de la facturación: qué generador puede escribir (1B-0).
+const billingEngine = resolveBillingEngine({ legacy: config.LEGACY_BILLING_GENERATION, next: config.NEW_BILLING_GENERATION });
 
 // Todas las rutas que pueden abrir o consumir un saldo mensual toman el mismo
 // lock transaccional por cliente. El índice único de facturas no protege
@@ -634,11 +638,18 @@ app.get('/api/billing/recurring/status', { preHandler: requireStaff }, async req
   return recurringBillingStatus(auth.sub);
 });
 
+// Diagnóstico del estado operativo (solo lectura): permite comprobar desde fuera
+// qué generador está escribiendo.
+app.get('/api/billing/engine-status', { preHandler: requireStaff }, async () => billingEngine);
+
 app.post('/api/billing/recurring/generate', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   const status = await recurringBillingStatus(auth.sub);
   if (status.blockedByZoho) {
     return { ...status, generated: 0, message: 'La facturación automática se activará después del corte final de Zoho.' };
+  }
+  if (!billingEngine.legacyWrites) {
+    return { ...status, generated: 0, message: `La generación del sistema anterior está apagada (${billingEngine.state}).` };
   }
   const result = await generateRecurringInvoices(auth.sub);
   return { ...(await recurringBillingStatus(auth.sub)), generated: result.generated, balances: result.balances, reposiciones: result.reposiciones, descuentos: result.descuentos, creditInvoicesRecalculated: result.creditInvoicesRecalculated, fechasCorregidas: result.fechasCorregidas };
@@ -6412,8 +6423,12 @@ app.delete('/api/progress-photos/:id', { preHandler: requireStaff }, async (requ
 
 const firstReminderRun = setTimeout(() => dispatchReminders().catch(error => app.log.error(error)), 10_000);
 const reminderInterval = setInterval(() => dispatchReminders().catch(error => app.log.error(error)), config.REMINDER_INTERVAL_MINUTES * 60_000);
-const firstBillingRun = setTimeout(() => generateRecurringInvoices().catch(error => app.log.error(error)), 15_000);
-const billingInterval = setInterval(() => generateRecurringInvoices().catch(error => app.log.error(error)), config.BILLING_INTERVAL_MINUTES * 60_000);
+// El generador viejo solo corre si el estado operativo lo permite (1B-0): en
+// `maintenance` y `new` no escribe, y con un conflicto de configuración tampoco.
+if (billingEngine.conflict) app.log.error({ billingEngine }, billingEngine.message);
+else app.log.info({ state: billingEngine.state }, 'Estado operativo de la facturación');
+const firstBillingRun = setTimeout(() => { if (billingEngine.legacyWrites) generateRecurringInvoices().catch(error => app.log.error(error)); }, 15_000);
+const billingInterval = setInterval(() => { if (billingEngine.legacyWrites) generateRecurringInvoices().catch(error => app.log.error(error)); }, config.BILLING_INTERVAL_MINUTES * 60_000);
 // Los intentos de acceso viejos no sirven para nada pasada la ventana; se
 // barren una vez al día para que la tabla no crezca sin fin.
 const purgaIntentos = setInterval(() => purgarIntentos().catch(error => app.log.error(error)), 24 * 60 * 60_000);

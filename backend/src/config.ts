@@ -28,6 +28,10 @@ const schema = z.object({
   // para adelantar cobros.
   BILLING_GENERATION_DAYS_AHEAD: z.coerce.number().int().min(0).max(31).default(0),
   BILLING_INTERVAL_MINUTES: z.coerce.number().int().min(5).max(1440).default(60),
+  // Estado operativo de la facturación (ver billing-engine.ts). El generador viejo
+  // sigue activo por defecto; el nuevo no existe todavía y queda apagado.
+  LEGACY_BILLING_GENERATION: z.enum(['on', 'off']).default('on'),
+  NEW_BILLING_GENERATION: z.enum(['off', 'shadow', 'on']).default('off'),
   ZOHO_CLIENT_ID: z.string().optional(),
   ZOHO_CLIENT_SECRET: z.string().optional(),
   ZOHO_ACCOUNTS_URL: z.string().url().default('https://accounts.zoho.com'),
