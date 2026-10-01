@@ -179,6 +179,42 @@ describe('vista previa (solo lectura)', () => {
   });
 });
 
+describe('nombres de clientes: coincidencia robusta y sin adivinar', () => {
+  const renombrar = (nuevo) => A.db`UPDATE clients SET full_name = ${nuevo} WHERE id = ${A.id['Sally Dayan Safdi']}`;
+
+  test('acentos, mayúsculas y espacios (incluido el espacio duro) no impiden la coincidencia', async () => {
+    await renombrar('  SALLY\u00a0 Dayán   safdi ');
+    try {
+      const p = await preview(A);
+      assert.equal(porClave(p, 'sally-2026-09').decision, 'incluir');
+      assert.equal(porClave(p, 'sally-2026-10').decision, 'incluir');
+      assert.equal(p.totals.invoices, 10);
+    } finally { await renombrar('Sally Dayan Safdi'); }
+  });
+
+  test('un nombre parecido NO se acepta: se sugiere, una sola vez por nombre, y la entrada queda por revisar', async () => {
+    await renombrar('Sally Safdie');
+    try {
+      const p = await preview(A);
+      const s = porClave(p, 'sally-2026-09');
+      assert.equal(s.decision, 'revisar');
+      assert.equal(s.reasons.length, 1, 'el mismo nombre no se repite como payer y beneficiario');
+      assert.match(s.reasons[0], /No se encontró al cliente "Sally Dayan Safdi"\. ¿Será "Sally Safdie"\?/);
+      assert.equal(p.totals.invoices, 8);
+      assert.equal(p.totals.review, 2);
+    } finally { await renombrar('Sally Dayan Safdi'); }
+  });
+
+  test('dos clientes con el mismo nombre normalizado se rechazan por ambiguos', async () => {
+    const [{ id: gemelo }] = await A.db`INSERT INTO clients (owner_id, full_name) VALUES (${A.ownerId}, 'GILA  falic') RETURNING id`;
+    try {
+      const g = porClave(await preview(A), 'gila-2026-09');
+      assert.equal(g.decision, 'revisar');
+      assert.match(g.reasons[0], /Hay más de un cliente llamado "Gila Falic"/);
+    } finally { await A.db`DELETE FROM clients WHERE id = ${gemelo}`; }
+  });
+});
+
 describe('aprobar y aplicar: las puertas', () => {
   test('aprobar exige el hash exacto; un lote anterior queda reemplazado', async () => {
     const viejo = await preview(A); const nuevo = await preview(A);

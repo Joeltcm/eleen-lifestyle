@@ -104,12 +104,30 @@ type Item = {
 export type Preview = { items: Item[]; totals: Record<string, any>; counterBefore: number; hash: string; manifestHash: string };
 
 type ResolvedClient = { id: string; name: string; cutDay: number | null; error?: undefined } | { error: string };
-async function resolveClient(tx: Tx, ownerId: string, name: string): Promise<ResolvedClient> {
-  const rows = await tx`SELECT id::text AS id, full_name, billing_cutoff_day FROM clients
-    WHERE owner_id = ${ownerId} AND lower(btrim(full_name)) = lower(btrim(${name}))`;
-  if (rows.length === 0) return { error: `No se encontró al cliente "${name}"` };
-  if (rows.length > 1) return { error: `Hay más de un cliente llamado "${name}"` };
-  return { id: rows[0].id as string, name: rows[0].full_name as string, cutDay: rows[0].billing_cutoff_day as number | null };
+type ClientIndexRow = { id: string; name: string; norm: string; tokens: string[]; cutDay: number | null };
+
+// Los nombres de la lista y los del sistema se comparan sin acentos, sin diferencias de mayúsculas y con los
+// espacios (incluido el espacio duro) colapsados: "Sally  Dayán Safdi" y "sally dayan safdi" son la misma persona.
+export const normalizeName = (value: string) => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[\s\u00a0]+/g, ' ').trim().toLowerCase();
+
+async function loadClientIndex(tx: Tx, ownerId: string): Promise<ClientIndexRow[]> {
+  const rows = await tx`SELECT id::text AS id, full_name, billing_cutoff_day FROM clients WHERE owner_id = ${ownerId}`;
+  return rows.map(row => {
+    const norm = normalizeName(String(row.full_name));
+    return { id: row.id as string, name: row.full_name as string, norm, tokens: norm.split(' ').filter(token => token.length >= 3), cutDay: row.billing_cutoff_day as number | null };
+  });
+}
+
+// Solo coincide un nombre IGUAL (normalizado). Si no hay coincidencia NO se adivina: se sugieren los clientes
+// que comparten alguna palabra para que se corrija la lista a propósito.
+function resolveClient(index: ClientIndexRow[], name: string): ResolvedClient {
+  const target = normalizeName(name);
+  const exact = index.filter(row => row.norm === target);
+  if (exact.length === 1) return { id: exact[0].id, name: exact[0].name, cutDay: exact[0].cutDay };
+  if (exact.length > 1) return { error: `Hay más de un cliente llamado "${name}"` };
+  const words = target.split(' ').filter(token => token.length >= 3);
+  const near = index.filter(row => words.some(word => row.tokens.includes(word))).slice(0, 4).map(row => `"${row.name}"`);
+  return { error: `No se encontró al cliente "${name}"${near.length ? `. ¿Será ${near.join(' o ')}?` : ''}` };
 }
 
 // Evidencia del dinero en el sistema anterior: cobros de ese pagador en esa fecha.
@@ -144,6 +162,7 @@ export async function buildImportPreview(tx: Tx, ownerId: string, manifest: Impo
   const items: Item[] = [];
   let projected = counterBefore;
   let seq = 0;
+  const clientIndex = await loadClientIndex(tx, ownerId);
 
   for (const entry of manifest.entries) {
     seq += 1;
@@ -151,11 +170,11 @@ export async function buildImportPreview(tx: Tx, ownerId: string, manifest: Impo
     const externalId = `import:${entry.key}`;
     const sourceIds: Record<string, any> = { payments: [], invoices: [] };
 
-    const payer = await resolveClient(tx, ownerId, entry.payer);
+    const payer = resolveClient(clientIndex, entry.payer);
     if (payer.error !== undefined) reasons.push(payer.error);
     const lines: Record<string, any>[] = [];
     for (const line of entry.lines) {
-      const beneficiary = await resolveClient(tx, ownerId, line.beneficiary);
+      const beneficiary = resolveClient(clientIndex, line.beneficiary);
       if (beneficiary.error !== undefined) { reasons.push(beneficiary.error); continue; }
       lines.push({ beneficiaryId: beneficiary.id, beneficiary: beneficiary.name, description: line.description ?? 'Plan', quantity: 1,
         unitAmount: line.amount ?? null, amount: line.amount ?? null, sessionsReference: line.sessionsReference ?? null });
@@ -194,6 +213,8 @@ export async function buildImportPreview(tx: Tx, ownerId: string, manifest: Impo
     }
 
     if (total <= 0) reasons.push('El total de la factura debe ser mayor que cero');
+    const uniqueReasons = [...new Set(reasons)];
+    reasons.splice(0, reasons.length, ...uniqueReasons);
     const decision: Item['decision'] = alreadyApplied ? 'ya_aplicado' : reasons.length ? 'revisar' : 'incluir';
     const issuedOn = entry.issuedOn ?? entry.cycleStart;
     const data: Record<string, any> = {
