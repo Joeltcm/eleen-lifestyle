@@ -100,3 +100,13 @@ test('sin details=1 la respuesta es la de siempre (sin líneas ni meta)', async 
 test('exige sesión', async () => {
   assert.equal((await cliente(servidor.base).get('/api/billing/invoices?details=1')).estado, 401);
 });
+
+test('"activa" (la vista de entrada) oculta las anuladas; "all" y "anulada" las muestran', async () => {
+  const extra = await factura(id.Eduardo, '2026-10-28', '2026-11-28', '2099-10-28', [[id.Eduardo, 175, 'Mensualidad']]);
+  assert.equal((await api.post(`/api/billing/invoices/${extra.id}/void`, { reason: 'prueba de anulación' })).estado, 200);
+  const activas = await lista('&status=activa');
+  assert.ok(activas.invoices.every(f => f.status !== 'anulada'));
+  assert.equal(activas.invoices.length, 4);
+  assert.equal((await lista('&status=all')).invoices.length, 5);
+  assert.deepEqual((await lista('&status=anulada')).invoices.map(f => f.id), [extra.id]);
+});

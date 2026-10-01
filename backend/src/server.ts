@@ -679,7 +679,7 @@ const billingInvoiceInput = z.object({
   lines: z.array(billingInvoiceLineInput).min(1).max(30)
 });
 const billingInvoiceListQuery = z.object({
-  status: z.enum(['all', 'abierta', 'pendiente', 'parcial', 'pagada', 'anulada', 'vencida']).default('all'),
+  status: z.enum(['all', 'activa', 'abierta', 'pendiente', 'parcial', 'pagada', 'anulada', 'vencida']).default('all'),
   kind: z.enum(billingInvoiceKinds).optional(),
   payerId: z.string().uuid().optional(),
   // Panel: cliente = pagador O beneficiario de alguna línea; mes = mes de emisión; corte = día de corte del pagador.
@@ -737,7 +737,7 @@ app.get('/api/billing/invoices', { preHandler: requireStaff }, async request => 
     SELECT ${billingInvoiceColumns}
     FROM billing_invoices i JOIN clients p ON p.id = i.payer_client_id
     WHERE i.owner_id = $1
-      AND ($2::text = 'all' OR $2::text = 'vencida' OR ($2::text = 'abierta' AND i.status IN ('pendiente', 'parcial')) OR i.status = $2)
+      AND ($2::text = 'all' OR $2::text = 'vencida' OR ($2::text = 'activa' AND i.status <> 'anulada') OR ($2::text = 'abierta' AND i.status IN ('pendiente', 'parcial')) OR i.status = $2)
       AND ($3::text IS NULL OR i.kind = $3)
       AND ($4::uuid IS NULL OR i.payer_client_id = $4)
       AND ($5::date IS NULL OR i.issued_on >= $5)

@@ -1,4 +1,4 @@
-const APP_VERSION = '249';
+const APP_VERSION = '250';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -4097,7 +4097,7 @@ document.querySelectorAll('[data-view-go]').forEach(button => button.addEventLis
 // se registra aparte (1B-3).
 const newBillingKinds = { mensual: 'Mensualidad', credito: 'A crédito', clase_suelta: 'Clase suelta', paquete: 'Paquete', manual: 'Manual' };
 const newBillingStatusLabels = { pendiente: 'Pendiente', parcial: 'Pago parcial', pagada: 'Pagada', anulada: 'Anulada' };
-const newBillingFilters = { status: 'all', clientId: '', month: '', cutDay: '' };
+const newBillingFilters = { status: 'activa', clientId: '', month: '', cutDay: '' };
 const newBillingMonthNames = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
 const newBillingMonthText = value => { const [year, month] = value.split('-'); const name = newBillingMonthNames[Number(month) - 1]; return `${name[0].toUpperCase()}${name.slice(1)} ${year}`; };
 function newBillingStatusText(invoice) {
@@ -4121,14 +4121,14 @@ async function newBillingInvoices() {
   const monthOptions = meta.months.map(month => `<option value="${month}"${month === f.month ? ' selected' : ''}>${newBillingMonthText(month)}</option>`).join('');
   const cutOptions = meta.cutDays.map(day => `<option value="${day}"${String(day) === String(f.cutDay) ? ' selected' : ''}>Corte del ${day}</option>`).join('');
   const percent = summary.total > 0 ? Math.round((summary.paid / summary.total) * 100) : 0;
-  const filtered = f.status !== 'all' || f.clientId || f.month || f.cutDay;
+  const filtered = f.status !== 'activa' || f.clientId || f.month || f.cutDay;
   root.innerHTML = `<article class="card"><div class="card-head"><div><h3>Facturas</h3><p id="new-billing-summary">${summary.count} facturas${filtered ? ' con estos filtros' : ''} · Total ${money.format(summary.total)} · Saldo ${money.format(summary.balance)}</p></div></div>
     <div class="subpanel-toolbar"><button class="primary" type="button" id="new-billing-create">+ Nueva factura</button></div>
     <div class="billing-period-bar">
       <label>Mes de emisión<select id="new-billing-month"><option value="">Todos</option>${monthOptions}</select></label>
       <label>Corte<select id="new-billing-cut"><option value="">Todos</option>${cutOptions}</select></label>
       <label>Cliente<select id="new-billing-client"><option value="">Todos</option>${clientOptions}</select></label>
-      <label>Estado<select id="new-billing-status">${[['all', 'Todas'], ['pendiente', 'Pendientes'], ['parcial', 'Pago parcial'], ['pagada', 'Pagadas'], ['vencida', 'Vencidas'], ['anulada', 'Anuladas']].map(([value, text]) => `<option value="${value}"${value === f.status ? ' selected' : ''}>${text}</option>`).join('')}</select></label>
+      <label>Estado<select id="new-billing-status">${[['activa', 'Vigentes'], ['pendiente', 'Pendientes'], ['parcial', 'Pago parcial'], ['pagada', 'Pagadas'], ['vencida', 'Vencidas'], ['anulada', 'Anuladas'], ['all', 'Todas (con anuladas)']].map(([value, text]) => `<option value="${value}"${value === f.status ? ' selected' : ''}>${text}</option>`).join('')}</select></label>
       ${filtered ? '<button class="secondary" type="button" id="new-billing-clear">Quitar filtros</button>' : ''}</div>
     <div class="metrics new-billing-metrics">
       <article><span>Facturado</span><strong>${summary.count} · ${money.format(summary.total)}</strong></article>
@@ -4150,7 +4150,7 @@ async function newBillingInvoices() {
   const bind = (id, key) => { document.getElementById(id).onchange = event => { f[key] = event.target.value; newBillingInvoices(); }; };
   bind('new-billing-month', 'month'); bind('new-billing-cut', 'cutDay'); bind('new-billing-client', 'clientId'); bind('new-billing-status', 'status');
   const clear = document.getElementById('new-billing-clear');
-  if (clear) clear.onclick = () => { Object.assign(f, { status: 'all', clientId: '', month: '', cutDay: '' }); newBillingInvoices(); };
+  if (clear) clear.onclick = () => { Object.assign(f, { status: 'activa', clientId: '', month: '', cutDay: '' }); newBillingInvoices(); };
   const list = document.getElementById('new-billing-list');
   list.querySelectorAll('[data-new-invoice-pay]').forEach(button => button.onclick = () => { const invoice = invoices.find(item => item.id === button.dataset.newInvoicePay); newBillingPaymentDialog({ payerId: invoice.payerClientId, amount: invoice.balance, invoiceId: invoice.id }); });
   list.querySelectorAll('[data-new-invoice-split]').forEach(button => button.onclick = () => newBillingSplitDialog(invoices.find(item => item.id === button.dataset.newInvoiceSplit)));
