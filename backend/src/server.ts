@@ -938,10 +938,20 @@ const clientSchema = z.object({
   // y paga al final; se le señala el pago pendiente. Ver migración 046.
   paymentMode: z.enum(['anticipado', 'no_anticipado']).default('anticipado')
 });
+const clientEditSchema = clientSchema.pick({
+  fullName: true, email: true, phone: true, goal: true, notes: true,
+  monthlySessionTarget: true, creditSessionPrice: true,
+  billingResponsibleClientId: true, status: true, cutoffDay: true, paymentMode: true
+}).extend({
+  // El monto propio sólo se acepta desde el formulario explícito de edición
+  // y sólo se aplica a clientes con mensualidad. No reutilizamos el default
+  // de alta (0), porque omitir el campo debe conservar el precio existente.
+  standardPrice: z.coerce.number().positive().max(100000).optional()
+});
 app.get('/api/clients', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`
-    SELECT c.*, p.name AS plan_name, p.sessions_included, p.validity_days,
+    SELECT c.*, p.name AS plan_name, p.price AS plan_catalog_price, p.sessions_included, p.validity_days,
       COALESCE((SELECT sum(total_sessions - used_sessions) FROM session_packages sp WHERE sp.client_id = c.id AND sp.status = 'active' AND (sp.expires_on IS NULL OR sp.expires_on >= current_date)), 0)::integer AS available_sessions,
       -- Movimientos del ciclo en curso, separados. Este contador cuenta los
       -- eventos por sr.created_at (cuando se pidió la reprogramación), mientras
@@ -1020,7 +1030,7 @@ app.post('/api/clients', { preHandler: requireStaff }, async (request, reply) =>
 app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const input = clientSchema.pick({ fullName: true, email: true, phone: true, goal: true, notes: true, monthlySessionTarget: true, creditSessionPrice: true, billingResponsibleClientId: true, status: true, cutoffDay: true, paymentMode: true }).parse(request.body);
+  const input = clientEditSchema.parse(request.body);
   // cutoffDay lleva .default(1) en el esquema, así que si no viene en el cuerpo
   // llega valiendo 1: editar sólo el nombre habría movido el día de cobro al
   // primero de mes sin avisar. Se mira si venía de verdad.
@@ -1029,6 +1039,11 @@ app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, repl
   // viene en el cuerpo no debe pisar la modalidad ya guardada.
   const tocaModalidad = 'paymentMode' in (request.body as Record<string, unknown>);
   const tocaTarifaCredito = 'creditSessionPrice' in (request.body as Record<string, unknown>);
+  const tocaMontoMensual = 'standardPrice' in (request.body as Record<string, unknown>);
+  const montoMensualSolicitado = input.standardPrice ?? 0;
+  if (tocaMontoMensual && input.standardPrice === undefined) {
+    return reply.code(400).send({ error: 'El monto mensual es obligatorio' });
+  }
   // El pagador debe ser otro cliente de la misma entrenadora, y no puede
   // apuntarse a sí mismo ni encadenar: quien paga por alguien no puede a su vez
   // tener pagador, o el saldo quedaría en un tercero imposible de rastrear.
@@ -1042,12 +1057,42 @@ app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, repl
   }
   const desactiva = input.status === 'inactive';
   const actualizacion = await sql.begin(async transaction => {
-    const [antes] = await transaction`SELECT status FROM clients WHERE id = ${id} AND owner_id = ${auth.sub} FOR UPDATE`;
+    const [antes] = await transaction`
+      SELECT status, billing_model, standard_price
+      FROM clients WHERE id = ${id} AND owner_id = ${auth.sub} FOR UPDATE
+    `;
     if (!antes) return null;
+    if (tocaMontoMensual && antes.billing_model !== 'monthly') {
+      sessionStateConflict('El monto mensual sólo aplica a clientes con mensualidad');
+    }
+    let membresiaMensual: { id: string } | undefined;
+    if (tocaMontoMensual) {
+      const membresias = await transaction`
+        SELECT id FROM memberships
+        WHERE client_id = ${id} AND status = 'active'
+        FOR UPDATE
+      `;
+      membresiaMensual = membresias[0] as { id: string } | undefined;
+      if (!membresiaMensual) {
+        sessionStateConflict('El cliente mensual no tiene una membresía activa para actualizar');
+      }
+    }
 
     const [client] = await transaction`UPDATE clients SET full_name = ${input.fullName}, email = ${input.email || null}, phone = ${input.phone || null}, goal = ${input.goal || null}, notes = ${input.notes || null}, monthly_session_target = ${input.monthlySessionTarget ?? null}, credit_session_price = CASE WHEN ${tocaTarifaCredito} THEN ${input.creditSessionPrice ?? null} WHEN ${tocaModalidad} AND ${input.paymentMode} = 'no_anticipado' AND credit_session_price IS NULL THEN 25 ELSE credit_session_price END, billing_responsible_client_id = ${input.billingResponsibleClientId ?? null}, status = COALESCE(${input.status ?? null}, status),
+      standard_price = CASE WHEN ${tocaMontoMensual} THEN ${montoMensualSolicitado}::numeric ELSE standard_price END,
       billing_cutoff_day = CASE WHEN ${tocaCorte} THEN ${input.cutoffDay}::int ELSE billing_cutoff_day END,
       payment_mode = CASE WHEN ${tocaModalidad} THEN ${input.paymentMode} ELSE payment_mode END, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
+
+    if (tocaMontoMensual && Number(antes.standard_price) !== Number(montoMensualSolicitado)) {
+      await transaction`UPDATE memberships SET amount = ${montoMensualSolicitado} WHERE id = ${membresiaMensual!.id}`;
+      await transaction`
+        INSERT INTO audit_log (user_id, user_email, action, route, target_id, detail, ip)
+        VALUES (${auth.sub}, ${auth.email || null}, 'UPDATE_CLIENT_MONTHLY_AMOUNT',
+          ${request.routeOptions?.url || request.url}, ${id},
+          ${transaction.json({ previousAmount: Number(antes.standard_price), newAmount: Number(montoMensualSolicitado), membershipId: membresiaMensual!.id })},
+          ${request.ip || null})
+      `;
+    }
 
     // La membresía guarda su propio día de renovación. Si sólo se moviera el
     // del cliente, quedarían dos fechas distintas para lo mismo y cuál manda

@@ -1218,6 +1218,55 @@ describe('modalidad de pago y cobros pendientes', () => {
     row = (await api.get('/api/clients')).datos.find(item => item.id === c.datos.id);
     assert.equal(row.payment_mode, 'no_anticipado');
   });
+
+  test('el monto mensual propio actualiza la membresía y deja auditoría sin tocar plan, saldos ni facturas', async () => {
+    const plan = await api.post('/api/plans', { name: 'Catálogo para monto propio', billingModel: 'monthly', price: 460, sessionsIncluded: 12 });
+    const creado = await api.post('/api/clients', { fullName: 'Monto propio auditable', planId: plan.datos.id, cutoffDay: 15 });
+    assert.equal(creado.estado, 201);
+    const clientId = creado.datos.id;
+    const saldosAntes = (await api.get('/api/packages')).datos.filter(item => item.client_id === clientId);
+    const facturasAntes = (await api.get('/api/invoices')).datos.filter(item => item.client_id === clientId);
+
+    const actualizado = await api.patch(`/api/clients/${clientId}`, {
+      fullName: 'Monto propio auditable', standardPrice: 450
+    });
+    assert.equal(actualizado.estado, 200);
+
+    const row = (await api.get('/api/clients')).datos.find(item => item.id === clientId);
+    assert.equal(Number(row.standard_price), 450);
+    assert.equal(row.plan_id, plan.datos.id, 'el plan comercial no cambia');
+    const [membership] = await db`SELECT amount FROM memberships WHERE client_id = ${clientId} AND status = 'active'`;
+    assert.equal(Number(membership.amount), 450, 'la membresía activa sigue el monto propio');
+    assert.deepEqual((await api.get('/api/packages')).datos.filter(item => item.client_id === clientId), saldosAntes,
+      'editar el monto no abre ni modifica saldos');
+    assert.deepEqual((await api.get('/api/invoices')).datos.filter(item => item.client_id === clientId), facturasAntes,
+      'editar el monto no toca facturas existentes');
+
+    const [audit] = await db`
+      SELECT action, target_id, detail
+      FROM audit_log
+      WHERE action = 'UPDATE_CLIENT_MONTHLY_AMOUNT' AND target_id = ${clientId}
+      ORDER BY created_at DESC LIMIT 1
+    `;
+    assert.equal(audit.action, 'UPDATE_CLIENT_MONTHLY_AMOUNT');
+    assert.equal(audit.target_id, clientId);
+    assert.equal(Number(audit.detail.previousAmount), 460);
+    assert.equal(Number(audit.detail.newAmount), 450);
+
+    const reGuardado = await api.patch(`/api/clients/${clientId}`, { fullName: 'Monto propio auditable' });
+    assert.equal(reGuardado.estado, 200);
+    const conservado = (await api.get('/api/clients')).datos.find(item => item.id === clientId);
+    assert.equal(Number(conservado.standard_price), 450, 'guardar sin el campo conserva el monto propio');
+  });
+
+  test('el monto mensual no se acepta para clientes de sesión suelta', async () => {
+    const creado = await api.post('/api/clients', { fullName: 'Monto no mensual', billingModel: 'single', standardPrice: 35, cutoffDay: 1 });
+    assert.equal(creado.estado, 201);
+    const rechazado = await api.patch(`/api/clients/${creado.datos.id}`, { fullName: 'Monto no mensual', standardPrice: 50 });
+    assert.equal(rechazado.estado, 409);
+    const row = (await api.get('/api/clients')).datos.find(item => item.id === creado.datos.id);
+    assert.equal(Number(row.standard_price), 35);
+  });
 });
 
 describe('cobertura end-to-end de facturación y modalidad de pago', () => {
