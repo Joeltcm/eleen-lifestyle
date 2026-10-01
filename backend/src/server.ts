@@ -15,7 +15,7 @@ import { cancelSessionInGoogle, registerGoogleCalendarRoutes, removeSessionFromG
 import { moveSessionInTransaction } from './session-reschedule.js';
 import { complianceCompletionExpression, complianceSessionCondition } from './compliance.js';
 import { routineSuggestionsReady, suggestRoutine } from './routine-suggestions.js';
-import { accountStatementPdf, accountsReceivablePdf, compliancePdf, invoicePdf, monthlyFinancePdf } from './billing-reports.js';
+import { accountStatementPdf, accountsReceivablePdf, billingInvoicePdf, compliancePdf, invoicePdf, monthlyFinancePdf } from './billing-reports.js';
 import { fechaDeNegocioPanama, fechaPanamaDiasAtras } from './panama-date.js';
 import { resolveBillingEngine } from './billing-engine.js';
 
@@ -636,6 +636,261 @@ async function generateRecurringInvoices(ownerId?: string) {
 app.get('/api/billing/recurring/status', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return recurringBillingStatus(auth.sub);
+});
+
+// ── Facturas del módulo nuevo (1B-2) ─────────────────────────────────────────
+// Documento por cobrar con número FAC-, de un pagador y un ciclo, con una línea por
+// beneficiario. Estas rutas NO leen ni escriben el sistema anterior (`invoices`), no
+// abren saldos y no tocan el precio ni la membresía de ningún cliente. El dinero
+// recibido (cobros) y su aplicación llegan en 1B-3.
+const billingInvoiceKinds = ['mensual', 'credito', 'clase_suelta', 'paquete', 'manual'] as const;
+const billingInvoiceLineInput = z.object({
+  beneficiaryClientId: z.string().uuid(),
+  description: z.string().trim().min(1).max(200).optional(),
+  quantity: z.coerce.number().positive().max(1000).default(1),
+  unitAmount: z.coerce.number().min(-100000).max(100000),
+  planId: z.string().uuid().nullable().optional(),
+  lineType: z.enum(['plan', 'sesion', 'ajuste']).default('plan'),
+  sessionsReference: z.coerce.number().int().positive().max(1000).nullable().optional()
+});
+const billingInvoiceInput = z.object({
+  payerClientId: z.string().uuid(),
+  kind: z.enum(billingInvoiceKinds),
+  cycleStart: z.string().date().optional(),
+  cycleEnd: z.string().date().optional(),
+  cycleDays: z.coerce.number().int().min(1).max(366).optional(),
+  cutDay: z.coerce.number().int().min(1).max(31).optional(),
+  issuedOn: z.string().date().optional(),
+  dueOn: z.string().date().optional(),
+  notes: z.string().trim().max(500).optional(),
+  lines: z.array(billingInvoiceLineInput).min(1).max(30)
+});
+const billingInvoiceListQuery = z.object({
+  status: z.enum(['all', 'pendiente', 'parcial', 'pagada', 'anulada', 'vencida']).default('all'),
+  kind: z.enum(billingInvoiceKinds).optional(),
+  payerId: z.string().uuid().optional(),
+  from: z.string().date().optional(),
+  to: z.string().date().optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(200)
+});
+
+const centavos = (value: number) => Math.round(value * 100);
+const desdeCentavos = (value: number) => value / 100;
+const billingCode = (number: unknown) => `FAC-${String(number).padStart(4, '0')}`;
+
+function sumarDias(fecha: string, dias: number): string {
+  const base = new Date(`${fecha}T12:00:00Z`);
+  base.setUTCDate(base.getUTCDate() + dias);
+  return base.toISOString().slice(0, 10);
+}
+
+function billingInvoiceValue(row: Record<string, any>, hoy: string) {
+  const total = Number(row.total);
+  const paid = Number(row.paid ?? 0);
+  const balance = row.status === 'anulada' ? 0 : Math.max(0, desdeCentavos(centavos(total) - centavos(paid)));
+  const overdue = (row.status === 'pendiente' || row.status === 'parcial') && String(row.due_on) < hoy && balance > 0;
+  return {
+    id: row.id, number: Number(row.number), code: billingCode(row.number),
+    payerClientId: row.payer_client_id, payerName: row.payer_name,
+    kind: row.kind, origin: row.origin, cycleStart: row.cycle_start, cycleEnd: row.cycle_end, cutDay: Number(row.cut_day),
+    issuedOn: row.issued_on, dueOn: row.due_on, status: row.status, overdue,
+    total, paid, balance, notes: row.notes ?? null,
+    voidReason: row.void_reason ?? null, voidedAt: row.voided_at ?? null, createdAt: row.created_at
+  };
+}
+
+const billingInvoiceColumns = `i.id, i.number, i.payer_client_id, i.kind, i.origin, i.cycle_start::text AS cycle_start,
+  i.cycle_end::text AS cycle_end, i.cut_day, i.issued_on::text AS issued_on, i.due_on::text AS due_on, i.status, i.total,
+  i.notes, i.void_reason, i.voided_at, i.created_at, p.full_name AS payer_name, p.email AS payer_email,
+  COALESCE((SELECT sum(a.amount) FROM billing_payment_applications a WHERE a.invoice_id = i.id AND a.reversed_at IS NULL), 0) AS paid`;
+
+async function auditBilling(transaction: TransactionSql, ownerId: string, userId: string | null, action: string, entity: string, entityId: string, detail: unknown) {
+  await transaction`
+    INSERT INTO billing_audit (owner_id, user_id, action, entity, entity_id, detail)
+    VALUES (${ownerId}, ${userId}, ${action}, ${entity}, ${entityId}, ${transaction.json(detail as any)})
+  `;
+}
+
+app.get('/api/billing/invoices', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const query = billingInvoiceListQuery.parse(request.query);
+  const hoy = fechaDeNegocioPanama();
+  const rows = await sql.unsafe(`
+    SELECT ${billingInvoiceColumns}
+    FROM billing_invoices i JOIN clients p ON p.id = i.payer_client_id
+    WHERE i.owner_id = $1
+      AND ($2::text = 'all' OR $2::text = 'vencida' OR i.status = $2)
+      AND ($3::text IS NULL OR i.kind = $3)
+      AND ($4::uuid IS NULL OR i.payer_client_id = $4)
+      AND ($5::date IS NULL OR i.issued_on >= $5)
+      AND ($6::date IS NULL OR i.issued_on <= $6)
+    ORDER BY i.number DESC LIMIT $7`,
+    [auth.sub, query.status, query.kind ?? null, query.payerId ?? null, query.from ?? null, query.to ?? null, query.limit]
+  ) as unknown as Record<string, any>[];
+  let invoices = rows.map(row => billingInvoiceValue(row, hoy));
+  if (query.status === 'vencida') invoices = invoices.filter(invoice => invoice.overdue);
+  const open = invoices.filter(invoice => invoice.status !== 'anulada');
+  return {
+    invoices,
+    summary: {
+      count: invoices.length,
+      total: desdeCentavos(open.reduce((sum, invoice) => sum + centavos(invoice.total), 0)),
+      balance: desdeCentavos(open.reduce((sum, invoice) => sum + centavos(invoice.balance), 0))
+    }
+  };
+});
+
+app.get('/api/billing/invoices/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [row] = await sql.unsafe(`
+    SELECT ${billingInvoiceColumns} FROM billing_invoices i JOIN clients p ON p.id = i.payer_client_id
+    WHERE i.id = $1 AND i.owner_id = $2`, [id, auth.sub]) as unknown as Record<string, any>[];
+  if (!row) return reply.code(404).send({ error: 'Factura no encontrada' });
+  const lines = await sql`
+    SELECT l.id, l.beneficiary_client_id, c.full_name AS beneficiary_name, l.line_type, l.description,
+      l.quantity, l.unit_amount, l.amount, l.sessions_reference
+    FROM billing_invoice_lines l JOIN clients c ON c.id = l.beneficiary_client_id
+    WHERE l.invoice_id = ${id} ORDER BY c.full_name, l.line_type
+  `;
+  const applications = await sql`
+    SELECT a.id, a.amount, a.applied_on::text AS applied_on, a.reversed_at, a.reversal_reason,
+      p.paid_on::text AS paid_on, p.method, p.reference
+    FROM billing_payment_applications a JOIN billing_payments p ON p.id = a.payment_id
+    WHERE a.invoice_id = ${id} ORDER BY a.created_at
+  `;
+  const audit = await sql`
+    SELECT at, action, detail FROM billing_audit WHERE owner_id = ${auth.sub} AND entity = 'invoice' AND entity_id = ${id} ORDER BY at
+  `;
+  return {
+    ...billingInvoiceValue(row, fechaDeNegocioPanama()),
+    lines: lines.map(line => ({
+      id: line.id, beneficiaryClientId: line.beneficiary_client_id, beneficiaryName: line.beneficiary_name,
+      lineType: line.line_type, description: line.description, quantity: Number(line.quantity),
+      unitAmount: Number(line.unit_amount), amount: Number(line.amount), sessionsReference: line.sessions_reference
+    })),
+    applications: applications.map(item => ({
+      id: item.id, amount: Number(item.amount), appliedOn: item.applied_on, paidOn: item.paid_on, method: item.method,
+      reference: item.reference, reversedAt: item.reversed_at, reversalReason: item.reversal_reason
+    })),
+    audit: audit.map(item => ({ at: item.at, action: item.action, detail: item.detail }))
+  };
+});
+
+app.post('/api/billing/invoices', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const input = billingInvoiceInput.parse(request.body);
+  const issuedOn = input.issuedOn ?? fechaDeNegocioPanama();
+  const cycleStart = input.cycleStart ?? issuedOn;
+  const puntual = input.kind === 'clase_suelta' || input.kind === 'manual';
+  if (input.kind === 'paquete' && !input.cycleDays && !input.cycleEnd) {
+    return reply.code(400).send({ error: 'Un paquete necesita los días del ciclo o su fecha final' });
+  }
+
+  // Todas las personas deben ser del mismo dueño (otro dueño recibe 404 como si no existiera).
+  const ids = [...new Set([input.payerClientId, ...input.lines.map(line => line.beneficiaryClientId)])];
+  const found = await sql`SELECT id, billing_cutoff_day FROM clients WHERE owner_id = ${auth.sub} AND id IN ${sql(ids)}`;
+  if (found.length !== ids.length) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  const payer = found.find(client => client.id === input.payerClientId)!;
+
+  const cutDay = input.cutDay ?? (Number(payer.billing_cutoff_day) || Number(cycleStart.slice(8, 10)));
+  let cycleEnd = input.cycleEnd;
+  if (!cycleEnd) {
+    if (puntual) cycleEnd = cycleStart;
+    else if (input.kind === 'paquete') cycleEnd = sumarDias(cycleStart, input.cycleDays!);
+    else cycleEnd = corteSiguiente(mediodiaEnPanama(cycleStart), cutDay).toISOString().slice(0, 10);
+  }
+  if (cycleEnd < cycleStart) return reply.code(400).send({ error: 'El fin del ciclo no puede ser anterior a su inicio' });
+  const dueOn = input.dueOn ?? issuedOn;
+
+  const lines = input.lines.map(line => {
+    const amount = desdeCentavos(centavos(line.quantity * line.unitAmount));
+    if (line.lineType !== 'ajuste' && amount < 0) return null;
+    return {
+      beneficiaryClientId: line.beneficiaryClientId, planId: line.planId ?? null, lineType: line.lineType,
+      description: line.description ?? (line.lineType === 'ajuste' ? 'Ajuste' : 'Plan'),
+      quantity: line.quantity, unitAmount: line.unitAmount, amount, sessionsReference: line.sessionsReference ?? null
+    };
+  });
+  if (lines.some(line => line === null)) return reply.code(400).send({ error: 'Solo los ajustes pueden tener un importe negativo' });
+  const valid = lines as NonNullable<(typeof lines)[number]>[];
+  const total = desdeCentavos(valid.reduce((sum, line) => sum + centavos(line.amount), 0));
+  if (total < 0) return reply.code(400).send({ error: 'El total de la factura no puede ser negativo' });
+
+  try {
+    const created = await sql.begin(async transaction => {
+      const [{ n }] = await transaction`SELECT billing_next_number(${auth.sub}) AS n`;
+      const [invoice] = await transaction`
+        INSERT INTO billing_invoices (owner_id, number, payer_client_id, kind, origin, cycle_start, cycle_end, cut_day,
+          issued_on, due_on, total, notes, created_by)
+        VALUES (${auth.sub}, ${n}, ${input.payerClientId}, ${input.kind}, 'manual', ${cycleStart}, ${cycleEnd}, ${cutDay},
+          ${issuedOn}, ${dueOn}, ${total}, ${input.notes || null}, ${auth.sub})
+        RETURNING id, number`;
+      for (const line of valid) {
+        await transaction`
+          INSERT INTO billing_invoice_lines (invoice_id, beneficiary_client_id, plan_id, line_type, description, quantity, unit_amount, amount, sessions_reference)
+          VALUES (${invoice.id}, ${line.beneficiaryClientId}, ${line.planId}, ${line.lineType}, ${line.description}, ${line.quantity}, ${line.unitAmount}, ${line.amount}, ${line.sessionsReference})`;
+      }
+      await auditBilling(transaction, auth.sub, auth.sub, 'CREATE_INVOICE', 'invoice', invoice.id, {
+        code: billingCode(invoice.number), payerClientId: input.payerClientId, kind: input.kind, cycleStart, cycleEnd, total, lines: valid.length
+      });
+      return invoice;
+    });
+    return reply.code(201).send({ id: created.id, number: Number(created.number), code: billingCode(created.number), total });
+  } catch (error) {
+    const pg = error as { code?: string; constraint_name?: string; message?: string };
+    if (pg.code === '23505' && pg.constraint_name === 'billing_invoices_cycle_idx') {
+      return reply.code(409).send({ error: `Ya existe una factura de este tipo para ese pagador en el ciclo que empieza el ${cycleStart.split('-').reverse().join('-')}` });
+    }
+    if (pg.code === '23505' && pg.constraint_name === 'billing_invoice_lines_plan_idx') {
+      return reply.code(400).send({ error: 'Una persona solo puede aparecer una vez por factura; sume sus conceptos en una sola línea' });
+    }
+    throw error;
+  }
+});
+
+app.post('/api/billing/invoices/:id/void', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const { reason } = z.object({ reason: z.string().trim().min(3, 'Indique el motivo').max(300) }).parse(request.body);
+  const result = await sql.begin(async transaction => {
+    const [invoice] = await transaction`
+      SELECT id, number, status FROM billing_invoices WHERE id = ${id} AND owner_id = ${auth.sub} FOR UPDATE`;
+    if (!invoice) return { error: 404 as const };
+    if (invoice.status === 'anulada') return { error: 409 as const, message: 'La factura ya está anulada' };
+    const [{ n }] = await transaction`
+      SELECT count(*)::int AS n FROM billing_payment_applications WHERE invoice_id = ${id} AND reversed_at IS NULL`;
+    if (n > 0) return { error: 409 as const, message: 'La factura tiene cobros aplicados: revierta primero esas aplicaciones, con su motivo' };
+    await transaction`UPDATE billing_invoices SET status = 'anulada', void_reason = ${reason}, voided_at = now(), voided_by = ${auth.sub} WHERE id = ${id}`;
+    await auditBilling(transaction, auth.sub, auth.sub, 'VOID_INVOICE', 'invoice', id, { code: billingCode(invoice.number), reason });
+    return { number: Number(invoice.number) };
+  });
+  if ('error' in result) {
+    if (result.error === 404) return reply.code(404).send({ error: 'Factura no encontrada' });
+    return reply.code(409).send({ error: result.message });
+  }
+  return { voided: true, code: billingCode(result.number) };
+});
+
+app.get('/api/billing/invoices/:id/pdf', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [row] = await sql.unsafe(`
+    SELECT i.id, i.number, i.kind, i.status, i.total, i.notes, i.void_reason, i.voided_at,
+      i.cycle_start::text AS cycle_start, i.cycle_end::text AS cycle_end, i.issued_on::text AS issued_on, i.due_on::text AS due_on,
+      p.full_name AS payer_name, p.email AS payer_email
+    FROM billing_invoices i JOIN clients p ON p.id = i.payer_client_id
+    WHERE i.id = $1 AND i.owner_id = $2`, [id, auth.sub]) as unknown as Record<string, any>[];
+  if (!row) return reply.code(404).send({ error: 'Factura no encontrada' });
+  const lines = await sql`
+    SELECT c.full_name AS beneficiary_name, l.description, l.quantity, l.amount
+    FROM billing_invoice_lines l JOIN clients c ON c.id = l.beneficiary_client_id
+    WHERE l.invoice_id = ${id} ORDER BY c.full_name`;
+  const applications = await sql`
+    SELECT a.amount, a.reversed_at, p.paid_on::text AS paid_on, p.method, p.reference
+    FROM billing_payment_applications a JOIN billing_payments p ON p.id = a.payment_id
+    WHERE a.invoice_id = ${id} ORDER BY a.created_at`;
+  return sendPdf(reply, await billingInvoicePdf(row, lines as unknown as Record<string, any>[], applications as unknown as Record<string, any>[]), `factura-${billingCode(row.number)}.pdf`);
 });
 
 // Diagnóstico del estado operativo (solo lectura): permite comprobar desde fuera

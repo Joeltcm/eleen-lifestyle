@@ -161,6 +161,70 @@ export function invoicePdf(invoice: PdfRecord, payments: PdfRecord[]) {
   });
 }
 
+const billingKindLabel: Record<string, string> = { mensual: 'Mensualidad', credito: 'A crédito', clase_suelta: 'Clase suelta', paquete: 'Paquete', manual: 'Manual' };
+const billingStatusLabel: Record<string, string> = { pendiente: 'Pendiente', parcial: 'Pago parcial', pagada: 'Pagada', anulada: 'Anulada' };
+
+// Factura del módulo nuevo (1B-2): número FAC-, pagador, ciclo, una línea por
+// beneficiario, cobros aplicados y saldo. Mismo formato visual que el comprobante.
+export function billingInvoicePdf(invoice: PdfRecord, lines: PdfRecord[], applications: PdfRecord[]) {
+  return pdfBuffer(document => {
+    const number = `FAC-${String(invoice.number).padStart(4, '0')}`;
+    const anulada = invoice.status === 'anulada';
+    const total = Number(invoice.total || 0);
+    const paid = applications.filter(item => !item.reversed_at).reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    const balance = anulada ? 0 : Math.max(0, Math.round((total - paid) * 100) / 100);
+    const settled = !anulada && balance === 0 && total > 0;
+    brandHeader(document, anulada ? 'Factura anulada' : 'Factura', `${number} · Documento interno no fiscal`);
+    const metaY = document.y;
+    infoPair(document, 'Pagador', clean(invoice.payer_name), 42, metaY, 250);
+    infoPair(document, 'Ciclo', `${date(invoice.cycle_start)} al ${date(invoice.cycle_end)}`, 322, metaY, 233);
+    infoPair(document, 'Correo', clean(invoice.payer_email || 'No registrado'), 42, metaY + 38, 250);
+    infoPair(document, 'Fecha de emisión', date(invoice.issued_on), 322, metaY + 38, 110);
+    infoPair(document, 'Vencimiento', date(invoice.due_on), 445, metaY + 38, 110);
+    infoPair(document, 'Estado', billingStatusLabel[String(invoice.status)] || clean(invoice.status), 42, metaY + 76, 110);
+    infoPair(document, 'Tipo', billingKindLabel[String(invoice.kind)] || clean(invoice.kind), 322, metaY + 76, 110);
+    document.y = metaY + 129;
+    table(document, [
+      { label: 'Beneficiario', key: 'beneficiary_name', width: 150 },
+      { label: 'Concepto', key: 'description', width: 190 },
+      { label: 'Cantidad', key: 'quantity', width: 55, align: 'center', format: value => String(Number(value || 1)) },
+      { label: 'Importe', key: 'amount', width: 128, align: 'right', format: money }
+    ], lines, `Factura ${number}`);
+    document.moveDown(1.2);
+    const summaryX = 360;
+    const row = (label: string, value: string, bold = false) => {
+      ensureSpace(document, 24, `Factura ${number}`);
+      const y = document.y; document.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bold ? 11 : 9).fillColor(colors.ink).text(label, summaryX, y, { width: 95 });
+      document.text(value, summaryX + 95, y, { width: 100, align: 'right' }); document.y = y + (bold ? 21 : 17);
+    };
+    row('Total', money(total), true);
+    row('Pagado', money(anulada ? 0 : paid));
+    row('Saldo', money(balance), true);
+    const aplicados = applications.filter(item => !item.reversed_at);
+    if (aplicados.length) {
+      document.y += 6;
+      ensureSpace(document, 80, `Factura ${number}`);
+      document.font('Helvetica-Bold').fontSize(8).fillColor(colors.muted).text('COBROS APLICADOS', 42, document.y); document.y += 14;
+      table(document, [
+        { label: 'Fecha', key: 'paid_on', width: 80, format: date },
+        { label: 'Método', key: 'method', width: 130 },
+        { label: 'Referencia', key: 'reference', width: 178 },
+        { label: 'Aplicado', key: 'amount', width: 125, align: 'right', format: money }
+      ], aplicados, `Factura ${number}`);
+    }
+    document.y += 10;
+    ensureSpace(document, 88, `Factura ${number}`);
+    const boxY = document.y;
+    document.save().roundedRect(42, boxY, 513, 72, 9).fill(anulada ? '#f5f0f2' : settled ? '#eef6f1' : '#fff8e9').restore();
+    document.font('Helvetica-Bold').fontSize(9).fillColor(anulada ? colors.muted : settled ? colors.green : colors.amber)
+      .text(anulada ? 'FACTURA ANULADA' : settled ? 'PAGADA' : 'SALDO PENDIENTE', 55, boxY + 13, { width: 485 });
+    document.font('Helvetica').fontSize(8).fillColor(colors.ink).text(
+      anulada ? `Motivo: ${clean(invoice.void_reason)}   ·   Anulada el ${date(invoice.voided_at)}` : (clean(invoice.notes) || 'Sin notas.'), 55, boxY + 32, { width: 485 });
+    document.fontSize(7).fillColor(colors.muted).text('Documento interno de Eileen Lifestyle. No constituye una factura fiscal.', 55, boxY + 51, { width: 485 });
+    document.y = boxY + 88;
+  });
+}
+
 export function accountStatementPdf(client: PdfRecord, rows: PdfRecord[], from: string, to: string) {
   return pdfBuffer(document => {
     brandHeader(document, 'Estado de cuenta', `${date(from)} al ${date(to)} · Importes en USD`);
