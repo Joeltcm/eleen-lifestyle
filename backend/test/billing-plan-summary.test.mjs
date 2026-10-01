@@ -45,3 +45,43 @@ test('quien no es pagador no muestra un total de $0: dice quién le factura', as
   assert.deepEqual(r.summary.paidBy, ['Riccardo']);
   assert.equal(r.summary.upcoming, null, 'Iraida no es pagadora: su cambio de monto se ve en el resumen de su pagador');
 });
+
+test('Corregir monto: cambia el importe de la línea vieja en su sitio y, si el tramo siguiente ya tiene ese mismo importe, los une (queda una sola línea)', async () => {
+  const antes = (await api.get(`/api/clients/${id.Riccardo}/billing-subscriptions`)).datos;
+  const vieja = antes.lines.find(l => l.beneficiaryName === 'Riccardo' && l.price === 450);
+  assert.ok(vieja.endsOn, 'la línea de 450 termina un día antes del tramo nuevo');
+  assert.equal((await api.post(`/api/billing-subscriptions/${vieja.id}/correct-price`, { price: 460, reason: 'x' })).estado, 400, 'motivo mínimo de 3 letras');
+  assert.equal((await api.post(`/api/billing-subscriptions/${vieja.id}/correct-price`, { price: 450, reason: 'mismo monto' })).estado, 409);
+  const r = await api.post(`/api/billing-subscriptions/${vieja.id}/correct-price`, { price: 460, reason: 'El reparto correcto era 460' });
+  assert.equal(r.estado, 200, JSON.stringify(r.datos));
+  assert.equal(r.datos.merged, true);
+  assert.deepEqual([r.datos.line.price, r.datos.line.startsOn, r.datos.line.endsOn], [460, vieja.startsOn, null]);
+  const despues = (await api.get(`/api/clients/${id.Riccardo}/billing-subscriptions`)).datos;
+  assert.equal(despues.lines.filter(l => l.beneficiaryName === 'Riccardo').length, 1, 'una sola línea de Riccardo');
+  assert.equal(despues.summary.totalForPayer, 870 + 10, 'hoy: 460 + 300 + 120');
+  const [bitacora] = await db`SELECT detail FROM audit_log WHERE action = 'CORRECT_BILLING_SUBSCRIPTION_PRICE'`;
+  assert.equal(bitacora.detail.previous.price, 450); assert.equal(bitacora.detail.next.price, 460); assert.equal(bitacora.detail.next.reason, 'El reparto correcto era 460');
+  assert.ok(bitacora.detail.next.mergedWith, 'la bitácora guarda el tramo que se unió');
+});
+
+test('con las dos corregidas, hoy y "desde 15-10" dan lo mismo ($900) y ya no hay "próximo"', async () => {
+  const antes = (await api.get(`/api/clients/${id.Riccardo}/billing-subscriptions`)).datos;
+  const iraida = antes.lines.find(l => l.beneficiaryName === 'Iraida' && l.price === 300);
+  assert.equal((await api.post(`/api/billing-subscriptions/${iraida.id}/correct-price`, { price: 320, reason: 'Reparto correcto' })).estado, 200);
+  const r = (await api.get(`/api/clients/${id.Riccardo}/billing-subscriptions`)).datos;
+  assert.equal(r.lines.length, 3);
+  assert.equal(r.summary.totalForPayer, 900);
+  assert.equal(r.summary.upcoming, null);
+  assert.deepEqual(r.summary.breakdown.map(b => [b.beneficiaryName, b.amount]).sort(), [['Ernesto', 120], ['Iraida', 320], ['Riccardo', 460]]);
+});
+
+test('si el tramo siguiente tiene OTRO importe no se une; y una línea inexistente da 404', async () => {
+  const nueva = await api.post(`/api/clients/${id.Ernesto}/billing-subscriptions`, { beneficiaryClientId: id.Ernesto, payerClientId: id.Ernesto, kind: 'monthly', price: 100, startsOn: '2026-01-01' });
+  const cambio = await api.patch(`/api/billing-subscriptions/${nueva.datos.id}`, { price: 130, startsOn: '2099-01-01', endsOn: null });
+  assert.equal(cambio.estado, 200, JSON.stringify(cambio.datos));
+  const r = await api.post(`/api/billing-subscriptions/${nueva.datos.id}/correct-price`, { price: 110, reason: 'Corrección sin unir' });
+  assert.equal(r.estado, 200); assert.equal(r.datos.merged, false);
+  assert.equal(r.datos.line.endsOn, '2098-12-31');
+  assert.equal((await api.post('/api/billing-subscriptions/00000000-0000-4000-8000-000000000000/correct-price', { price: 5, reason: 'abc' })).estado, 404);
+  assert.equal((await cliente(servidor.base).post(`/api/billing-subscriptions/${nueva.datos.id}/correct-price`, { price: 5, reason: 'abc' })).estado, 401);
+});

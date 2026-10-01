@@ -2223,6 +2223,12 @@ const billingSubscriptionPatch = z.object({
   autoGenerate: z.boolean().optional()
 });
 
+function dayAfter(date: string): string {
+  const value = new Date(`${date}T12:00:00Z`);
+  value.setUTCDate(value.getUTCDate() + 1);
+  return value.toISOString().slice(0, 10);
+}
+
 function dayBefore(date: string): string {
   const value = new Date(`${date}T12:00:00Z`);
   value.setUTCDate(value.getUTCDate() - 1);
@@ -2415,6 +2421,45 @@ app.patch('/api/billing-subscriptions/:id', { preHandler: requireStaff }, async 
   if (!updated) return reply.code(404).send({ error: 'Concepto a facturar no encontrado' });
   const [result] = await sql`SELECT bs.*, b.full_name AS beneficiary_name, p.full_name AS payer_name FROM billing_subscriptions bs JOIN clients b ON b.id = bs.beneficiary_client_id JOIN clients p ON p.id = bs.payer_client_id WHERE bs.id = ${updated.id}`;
   return billingSubscriptionValue(result);
+});
+
+// CORREGIR el monto de una línea del plan (era un error: no un cambio de precio con fecha). Cambia el importe en el mismo registro, con motivo y bitácora; y si el
+// siguiente tramo (ya programado, aún no vigente) queda con el MISMO importe, los une en una sola línea para no dejar dos líneas iguales. Las facturas no dependen de estas líneas.
+app.post('/api/billing-subscriptions/:id/correct-price', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = z.object({ price: z.coerce.number().positive().max(100000), reason: z.string().trim().min(3, 'Indique el motivo').max(300) }).parse(request.body);
+  const result = await sql.begin(async transaction => {
+    const [current] = await transaction`
+      SELECT bs.*, b.full_name AS beneficiary_name, p.full_name AS payer_name
+      FROM billing_subscriptions bs JOIN clients b ON b.id = bs.beneficiary_client_id JOIN clients p ON p.id = bs.payer_client_id
+      WHERE bs.id = ${id} AND bs.owner_id = ${auth.sub} FOR UPDATE` as unknown as Record<string, any>[];
+    if (!current) return null;
+    if (centavos(Number(current.price)) === centavos(input.price)) sessionStateConflict('El monto ya es ese');
+    const hoy = fechaDeNegocioPanama();
+    const oldValue = billingSubscriptionValue(current);
+    await transaction`UPDATE billing_subscriptions SET price = ${input.price}, updated_at = now() WHERE id = ${id}`;
+    let merged: Record<string, any> | null = null;
+    if (current.ends_on) {
+      const [successor] = await transaction`
+        SELECT * FROM billing_subscriptions
+        WHERE owner_id = ${auth.sub} AND beneficiary_client_id = ${current.beneficiary_client_id} AND payer_client_id = ${current.payer_client_id} AND kind = ${current.kind}
+          AND starts_on = ${dayAfter(dateOnly(current.ends_on))}::date AND id <> ${id} FOR UPDATE` as unknown as Record<string, any>[];
+      if (successor && dateOnly(successor.starts_on) > hoy && centavos(Number(successor.price)) === centavos(input.price) && successor.auto_generate === current.auto_generate) {
+        await transaction`DELETE FROM billing_subscriptions WHERE id = ${successor.id}`;
+        await transaction`UPDATE billing_subscriptions SET ends_on = ${successor.ends_on ? dateOnly(successor.ends_on) : null}, updated_at = now() WHERE id = ${id}`;
+        merged = successor;
+      }
+    }
+    const [row] = await transaction`
+      SELECT bs.*, b.full_name AS beneficiary_name, p.full_name AS payer_name
+      FROM billing_subscriptions bs JOIN clients b ON b.id = bs.beneficiary_client_id JOIN clients p ON p.id = bs.payer_client_id WHERE bs.id = ${id}` as unknown as Record<string, any>[];
+    await auditBillingSubscription(transaction, request, auth, 'CORRECT_BILLING_SUBSCRIPTION_PRICE', id, oldValue,
+      { ...billingSubscriptionValue(row), reason: input.reason, mergedWith: merged ? billingSubscriptionValue({ ...merged, beneficiary_name: current.beneficiary_name, payer_name: current.payer_name }) : null });
+    return { line: billingSubscriptionValue(row), merged: Boolean(merged) };
+  });
+  if (!result) return reply.code(404).send({ error: 'Concepto a facturar no encontrado' });
+  return result;
 });
 
 // planId elige un plan existente; model 'single' pasa al cliente a clase suelta

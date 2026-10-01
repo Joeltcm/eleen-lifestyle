@@ -109,3 +109,9 @@ test('Plan de facturación: las líneas ya cerradas van en un historial plegado,
   assert.match(app, /Historial de montos anteriores/);
   assert.match(app, /line\.endsOn && line\.endsOn < hoy/);
 });
+
+test('Plan de facturación: "Corregir monto" existe como acción aparte de "Cambiar monto" y usa su propio endpoint', async () => {
+  const app = await leer('app.js');
+  assert.match(app, /data-correct-billing="\$\{line\.id\}">Corregir monto</);
+  assert.match(app, /\/api\/billing-subscriptions\/\$\{line\.id\}\/correct-price/);
+});

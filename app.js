@@ -1,4 +1,4 @@
-const APP_VERSION = '251';
+const APP_VERSION = '252';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -3603,7 +3603,24 @@ function billingSubscriptionCard(line, editable = false, client = null) {
   const beneficiary = escapeHtml(line.beneficiaryName || 'Beneficiario');
   const payer = escapeHtml(line.payerName || 'Pagador');
   const automatic = editable ? `<label class="declarative-billing-auto"><input type="checkbox" data-auto-billing="${line.id}"${line.autoGenerate !== false ? ' checked' : ''} /> Facturación automática</label>` : '';
-  return `<article class="declarative-billing-line"><div><strong>${beneficiary}</strong><small>${(() => { const hoy = dateKey(new Date()); return line.startsOn > hoy ? `<b>Próximo · rige desde ${billingDateText(line.startsOn)}</b><br>` : line.endsOn && line.endsOn >= hoy ? `<b>Vigente hasta ${billingDateText(line.endsOn)}</b><br>` : ''; })()}${billingLineText(line)}${line.kind === 'package' && line.cycleDays ? ` · ciclo ${line.cycleDays} días` : ''}${line.sessionsReference ? ` · referencia ${line.sessionsReference} sesiones` : ''}</small><small>Pagador: ${payer}</small>${automatic}</div>${editable && line.endsOn === null ? `<div class="declarative-billing-actions"><button type="button" class="secondary" data-close-billing="${line.id}">Cerrar línea</button><button type="button" class="secondary" data-edit-billing="${line.id}">Cambiar monto</button></div>` : ''}</article>`;
+  return `<article class="declarative-billing-line"><div><strong>${beneficiary}</strong><small>${(() => { const hoy = dateKey(new Date()); return line.startsOn > hoy ? `<b>Próximo · rige desde ${billingDateText(line.startsOn)}</b><br>` : line.endsOn && line.endsOn >= hoy ? `<b>Vigente hasta ${billingDateText(line.endsOn)}</b><br>` : ''; })()}${billingLineText(line)}${line.kind === 'package' && line.cycleDays ? ` · ciclo ${line.cycleDays} días` : ''}${line.sessionsReference ? ` · referencia ${line.sessionsReference} sesiones` : ''}</small><small>Pagador: ${payer}</small>${automatic}</div>${editable && line.endsOn === null ? `<div class="declarative-billing-actions"><button type="button" class="secondary" data-close-billing="${line.id}">Cerrar línea</button><button type="button" class="secondary" data-edit-billing="${line.id}">Cambiar monto</button><button type="button" class="secondary" data-correct-billing="${line.id}">Corregir monto</button></div>` : editable && line.endsOn >= dateKey(new Date()) && line.startsOn <= dateKey(new Date()) ? `<div class="declarative-billing-actions"><button type="button" class="secondary" data-correct-billing="${line.id}">Corregir monto</button></div>` : ''}</article>`;
+}
+// Corregir un monto equivocado en el mismo registro (no un cambio de precio con fecha): queda en la bitácora con su motivo.
+function billingCorrectDialog(client, line) {
+  const box = document.createElement('div');
+  box.innerHTML = `<form id="billing-correct-form"><p class="eyebrow">PLAN DE FACTURACIÓN</p><h2>Corregir monto</h2><p class="form-summary">${escapeHtml(line.beneficiaryName || '')} · ${escapeHtml(billingLineText(line))}</p>
+    <label>Monto correcto<input name="price" type="number" min="0.01" step="0.01" required value="${Number(line.price || 0).toFixed(2)}" /></label>
+    <label>Motivo<input name="reason" required minlength="3" maxlength="300" value="Monto corregido" /></label>
+    <p class="section-note">Úsalo cuando el monto estaba mal, no cuando cambia el precio. Cambia el importe de esta línea tal como está (con la misma fecha de inicio). Si el siguiente tramo ya programado queda con el mismo importe, se unen en una sola línea.</p>
+    <button class="primary wide-button">Corregir monto</button></form>`;
+  openModal(box);
+  box.querySelector('form').onsubmit = async event => {
+    event.preventDefault(); const values = new FormData(event.target);
+    try {
+      const result = await api(`/api/billing-subscriptions/${line.id}/correct-price`, { method: 'POST', body: { price: Number(values.get('price')), reason: values.get('reason') } });
+      modal.close(); await loadBillingSubscriptionsEditor(client); toast(result.merged ? 'Monto corregido y unido al tramo siguiente' : 'Monto corregido');
+    } catch (error) { toast(error.message, true); }
+  };
 }
 function billingCloseDialog(client, line) {
   const box = document.createElement('div');
@@ -3620,6 +3637,7 @@ function renderBillingSubscriptions(target, payload, client, editable = false) {
   if (payload.error) { target.innerHTML = `<p class="empty">${escapeHtml(payload.error)}</p>`; return; }
   const proposal = payload.proposal || [];
   target.innerHTML = `<div class="declarative-billing-summary">${(payload.summary?.breakdown || []).length ? `<strong>Total vigente hoy de ${escapeHtml(payload.summary?.payerName || client.name)}: ${money.format(Number(payload.summary?.totalForPayer || 0))}</strong>${payload.summary.breakdown.map(item => `<small>${escapeHtml(item.beneficiaryName)} · ${money.format(Number(item.amount))}</small>`).join('')}` : (payload.summary?.paidBy || []).length ? `<strong>${escapeHtml(client.name)} no es pagador</strong><small>Su mensualidad la factura ${escapeHtml(payload.summary.paidBy.join(' y '))}</small>` : '<strong>Sin conceptos vigentes hoy</strong>'}${payload.summary?.upcoming ? `<strong style="margin-top:8px">Desde ${billingDateText(payload.summary.upcoming.startsOn)}: ${money.format(Number(payload.summary.upcoming.totalForPayer))}</strong>${payload.summary.upcoming.breakdown.map(item => `<small>${escapeHtml(item.beneficiaryName)} · ${money.format(Number(item.amount))}</small>`).join('')}` : ''}</div>${payload.lines?.length ? (() => { const hoy = dateKey(new Date()); const vigentes = payload.lines.filter(line => !line.endsOn || line.endsOn >= hoy).sort((a, b) => (a.startsOn > hoy) - (b.startsOn > hoy) || a.beneficiaryName.localeCompare(b.beneficiaryName, 'es')); const historial = payload.lines.filter(line => line.endsOn && line.endsOn < hoy); return `<div class="declarative-billing-lines">${vigentes.map(line => billingSubscriptionCard(line, editable, client)).join('') || '<p class="empty">No hay conceptos vigentes.</p>'}</div>${historial.length ? `<details class="declarative-billing-history"><summary>Historial de montos anteriores (${historial.length})</summary><div class="declarative-billing-lines">${historial.map(line => billingSubscriptionCard(line, false, client)).join('')}</div></details>` : ''}`; })() : '<p class="empty">Aún no hay conceptos confirmados.</p>'}${proposal.length ? `<div class="declarative-billing-proposals"><p class="section-note"><b>Propuestas tomadas del expediente</b><br>Inicio propuesto en el último corte. No se guarda hasta que confirmes o ajustes cada concepto.</p>${proposal.map((line, index) => `<article class="declarative-billing-line proposal"><div><strong>${escapeHtml(line.beneficiaryName)}</strong><small>${billingLineText(line)}</small></div><button type="button" class="secondary" data-confirm-billing-proposal="${index}">Confirmar concepto</button></article>`).join('')}</div>` : ''}<p class="section-note">Preparado para el sistema nuevo; hoy la facturación automática sigue usando el monto mensual del cliente.</p>`;
+  target.querySelectorAll('[data-correct-billing]').forEach(button => button.onclick = () => { const line = payload.lines.find(item => item.id === button.dataset.correctBilling); if (line) billingCorrectDialog(client, line); });
   target.querySelectorAll('[data-close-billing]').forEach(button => button.onclick = async () => {
     const line = payload.lines.find(item => item.id === button.dataset.closeBilling);
     if (line) billingCloseDialog(client, line);
