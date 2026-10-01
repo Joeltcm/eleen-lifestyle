@@ -4835,13 +4835,13 @@ app.get('/api/invoices', { preHandler: requireStaff }, async request => {
 
 // Cobros sin saldo de sesiones vinculado, para cerrar la migración.
 
-// Archivo (solo lectura): el historial del sistema anterior —lo facturado en Zoho y el sistema viejo— anterior al inicio en limpio (01-09-2026).
-// No escribe nada. Desde septiembre todo vive en Facturas y Cobros.
+// Archivo (solo lectura): SOLO el historial de Zoho anterior al inicio en limpio (01-09-2026) (J-069: lo hecho en la app antes de septiembre no se muestra).
+// No escribe nada. Desde septiembre todo vive en Facturas y Cobros; lo que se haya olvidado se ingresa a mano allí.
 app.get('/api/billing/archive', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   const query = z.object({
     clientId: z.string().uuid().optional(), month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional(),
-    source: z.enum(['zoho', 'sistema']).optional(), status: z.enum(['pagada', 'pendiente', 'anulada']).optional(),
+    status: z.enum(['pagada', 'pendiente', 'anulada']).optional(),
     limit: z.coerce.number().int().min(1).max(1000).default(500)
   }).parse(request.query);
   const rows = await sql`
@@ -4851,10 +4851,9 @@ app.get('/api/billing/archive', { preHandler: requireStaff }, async request => {
         ELSE COALESCE((SELECT sum(pa.amount) FROM payment_allocations pa WHERE pa.invoice_id = i.id), CASE WHEN i.status = 'confirmed' THEN i.amount ELSE 0 END) END::text AS paid,
       i.payment_method, i.confirmed_at::date::text AS confirmed_on
     FROM invoices i JOIN clients c ON c.id = i.client_id
-    WHERE c.owner_id = ${auth.sub} AND COALESCE(i.issued_on, i.due_on, i.created_at::date) < ${NEW_BILLING_CLEAN_START}::date
+    WHERE c.owner_id = ${auth.sub} AND i.source_system = 'zoho_invoice' AND COALESCE(i.issued_on, i.due_on, i.created_at::date) < ${NEW_BILLING_CLEAN_START}::date
       AND (${query.clientId ?? null}::uuid IS NULL OR i.client_id = ${query.clientId ?? null} OR i.billed_for_client_id = ${query.clientId ?? null})
       AND (${query.month ?? null}::text IS NULL OR to_char(COALESCE(i.issued_on, i.due_on, i.created_at::date), 'YYYY-MM') = ${query.month ?? null})
-      AND (${query.source ?? null}::text IS NULL OR (${query.source ?? null} = 'zoho' AND i.source_system = 'zoho_invoice') OR (${query.source ?? null} = 'sistema' AND i.source_system IS DISTINCT FROM 'zoho_invoice'))
       AND (${query.status ?? null}::text IS NULL OR (${query.status ?? null} = 'pagada' AND i.status = 'confirmed') OR (${query.status ?? null} = 'pendiente' AND i.status = 'pending') OR (${query.status ?? null} = 'anulada' AND i.status = 'void'))
     ORDER BY COALESCE(i.issued_on, i.due_on, i.created_at::date) DESC, i.created_at DESC LIMIT ${query.limit}`;
   const ids = rows.map(row => row.id as string);
@@ -4878,7 +4877,7 @@ app.get('/api/billing/archive', { preHandler: requireStaff }, async request => {
   const [meta] = await sql`
     SELECT COALESCE(array_agg(DISTINCT to_char(COALESCE(i.issued_on, i.due_on, i.created_at::date), 'YYYY-MM')), '{}') AS months
     FROM invoices i JOIN clients c ON c.id = i.client_id
-    WHERE c.owner_id = ${auth.sub} AND COALESCE(i.issued_on, i.due_on, i.created_at::date) < ${NEW_BILLING_CLEAN_START}::date`;
+    WHERE c.owner_id = ${auth.sub} AND i.source_system = 'zoho_invoice' AND COALESCE(i.issued_on, i.due_on, i.created_at::date) < ${NEW_BILLING_CLEAN_START}::date`;
   return {
     cleanStart: NEW_BILLING_CLEAN_START, invoices,
     summary: { count: invoices.length, total: desdeCentavos(live.reduce((sum, item) => sum + centavos(item.amount), 0)), paid: desdeCentavos(live.reduce((sum, item) => sum + centavos(item.paid), 0)), balance: desdeCentavos(live.reduce((sum, item) => sum + centavos(item.balance), 0)) },

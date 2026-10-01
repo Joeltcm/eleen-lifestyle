@@ -40,24 +40,22 @@ before(async () => {
 
 after(async () => { for (const x of [N, L]) { await x?.db?.end({ timeout: 1 }).catch(() => {}); await x?.servidor?.parar(); } });
 
-test('el archivo lista solo lo anterior a septiembre, con sus cobros, y los totales', async () => {
+test('el archivo lista SOLO lo de Zoho anterior a septiembre (no lo hecho en la app), con sus cobros, y los totales', async () => {
   const r = (await N.api.get('/api/billing/archive')).datos;
   assert.equal(r.cleanStart, '2026-09-01');
-  assert.deepEqual(r.invoices.map(i => i.concept), ['Mensualidad agosto', 'Mensualidad agosto', 'Mensualidad julio']);
+  assert.deepEqual(r.invoices.map(i => i.concept), ['Mensualidad agosto', 'Mensualidad agosto'], 'la de julio de la app y la de septiembre no se muestran');
+  assert.ok(r.invoices.every(i => i.source === 'zoho'));
   const ana = r.invoices.find(i => i.client === 'Ana');
   assert.deepEqual([ana.number, ana.source, ana.status, ana.amount, ana.paid, ana.balance], ['INV-000100', 'zoho', 'pagada', 300, 300, 0]);
   assert.deepEqual(ana.payments, [{ paidOn: '2026-08-03', method: 'Yappy', amount: 300 }]);
-  const julio = r.invoices.find(i => i.concept === 'Mensualidad julio');
-  assert.deepEqual([julio.source, julio.status, julio.payments[0].method, julio.payments[0].paidOn], ['sistema', 'pagada', 'Efectivo', '2026-07-09']);
-  assert.deepEqual(r.summary, { count: 3, total: 700, paid: 500, balance: 200 });
-  assert.deepEqual(r.meta.months, ['2026-08', '2026-07']);
+  assert.deepEqual(r.summary, { count: 2, total: 500, paid: 300, balance: 200 });
+  assert.deepEqual(r.meta.months, ['2026-08']);
 });
 
-test('filtra por mes, origen, estado y cliente', async () => {
+test('filtra por mes, estado y cliente', async () => {
   const q = async s => (await N.api.get(`/api/billing/archive?${s}`)).datos;
-  assert.equal((await q('month=2026-07')).invoices.length, 1);
-  assert.equal((await q('source=zoho')).invoices.length, 2);
-  assert.equal((await q('source=sistema')).invoices.length, 1);
+  assert.equal((await q('month=2026-07')).invoices.length, 0, 'julio fue de la app: no está en el historial de Zoho');
+  assert.equal((await q('month=2026-08')).invoices.length, 2);
   assert.deepEqual((await q('status=pendiente')).invoices.map(i => i.client), ['Beto']);
   assert.deepEqual((await q(`clientId=${N.id.Ana}`)).invoices.map(i => i.client), ['Ana']);
   assert.equal((await N.api.get('/api/billing/archive?month=2026-13')).estado, 400);
