@@ -1259,7 +1259,10 @@ async function proposedBillingLines(ownerId: string, today: string) {
     FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id
     WHERE c.owner_id = ${ownerId} AND c.status = 'active' AND c.billing_model IN ('monthly', 'package')
       AND (c.standard_price > 0 OR c.payment_mode = 'no_anticipado')
-      AND NOT EXISTS (SELECT 1 FROM billing_subscriptions s WHERE s.beneficiary_client_id = c.id AND s.starts_on <= ${today}::date AND (s.ends_on IS NULL OR s.ends_on >= ${today}::date))
+      -- Se compara por la PAREJA beneficiario + pagador del expediente actual: quien tiene además un plan propio (Ernesto) sigue necesitando
+      -- la línea con el pagador de su plan familiar.
+      AND NOT EXISTS (SELECT 1 FROM billing_subscriptions s WHERE s.beneficiary_client_id = c.id AND s.payer_client_id = COALESCE(c.billing_responsible_client_id, c.id)
+        AND s.starts_on <= ${today}::date AND (s.ends_on IS NULL OR s.ends_on >= ${today}::date))
     ORDER BY c.full_name`;
   return rows.map(row => {
     const kind = row.billing_model === 'package' ? 'package' : row.payment_mode === 'no_anticipado' ? 'credit' : 'monthly';
@@ -1319,7 +1322,8 @@ app.get('/api/billing/cutover/readiness', { preHandler: requireStaff }, async re
     FROM clients c
     WHERE c.owner_id = ${auth.sub} AND c.status = 'active' AND c.billing_model IN ('monthly', 'package')
       AND (c.standard_price > 0 OR c.payment_mode = 'no_anticipado')
-      AND NOT EXISTS (SELECT 1 FROM billing_subscriptions s WHERE s.beneficiary_client_id = c.id AND s.starts_on <= ${today}::date AND (s.ends_on IS NULL OR s.ends_on >= ${today}::date))
+      AND NOT EXISTS (SELECT 1 FROM billing_subscriptions s WHERE s.beneficiary_client_id = c.id AND s.payer_client_id = COALESCE(c.billing_responsible_client_id, c.id)
+        AND s.starts_on <= ${today}::date AND (s.ends_on IS NULL OR s.ends_on >= ${today}::date))
     ORDER BY c.full_name`;
   checks.push(missing.length
     ? { key: 'plans', label: 'Todos los clientes con cobro tienen su Plan de facturación', status: 'fail', detail: `${missing.length} cliente(s) activos con cobro no tienen plan de facturación declarado: sin él el generador nuevo no los facturaría.`,

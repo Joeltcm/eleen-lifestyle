@@ -94,7 +94,7 @@ const preview = async ctx => (await ctx.api.post('/api/billing/imports/preview',
 const porClave = (p, key) => p.items.find(i => i.key === key);
 
 describe('vista previa (solo lectura)', () => {
-  test('con la lista aprobada propone 21 facturas por $4.075, 17 cobros por $2.860 y $1.215 pendientes', async () => {
+  test('con la lista aprobada propone 23 facturas por $4.475, 17 cobros por $2.860 y $1.615 pendientes', async () => {
     const antes = await snapshotLegacy(A.db);
     const r = await A.api.post('/api/billing/imports/preview', {});
     assert.equal(r.estado, 201);
@@ -102,8 +102,8 @@ describe('vista previa (solo lectura)', () => {
     assert.equal(p.status, 'preview');
     assert.match(p.previewHash, /^[0-9a-f]{64}$/);
     assert.deepEqual([p.totals.invoices, p.totals.invoicesTotal, p.totals.payments, p.totals.paymentsTotal, p.totals.openBalance],
-      [21, 4075, 17, 2860, 1215]);
-    assert.deepEqual([p.totals.paid, p.totals.pending, p.totals.review, p.totals.excluded, p.totals.firstNumber, p.totals.lastNumber], [17, 4, 0, 3, 1, 21]);
+      [23, 4475, 17, 2860, 1615]);
+    assert.deepEqual([p.totals.paid, p.totals.pending, p.totals.review, p.totals.excluded, p.totals.firstNumber, p.totals.lastNumber], [17, 6, 0, 1, 1, 23]);
     assert.deepEqual(await snapshotLegacy(A.db), antes, 'la vista previa no escribe en el sistema anterior');
     const [{ n }] = await A.db`SELECT (SELECT count(*) FROM billing_invoices)::int + (SELECT count(*) FROM billing_payments)::int AS n`;
     assert.equal(n, 0, 'la vista previa no crea facturas ni cobros');
@@ -136,12 +136,18 @@ describe('vista previa (solo lectura)', () => {
     assert.equal(j.data.kind, 'credito');
   });
 
-  test('los excluidos se listan con su motivo y no se proponen (Michelle, Milo, Sara Djamous)', async () => {
+  test('lo excluido se lista con su motivo y no se propone (Sara Djamous)', async () => {
     const p = await preview(A);
     const excluidos = p.items.filter(i => i.decision === 'excluir');
-    assert.deepEqual(excluidos.map(i => i.key).sort(), ['michelle', 'milo', 'sara-djamous']);
+    assert.deepEqual(excluidos.map(i => i.key).sort(), ['sara-djamous']);
     assert.ok(excluidos.every(i => i.reasons[0].length > 10));
-    assert.ok(!p.items.some(i => i.decision === 'incluir' && /michelle|milo|sara-djamous/.test(i.key)));
+    assert.ok(!p.items.some(i => i.decision === 'incluir' && /sara-djamous/.test(i.key)));
+    // Michelle y Milo (J-061) van ABIERTAS: factura sin cobro y con la nota de que se confirma el pago
+    for (const [clave, total, inicio] of [['michelle-2026-09', 280, '2026-09-15'], ['milo-2026-09', 120, '2026-09-28']]) {
+      const item = p.items.find(i => i.key === clave);
+      assert.deepEqual([item.decision, item.data.status, item.data.payment, item.data.total, item.data.cycleStart], ['incluir', 'pendiente', null, total, inicio], clave);
+      assert.match(item.data.note, /se confirma el pago/);
+    }
   });
 
   test('sin evidencia en el sistema anterior, una entrada pasa a "revisar" y no se carga', async () => {
@@ -152,9 +158,9 @@ describe('vista previa (solo lectura)', () => {
       const s = porClave(p, 'sally-2026-09');
       assert.equal(s.decision, 'revisar');
       assert.match(s.reasons[0], /No hay un cobro de Sally Dayan Safdi del 2026-09-02/);
-      assert.equal(p.totals.invoices, 20);
+      assert.equal(p.totals.invoices, 22);
       assert.equal(p.totals.review, 1);
-      assert.equal(p.totals.lastNumber, 20, 'los números proyectados se recorren sin huecos');
+      assert.equal(p.totals.lastNumber, 22, 'los números proyectados se recorren sin huecos');
     } finally {
       const [pay] = await A.db`INSERT INTO invoice_payments (client_id, amount, paid_on, method, source_system, external_id) VALUES (${A.id['Sally Dayan Safdi']}, ${borrado.amount}, ${borrado.paid_on}, ${borrado.method}, 'eileen', 'restaurado') RETURNING id`;
       const [inv] = await A.db`SELECT id FROM invoices WHERE client_id = ${A.id['Sally Dayan Safdi']} AND status = 'confirmed'`;
@@ -184,7 +190,7 @@ describe('vista previa (solo lectura)', () => {
     assert.equal(x.previewHash, y.previewHash);
     const m = await A.api.get('/api/billing/imports/default-manifest');
     assert.equal(m.estado, 200);
-    assert.equal(m.datos.entries.length, 10);
+    assert.equal(m.datos.entries.length, 12);
   });
 });
 
@@ -197,7 +203,7 @@ describe('nombres de clientes: coincidencia robusta y sin adivinar', () => {
       const p = await preview(A);
       assert.equal(porClave(p, 'sally-2026-09').decision, 'incluir');
       assert.equal(porClave(p, 'sally-2026-10').decision, 'incluir');
-      assert.equal(p.totals.invoices, 21);
+      assert.equal(p.totals.invoices, 23);
     } finally { await renombrar('Sally Dayan Safdi'); }
   });
 
@@ -209,7 +215,7 @@ describe('nombres de clientes: coincidencia robusta y sin adivinar', () => {
       assert.equal(s.decision, 'revisar');
       assert.equal(s.reasons.length, 1, 'el mismo nombre no se repite como payer y beneficiario');
       assert.match(s.reasons[0], /No se encontró al cliente "Sally Dayan Safdi"\. ¿Será "Sally Safdie"\?/);
-      assert.equal(p.totals.invoices, 19);
+      assert.equal(p.totals.invoices, 21);
       assert.equal(p.totals.review, 2);
     } finally { await renombrar('Sally Dayan Safdi'); }
   });
@@ -253,7 +259,7 @@ describe('clases sueltas de Susie, Reina y Sara Hidrie (J-056)', () => {
       assert.match(por(sinCobro.id).reasons.join('|'), /No tiene un cobro aplicado/);
       assert.match(por(mensual.id).reasons.join('|'), /No parece una clase suelta/);
       assert.ok([pendiente, sinCobro, mensual].every(r => por(r.id).decision === 'revisar'));
-      assert.equal(p.totals.invoices, 21, 'las dudosas no suman a lo que se carga');
+      assert.equal(p.totals.invoices, 23, 'las dudosas no suman a lo que se carga');
       assert.equal(p.totals.review, 3);
     } finally { await A.db`DELETE FROM invoices WHERE id IN (${pendiente.id}, ${sinCobro.id}, ${mensual.id})`; }
   });
@@ -389,19 +395,19 @@ describe('aprobar y aplicar: las puertas', () => {
 
 describe('aplicar (generador viejo apagado)', () => {
   let lote;
-  test('aplica la lista: 21 facturas numeradas 1..21, 17 cobros, estados correctos y el sistema viejo intacto', async () => {
+  test('aplica la lista: 23 facturas numeradas 1..23, 17 cobros, estados correctos y el sistema viejo intacto', async () => {
     const antes = await snapshotLegacy(B.db);
     lote = await preview(B);
     assert.equal((await B.api.post(`/api/billing/imports/${lote.id}/approve`, { previewHash: lote.previewHash })).estado, 200);
     const r = await B.api.post(`/api/billing/imports/${lote.id}/apply`, {});
     assert.equal(r.estado, 200, JSON.stringify(r.datos));
-    assert.equal(r.datos.created.length, 21);
-    assert.deepEqual(r.datos.created.map(c => c.code), Array.from({ length: 21 }, (_, i) => `FAC-${String(i + 1).padStart(4, '0')}`));
+    assert.equal(r.datos.created.length, 23);
+    assert.deepEqual(r.datos.created.map(c => c.code), Array.from({ length: 23 }, (_, i) => `FAC-${String(i + 1).padStart(4, '0')}`));
     const f = await B.api.get('/api/billing/invoices?limit=50');
-    assert.equal(f.datos.invoices.length, 21);
-    assert.equal(f.datos.summary.total, 4075);
-    assert.equal(f.datos.summary.balance, 1215);
-    assert.deepEqual(f.datos.invoices.reduce((acc, i) => { acc[i.status] = (acc[i.status] ?? 0) + 1; return acc; }, {}), { pagada: 17, pendiente: 4 });
+    assert.equal(f.datos.invoices.length, 23);
+    assert.equal(f.datos.summary.total, 4475);
+    assert.equal(f.datos.summary.balance, 1615);
+    assert.deepEqual(f.datos.invoices.reduce((acc, i) => { acc[i.status] = (acc[i.status] ?? 0) + 1; return acc; }, {}), { pagada: 17, pendiente: 6 });
     assert.ok(f.datos.invoices.every(i => i.origin === 'carga_inicial'));
     const p = await B.api.get('/api/billing/payments?limit=50');
     assert.deepEqual([p.datos.payments.length, p.datos.summary.total, p.datos.summary.applied, p.datos.summary.available], [17, 2860, 2860, 0]);
@@ -426,9 +432,13 @@ describe('aplicar (generador viejo apagado)', () => {
     assert.equal(d.status, 'pagada');
   });
 
-  test('los excluidos NO se cargaron (Michelle, Milo, Sara Djamous)', async () => {
-    for (const nombre of ['Michelle Behar', 'Milo Asís', 'Sara Djamous']) {
-      assert.equal((await B.api.get(`/api/billing/invoices?payerId=${B.id[nombre]}`)).datos.invoices.length, 0, nombre);
+  test('Sara Djamous (excluida) NO se cargó; Michelle y Milo quedaron como facturas ABIERTAS sin cobro (J-061)', async () => {
+    assert.equal((await B.api.get(`/api/billing/invoices?payerId=${B.id['Sara Djamous']}`)).datos.invoices.length, 0);
+    assert.equal((await B.api.get(`/api/billing/payments?payerId=${B.id['Sara Djamous']}`)).datos.payments.length, 0);
+    for (const [nombre, total] of [['Michelle Behar', 280], ['Milo Asís', 120]]) {
+      const [f] = (await B.api.get(`/api/billing/invoices?payerId=${B.id[nombre]}`)).datos.invoices;
+      assert.deepEqual([f.status, f.total, f.paid, f.balance], ['pendiente', total, 0, total], nombre);
+      assert.match((await B.api.get(`/api/billing/invoices/${f.id}`)).datos.notes, /se confirma el pago/);
       assert.equal((await B.api.get(`/api/billing/payments?payerId=${B.id[nombre]}`)).datos.payments.length, 0, nombre);
     }
   });
@@ -436,11 +446,11 @@ describe('aplicar (generador viejo apagado)', () => {
   test('es idempotente: una vista previa nueva marca todo como ya aplicado y aplicar crea cero filas', async () => {
     const p = await preview(B);
     assert.equal(p.totals.invoices, 0);
-    assert.equal(p.totals.alreadyApplied, 21);
+    assert.equal(p.totals.alreadyApplied, 23);
     assert.equal((await B.api.post(`/api/billing/imports/${p.id}/approve`, { previewHash: p.previewHash })).estado, 200);
     assert.equal((await B.api.post(`/api/billing/imports/${p.id}/apply`, {})).estado, 200);
     const [{ n, c }] = await B.db`SELECT (SELECT count(*) FROM billing_invoices)::int AS n, (SELECT last_number FROM billing_counters)::int AS c`;
-    assert.deepEqual([n, c], [21, 21]);
+    assert.deepEqual([n, c], [23, 23]);
   });
 
   test('un lote aplicado no se aplica otra vez', async () => {
@@ -455,10 +465,10 @@ describe('aplicar (generador viejo apagado)', () => {
 
 describe('reversión del lote', () => {
   test('se bloquea si ya se emitió otra factura después de la carga', async () => {
-    const lote = (await B.api.get('/api/billing/imports')).datos.batches.find(b => b.status === 'applied' && b.totals.invoices === 21);
+    const lote = (await B.api.get('/api/billing/imports')).datos.batches.find(b => b.status === 'applied' && b.totals.invoices === 23);
     const manual = await B.api.post('/api/billing/invoices', { payerClientId: B.id['Michelle Behar'], kind: 'manual', issuedOn: '2026-10-01',
       lines: [{ beneficiaryClientId: B.id['Michelle Behar'], unitAmount: 280, description: 'Manual de Joel' }] });
-    assert.equal(manual.datos.number, 22);
+    assert.equal(manual.datos.number, 24);
     const r = await B.api.post(`/api/billing/imports/${lote.id}/reverse`, { reason: 'Prueba' });
     assert.equal(r.estado, 409);
     assert.match(r.datos.error, /Ya se emitieron facturas después de la carga/);
@@ -479,7 +489,7 @@ describe('reversión y cambios de última hora (servidor aparte, generador viejo
     assert.equal((await C.api.post(`/api/billing/imports/${p.id}/reverse`, { reason: ' ' })).estado, 400);
     const r = await C.api.post(`/api/billing/imports/${p.id}/reverse`, { reason: 'La lista estaba desactualizada' });
     assert.equal(r.estado, 200, JSON.stringify(r.datos));
-    assert.deepEqual([r.datos.invoices, r.datos.payments, r.datos.counter], [21, 17, 0]);
+    assert.deepEqual([r.datos.invoices, r.datos.payments, r.datos.counter], [23, 17, 0]);
     const [n] = await C.db`SELECT (SELECT count(*) FROM billing_invoices)::int AS facturas, (SELECT count(*) FROM billing_invoice_lines)::int AS lineas,
       (SELECT count(*) FROM billing_payments)::int AS cobros, (SELECT count(*) FROM billing_payment_applications)::int AS aplicaciones,
       (SELECT last_number FROM billing_counters)::int AS contador`;
@@ -490,7 +500,7 @@ describe('reversión y cambios de última hora (servidor aparte, generador viejo
     assert.deepEqual(acciones, ['IMPORT_APPLY', 'IMPORT_REVERSE'], 'la bitácora conserva lo ocurrido');
     // y se puede volver a cargar con los mismos números 1..10
     const q = await preview(C);
-    assert.deepEqual([q.totals.firstNumber, q.totals.lastNumber], [1, 21]);
+    assert.deepEqual([q.totals.firstNumber, q.totals.lastNumber], [1, 23]);
   });
 
   test('si se emitió una factura después de aprobar, aplicar se rechaza: el contador ya no es el de la vista previa', async () => {

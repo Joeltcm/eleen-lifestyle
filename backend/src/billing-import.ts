@@ -72,12 +72,17 @@ export const DEFAULT_IMPORT_MANIFEST: ImportManifest = {
     // Gila: el cobro NO está registrado todavía; Joel (J-058) pidió dejarlo abierto para confirmarlo con Eileen.
     { key: 'gila-2026-09', label: 'Gila Falic · 28-09 (pendiente: se confirma con Eileen)', payer: 'Gila Falic', kind: 'mensual', cycleStart: '2026-09-28', cycleEnd: '2026-10-28',
       lines: [{ beneficiary: 'Gila Falic', description: 'Mensualidad', amount: 240 }], allowWithoutEvidence: 'Cobro abierto: se confirma con Eileen (J-058). El sistema anterior no trae su factura ni su cobro.' },
+    // Michelle y Milo (J-061): se cargan ABIERTOS, sin cobro, hasta confirmar el pago; Joel registra el cobro en "Cobros (nuevo)".
+    { key: 'michelle-2026-09', label: 'Michelle Behar · 15-09 (abierta: se confirma el pago)', payer: 'Michelle Behar', kind: 'mensual', cycleStart: '2026-09-15', cycleEnd: '2026-10-15',
+      lines: [{ beneficiary: 'Michelle Behar', description: 'Mensualidad', amount: 280 }],
+      allowWithoutEvidence: 'Cobro abierto: se confirma el pago (J-061). Michelle indicó haber pagado $280 por Yappy alrededor del 15-09; el sistema anterior lo tiene en otra factura.' },
+    { key: 'milo-2026-09', label: 'Milo Asís · 28-09 (abierta: se confirma el pago)', payer: 'Milo Asís', kind: 'mensual', cycleStart: '2026-09-28', cycleEnd: '2026-10-28',
+      lines: [{ beneficiary: 'Milo Asís', description: 'Mensualidad', amount: 120 }],
+      allowWithoutEvidence: 'Cobro abierto: se confirma el pago (J-061). Milo indicó haber pagado $120 por Yappy el 28-09; el sistema anterior no lo trae.' },
     { key: 'julio-2026-09', label: 'Julio Alvarez · crédito (31-08, 30-09]', payer: 'Julio Alvarez', kind: 'credito', cycleStart: '2026-08-31', cycleEnd: '2026-09-30', issuedOn: '2026-09-30', dueOn: '2026-09-30', amountFrom: 'legacy',
       lines: [{ beneficiary: 'Julio Alvarez', description: 'Sesiones cobrables del ciclo' }] }
   ],
   exclusions: [
-    { key: 'michelle', label: 'Michelle Behar', reason: 'Etiqueta, periodo y fecha de la factura no concuerdan con el ciclo confirmado: la carga Joel a mano (J-045).' },
-    { key: 'milo', label: 'Milo Asís', reason: 'Falta el segundo cobro declarado del 28-09 y no se reconstruyen con seguridad ambos ciclos: la carga Joel a mano (J-045).' },
     { key: 'sara-djamous', label: 'Sara Djamous', reason: 'Fechas de ciclo, compra, vencimiento y factura pendiente no concuerdan: la carga Joel a mano (J-045).' }
   ],
   // Joel pidió incluirlas (J-056): una factura de clase suelta y su cobro por cada clase pagada desde el 01-09-2026.

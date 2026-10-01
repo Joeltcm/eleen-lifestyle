@@ -70,3 +70,21 @@ test('exige sesión', async () => {
   assert.equal((await cliente(servidor.base).get('/api/billing/cutover/proposed-lines')).estado, 401);
   assert.equal((await cliente(servidor.base).post('/api/billing/cutover/proposed-lines/apply', { confirm: true })).estado, 401);
 });
+
+test('quien ya tiene un plan PROPIO (Ernesto) sigue necesitando la línea de su plan familiar: se compara por pareja beneficiario+pagador', async () => {
+  // Estado inicial de la prueba anterior: ya no quedan propuestas. Se borra la línea familiar de Ernesto y se declara solo su plan propio.
+  await db`DELETE FROM billing_subscriptions WHERE beneficiary_client_id = ${id.Ernesto}`;
+  const propio = await api.post(`/api/clients/${id.Ernesto}/billing-subscriptions`, { beneficiaryClientId: id.Ernesto, payerClientId: id.Ernesto, kind: 'monthly', price: 120, sessionsReference: 4, startsOn: '2026-09-15' });
+  assert.equal(propio.estado, 201);
+  const r = await api.get('/api/billing/cutover/proposed-lines');
+  assert.deepEqual(r.datos.lines.map(l => [l.beneficiaryName, l.payerName, l.price]), [['Ernesto', 'Riccardo', 150]], 'sigue proponiendo su parte familiar con Riccardo de pagador');
+  const lista = await api.get('/api/billing/cutover/readiness');
+  const planes = lista.datos.checks.find(c => c.key === 'plans');
+  assert.equal(planes.status, 'fail');
+  assert.ok(planes.items.some(i => i.name === 'Ernesto'), 'la lista de comprobación también lo marca');
+  const crear = await api.post('/api/billing/cutover/proposed-lines/apply', { confirm: true });
+  assert.equal(crear.datos.count, 1);
+  const lineas = await db`SELECT p.full_name AS pagador, s.price::float AS precio FROM billing_subscriptions s JOIN clients p ON p.id = s.payer_client_id WHERE s.beneficiary_client_id = ${id.Ernesto} ORDER BY s.price`;
+  assert.deepEqual(lineas.map(l => [l.pagador, l.precio]), [['Ernesto', 120], ['Riccardo', 150]], 'queda con sus DOS planes: propio y familiar');
+  assert.equal((await api.get('/api/billing/cutover/proposed-lines')).datos.lines.length, 0);
+});
