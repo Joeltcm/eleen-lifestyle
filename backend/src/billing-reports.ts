@@ -175,6 +175,8 @@ export function invoicePdf(invoice: PdfRecord, payments: PdfRecord[]) {
 }
 
 const billingKindLabel: Record<string, string> = { mensual: 'Mensualidad', credito: 'A crédito', clase_suelta: 'Clase suelta', paquete: 'Paquete', manual: 'Manual' };
+// Texto del concepto de una línea en el PDF (J-100): se quita la etiqueta "plan familiar" ("Ernesto, plan familiar (4 clases)" -> "Ernesto (4 clases)"); no cambia lo guardado.
+export const lineConceptText = (value: unknown) => String(value ?? '').replace(/,?\s*plan familiar/gi, '').replace(/\s{2,}/g, ' ').trim();
 const billingStatusLabel: Record<string, string> = { pendiente: 'Pago pendiente', parcial: 'Pago parcial', pagada: 'Pagada', anulada: 'Anulada' };
 
 // Factura del módulo nuevo (1B-2): número FAC-, pagador, ciclo, una línea por
@@ -199,7 +201,7 @@ export function billingInvoicePdf(invoice: PdfRecord, lines: PdfRecord[], applic
     document.y = metaY + 129;
     table(document, [
       { label: 'Beneficiario', key: 'beneficiary_name', width: 150 },
-      { label: 'Concepto', key: 'description', width: 190 },
+      { label: 'Concepto', key: 'description', width: 190, format: value => lineConceptText(value) },
       { label: 'Cantidad', key: 'quantity', width: 55, align: 'center', format: value => String(Number(value || 1)) },
       { label: 'Importe', key: 'amount', width: 128, align: 'right', format: money }
     ], lines, `Factura ${number}`);

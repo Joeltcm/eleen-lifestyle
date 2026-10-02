@@ -1,4 +1,4 @@
-const APP_VERSION = '264';
+const APP_VERSION = '265';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1075,9 +1075,11 @@ function downloadBlob(blob, fileName) {
 async function previewProtectedPdf(path, title, fileName) {
   const loading = document.createElement('div'); loading.className = 'pdf-loading'; loading.innerHTML = `<p class="eyebrow">DOCUMENTO PDF</p><h2>${escapeHtml(title)}</h2><p>Preparando una vista privada…</p>`; openModal(loading, true);
   try {
-    const blob = await protectedBlob(path); const url = URL.createObjectURL(blob); const content = document.createElement('div'); content.className = 'pdf-preview';
-    content.innerHTML = `<div class="pdf-preview-head"><div><p class="eyebrow">DOCUMENTO PDF</p><h2>${escapeHtml(title)}</h2></div><div class="pdf-actions"><a class="secondary" href="${url}" target="_blank" rel="noopener">Abrir PDF</a><a class="primary" href="${url}" download="${escapeHtml(fileName)}">Descargar</a></div></div><iframe src="${url}" title="${escapeHtml(title)}"></iframe><p class="pdf-mobile-note">Si la vista no aparece en iPhone o iPad, toca “Abrir PDF”.</p>`;
-    openModal(content, true); modal.addEventListener('close', () => URL.revokeObjectURL(url), { once: true });
+    // La URL lleva el NOMBRE del archivo (p. ej. factura-FAC-0031.pdf): así el visor del navegador, "Abrir PDF" y "Descargar" lo guardan con ese nombre y no con un código.
+    const { id: ticket } = await api('/api/pdf-tickets', { method: 'POST', body: { path } });
+    const url = `${API_BASE}/api/pdf-ticket/${ticket}/${encodeURIComponent(fileName)}`; const content = document.createElement('div'); content.className = 'pdf-preview';
+    content.innerHTML = `<div class="pdf-preview-head"><div><p class="eyebrow">DOCUMENTO PDF</p><h2>${escapeHtml(title)}</h2></div><div class="pdf-actions"><a class="secondary" href="${url}" target="_blank" rel="noopener">Abrir PDF</a><a class="primary" href="${url}?download=1" download="${escapeHtml(fileName)}">Descargar</a></div></div><iframe src="${url}" title="${escapeHtml(title)}"></iframe><p class="pdf-mobile-note">Si la vista no aparece en iPhone o iPad, toca “Abrir PDF”.</p>`;
+    openModal(content, true);
   } catch (error) { modal.close(); toast(error.message, true); }
 }
 const selectedReportDates = () => {

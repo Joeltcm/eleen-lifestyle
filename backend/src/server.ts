@@ -3,7 +3,7 @@ import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
 import bcrypt from 'bcryptjs';
 import webpush from 'web-push';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
 import { config } from './config.js';
 import type { TransactionSql } from 'postgres';
@@ -4873,6 +4873,41 @@ async function receivablesData(ownerId: string, asOf: string) {
     return { ...row, days_overdue: days, balance_amount: Number(row.balance_amount), aging };
   });
 }
+
+// Enlaces de documento con NOMBRE de archivo (J-100): un PDF protegido se abría desde un blob y el visor del navegador lo guardaba con un nombre
+// aleatorio (UUID). Aquí se canjea, con la sesión, un boleto de corta vida (5 min) por una URL cuyo último tramo ES el nombre del archivo y que responde con
+// Content-Disposition; el visor, "Abrir PDF" y "Descargar" usan esa misma URL. El boleto repite el GET protegido con el token de quien lo pidió (mismas
+// reglas de acceso), solo admite rutas /api/... de PDF y nunca se guarda en disco.
+const pdfTickets = new Map<string, { token: string; path: string; expires: number }>();
+const PDF_TICKET_MS = 5 * 60_000;
+app.post('/api/pdf-tickets', { preHandler: requireAuth }, async (request, reply) => {
+  const { path } = z.object({ path: z.string().min(5).max(400) }).parse(request.body);
+  if (!/^\/api\/[A-Za-z0-9\/_\-.?=&%:,]+$/.test(path) || path.includes('..') || !/((\/pdf|\.pdf)(\?|$)|[?&]format=pdf)/.test(path)) {
+    return reply.code(400).send({ error: 'Solo se puede abrir un documento PDF' });
+  }
+  const token = String(request.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const now = Date.now();
+  for (const [key, value] of pdfTickets) if (value.expires < now) pdfTickets.delete(key);
+  if (pdfTickets.size > 2000) return reply.code(429).send({ error: 'Demasiados documentos abiertos; intenta en unos minutos' });
+  const id = randomBytes(24).toString('base64url');
+  pdfTickets.set(id, { token, path, expires: now + PDF_TICKET_MS });
+  return { id, expiresInSeconds: PDF_TICKET_MS / 1000 };
+});
+app.get('/api/pdf-ticket/:id/:name', async (request, reply) => {
+  const { id, name } = request.params as { id: string; name: string };
+  const ticket = pdfTickets.get(id);
+  if (!ticket || ticket.expires < Date.now()) { pdfTickets.delete(id); return reply.code(404).send({ error: 'El enlace del documento venció; ábrelo de nuevo' }); }
+  const res = await app.inject({ method: 'GET', url: ticket.path, headers: { authorization: `Bearer ${ticket.token}` } });
+  if (res.statusCode !== 200) return reply.code(res.statusCode).type('application/json').send(res.body);
+  const base = String(name).replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 120) || 'documento';
+  const fileName = base.toLowerCase().endsWith('.pdf') ? base : `${base}.pdf`;
+  const attachment = (request.query as { download?: string }).download === '1';
+  reply.header('Content-Type', 'application/pdf');
+  reply.header('Content-Disposition', `${attachment ? 'attachment' : 'inline'}; filename="${fileName}"`);
+  reply.header('Cache-Control', 'private, no-store');
+  reply.header('X-Content-Type-Options', 'nosniff');
+  return reply.send(res.rawPayload);
+});
 
 const csvCell = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
 const csvDate = (value: unknown) => String(value ?? '').slice(0, 10);
