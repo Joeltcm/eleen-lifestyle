@@ -99,3 +99,15 @@ test('clases dobles: detecta dos clases sin marcar el mismo día para la misma p
   assert.equal((await api.get('/api/sessions/duplicates')).datos.groups.filter(x => x.clientId === c2 && x.day === mios[0].day).length, 0);
   assert.equal((await cliente(servidor.base).get('/api/sessions/duplicates')).estado, 401);
 });
+
+test('clases dobles de AYER (ya pasadas, sin marcar) también aparecen: el caso de Sara/Susie/Reina a las 09:00 y 13:49', async () => {
+  const c4 = (await api.post('/api/clients', { fullName: 'Doble de ayer', cutoffDay: 1 })).datos.id;
+  const ayer = new Date(Date.now() - 24 * 3600_000).toISOString().slice(0, 10);
+  const mk = hora => api.post('/api/sessions', { clientId: c4, startsAt: new Date(`${ayer}T${hora}:00-05:00`).toISOString(), durationMinutes: 60, mode: 'Presencial' });
+  assert.equal((await mk('09:00')).estado, 201);
+  assert.equal((await mk('13:49')).estado, 201);
+  const grupo = (await api.get('/api/sessions/duplicates')).datos.groups.filter(g => g.clientId === c4);
+  assert.equal(grupo.length, 1, 'el día de ayer con dos clases aparece');
+  assert.deepEqual(grupo[0].sessions.map(s => s.time), ['09:00', '13:49']);
+  assert.ok(grupo[0].sessions.every(s => s.past && s.removable));
+});
