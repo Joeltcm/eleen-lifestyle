@@ -450,7 +450,7 @@ const estadoSesion = session => sesionEnPausa(session) ? 'pausa' : session.statu
 // tres estados son distintos y ninguno es el "no" del otro.
 const sessionComplianceForm = session => {
   const cumplio = session.status === 'completed';
-  // Tres decisiones y ninguna más (J-101): sin estado, cumplió o cancelar. "No asistió" no se usa. Cancelar abre el diálogo de cancelación (quién cancela, si reprograma).
+  // Tres decisiones y ninguna más (J-101): sin estado, cumplió o cancelar. el "no asistió" no se usa. Cancelar abre el diálogo de cancelación (quién cancela, si reprograma).
   return `<form class="session-compliance" data-session-compliance="${session.id}"><div class="outcome-group" role="radiogroup" aria-label="Estado de la clase"><label class="outcome-btn outcome-none"><input type="radio" name="outcome" value="scheduled" ${cumplio ? '' : 'checked'} /><span>Sin estado</span></label><label class="outcome-btn outcome-done"><input type="radio" name="outcome" value="completed" ${cumplio ? 'checked' : ''} /><span>Cumplió</span></label><button type="button" class="outcome-btn outcome-cancel" data-cancel-session="${session.id}">Cancelar</button></div><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" ${cumplio ? '' : 'disabled'} value="${cumplio ? session.completionPercent || 100 : 0}" /><span>%</span></label><button class="secondary" title="Guardar cumplimiento">Guardar</button></form>`;
 };
 function renderDashboard() {
