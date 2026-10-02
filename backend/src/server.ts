@@ -4364,8 +4364,8 @@ app.post('/api/sessions/:id/reactivate', { preHandler: requireStaff }, async (re
 // nunca se pierde por accidente una que estaba en pie. Las completadas tampoco
 // se tocan, porque descontaron una sesión del saldo y borrarlas descuadraría
 // el cumplimiento.
-// Clases DOBLES: días (futuros y de las últimas 2 semanas) en que una misma persona tiene dos o más clases vivas (programadas, realizadas o no cumplidas) y AL MENOS UNA
-// programada y sin marcar, que es la única que se puede quitar (J-101). Solo lectura: sugiere quitar (a) la programada de un día que ya tiene otra REALIZADA o no cumplida y
+// Clases DOBLES: días (futuros y de las últimas 2 semanas) en que una misma persona tiene dos o más clases vivas (programadas, realizadas o no cumplidas), aunque estén
+// todas marcadas (J-101: Sara/Susie/Reina quedaron dobles y realizadas). Solo las programadas se pueden quitar desde aquí. Solo lectura: sugiere quitar (a) la programada de un día que ya tiene otra REALIZADA o no cumplida y
 // (b) la creada por un horario fijo en las últimas 36 horas que no es la más antigua del día. Se borra con DELETE /api/sessions/:id/permanent (que anota la excepción para que
 // el calendario no la resucite).
 app.get('/api/sessions/duplicates', { preHandler: requireStaff }, async request => {
@@ -4376,7 +4376,7 @@ app.get('/api/sessions/duplicates', { preHandler: requireStaff }, async request 
         to_char(s.starts_at AT TIME ZONE 'America/Panama', 'HH24:MI') AS hora, s.created_at, s.recurrence_id IS NOT NULL AS de_horario_fijo
       FROM sessions s JOIN clients c ON c.id = s.client_id
       WHERE c.owner_id = ${auth.sub} AND s.status IN ('scheduled', 'completed', 'no_show') AND s.starts_at >= now() - interval '14 days' AND NOT COALESCE(s.paused_hold, false)),
-    dobles AS (SELECT client_id, dia FROM vivas GROUP BY client_id, dia HAVING count(*) > 1 AND bool_or(status = 'scheduled'))
+    dobles AS (SELECT client_id, dia FROM vivas GROUP BY client_id, dia HAVING count(*) > 1)
     SELECT v.* FROM vivas v JOIN dobles d ON d.client_id = v.client_id AND d.dia = v.dia
     ORDER BY v.full_name, v.dia, v.created_at, v.starts_at`;
   type Sesion = { id: string; time: string; status: string; past: boolean; createdAt: string; fromRecurrence: boolean; removable: boolean; suggestedRemove: boolean };

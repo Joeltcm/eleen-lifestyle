@@ -111,3 +111,17 @@ test('clases dobles de AYER (ya pasadas, sin marcar) también aparecen: el caso 
   assert.deepEqual(grupo[0].sessions.map(s => s.time), ['09:00', '13:49']);
   assert.ok(grupo[0].sessions.every(s => s.past && s.removable));
 });
+
+test('clases dobles YA MARCADAS como realizadas también se listan (no se pueden quitar desde el buscador)', async () => {
+  const c5 = (await api.post('/api/clients', { fullName: 'Doble realizado', cutoffDay: 1 })).datos.id;
+  const ayer = new Date(Date.now() - 24 * 3600_000).toISOString().slice(0, 10);
+  const ids = [];
+  for (const hora of ['09:00', '13:49']) {
+    const r = await api.post('/api/sessions', { clientId: c5, startsAt: new Date(`${ayer}T${hora}:00-05:00`).toISOString(), durationMinutes: 60, mode: 'Presencial' });
+    assert.equal(r.estado, 201); ids.push(r.datos.id);
+  }
+  for (const id of ids) assert.equal((await api.patch(`/api/sessions/${id}/compliance`, { outcome: 'completed', completionPercent: 100 })).estado, 200);
+  const grupo = (await api.get('/api/sessions/duplicates')).datos.groups.filter(g => g.clientId === c5);
+  assert.equal(grupo.length, 1);
+  assert.ok(grupo[0].sessions.every(s => s.status === 'completed' && !s.removable && !s.suggestedRemove));
+});
