@@ -753,3 +753,112 @@ button.active-filter{background:#2f6f4f;color:#fff;border-color:#2f6f4f}
 @media(max-width:600px){.session-management .session-compliance:has(.outcome-group){grid-template-columns:minmax(0,1fr) auto}.session-compliance .outcome-group{grid-column:1/-1}}
 .outcome-solid{background:#2f8a5b;border-color:#2f8a5b;color:#fff}
 .notification-actions .outcome-btn{flex:1 1 0}
+
+/* ===== Ajustes de pantalla para iPhone 15 Plus / Pro Max (430 px) e iPad Pro 11" (834 px) — v271 =====
+   Lo que sigue va al final a propósito: corrige tamaños de letra demasiado chicos (7–10 px), el calendario semanal (columnas con la fecha centrada y chips
+   diminutos) y la barra de navegación del calendario, sin tocar la versión de escritorio. */
+@media (max-width:1180px){
+  body .topbar p.eyebrow,body .section-heading p.eyebrow,body .hero-copy p.eyebrow,body .eyebrow{font-size:11px}
+  body th,body thead th{font-size:11px}
+  body .status,body .estado-chip,body .attendance-client-status,body .session-state,body .integration-status{font-size:11px}
+  body .commercial-label{font-size:10.5px}
+  body .commercial-summary small,body .mini-data span,body .compliance-row small,body .ciclo-movimientos{font-size:11px}
+  body .attendance-custom-range>span,body .attendance-range-fields label,body .attendance-filter-help,body .attendance-period-highlight>div>span{font-size:11px}
+  body .calendar-today-button{font-size:12px}
+  body .session-management .secondary,body .session-compliance .secondary{font-size:11px}
+  body .completion-percent>span{font-size:11px}
+  body .dia-chip span,body .dia-chip small,body .sesion-quien small{font-size:11px}
+  body .notification-button span{font-size:10px}
+  /* Los días de la semana: fecha arriba, no centrada; chips legibles. */
+  body .calendar-week .day-col{display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:0}
+  body .calendar-week .day-name{font-size:11px}
+  body .calendar-week .session-chip{font-size:11.5px;padding:7px 7px;line-height:1.25;margin-bottom:6px}
+  body .calendar-week .session-chip b{font-size:11.5px}
+  body .text-button{min-height:34px;padding-top:7px;padding-bottom:7px}
+}
+@media (max-width:600px){
+  /* Barra inferior: etiquetas legibles. */
+  body .sidebar .nav-link>span:last-child,body .nav-link>span:last-child{font-size:10.5px;letter-spacing:0}
+  /* Navegación del calendario: "Hoy" al lado de las flechas, no en una fila entera. */
+  body .calendar-period-nav{grid-template-columns:44px minmax(0,1fr) 44px 58px;gap:6px}
+  body .calendar-today-button{grid-column:auto;width:auto;min-width:0;padding:0 8px}
+  body .calendar-period-nav h3{font-size:16px}
+  /* Tarjetas de cliente más compactas: caben más por pantalla. */
+  body .client-card{padding:16px}
+  body .client-card>p{margin:8px 0}
+  body .commercial-summary{padding:10px 12px}
+}
+@media (max-width:400px){
+  body .sidebar .nav-link>span:last-child,body .nav-link>span:last-child{font-size:10px}
+}
+@media (min-width:601px) and (max-width:960px){
+  /* iPad en vertical: columnas de ~70 px; la hora siempre arriba y el nombre debajo, en vez de que unos chips se partan y otros no. */
+  body .calendar-week .session-chip b{display:block;margin-bottom:1px}
+}
+@media (max-width:1180px){
+  /* La etiqueta de estado no se estira a lo alto de la fila (quedaba como un óvalo). */
+  body .agenda-item .session-state{align-self:center;height:auto;min-height:0;flex:0 0 auto}
+}
+@media (min-width:601px) and (max-width:1180px){
+  /* La burbuja de adherencia del Resumen se salía 8 px del cuadro en iPad vertical. */
+  body .hero-score{right:20px}
+}
+@media (max-width:1180px){
+  body .compliance-actions{flex-wrap:wrap;justify-content:flex-end;row-gap:6px}
+  body .compliance-actions .text-button{white-space:nowrap}
+  body .hero-score>span,body .hero-score small{font-size:8.5px}
+}
+@media (max-width:1100px){
+  /* Asistencia: el título y los filtros se apilan; en iPad vertical el título quedaba en una columna de 95 px y los filtros descuadrados. */
+  body .section-heading:has(.attendance-toolbar){flex-direction:column;align-items:stretch;gap:10px}
+  body .section-heading:has(.attendance-toolbar) .attendance-toolbar{width:100%;max-width:none}
+}
+@media (max-width:1180px){
+  body .client-actions .secondary,body .client-actions button{min-height:40px;font-size:12px}
+}
+
+/* Tablas de Facturación como tarjetas (teléfono y iPad en vertical). Las celdas llevan su etiqueta a la izquierda con posición absoluta, de modo que el contenido
+   (que mezcla texto, <br> y <small>) fluye normal a la derecha; con la rejilla de antes, el "vence …" caía bajo la etiqueta y las acciones quedaban sangradas.
+   En iPad (601–1100 px) antes la tabla tenía 720 px mínimos dentro de ~620 y las acciones quedaban cortadas a la derecha. */
+@media (max-width:1100px){
+  .view:has(#billing-subtabs) .table-wrap:has(.stack-mobile){overflow-x:visible}
+  .view:has(#billing-subtabs) .stack-mobile thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  .view:has(#billing-subtabs) .stack-mobile,.view:has(#billing-subtabs) .stack-mobile tbody{display:block;width:auto;min-width:0}
+  .view:has(#billing-subtabs) .stack-mobile tr{display:block;margin-bottom:12px;padding:12px 16px 14px;border-radius:14px;background:rgba(255,253,252,.94);box-shadow:0 4px 13px #6d4a5909;border:1px solid #f0e6ea}
+  .view:has(#billing-subtabs) .stack-mobile td{display:block;position:relative;width:auto;min-height:28px;padding:6px 0 6px 100px;border:0;font-size:13px;line-height:1.4;text-align:left}
+  .view:has(#billing-subtabs) .stack-mobile td:before{content:attr(data-label);position:absolute;left:0;top:8px;width:92px;font:500 10.5px 'DM Mono';letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
+  .view:has(#billing-subtabs) .stack-mobile td small{display:block;margin-top:2px;font-size:11.5px;color:var(--muted)}
+  /* La celda de acciones no lleva etiqueta: ocupa todo el ancho, con los botones en fila. */
+  .view:has(#billing-subtabs) .stack-mobile td[data-label=""],.view:has(#billing-subtabs) .stack-mobile td[data-label="Acciones"]{display:flex;flex-wrap:wrap;gap:8px;padding:12px 0 0;margin-top:8px;border-top:1px solid var(--line)}
+  .view:has(#billing-subtabs) .stack-mobile td[data-label=""]:before,.view:has(#billing-subtabs) .stack-mobile td[data-label="Acciones"]:before{display:none}
+  .view:has(#billing-subtabs) .stack-mobile td[data-label=""] button,.view:has(#billing-subtabs) .stack-mobile td[data-label="Acciones"] button{flex:1 1 calc(50% - 8px);min-height:44px;margin:0}
+  .view:has(#billing-subtabs) .stack-mobile td[data-label=""] button.primary{flex-basis:100%}
+  .view:has(#billing-subtabs) .stack-mobile td.empty{padding-left:0}
+  .view:has(#billing-subtabs) .stack-mobile td.empty:before{display:none}
+  .view:has(#billing-subtabs) .stack-mobile tr:has(td.empty){background:none;box-shadow:none;border:0;padding:0}
+}
+@media (min-width:601px) and (max-width:1100px){
+  /* En iPad las fichas muestran sus datos en dos columnas. */
+  .view:has(#billing-subtabs) .stack-mobile tr{display:grid;grid-template-columns:1fr 1fr;column-gap:30px}
+  .view:has(#billing-subtabs) .stack-mobile td[data-label=""],.view:has(#billing-subtabs) .stack-mobile td[data-label="Acciones"]{grid-column:1/-1}
+  .view:has(#billing-subtabs) .stack-mobile td[data-label=""] button{flex:0 1 auto;min-width:150px}
+  .view:has(#billing-subtabs) .stack-mobile td[data-label=""] button.primary{flex-basis:auto}
+  .view:has(#billing-subtabs) .stack-mobile tr:has(td.empty){display:block}
+}
+@media (max-width:600px){
+  /* Tarjetas de totales de Facturación: de 126 px a lo que ocupa su contenido; seis tarjetas de 126 px empujaban las facturas fuera de la primera pantalla. */
+  body .new-billing-metrics article{min-height:0;padding:12px 14px}
+  body .new-billing-metrics{gap:8px}
+}
+@media (max-width:600px){
+  body .metrics article{min-height:0}
+  body label + p.eyebrow{margin-top:20px}
+}
+/* Portal: el cuadro "Consulta tu período" se salía por la derecha en 430 px (los tres botones de mes no cabían en una fila y empujaban la rejilla). */
+.portal-period-controls{grid-template-columns:minmax(0,1fr)}
+.portal-period-controls>*{min-width:0}
+.portal-period-controls input{max-width:100%;min-width:0}
+.portal-period-nav{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+.portal-period-nav button{min-width:0;padding:10px 6px;font-size:12px;line-height:1.2;white-space:normal}
+body .portal-period-nav button,body .portal-view .portal-period-nav button.secondary{font-size:12.5px;line-height:1.2;min-height:44px}
+body .portal-period-nav button{white-space:nowrap;padding-left:4px;padding-right:4px}

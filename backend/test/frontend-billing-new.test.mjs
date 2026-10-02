@@ -175,3 +175,12 @@ test('estado de la clase: solo Sin estado / Cumplió (verde) / Cancelar (rojo); 
   assert.match(css, /\.outcome-done/); assert.match(css, /\.outcome-cancel/);
   assert.equal((app.match(/data-cancel-session="\$\{session\.id\}"/g) || []).length, 1, 'un solo botón Cancelar por clase');
 });
+
+test('ajustes visuales iPhone 15 Plus / iPad Pro 11" (v271): tablas de Facturación como tarjetas, calendario semanal y portal sin desbordes', async () => {
+  const css = await leer('styles.css');
+  assert.match(css, /iPhone 15 Plus \/ Pro Max \(430 px\) e iPad Pro 11"/);
+  assert.match(css, /\.view:has\(#billing-subtabs\) \.stack-mobile td\[data-label=""\]/);
+  assert.match(css, /\.calendar-period-nav\{grid-template-columns:44px minmax\(0,1fr\) 44px 58px/);
+  assert.match(css, /\.portal-period-nav\{display:grid;grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.calendar-week \.day-col\{display:flex;flex-direction:column/);
+});
