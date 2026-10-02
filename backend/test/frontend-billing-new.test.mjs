@@ -165,3 +165,13 @@ test('cobro "Sesión individual": avisa y desmarca "La clase ya se dio" si la pe
   assert.match(app, /desmarcadaPorAviso/);
   assert.match(app, /Registrar "La clase ya se dio" crea OTRA clase ese día/);
 });
+
+test('estado de la clase: solo Sin estado / Cumplió (verde) / Cancelar (rojo); "No asistió" ya no se ofrece (agenda ni recordatorios)', async () => {
+  const app = await leer('app.js'); const css = await leer('styles.css');
+  const form = app.slice(app.indexOf('const sessionComplianceForm'), app.indexOf('function renderDashboard'));
+  assert.match(form, /value="scheduled"/); assert.match(form, /value="completed"/); assert.match(form, /data-cancel-session/);
+  assert.doesNotMatch(form, /no_show|No asistió/);
+  assert.doesNotMatch(app, /data-marcar="no_show"/);
+  assert.match(css, /\.outcome-done/); assert.match(css, /\.outcome-cancel/);
+  assert.equal((app.match(/data-cancel-session="\$\{session\.id\}"/g) || []).length, 1, 'un solo botón Cancelar por clase');
+});

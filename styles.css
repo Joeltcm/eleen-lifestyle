@@ -738,3 +738,18 @@ button.active-filter{background:#2f6f4f;color:#fff;border-color:#2f6f4f}
 .session-state.pausa{background:#efe6fa;color:#5a3889;font-weight:700}
 .session-chip.pausa{border-left:4px solid #8e63c7}
 .kpi-pendiente{border-color:#f0c26c!important;background:linear-gradient(145deg,#fff,#fff7e3)}
+
+/* Estado de la clase: sin estado / cumplió (verde) / cancelar (rojo) */
+.outcome-group{display:flex;gap:6px;min-width:0}
+.outcome-btn{position:relative;flex:1 1 0;display:flex;align-items:center;justify-content:center;min-height:38px;padding:7px 10px;border:1.5px solid #ddd2d7;border-radius:10px;background:#fff;color:#6f6168;font:700 11px 'DM Sans',sans-serif;text-align:center;cursor:pointer;white-space:nowrap}
+.outcome-btn input{position:absolute;opacity:0;pointer-events:none}
+.outcome-none:has(input:checked){background:#efe9ec;border-color:#a99aa2;color:#3d2f36}
+.outcome-done{border-color:#a9d1b9;color:#2f7a52}
+.outcome-done:has(input:checked){background:#2f8a5b;border-color:#2f8a5b;color:#fff}
+.outcome-cancel{border-color:#e3a9ac;background:#fbeaea;color:#b13d45}
+.outcome-cancel:hover{background:#b13d45;border-color:#b13d45;color:#fff}
+.outcome-btn:has(input:focus-visible){outline:2px solid #ae6686;outline-offset:2px}
+.session-compliance:has(.outcome-group){grid-template-columns:minmax(0,1fr) 76px auto}
+@media(max-width:600px){.session-management .session-compliance:has(.outcome-group){grid-template-columns:minmax(0,1fr) auto}.session-compliance .outcome-group{grid-column:1/-1}}
+.outcome-solid{background:#2f8a5b;border-color:#2f8a5b;color:#fff}
+.notification-actions .outcome-btn{flex:1 1 0}
