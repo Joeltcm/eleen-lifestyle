@@ -184,3 +184,11 @@ test('ajustes visuales iPhone 15 Plus / iPad Pro 11" (v271): tablas de Facturaci
   assert.match(css, /\.portal-period-nav\{display:grid;grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
   assert.match(css, /\.calendar-week \.day-col\{display:flex;flex-direction:column/);
 });
+
+test('cumplimiento del Resumen: "Últimos 7 días", "perdidas" y sin saldo del ciclo para quien entrena a crédito (v272)', async () => {
+  const app = await leer('app.js'); const html = await leer('index.html');
+  assert.match(html, /<option value="week">Últimos 7 días<\/option><option value="month">Último mes<\/option>/);
+  assert.match(app, /perdida\$\{client\.missed === 1 \? '' : 's'\}/);
+  assert.doesNotMatch(app, /sin hacer`/);
+  assert.match(app, /c\.paymentMode === 'no_anticipado'\)\) return ''/);
+});

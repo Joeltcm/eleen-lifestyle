@@ -1,4 +1,4 @@
-const APP_VERSION = '271';
+const APP_VERSION = '272';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -318,6 +318,8 @@ const remainingSessions = pack => Math.max(0, pack.total - pack.used);
 // la pregunta que la entrenadora le hace al panel es "¿cuántas le quedan?", y
 // esa vivía sólo en Control de paquetes.
 const avanceDelMes = clientId => {
+  // Quien entrena a crédito (Julio) paga por clase dada: no tiene un saldo de sesiones que mostrar, aunque conserve una mensualidad vieja del sistema anterior.
+  if ((data.clients || []).some(c => c.id === clientId && c.paymentMode === 'no_anticipado')) return '';
   const pack = data.packages.find(item => item.clientId === clientId && item.status === 'confirmed' && item.kind === 'monthly');
   if (!pack) return '';
   return ` · Saldo del ciclo: ${pack.used} de ${pack.total} sesiones usadas`;
@@ -482,7 +484,7 @@ function renderDashboard() {
   const noInbody = data.clients.filter(client => !client.inbody && clientesActivos.has(client.id)).map(client => `<div class="alert-item"><b>${escapeHtml(client.name)}</b><span>Sin evaluación InBody registrada.</span></div>`).join('');
   const cobrosPendientes = data.invoices.filter(item => item.status === 'pending' && item.source !== 'zoho_invoice' && clientesActivos.has(item.clientId)).length;
   document.getElementById('alerts').innerHTML = `${noInbody || '<div class="alert-item"><b>Todo al día</b><span>No hay alertas de seguimiento.</span></div>'}<div class="alert-item"><b>${cobrosPendientes} ${cobrosPendientes === 1 ? 'cobro pendiente' : 'cobros pendientes'}</b><span>Revisa pagos y comprobantes.</span></div>`;
-  document.getElementById('compliance-list').innerHTML = data.compliance.clients.length ? data.compliance.clients.map(client => `<div class="compliance-row"><span class="initials">${escapeHtml(initials(client.name))}</span><div><b>${escapeHtml(client.name)}</b><small>${client.completed} de ${client.activities} clases${client.missed ? ` · ${client.missed} sin hacer` : ''}${avanceDelMes(client.clientId)}</small><span class="compliance-track"><i style="width:${client.compliancePercent}%"></i></span></div><strong>${client.compliancePercent}%</strong></div>`).join('') : '<p class="empty">Aún no hay clases vencidas en este período.</p>';
+  document.getElementById('compliance-list').innerHTML = data.compliance.clients.length ? data.compliance.clients.map(client => `<div class="compliance-row"><span class="initials">${escapeHtml(initials(client.name))}</span><div><b>${escapeHtml(client.name)}</b><small>${client.completed} de ${client.activities} clases${client.missed ? ` · ${client.missed} perdida${client.missed === 1 ? '' : 's'}` : ''}${avanceDelMes(client.clientId)}</small><span class="compliance-track"><i style="width:${client.compliancePercent}%"></i></span></div><strong>${client.compliancePercent}%</strong></div>`).join('') : '<p class="empty">Aún no hay clases vencidas en este período.</p>';
   const notificationCount = document.getElementById('notification-count'); notificationCount.textContent = data.notifications.length; notificationCount.hidden = !data.notifications.length;
 }
 // Los inactivos aparte y al final. Mezclados alfabéticamente obligaban a leer
