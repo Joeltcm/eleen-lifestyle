@@ -157,3 +157,11 @@ test('E2: las tarifas tienen zona/especial y el plan de facturación ofrece suge
   assert.match(app, /No crea ningún vínculo con la tarifa/);
   assert.match(app, /specialFor/);
 });
+
+test('cobro "Sesión individual": avisa y desmarca "La clase ya se dio" si la persona ya tiene clase ese día (evita dobles, J-101)', async () => {
+  const app = await leer('app.js');
+  assert.match(app, /const revisarClaseDelDia = /);
+  assert.match(app, /Registrar otra la deja doble/);
+  assert.match(app, /desmarcadaPorAviso/);
+  assert.match(app, /Registrar "La clase ya se dio" crea OTRA clase ese día/);
+});
