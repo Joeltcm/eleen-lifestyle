@@ -66,3 +66,36 @@ test('la agenda recurrente permanece indefinida aunque llegue una fecha Hasta', 
   assert.equal(editada.estado, 200);
   assert.equal(editada.datos.recurrence.ends_on, null, 'editar una agenda tampoco puede ponerle fecha de fin');
 });
+
+test('un segundo horario fijo NO pone una segunda clase el mismo día (una clase por día y persona)', async () => {
+  const c3 = (await api.post('/api/clients', { fullName: 'Un solo horario por día', cutoffDay: 1 })).datos.id;
+  assert.equal((await api.post('/api/session-recurrences', { clientId: c3, weekdays: [0, 1, 2, 3, 4, 5, 6], timeOfDay: '07:00', durationMinutes: 60, mode: 'Presencial' })).estado, 201);
+  const antes = (await api.get('/api/sessions')).datos.filter(x => x.client_id === c3 && x.status !== 'cancelled').length;
+  assert.equal((await api.post('/api/session-recurrences', { clientId: c3, weekdays: [0, 1, 2, 3, 4, 5, 6], timeOfDay: '13:49', durationMinutes: 60, mode: 'Presencial' })).estado, 201);
+  await api.post('/api/session-recurrences/extend', {});
+  const despues = (await api.get('/api/sessions')).datos.filter(x => x.client_id === c3 && x.status !== 'cancelled').length;
+  assert.equal(despues, antes, 'el segundo horario no agregó clases en días que ya tienen una');
+  assert.equal((await api.get('/api/sessions/duplicates')).datos.groups.filter(g => g.clientId === c3).length, 0);
+});
+
+test('clases dobles: detecta dos clases sin marcar el mismo día para la misma persona (agendadas a mano) y sugiere quitar la nueva de horario fijo; quitarla no la resucita', async () => {
+  const c2 = (await api.post('/api/clients', { fullName: 'Con doble', cutoffDay: 1 })).datos.id;
+  // Horario fijo diario a las 07:00 y, además, clases agendadas a mano a las 13:49 (sin horario fijo): dos clases el mismo día
+  assert.equal((await api.post('/api/session-recurrences', { clientId: c2, weekdays: [0, 1, 2, 3, 4, 5, 6], timeOfDay: '07:00', durationMinutes: 60, mode: 'Presencial' })).estado, 201);
+  const dias = (await api.get('/api/sessions')).datos.filter(x => x.client_id === c2 && x.status !== 'cancelled').sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at))).slice(3, 6);   // días futuros (los primeros pueden ser de hoy y ya haber pasado)
+  const mano = await api.post('/api/sessions/batch', { clientId: c2, startsAt: dias.map(d => new Date(new Date(d.starts_at).getTime() + 6.82 * 3600_000).toISOString()), durationMinutes: 60, mode: 'Presencial' });
+  assert.equal(mano.estado, 201, JSON.stringify(mano.datos));
+  const r = await api.get('/api/sessions/duplicates');
+  assert.equal(r.estado, 200);
+  const mios = r.datos.groups.filter(g => g.clientId === c2);
+  assert.equal(mios.length, 3, 'tres días con dos clases');
+  assert.deepEqual(mios[0].sessions.map(s => s.fromRecurrence), [true, false], 'la de horario fijo es la más antigua; la otra se agendó a mano');
+  assert.deepEqual(mios[0].sessions.map(s => s.suggestedRemove), [false, false], 'la a mano no se sugiere quitar (la decide una persona)');
+  assert.ok(r.datos.groups.every(x => x.sessions.length >= 2));
+  assert.equal(r.datos.groups.filter(x => x.clientId === cid).length, 0, 'Francolini (un horario por día) no aparece');
+  // quitar una de esas a mano y comprobar que el grupo desaparece
+  const quitar = mios[0].sessions[1].id;
+  assert.equal((await api.delete(`/api/sessions/${quitar}/permanent`)).estado, 200);
+  assert.equal((await api.get('/api/sessions/duplicates')).datos.groups.filter(x => x.clientId === c2 && x.day === mios[0].day).length, 0);
+  assert.equal((await cliente(servidor.base).get('/api/sessions/duplicates')).estado, 401);
+});

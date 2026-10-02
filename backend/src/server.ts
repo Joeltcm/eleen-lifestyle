@@ -3834,6 +3834,12 @@ async function extenderRecurrencias(ownerId?: string, forzar = false) {
         SELECT 1 FROM sessions s
         WHERE s.client_id = ${regla.client_id} AND s.starts_at = candidato.momento AND s.status <> 'cancelled'
       )
+      -- UNA clase por día y persona (J-101): si ese día el cliente ya entrena —de otro horario fijo o agendada a mano, a la hora que sea— el día está atendido y
+      -- no se le pone una segunda. (Dos clases el mismo día se agendan a mano.)
+      AND NOT EXISTS (
+        SELECT 1 FROM sessions s
+        WHERE s.client_id = ${regla.client_id} AND s.status <> 'cancelled' AND (s.starts_at AT TIME ZONE 'America/Panama')::date = candidato.dia
+      )
       RETURNING id
     `;
     creadas += filas.length;
@@ -4358,6 +4364,35 @@ app.post('/api/sessions/:id/reactivate', { preHandler: requireStaff }, async (re
 // nunca se pierde por accidente una que estaba en pie. Las completadas tampoco
 // se tocan, porque descontaron una sesión del saldo y borrarlas descuadraría
 // el cumplimiento.
+// Clases DOBLES: días futuros en que una misma persona tiene dos o más sesiones programadas y sin tocar (p. ej. tras rellenar el calendario por error).
+// Solo lectura: sugiere quitar las que nacieron de un horario fijo en las últimas 36 horas y no son la más antigua del día; Joel/Eileen confirman y se borran con
+// DELETE /api/sessions/:id/permanent (que también anota la excepción para que el calendario no las resucite).
+app.get('/api/sessions/duplicates', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const rows = await sql`
+    WITH vivas AS (
+      SELECT s.id::text AS id, s.client_id::text AS client_id, c.full_name, s.starts_at, (s.starts_at AT TIME ZONE 'America/Panama')::date AS dia,
+        to_char(s.starts_at AT TIME ZONE 'America/Panama', 'HH24:MI') AS hora, s.created_at, s.recurrence_id IS NOT NULL AS de_horario_fijo
+      FROM sessions s JOIN clients c ON c.id = s.client_id
+      WHERE c.owner_id = ${auth.sub} AND s.status = 'scheduled' AND s.starts_at >= now() AND NOT COALESCE(s.paused_hold, false))
+    SELECT v.*, (SELECT count(*)::int FROM vivas w WHERE w.client_id = v.client_id AND w.dia = v.dia) AS en_el_dia
+    FROM vivas v WHERE (SELECT count(*) FROM vivas w WHERE w.client_id = v.client_id AND w.dia = v.dia) > 1
+    ORDER BY v.full_name, v.dia, v.created_at, v.starts_at`;
+  const grupos = new Map<string, { clientId: string; name: string; day: string; sessions: { id: string; time: string; createdAt: string; fromRecurrence: boolean; suggestedRemove: boolean }[] }>();
+  const reciente = Date.now() - 36 * 3600_000;
+  for (const row of rows) {
+    const key = `${row.client_id}|${row.dia instanceof Date ? row.dia.toISOString().slice(0, 10) : String(row.dia).slice(0, 10)}`;
+    const grupo = grupos.get(key) ?? { clientId: row.client_id as string, name: row.full_name as string, day: key.split('|')[1], sessions: [] };
+    const esLaMasAntigua = grupo.sessions.length === 0;
+    grupo.sessions.push({
+      id: row.id as string, time: row.hora as string, createdAt: new Date(row.created_at as string).toISOString(), fromRecurrence: Boolean(row.de_horario_fijo),
+      suggestedRemove: !esLaMasAntigua && Boolean(row.de_horario_fijo) && new Date(row.created_at as string).getTime() >= reciente
+    });
+    grupos.set(key, grupo);
+  }
+  return { groups: [...grupos.values()] };
+});
+
 app.delete('/api/sessions/:id/permanent', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);

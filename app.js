@@ -1,4 +1,4 @@
-const APP_VERSION = '265';
+const APP_VERSION = '266';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2001,6 +2001,11 @@ async function recurrenceManager() {
     <button type="button" class="primary wide-button" id="agregar-horario-fijo">+ Agregar horario fijo</button>
     <p style="color:#6f7b75;margin-top:6px"><small>Todos los días de un horario comparten la misma hora. Si un cliente entrena a horas distintas (p. ej. lun y mar a las 17:30 y vie a las 10:00), agrega un horario por cada hora.</small></p>
     <div id="recurrencias-lista"><p class="empty">Cargando…</p></div>
+    <div class="clases-dobles" style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line, #e8dfe3)">
+      <button type="button" class="secondary wide-button" id="buscar-clases-dobles">Buscar clases repetidas el mismo día</button>
+      <p style="color:#6f7b75;margin:6px 0 0"><small>Muestra los días futuros en que una persona tiene dos o más clases sin marcar. Las sugeridas para quitar son las creadas por un horario fijo en las últimas 36 horas (por ejemplo, al rellenar el calendario por error). Tú decides cuáles se quitan.</small></p>
+      <div id="clases-dobles-resultado"></div>
+    </div>
     <div class="actualizar-calendario" style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line, #e8dfe3)">
       <button type="button" class="secondary wide-button" id="rellenar-horarios">Actualizar el calendario ahora</button>
       <p style="color:#6f7b75;margin:6px 0 0"><small>El calendario se actualiza solo cada pocas horas con las próximas ocho semanas de cada horario. Pulsa aquí únicamente si acabas de cambiar un horario y todavía no ves sus clases. No toca los días en que el cliente ya tiene clase, aunque se haya corrido de hora.</small></p>
@@ -2008,6 +2013,24 @@ async function recurrenceManager() {
     <div id="horarios-diagnostico"></div>`;
   openModal(box, true);
   document.getElementById('agregar-horario-fijo').onclick = () => nuevoHorarioFijo();
+  document.getElementById('buscar-clases-dobles').onclick = async event => {
+    const boton = event.currentTarget; const destino = document.getElementById('clases-dobles-resultado'); boton.disabled = true;
+    try {
+      const { groups } = await api('/api/sessions/duplicates');
+      if (!groups.length) { destino.innerHTML = '<p class="form-summary">✓ No hay clases repetidas el mismo día.</p>'; return; }
+      destino.innerHTML = `<p class="section-note">${groups.length} día${groups.length === 1 ? '' : 's'} con más de una clase. Marca las que se quitan.</p>
+        <div class="new-billing-allocs">${groups.map(group => `<div class="new-billing-alloc" style="grid-template-columns:1fr"><div><b>${escapeHtml(group.name)} · ${fechaCorta(group.day)}</b>${group.sessions.map(session => `<label style="display:flex;gap:8px;align-items:center;margin-top:4px"><input type="checkbox" data-quitar-clase="${session.id}"${session.suggestedRemove ? ' checked' : ''} /> ${escapeHtml(session.time)} <small>${session.fromRecurrence ? 'de un horario fijo' : 'agendada a mano'} · creada ${fechaHoraPanama(session.createdAt)}${session.suggestedRemove ? ' · sugerida para quitar' : ''}</small></label>`).join('')}</div></div>`).join('')}</div>
+        <button type="button" class="primary wide-button" id="quitar-clases-dobles">Quitar las marcadas</button>`;
+      document.getElementById('quitar-clases-dobles').onclick = async () => {
+        const ids = [...destino.querySelectorAll('[data-quitar-clase]:checked')].map(input => input.dataset.quitarClase);
+        if (!ids.length) return toast('No marcaste ninguna clase', true);
+        if (!confirm(`Se borrarán ${ids.length} clase${ids.length === 1 ? '' : 's'} programadas. No cuentan como incumplidas y el calendario no las vuelve a crear. ¿Continuar?`)) return;
+        let quitadas = 0;
+        for (const id of ids) { try { await api(`/api/sessions/${id}/permanent`, { method: 'DELETE' }); quitadas += 1; } catch (error) { toast(error.message, true); } }
+        await loadData(); renderAll(); toast(`${quitadas} clase${quitadas === 1 ? '' : 's'} quitada${quitadas === 1 ? '' : 's'}`); recurrenceManager();
+      };
+    } catch (error) { toast(error.message, true); } finally { boton.disabled = false; }
+  };
   const pintar = async () => {
     const destino = document.getElementById('recurrencias-lista');
     try {
