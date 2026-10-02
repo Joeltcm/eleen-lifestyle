@@ -4364,31 +4364,40 @@ app.post('/api/sessions/:id/reactivate', { preHandler: requireStaff }, async (re
 // nunca se pierde por accidente una que estaba en pie. Las completadas tampoco
 // se tocan, porque descontaron una sesión del saldo y borrarlas descuadraría
 // el cumplimiento.
-// Clases DOBLES: días futuros en que una misma persona tiene dos o más sesiones programadas y sin tocar (p. ej. tras rellenar el calendario por error).
-// Solo lectura: sugiere quitar las que nacieron de un horario fijo en las últimas 36 horas y no son la más antigua del día; Joel/Eileen confirman y se borran con
-// DELETE /api/sessions/:id/permanent (que también anota la excepción para que el calendario no las resucite).
+// Clases DOBLES: días (futuros y de las últimas 2 semanas) en que una misma persona tiene dos o más clases vivas (programadas, realizadas o no cumplidas) y AL MENOS UNA
+// programada y sin marcar, que es la única que se puede quitar (J-101). Solo lectura: sugiere quitar (a) la programada de un día que ya tiene otra REALIZADA o no cumplida y
+// (b) la creada por un horario fijo en las últimas 36 horas que no es la más antigua del día. Se borra con DELETE /api/sessions/:id/permanent (que anota la excepción para que
+// el calendario no la resucite).
 app.get('/api/sessions/duplicates', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   const rows = await sql`
     WITH vivas AS (
-      SELECT s.id::text AS id, s.client_id::text AS client_id, c.full_name, s.starts_at, (s.starts_at AT TIME ZONE 'America/Panama')::date AS dia,
+      SELECT s.id::text AS id, s.client_id::text AS client_id, c.full_name, s.status, s.starts_at, (s.starts_at AT TIME ZONE 'America/Panama')::date AS dia,
         to_char(s.starts_at AT TIME ZONE 'America/Panama', 'HH24:MI') AS hora, s.created_at, s.recurrence_id IS NOT NULL AS de_horario_fijo
       FROM sessions s JOIN clients c ON c.id = s.client_id
-      WHERE c.owner_id = ${auth.sub} AND s.status = 'scheduled' AND s.starts_at >= now() AND NOT COALESCE(s.paused_hold, false))
-    SELECT v.*, (SELECT count(*)::int FROM vivas w WHERE w.client_id = v.client_id AND w.dia = v.dia) AS en_el_dia
-    FROM vivas v WHERE (SELECT count(*) FROM vivas w WHERE w.client_id = v.client_id AND w.dia = v.dia) > 1
+      WHERE c.owner_id = ${auth.sub} AND s.status IN ('scheduled', 'completed', 'no_show') AND s.starts_at >= now() - interval '14 days' AND NOT COALESCE(s.paused_hold, false)),
+    dobles AS (SELECT client_id, dia FROM vivas GROUP BY client_id, dia HAVING count(*) > 1 AND bool_or(status = 'scheduled'))
+    SELECT v.* FROM vivas v JOIN dobles d ON d.client_id = v.client_id AND d.dia = v.dia
     ORDER BY v.full_name, v.dia, v.created_at, v.starts_at`;
-  const grupos = new Map<string, { clientId: string; name: string; day: string; sessions: { id: string; time: string; createdAt: string; fromRecurrence: boolean; suggestedRemove: boolean }[] }>();
+  type Sesion = { id: string; time: string; status: string; past: boolean; createdAt: string; fromRecurrence: boolean; removable: boolean; suggestedRemove: boolean };
+  const grupos = new Map<string, { clientId: string; name: string; day: string; sessions: Sesion[] }>();
   const reciente = Date.now() - 36 * 3600_000;
   for (const row of rows) {
-    const key = `${row.client_id}|${row.dia instanceof Date ? row.dia.toISOString().slice(0, 10) : String(row.dia).slice(0, 10)}`;
-    const grupo = grupos.get(key) ?? { clientId: row.client_id as string, name: row.full_name as string, day: key.split('|')[1], sessions: [] };
-    const esLaMasAntigua = grupo.sessions.length === 0;
+    const day = row.dia instanceof Date ? row.dia.toISOString().slice(0, 10) : String(row.dia).slice(0, 10);
+    const key = `${row.client_id}|${day}`;
+    const grupo = grupos.get(key) ?? { clientId: row.client_id as string, name: row.full_name as string, day, sessions: [] };
     grupo.sessions.push({
-      id: row.id as string, time: row.hora as string, createdAt: new Date(row.created_at as string).toISOString(), fromRecurrence: Boolean(row.de_horario_fijo),
-      suggestedRemove: !esLaMasAntigua && Boolean(row.de_horario_fijo) && new Date(row.created_at as string).getTime() >= reciente
+      id: row.id as string, time: row.hora as string, status: row.status as string, past: new Date(row.starts_at as string).getTime() < Date.now(),
+      createdAt: new Date(row.created_at as string).toISOString(), fromRecurrence: Boolean(row.de_horario_fijo), removable: row.status === 'scheduled', suggestedRemove: false
     });
     grupos.set(key, grupo);
+  }
+  for (const grupo of grupos.values()) {
+    const hayMarcada = grupo.sessions.some(item => item.status !== 'scheduled');
+    grupo.sessions.forEach((item, index) => {
+      if (!item.removable) return;
+      item.suggestedRemove = hayMarcada || (index > 0 && item.fromRecurrence && new Date(item.createdAt).getTime() >= reciente);
+    });
   }
   return { groups: [...grupos.values()] };
 });

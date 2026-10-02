@@ -1,4 +1,4 @@
-const APP_VERSION = '266';
+const APP_VERSION = '267';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2003,7 +2003,7 @@ async function recurrenceManager() {
     <div id="recurrencias-lista"><p class="empty">Cargando…</p></div>
     <div class="clases-dobles" style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line, #e8dfe3)">
       <button type="button" class="secondary wide-button" id="buscar-clases-dobles">Buscar clases repetidas el mismo día</button>
-      <p style="color:#6f7b75;margin:6px 0 0"><small>Muestra los días futuros en que una persona tiene dos o más clases sin marcar. Las sugeridas para quitar son las creadas por un horario fijo en las últimas 36 horas (por ejemplo, al rellenar el calendario por error). Tú decides cuáles se quitan.</small></p>
+      <p style="color:#6f7b75;margin:6px 0 0"><small>Muestra los días (de las últimas dos semanas en adelante) en que una persona tiene dos o más clases y al menos una sin marcar. Se sugiere quitar la que sobra: la programada de un día que ya tiene otra realizada, o la creada por un horario fijo en las últimas 36 horas. Tú decides cuáles se quitan.</small></p>
       <div id="clases-dobles-resultado"></div>
     </div>
     <div class="actualizar-calendario" style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line, #e8dfe3)">
@@ -2019,7 +2019,7 @@ async function recurrenceManager() {
       const { groups } = await api('/api/sessions/duplicates');
       if (!groups.length) { destino.innerHTML = '<p class="form-summary">✓ No hay clases repetidas el mismo día.</p>'; return; }
       destino.innerHTML = `<p class="section-note">${groups.length} día${groups.length === 1 ? '' : 's'} con más de una clase. Marca las que se quitan.</p>
-        <div class="new-billing-allocs">${groups.map(group => `<div class="new-billing-alloc" style="grid-template-columns:1fr"><div><b>${escapeHtml(group.name)} · ${fechaCorta(group.day)}</b>${group.sessions.map(session => `<label style="display:flex;gap:8px;align-items:center;margin-top:4px"><input type="checkbox" data-quitar-clase="${session.id}"${session.suggestedRemove ? ' checked' : ''} /> ${escapeHtml(session.time)} <small>${session.fromRecurrence ? 'de un horario fijo' : 'agendada a mano'} · creada ${fechaHoraPanama(session.createdAt)}${session.suggestedRemove ? ' · sugerida para quitar' : ''}</small></label>`).join('')}</div></div>`).join('')}</div>
+        <div class="new-billing-allocs">${groups.map(group => `<div class="new-billing-alloc" style="grid-template-columns:1fr"><div><b>${escapeHtml(group.name)} · ${fechaCorta(group.day)}</b>${group.sessions.map(session => { const estado = session.status === 'completed' ? 'realizada' : session.status === 'no_show' ? 'no cumplió' : (session.past ? 'sin marcar' : 'programada'); return `<label style="display:flex;gap:8px;align-items:center;margin-top:4px">${session.removable ? `<input type="checkbox" data-quitar-clase="${session.id}"${session.suggestedRemove ? ' checked' : ''} />` : '<span style="width:13px"></span>'} ${escapeHtml(session.time)} <small>${estado} · ${session.fromRecurrence ? 'de un horario fijo' : 'agendada a mano'} · creada ${fechaHoraPanama(session.createdAt)}${session.suggestedRemove ? ' · sugerida para quitar' : ''}${session.removable ? '' : ' · ya marcada, no se quita aquí'}</small></label>`; }).join('')}</div></div>`).join('')}</div>
         <button type="button" class="primary wide-button" id="quitar-clases-dobles">Quitar las marcadas</button>`;
       document.getElementById('quitar-clases-dobles').onclick = async () => {
         const ids = [...destino.querySelectorAll('[data-quitar-clase]:checked')].map(input => input.dataset.quitarClase);
