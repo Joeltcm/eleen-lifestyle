@@ -195,9 +195,12 @@ test('cumplimiento del Resumen: "Últimos 7 días", "perdidas" y sin saldo del c
 
 test('rutina en lugar de la clase (J-102): diálogo de cancelación, IA para el cliente, cronómetro del portal, tarjeta de rutinas cumplidas y aviso sonoro', async () => {
   const app = await leer('app.js'); const sw = await leer('sw.js'); const css = await leer('styles.css');
-  assert.match(app, /id="ofrecer-rutina">Ofrecerle una rutina en lugar de la clase/);
+  assert.match(app, /id="ofrecer-rutina">No puedo atenderla: ofrecerle una rutina/);
+  const dialogoCliente = app.slice(app.indexOf('const preguntarDestinoCliente'), app.indexOf('const preguntarCompensacion'));
+  assert.doesNotMatch(dialogoCliente, /ofrecer-rutina/, 'la oferta no aparece cuando cancela el cliente: solo cuando Eileen no puede atender');
   assert.match(app, /forClient: true, durationMinutes: sesion\.durationMinutes/);
   assert.match(app, /\/routine-offer`, \{ method: 'POST', body: \{ routineId: guardada\.id \}/);
+  assert.match(app, /vale solo este día/); assert.match(app, /routineOfferExpired/);
   assert.match(app, /data-routine-timer/); assert.match(app, /data-timer-toggle/);
   assert.match(app, /portal-routines-done-card/); assert.match(app, /Rutinas cumplidas/);
   assert.match(app, /durationSeconds: segundos/);

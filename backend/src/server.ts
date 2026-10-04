@@ -3685,7 +3685,8 @@ app.get('/api/sessions', { preHandler: requireStaff }, async request => {
   return sql`SELECT s.*, c.full_name, r.title AS routine_title,
     charged.label AS charged_package_label, charged.used_sessions AS charged_package_used,
     charged.total_sessions AS charged_package_total,
-    sro.status AS routine_offer_status, sro.duration_seconds AS routine_offer_duration_seconds
+    sro.status AS routine_offer_status, sro.duration_seconds AS routine_offer_duration_seconds,
+    (sro.status = 'offered' AND (s.starts_at AT TIME ZONE 'America/Panama')::date < (now() AT TIME ZONE 'America/Panama')::date) AS routine_offer_expired
     FROM sessions s
     JOIN clients c ON c.id = s.client_id
     LEFT JOIN routines r ON r.id = s.routine_id
@@ -7387,7 +7388,7 @@ app.post('/api/portal/routine-completions', { preHandler: requireAuth }, async (
 });
 
 // ── Rutina ofrecida en lugar de la clase ───────────────────────────────────
-// Cuando un cliente cancela, Eileen puede ofrecerle una rutina para hacer por su cuenta. La clase NO se cancela: queda programada con la rutina ligada, y si el cliente
+// Solo cuando Eileen no puede atender la clase (J-102), puede ofrecerle al cliente una rutina para hacer por su cuenta. Y SOLO VALE EL DÍA DE ESA CLASE (hora de Panamá): ni antes ni después. La clase NO se cancela: queda programada con la rutina ligada, y si el cliente
 // la cumple en el portal pasa a "realizada" (cuenta como su clase del día y descuenta de su saldo como cualquier clase dada). Si no la cumple, la clase sigue
 // apareciendo entre las que faltan por marcar y Eileen decide cómo cerrarla.
 const duracionTexto = (segundos: number | null) => {
@@ -7411,10 +7412,14 @@ app.post('/api/sessions/:id/routine-offer', { preHandler: requireStaff }, async 
   const id = z.string().uuid().parse((request.params as { id: string }).id);
   const input = z.object({ routineId: z.string().uuid() }).parse(request.body);
   const [sesion] = await sql`
-    SELECT s.id, s.status, s.client_id, s.starts_at, s.duration_minutes, s.notes, c.full_name, c.portal_user_id
+    SELECT s.id, s.status, s.client_id, s.starts_at, s.duration_minutes, s.notes, c.full_name, c.portal_user_id,
+      ((s.starts_at AT TIME ZONE 'America/Panama')::date >= (now() AT TIME ZONE 'America/Panama')::date) AS dia_vigente,
+      ((s.starts_at AT TIME ZONE 'America/Panama')::date = (now() AT TIME ZONE 'America/Panama')::date) AS es_hoy,
+      to_char(s.starts_at AT TIME ZONE 'America/Panama', 'DD-MM-YYYY') AS dia_texto
     FROM sessions s JOIN clients c ON c.id = s.client_id WHERE s.id = ${id} AND c.owner_id = ${auth.sub}`;
   if (!sesion) return reply.code(404).send({ error: 'Sesión no encontrada' });
   if (sesion.status !== 'scheduled') return reply.code(409).send({ error: 'Solo se puede ofrecer una rutina en lugar de una clase programada.' });
+  if (!sesion.dia_vigente) return reply.code(409).send({ error: `La rutina solo vale el día de la clase (${sesion.dia_texto}) y ese día ya pasó.` });
   const [rutina] = await sql`
     SELECT r.id, r.title FROM routines r JOIN routine_assignments ra ON ra.routine_id = r.id AND ra.active = true AND ra.client_id = ${sesion.client_id}
     WHERE r.id = ${input.routineId} AND r.owner_id = ${auth.sub}`;
@@ -7429,16 +7434,16 @@ app.post('/api/sessions/:id/routine-offer', { preHandler: requireStaff }, async 
       ON CONFLICT (session_id) DO UPDATE SET routine_id = EXCLUDED.routine_id, status = 'offered', offered_at = now(), offered_by_user_id = EXCLUDED.offered_by_user_id,
         completed_at = NULL, completion_percent = NULL, duration_seconds = NULL
       RETURNING *`;
-    const nota = 'Rutina ofrecida en lugar de la clase (cancelación del cliente).';
+    const nota = 'Rutina ofrecida en lugar de la clase (Eileen no pudo atenderla). Solo vale el día de la clase.';
     await transaction`
       UPDATE sessions SET routine_id = ${rutina.id}, updated_at = now(),
-        notes = CASE WHEN COALESCE(notes, '') LIKE ${'%' + nota + '%'} THEN notes ELSE COALESCE(notes || E'\n', '') || ${nota} END
+        notes = CASE WHEN COALESCE(notes, '') LIKE ${'%Rutina ofrecida en lugar de la clase%'} THEN notes ELSE COALESCE(notes || E'\n', '') || ${nota} END
       WHERE id = ${id}`;
     return filas;
   });
   if (sesion.portal_user_id) {
     await sendPushToUser(String(sesion.portal_user_id), {
-      title: 'Eileen te dejó una rutina', body: `Haz «${rutina.title}» hoy: cuenta como tu clase.`,
+      title: 'Eileen te dejó una rutina', body: `Haz «${rutina.title}» ${sesion.es_hoy ? 'hoy' : `el ${sesion.dia_texto}`}: cuenta como tu clase. Solo vale ese día.`,
       url: new URL('/#portal-routines', config.APP_URL).toString()
     });
   }
@@ -7465,6 +7470,7 @@ app.get('/api/portal/routine-offers', { preHandler: requireAuth }, async (reques
     SELECT o.id, o.routine_id, o.session_id, o.offered_at, s.starts_at, s.duration_minutes, r.title AS routine_title
     FROM session_routine_offers o JOIN sessions s ON s.id = o.session_id JOIN routines r ON r.id = o.routine_id
     WHERE o.client_id = ${client.id} AND o.status = 'offered' AND s.status = 'scheduled'
+      AND (s.starts_at AT TIME ZONE 'America/Panama')::date = (now() AT TIME ZONE 'America/Panama')::date
     ORDER BY s.starts_at`;
 });
 
@@ -7476,11 +7482,15 @@ app.post('/api/portal/routine-offers/:id/complete', { preHandler: requireAuth },
   const client = await portalClient(auth.sub);
   if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
   const [oferta] = await sql`
-    SELECT o.id, o.status, o.session_id, o.routine_id, r.title FROM session_routine_offers o JOIN routines r ON r.id = o.routine_id
+    SELECT o.id, o.status, o.session_id, o.routine_id, r.title,
+      ((s.starts_at AT TIME ZONE 'America/Panama')::date = (now() AT TIME ZONE 'America/Panama')::date) AS es_hoy,
+      to_char(s.starts_at AT TIME ZONE 'America/Panama', 'DD-MM-YYYY') AS dia_texto
+    FROM session_routine_offers o JOIN routines r ON r.id = o.routine_id JOIN sessions s ON s.id = o.session_id
     WHERE o.id = ${id} AND o.client_id = ${client.id}`;
   if (!oferta) return reply.code(404).send({ error: 'Rutina ofrecida no encontrada' });
   if (oferta.status === 'completed') return { alreadyCompleted: true };
   if (oferta.status === 'withdrawn') return reply.code(409).send({ error: 'Eileen retiró esta rutina.' });
+  if (!oferta.es_hoy) return reply.code(409).send({ error: `Esta rutina solo valía el ${oferta.dia_texto}. Ya no cuenta como clase; puedes hacerla igual y se registra como rutina suelta.` });
 
   await sql.begin(async transaction => {
     await transaction`

@@ -9,7 +9,9 @@ import { CREDENCIALES, SETUP_TOKEN, cliente, levantar } from './harness.mjs';
 const ejecutar = promisify(execFile);
 
 let servidor; let api; let portal; let c; let rutinaId; let otraRutinaId; let sesionId;
-const manana = () => new Date(Date.now() + 26 * 3600_000).toISOString();
+// La oferta solo vale el día de la clase (hora de Panamá): la clase de prueba es hoy a las 23:00 de Panamá (puede estar aún por delante o ya pasada; la rutina la cierra igual).
+const hoyPanama = () => new Date(Date.now() - 5 * 3600_000).toISOString().slice(0, 10);
+const hoyALas23 = () => new Date(`${hoyPanama()}T23:00:00-05:00`).toISOString();
 
 before(async () => {
   servidor = await levantar();
@@ -21,7 +23,7 @@ before(async () => {
   const ejercicios = [{ name: 'Sentadilla', sets: 3, reps: '12' }, { name: 'Plancha', sets: 3, reps: '30 seg' }];
   rutinaId = (await api.post('/api/routines', { title: 'Rutina en casa', description: 'Calienta 5 minutos.', sessionsPerWeek: 1, exercises: ejercicios, clientId: c })).datos.id;
   otraRutinaId = (await api.post('/api/routines', { title: 'Sin asignar', sessionsPerWeek: 1, exercises: ejercicios })).datos.id;
-  sesionId = (await api.post('/api/sessions', { clientId: c, startsAt: manana(), durationMinutes: 45, mode: 'Presencial' })).datos.id;
+  sesionId = (await api.post('/api/sessions', { clientId: c, startsAt: hoyALas23(), durationMinutes: 45, mode: 'Presencial' })).datos.id;
   const enlace = await api.post(`/api/clients/${c}/access-link`, {});
   const acceso = await api.post(`/api/auth/access-link/${String(enlace.datos.url).split('acceso=')[1]}`, { password: 'clave-del-portal-larga' });
   portal = cliente(servidor.base); portal.usarToken(acceso.datos.token);
@@ -64,9 +66,31 @@ test('cumplir la rutina cierra la clase como realizada (aunque su hora no haya l
   assert.equal((await api.post(`/api/sessions/${sesionId}/routine-offer`, { routineId: rutinaId })).estado, 409, 'ya no se ofrece en una clase realizada');
 });
 
-test('retirar la oferta la quita del portal sin tocar la clase; el portal no acepta ofertas ajenas', async () => {
-  const s2 = (await api.post('/api/sessions', { clientId: c, startsAt: new Date(Date.now() + 50 * 3600_000).toISOString(), durationMinutes: 45, mode: 'Presencial' })).datos.id;
+test('la oferta vale SOLO el día de la clase: una clase de otro día no se muestra ni se puede cumplir; una clase pasada no admite oferta; la vencida se marca', async () => {
+  const futura = (await api.post('/api/sessions', { clientId: c, startsAt: new Date(Date.now() + 50 * 3600_000).toISOString(), durationMinutes: 45, mode: 'Presencial' })).datos.id;
+  const ofrecida = await api.post(`/api/sessions/${futura}/routine-offer`, { routineId: rutinaId });
+  assert.equal(ofrecida.estado, 201, 'se puede ofrecer con anticipación para el día de esa clase');
+  assert.equal((await portal.get('/api/portal/routine-offers')).datos.length, 0, 'pero el portal no la muestra hasta ese día');
+  const antes = await portal.post(`/api/portal/routine-offers/${ofrecida.datos.id}/complete`, { completionPercent: 100 });
+  assert.equal(antes.estado, 409);
+  assert.match(antes.datos.error, /solo valía el \d{2}-\d{2}-\d{4}/);
+  assert.equal((await sesionDe(futura)).status, 'scheduled', 'la clase no se tocó');
+  // Clase de ayer: ya no admite oferta.
+  const ayer = (await api.post('/api/sessions', { clientId: c, startsAt: new Date(Date.now() - 30 * 3600_000).toISOString(), durationMinutes: 45, mode: 'Presencial' })).datos.id;
+  const tarde = await api.post(`/api/sessions/${ayer}/routine-offer`, { routineId: rutinaId });
+  assert.equal(tarde.estado, 409); assert.match(tarde.datos.error, /solo vale el día de la clase/);
+  // Una oferta cuyo día ya pasó queda marcada como vencida (la clase sigue programada para que Eileen decida).
+  const db = postgres(servidor.databaseUrl, { onnotice: () => {}, max: 2 });
+  try { await db`UPDATE sessions SET starts_at = now() - interval '3 days' WHERE id = ${futura}`; } finally { await db.end({ timeout: 1 }).catch(() => {}); }
+  const vencida = await sesionDe(futura);
+  assert.equal(vencida.routine_offer_status, 'offered'); assert.equal(vencida.routine_offer_expired, true); assert.equal(vencida.status, 'scheduled');
+  assert.equal((await portal.post(`/api/portal/routine-offers/${ofrecida.datos.id}/complete`, { completionPercent: 100 })).estado, 409);
+});
+
+test('retirar la oferta la quita; el portal no acepta ofertas ajenas ni sesiones sin ella', async () => {
+  const s2 = (await api.post('/api/sessions', { clientId: c, startsAt: hoyALas23(), durationMinutes: 45, mode: 'Presencial' })).datos.id;
   assert.equal((await api.post(`/api/sessions/${s2}/routine-offer`, { routineId: rutinaId })).estado, 201);
+  assert.equal((await portal.get('/api/portal/routine-offers')).datos.length, 1, 'hoy sí se muestra');
   assert.equal((await api.delete(`/api/sessions/${s2}/routine-offer`)).estado, 200);
   assert.equal((await portal.get('/api/portal/routine-offers')).datos.length, 0);
   assert.equal((await sesionDe(s2)).status, 'scheduled');
@@ -86,8 +110,8 @@ test('la rutina cumplida suelta también guarda la duración del cronómetro y a
   assert.equal(mala.estado, 400, 'una duración absurda se rechaza');
 });
 
-test('la reversa de 056 se niega a borrar ofertas y duraciones sin orden expresa, y con la orden las quita', async () => {
-  const archivo = new URL('../migrations-down/056_rutina_en_lugar_de_clase.down.sql', import.meta.url).pathname;
+test('la reversa de 057 se niega a borrar ofertas y duraciones sin orden expresa, y con la orden las quita', async () => {
+  const archivo = new URL('../migrations-down/057_rutina_en_lugar_de_clase.down.sql', import.meta.url).pathname;
   const db = postgres(servidor.databaseUrl, { onnotice: () => {}, max: 2 });
   try {
     await assert.rejects(ejecutar('psql', ['-v', 'ON_ERROR_STOP=1', '-q', servidor.databaseUrl, '-f', archivo]), /hay ofertas de rutina o duraciones guardadas/);

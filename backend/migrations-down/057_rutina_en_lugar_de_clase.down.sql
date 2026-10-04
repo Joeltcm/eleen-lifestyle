@@ -1,4 +1,4 @@
--- Reversa de 056_rutina_en_lugar_de_clase.sql.
+-- Reversa de 057_rutina_en_lugar_de_clase.sql.
 -- Elimina las ofertas de rutina y las duraciones registradas, por eso exige una
 -- orden explícita. No toca sesiones ni rutinas: solo la liga y el cronómetro.
 BEGIN;
@@ -13,5 +13,5 @@ BEGIN
 END $$;
 DROP TABLE IF EXISTS session_routine_offers;
 ALTER TABLE routine_completions DROP COLUMN IF EXISTS duration_seconds;
-DELETE FROM schema_migrations WHERE name = '056_rutina_en_lugar_de_clase.sql';
+DELETE FROM schema_migrations WHERE name = '057_rutina_en_lugar_de_clase.sql';
 COMMIT;
