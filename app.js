@@ -276,6 +276,7 @@ async function loadData() {
     section: exercise.section, pattern: exercise.pattern || '', level: exercise.level,
     machine: exercise.machine || 'No aplica', freeWeight: exercise.free_weight || 'No aplica',
     cues: exercise.cues || '', usesWeight: Boolean(exercise.uses_weight), hasVideo: Boolean(exercise.has_video),
+    videoCount: Number(exercise.video_count || (exercise.has_video ? 1 : 0)),
     videoDurationSeconds: exercise.video_duration_seconds ? Number(exercise.video_duration_seconds) : null
   })) : fallbackCatalog;
   const assessmentsByClient = new Map();
@@ -2524,11 +2525,11 @@ function renderCatalogList() {
   target.innerHTML = `<p class="section-note">${filtrando ? `${shown.length} de ${exerciseCatalog.length} ejercicios` : `${exerciseCatalog.length} ejercicios`} · ${withVideo} con video · ${exerciseCatalog.length - withVideo} sin video.</p>
     ${shown.length ? `<div class="catalog-list">${shown.map(exercise => `<article class="catalog-item">
       <div class="catalog-item-copy"><b>${escapeHtml(exercise.name)}</b><small>${escapeHtml([exerciseSectionLabels[exercise.section], exercise.pattern, exercise.level].filter(Boolean).join(' · '))}</small></div>
-      <span class="catalog-video ${exercise.hasVideo ? 'ready' : ''}">${exercise.hasVideo ? `▶ ${exercise.videoDurationSeconds ? `${Math.round(exercise.videoDurationSeconds)} s` : 'con video'}` : 'sin video'}</span>
+      <span class="catalog-video ${exercise.hasVideo ? 'ready' : ''}">${exercise.hasVideo ? `▶ ${exercise.videoCount > 1 ? `${exercise.videoCount} demostraciones` : exercise.videoDurationSeconds ? `${Math.round(exercise.videoDurationSeconds)} s` : 'con video'}` : 'sin video'}</span>
       <div class="catalog-item-actions">
         <button class="secondary session-use" data-edit-exercise="${exercise.id}">Editar</button>
-        ${exercise.hasVideo ? `<button class="secondary session-use" data-preview-exercise="${exercise.id}">Ver video</button>` : ''}
-        <button class="secondary session-use" data-video-exercise="${exercise.id}">${exercise.hasVideo ? 'Reemplazar video' : 'Subir video'}</button>
+        ${exercise.hasVideo ? `<button class="secondary session-use" data-preview-exercise="${exercise.id}">Ver demostraciones</button>` : ''}
+        <button class="secondary session-use" data-video-exercise="${exercise.id}">${exercise.hasVideo ? 'Agregar video' : 'Subir video'}</button>
       </div></article>`).join('')}</div>` : `<p class="empty">${busqueda ? `Ningún ejercicio coincide con “${escapeHtml(document.getElementById('catalog-search').value.trim())}”.` : 'No hay ejercicios en esta sección.'}</p>`}`;
 
   target.querySelectorAll('[data-edit-exercise]').forEach(button => {
@@ -2568,18 +2569,19 @@ async function previewExerciseVideo(exercise) {
   box.innerHTML = `<p class="eyebrow">DEMOSTRACIÓN</p><h2>${escapeHtml(exercise.name)}</h2>
     <p style="color:#6f7b75;margin-top:-12px">Así lo ve el cliente en su rutina.</p>
     <div id="preview-video"><p class="empty">Cargando video…</p></div>
-    <button class="secondary wide-button" id="preview-replace">Reemplazar este video</button>`;
+    <button class="secondary wide-button" id="preview-replace">Administrar demostraciones</button>`;
   openModal(box);
   document.getElementById('preview-replace').onclick = () => exerciseVideoUploader(exercise);
   try {
-    const fuente = await api(`/api/exercises/${exercise.id}/video-url`);
+    const fuente = await api(`/api/exercises/${exercise.id}/video-urls`);
     const target = document.getElementById('preview-video');
     if (!target || !modal.open) return;
     // En bucle: son clips de pocos segundos y se revisan mirando el movimiento
     // repetido, no una sola vez.
     // Silenciado por necesidad, no por gusto: sin muted el navegador no deja
     // que un video arranque solo, y el clip no empezaría hasta pulsar play.
-    target.innerHTML = `<div class="exercise-video"><video controls loop muted autoplay playsinline preload="auto" src="${escapeHtml(fuente.videoUrl)}"></video></div>`;
+    target.innerHTML = fuente.videos.map(video => `<section class="exercise-video-variant"><b>${escapeHtml(video.label || 'Demostración')}</b><div class="exercise-video"><video controls loop muted autoplay playsinline preload="auto" src="${escapeHtml(video.videoUrl)}"></video></div></section>`).join('');
+    target.querySelectorAll('video').forEach(video => video.play().catch(() => {}));
   } catch (error) {
     const target = document.getElementById('preview-video');
     if (target) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
@@ -2593,6 +2595,7 @@ async function reloadCatalog() {
     section: exercise.section, pattern: exercise.pattern || '', level: exercise.level,
     machine: exercise.machine || 'No aplica', freeWeight: exercise.free_weight || 'No aplica',
     cues: exercise.cues || '', usesWeight: Boolean(exercise.uses_weight), hasVideo: Boolean(exercise.has_video),
+    videoCount: Number(exercise.video_count || (exercise.has_video ? 1 : 0)),
     videoDurationSeconds: exercise.video_duration_seconds ? Number(exercise.video_duration_seconds) : null
   }));
 }
@@ -2645,46 +2648,58 @@ function exerciseEditor(exercise) {
   });
 }
 
-function exerciseVideoUploader(exercise) {
+function videoLabelFromFilename(filename) {
+  const match = String(filename).match(/opci[oó]n\s*[-_ ]?(\d+)/i);
+  return match ? `Opción ${match[1]}` : 'Demostración';
+}
+
+async function exerciseVideoUploader(exercise) {
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">DEMOSTRACIÓN</p><h2>Video de ${escapeHtml(exercise.name)}</h2>
     <p style="color:#6f7b75">Un clip corto ejecutando el ejercicio. El cliente lo verá en su rutina para hacerlo sin asistencia.</p>
-    <p class="section-note">Se comprime en tu teléfono antes de subir y se le quita el audio: pesa mucho menos y el cliente lo abre sin gastar sus datos. Máximo 90 segundos.</p>
+    <p class="section-note">Puedes subir varias opciones sin reemplazarlas. Se comprimen antes de subir y se les quita el audio. Si el nombre incluye “opción 1”, “opción 2”, etc., esa etiqueta se conservará.</p>
+    <div id="exercise-video-list"><p class="empty">Cargando demostraciones…</p></div>
+    <label>Etiqueta opcional para los archivos seleccionados<input id="video-label" maxlength="80" placeholder="Se toma del nombre del archivo" /></label>
     <label style="border:2px dashed #d8a7bc;border-radius:9px;padding:24px;text-align:center;color:#8c5870;cursor:pointer">
-      <input id="video-file" type="file" accept="video/*" hidden />${exercise.hasVideo ? 'Seleccionar un video nuevo' : 'Seleccionar video'}<br><small style="color:#6f7b75;font-weight:400">Se acepta lo que grabe tu teléfono</small></label>
+      <input id="video-file" type="file" accept="video/*" multiple hidden />Agregar demostraciones<br><small style="color:#6f7b75;font-weight:400">Se acepta lo que grabe tu teléfono</small></label>
     <div id="video-result"></div>
-    ${exercise.hasVideo ? '<button type="button" class="secondary wide-button" id="remove-video">Quitar el video actual</button>' : ''}`;
+    `;
   openModal(box);
   const result = document.getElementById('video-result');
+  const list = document.getElementById('exercise-video-list');
 
-  if (exercise.hasVideo) document.getElementById('remove-video').onclick = async () => {
-    if (!confirm(`¿Quitar el video de "${exercise.name}"?`)) return;
-    try { await api(`/api/exercises/${exercise.id}/video`, { method: 'DELETE' }); await reloadCatalog(); modal.close(); toast('Video eliminado'); exerciseCatalogManager(); }
-    catch (error) { toast(error.message, true); }
+  const renderExisting = async () => {
+    try {
+      const videos = await api(`/api/exercises/${exercise.id}/videos`);
+      list.innerHTML = videos.length ? `<div class="exercise-video-list">${videos.map(video => `<div class="exercise-video-list-item"><span><b>${escapeHtml(video.label || 'Demostración')}</b><small>${video.duration_seconds ? `${Math.round(Number(video.duration_seconds))} s` : 'Duración no disponible'}</small></span><button type="button" class="secondary" data-delete-exercise-video="${video.id}">Quitar</button></div>`).join('')}</div>` : '<p class="empty">Todavía no hay demostraciones.</p>';
+    } catch (error) { list.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; }
   };
+  await renderExisting();
+
+  list.addEventListener('click', async event => {
+    const button = event.target.closest('[data-delete-exercise-video]');
+    if (!button || !confirm(`¿Quitar esta demostración de "${exercise.name}"?`)) return;
+    try { button.disabled = true; await api(`/api/exercises/${exercise.id}/videos/${button.dataset.deleteExerciseVideo}`, { method: 'DELETE' }); await reloadCatalog(); await renderExisting(); toast('Demostración eliminada'); }
+    catch (error) { toast(error.message, true); button.disabled = false; }
+  });
 
   document.getElementById('video-file').addEventListener('change', async event => {
-    const file = event.target.files[0]; if (!file) return;
+    const files = [...event.target.files]; if (!files.length) return;
     const say = (title, detail) => { result.innerHTML = `<div class="alert-item" style="margin-top:15px"><b>${escapeHtml(title)}</b><span>${escapeHtml(detail)}</span></div>`; };
     try {
-      say('Comprimiendo…', `${file.name} · ${megabytes(file.size)} de origen. Toma más o menos lo que dura el clip.`);
-      const compressed = await VideoCompressor.compress(file, {
-        onProgress: fraction => say('Comprimiendo…', `${Math.round(fraction * 100)}% de ${file.name}`)
-      });
-      if (compressed.blob.size > 40 * 1024 * 1024) throw new Error(`Aun comprimido pesa ${megabytes(compressed.blob.size)} y el máximo son 40 MB. Graba un clip más corto.`);
-
-      const ahorro = compressed.finalSize && compressed.originalSize && compressed.finalSize < compressed.originalSize
-        ? ` (de ${megabytes(compressed.originalSize)} a ${megabytes(compressed.finalSize)})` : '';
-      say('Subiendo…', `${megabytes(compressed.blob.size)}${ahorro}`);
-
-      const target = await api(`/api/exercises/${exercise.id}/video-upload-url`, { method: 'POST', body: { contentType: compressed.contentType, sizeBytes: compressed.blob.size } });
-      // Va directo a R2 con la URL firmada; sin el encabezado de autorización,
-      // que R2 rechazaría por no venir en la firma.
-      const upload = await fetch(target.uploadUrl, { method: 'PUT', headers: { 'Content-Type': compressed.contentType }, body: compressed.blob });
-      if (!upload.ok) throw new Error(`El almacenamiento rechazó la subida (${upload.status})`);
-
-      await api(`/api/exercises/${exercise.id}/video`, { method: 'POST', body: { objectKey: target.objectKey, durationSeconds: compressed.durationSeconds || undefined } });
-      await reloadCatalog(); modal.close(); toast(`Video de ${exercise.name} guardado`); exerciseCatalogManager();
+      const customLabel = document.getElementById('video-label').value.trim();
+      for (const file of files) {
+        say('Comprimiendo…', `${file.name} · ${megabytes(file.size)} de origen.`);
+        const compressed = await VideoCompressor.compress(file, { onProgress: fraction => say('Comprimiendo…', `${Math.round(fraction * 100)}% de ${file.name}`) });
+        if (compressed.blob.size > 40 * 1024 * 1024) throw new Error(`Aun comprimido pesa ${megabytes(compressed.blob.size)} y el máximo son 40 MB. Graba un clip más corto.`);
+        const ahorro = compressed.finalSize && compressed.originalSize && compressed.finalSize < compressed.originalSize ? ` (de ${megabytes(compressed.originalSize)} a ${megabytes(compressed.finalSize)})` : '';
+        say('Subiendo…', `${file.name} · ${megabytes(compressed.blob.size)}${ahorro}`);
+        const target = await api(`/api/exercises/${exercise.id}/videos-upload-url`, { method: 'POST', body: { contentType: compressed.contentType, sizeBytes: compressed.blob.size } });
+        const upload = await fetch(target.uploadUrl, { method: 'PUT', headers: { 'Content-Type': compressed.contentType }, body: compressed.blob });
+        if (!upload.ok) throw new Error(`El almacenamiento rechazó la subida (${upload.status})`);
+        await api(`/api/exercises/${exercise.id}/videos`, { method: 'POST', body: { objectKey: target.objectKey, label: customLabel || videoLabelFromFilename(file.name), durationSeconds: compressed.durationSeconds || undefined } });
+      }
+      await reloadCatalog(); modal.close(); toast(`${files.length} demostración${files.length === 1 ? '' : 'es'} guardada${files.length === 1 ? '' : 's'}`); exerciseCatalogManager();
     } catch (error) {
       say('No se pudo guardar el video', error.message);
       event.target.value = '';
@@ -5246,7 +5261,7 @@ function exerciseRows(exercises, catalog, prefix = 'video') {
       ${dose ? `<small>${escapeHtml(dose)}</small>` : ''}
       ${catalogEntry?.cues ? `<small>${escapeHtml(catalogEntry.cues)}</small>` : ''}
       ${tieneVideo
-        ? `<button type="button" class="secondary session-use exercise-video-toggle" data-play-exercise="${catalogEntry.id}" data-video-target="${videoId}">▶ Ver cómo se hace</button><div class="exercise-video" id="${videoId}" hidden></div>`
+        ? `<button type="button" class="secondary session-use exercise-video-toggle" data-play-exercise="${catalogEntry.id}" data-video-target="${videoId}">▶ Ver demostraciones</button><div class="exercise-video" id="${videoId}" hidden></div>`
         // Decir "sin video" en vez de no mostrar nada: la ausencia de botón se
         // veía idéntica a que la función estuviera rota, y hoy sólo un
         // ejercicio de 77 tiene video.
@@ -5271,23 +5286,19 @@ async function playExerciseVideo(exerciseId, button) {
     const visible = !container.hidden;
     container.hidden = visible;
     if (visible) container.querySelector('video')?.pause();
-    button.textContent = visible ? '▶ Ver cómo se hace' : 'Ocultar video';
+    button.textContent = visible ? '▶ Ver demostraciones' : 'Ocultar demostraciones';
     return;
   }
   button.disabled = true; button.textContent = 'Cargando…';
   try {
-    const source = await api(`/api/exercises/${exerciseId}/video-url`);
-    // loop porque el cliente necesita ver el movimiento varias veces mientras
-    // entrena, y muted porque este reproductor arranca solo: los navegadores
-    // bloquean el autoplay con sonido, y un gimnasio de fondo no aporta nada.
-    // Con los controles a la vista, quien quiera oírlo puede quitar el silencio.
-    container.innerHTML = `<video controls loop muted autoplay playsinline preload="auto" src="${escapeHtml(source.videoUrl)}"></video>`;
+    const source = await api(`/api/exercises/${exerciseId}/video-urls`);
+    container.innerHTML = source.videos.map(video => `<section class="exercise-video-variant"><b>${escapeHtml(video.label || 'Demostración')}</b><div class="exercise-video"><video controls loop muted autoplay playsinline preload="auto" src="${escapeHtml(video.videoUrl)}"></video></div></section>`).join('');
     container.dataset.loaded = 'true'; container.hidden = false;
-    button.textContent = 'Ocultar video';
-    container.querySelector('video').play().catch(() => {});
+    button.textContent = 'Ocultar demostraciones';
+    container.querySelectorAll('video').forEach(video => video.play().catch(() => {}));
   } catch (error) {
     toast(error.message, true);
-    button.textContent = '▶ Ver cómo se hace';
+    button.textContent = '▶ Ver demostraciones';
   } finally { button.disabled = false; }
 }
 

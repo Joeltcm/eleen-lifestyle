@@ -3377,7 +3377,9 @@ function slugFrom(name: string) {
 const exerciseColumns = sql`
   id, slug, name, english, section, pattern, level, machine, free_weight, cues,
   uses_weight, archived, sort_order, video_content_type, video_size_bytes, video_duration_seconds,
-  video_uploaded_at, (video_object_key IS NOT NULL) AS has_video
+  video_uploaded_at,
+  (video_object_key IS NOT NULL OR EXISTS (SELECT 1 FROM exercise_videos ev WHERE ev.exercise_id = exercises.id)) AS has_video,
+  (SELECT count(*)::int FROM exercise_videos ev WHERE ev.exercise_id = exercises.id) AS video_count
 `;
 
 app.get('/api/exercises', { preHandler: requireStaff }, async request => {
@@ -3439,12 +3441,34 @@ app.patch('/api/exercises/:id', { preHandler: requireStaff }, async (request, re
 app.delete('/api/exercises/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const [exercise] = await sql`DELETE FROM exercises WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING id, name, video_object_key`;
+  const [exercise] = await sql`SELECT id, name, video_object_key FROM exercises WHERE id = ${id} AND owner_id = ${auth.sub}`;
   if (!exercise) return reply.code(404).send({ error: 'Ejercicio no encontrado' });
-  if (exercise.video_object_key && storageReady) {
-    await deleteObject(exercise.video_object_key).catch(error => app.log.warn({ err: error, exerciseId: id }, 'No se pudo borrar el video del ejercicio'));
+  const variantes = await sql`SELECT object_key FROM exercise_videos WHERE exercise_id = ${id} AND owner_id = ${auth.sub}`;
+  await sql`DELETE FROM exercises WHERE id = ${id} AND owner_id = ${auth.sub}`;
+  const keys = [...new Set([exercise.video_object_key, ...variantes.map(video => video.object_key)].filter(Boolean))] as string[];
+  if (storageReady) {
+    for (const objectKey of keys) await deleteObject(objectKey).catch(error => app.log.warn({ err: error, exerciseId: id }, 'No se pudo borrar el video del ejercicio'));
   }
   return { deleted: true, exercise: { id: exercise.id, name: exercise.name } };
+});
+
+const exerciseVideoInput = z.object({
+  label: z.string().trim().min(1).max(80).default('Demostración'),
+  sortOrder: z.coerce.number().int().min(0).max(10000).optional()
+});
+
+// Metadatos para la entrenadora. Las claves de R2 nunca se exponen al
+// navegador: sólo se usan en el endpoint de borrado del lado del servidor.
+app.get('/api/exercises/:id/videos', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [exercise] = await sql`SELECT id FROM exercises WHERE id = ${id} AND owner_id = ${auth.sub}`;
+  if (!exercise) return reply.code(404).send({ error: 'Ejercicio no encontrado' });
+  return sql`
+    SELECT id, label, content_type, size_bytes, duration_seconds, uploaded_at, sort_order
+    FROM exercise_videos WHERE exercise_id = ${id} AND owner_id = ${auth.sub}
+    ORDER BY sort_order, created_at
+  `;
 });
 
 // El video sube directo del navegador a R2 con una URL firmada. Pasarlo por
@@ -3485,25 +3509,110 @@ app.post('/api/exercises/:id/video', { preHandler: requireStaff }, async (reques
   if (previousKey && previousKey !== input.objectKey) {
     await deleteObject(previousKey).catch(error => app.log.warn({ err: error, exerciseId: id }, 'No se pudo borrar el video anterior'));
   }
+  // Compatibilidad con el endpoint antiguo: reemplazar el video predeterminado
+  // también actualiza su fila de variantes, sin borrar las demás opciones.
+  const [previousVariant] = previousKey ? await sql`SELECT id FROM exercise_videos WHERE exercise_id = ${id} AND object_key = ${previousKey}` : [];
+  if (previousVariant) {
+    await sql`
+      UPDATE exercise_videos SET object_key = ${input.objectKey}, content_type = ${uploaded.contentType || 'video/mp4'},
+        size_bytes = ${uploaded.sizeBytes}, duration_seconds = ${input.durationSeconds ?? null}, uploaded_at = now(), updated_at = now()
+      WHERE id = ${previousVariant.id}
+    `;
+  } else {
+    await sql`
+      INSERT INTO exercise_videos (exercise_id, owner_id, label, object_key, content_type, size_bytes, duration_seconds, sort_order)
+      VALUES (${id}, ${auth.sub}, 'Demostración', ${input.objectKey}, ${uploaded.contentType || 'video/mp4'}, ${uploaded.sizeBytes}, ${input.durationSeconds ?? null}, 0)
+      ON CONFLICT (owner_id, object_key) DO NOTHING
+    `;
+  }
   return updated;
+});
+
+// Variante nueva: sube una demostración sin reemplazar las anteriores.
+app.post('/api/exercises/:id/videos-upload-url', { preHandler: requireStaff }, async (request, reply) => {
+  if (!storageReady) return reply.code(503).send({ error: 'El almacenamiento de video aún no está configurado' });
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = z.object({ contentType: z.enum(videoContentTypes), sizeBytes: z.coerce.number().int().positive().max(maxVideoSize) }).parse(request.body);
+  const [exercise] = await sql`SELECT id FROM exercises WHERE id = ${id} AND owner_id = ${auth.sub}`;
+  if (!exercise) return reply.code(404).send({ error: 'Ejercicio no encontrado' });
+  const objectKey = `exercises/${id}/${randomUUID()}.${input.contentType === 'video/webm' ? 'webm' : 'mp4'}`;
+  return { objectKey, uploadUrl: await createUploadUrl(objectKey, input.contentType), expiresInSeconds: 600 };
+});
+
+app.post('/api/exercises/:id/videos', { preHandler: requireStaff }, async (request, reply) => {
+  if (!storageReady) return reply.code(503).send({ error: 'El almacenamiento de video aún no está configurado' });
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = z.object({ objectKey: z.string().min(1).max(300), durationSeconds: z.coerce.number().positive().max(600).optional(), ...exerciseVideoInput.shape }).parse(request.body);
+  if (!input.objectKey.startsWith(`exercises/${id}/`)) return reply.code(400).send({ error: 'La ruta del video no corresponde a este ejercicio' });
+  const [exercise] = await sql`SELECT id, video_object_key FROM exercises WHERE id = ${id} AND owner_id = ${auth.sub}`;
+  if (!exercise) return reply.code(404).send({ error: 'Ejercicio no encontrado' });
+  const uploaded = await verifyUpload(input.objectKey).catch(() => null);
+  if (!uploaded?.sizeBytes) return reply.code(409).send({ error: 'El video no llegó completo al almacenamiento' });
+
+  const [video] = await sql`
+    INSERT INTO exercise_videos (exercise_id, owner_id, label, object_key, content_type, size_bytes, duration_seconds, sort_order)
+    VALUES (${id}, ${auth.sub}, ${input.label}, ${input.objectKey}, ${uploaded.contentType || 'video/mp4'}, ${uploaded.sizeBytes}, ${input.durationSeconds ?? null}, ${input.sortOrder ?? 100})
+    RETURNING id, label, content_type, size_bytes, duration_seconds, uploaded_at, sort_order
+  `;
+  // La primera variante mantiene funcionando a clientes y enlaces antiguos
+  // que todavía consultan video_object_key.
+  if (!exercise.video_object_key) {
+    await sql`
+      UPDATE exercises SET video_object_key = ${input.objectKey}, video_content_type = ${uploaded.contentType || 'video/mp4'},
+        video_size_bytes = ${uploaded.sizeBytes}, video_duration_seconds = ${input.durationSeconds ?? null}, video_uploaded_at = now(), updated_at = now()
+      WHERE id = ${id} AND owner_id = ${auth.sub}
+    `;
+  }
+  return reply.code(201).send(video);
+});
+
+app.delete('/api/exercises/:id/videos/:videoId', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const { id, videoId } = request.params as { id: string; videoId: string };
+  z.string().uuid().parse(id); z.string().uuid().parse(videoId);
+  const [video] = await sql`
+    SELECT ev.id, ev.object_key, e.video_object_key
+    FROM exercise_videos ev JOIN exercises e ON e.id = ev.exercise_id
+    WHERE ev.id = ${videoId} AND ev.exercise_id = ${id} AND ev.owner_id = ${auth.sub} AND e.owner_id = ${auth.sub}
+  `;
+  if (!video) return reply.code(404).send({ error: 'Demostración no encontrada' });
+  await sql`DELETE FROM exercise_videos WHERE id = ${videoId} AND owner_id = ${auth.sub}`;
+  if (video.video_object_key === video.object_key) {
+    const [next] = await sql`
+      SELECT object_key, content_type, size_bytes, duration_seconds, uploaded_at
+      FROM exercise_videos WHERE exercise_id = ${id} AND owner_id = ${auth.sub}
+      ORDER BY sort_order, created_at LIMIT 1
+    `;
+    await sql`
+      UPDATE exercises SET video_object_key = ${next?.object_key || null}, video_content_type = ${next?.content_type || null},
+        video_size_bytes = ${next?.size_bytes || null}, video_duration_seconds = ${next?.duration_seconds || null},
+        video_uploaded_at = ${next?.uploaded_at || null}, updated_at = now()
+      WHERE id = ${id} AND owner_id = ${auth.sub}
+    `;
+  }
+  if (storageReady) await deleteObject(video.object_key).catch(error => app.log.warn({ err: error, exerciseId: id }, 'No se pudo borrar la demostración'));
+  return { deleted: true, videoId };
 });
 
 app.delete('/api/exercises/:id/video', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
-  // RETURNING sobre un UPDATE entrega la fila ya modificada, así que la clave
-  // del objeto se lee antes de limpiarla; si no, quedaría huérfana en R2.
   const [exercise] = await sql`SELECT video_object_key FROM exercises WHERE id = ${id} AND owner_id = ${auth.sub}`;
   if (!exercise) return reply.code(404).send({ error: 'Ejercicio no encontrado' });
+  const [variant] = await sql`SELECT id, object_key FROM exercise_videos WHERE exercise_id = ${id} AND owner_id = ${auth.sub} ORDER BY sort_order, created_at LIMIT 1`;
+  const objectKey = variant?.object_key || exercise.video_object_key;
+  if (variant) await sql`DELETE FROM exercise_videos WHERE id = ${variant.id} AND owner_id = ${auth.sub}`;
+  const [next] = await sql`SELECT object_key, content_type, size_bytes, duration_seconds, uploaded_at FROM exercise_videos WHERE exercise_id = ${id} AND owner_id = ${auth.sub} ORDER BY sort_order, created_at LIMIT 1`;
   const [updated] = await sql`
-    UPDATE exercises SET video_object_key = NULL, video_content_type = NULL, video_size_bytes = NULL,
-      video_duration_seconds = NULL, video_uploaded_at = NULL, updated_at = now()
+    UPDATE exercises SET video_object_key = ${next?.object_key || null}, video_content_type = ${next?.content_type || null},
+      video_size_bytes = ${next?.size_bytes || null}, video_duration_seconds = ${next?.duration_seconds || null},
+      video_uploaded_at = ${next?.uploaded_at || null}, updated_at = now()
     WHERE id = ${id} AND owner_id = ${auth.sub}
     RETURNING ${exerciseColumns}
   `;
-  if (exercise.video_object_key && storageReady) {
-    await deleteObject(exercise.video_object_key).catch(error => app.log.warn({ err: error, exerciseId: id }, 'No se pudo borrar el video del ejercicio'));
-  }
+  if (objectKey && storageReady) await deleteObject(objectKey).catch(error => app.log.warn({ err: error, exerciseId: id }, 'No se pudo borrar el video del ejercicio'));
   return updated;
 });
 
@@ -3513,15 +3622,47 @@ app.get('/api/exercises/:id/video-url', { preHandler: requireAuth }, async (requ
   if (!storageReady) return reply.code(503).send({ error: 'El almacenamiento de video aún no está configurado' });
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const [exercise] = await sql`SELECT id, owner_id, video_object_key, video_content_type FROM exercises WHERE id = ${id}`;
-  if (!exercise?.video_object_key) return reply.code(404).send({ error: 'Este ejercicio todavía no tiene video' });
+  const [exercise] = await sql`
+    SELECT e.id, e.owner_id, e.video_object_key, e.video_content_type,
+      COALESCE((SELECT ev.object_key FROM exercise_videos ev WHERE ev.exercise_id = e.id ORDER BY ev.sort_order, ev.created_at LIMIT 1), e.video_object_key) AS selected_object_key,
+      COALESCE((SELECT ev.content_type FROM exercise_videos ev WHERE ev.exercise_id = e.id ORDER BY ev.sort_order, ev.created_at LIMIT 1), e.video_content_type) AS selected_content_type
+    FROM exercises e WHERE e.id = ${id}
+  `;
+  if (!exercise?.selected_object_key) return reply.code(404).send({ error: 'Este ejercicio todavía no tiene video' });
 
   const allowed = ['admin', 'trainer'].includes(auth.role)
     ? exercise.owner_id === auth.sub
     : (await portalClient(auth.sub))?.owner_id === exercise.owner_id;
   if (!allowed) return reply.code(403).send({ error: 'Sin acceso a este video' });
 
-  return { exerciseId: id, contentType: exercise.video_content_type, videoUrl: await createDownloadUrl(exercise.video_object_key), expiresInSeconds: 300 };
+  return { exerciseId: id, contentType: exercise.selected_content_type, videoUrl: await createDownloadUrl(exercise.selected_object_key), expiresInSeconds: 300 };
+});
+
+app.get('/api/exercises/:id/video-urls', { preHandler: requireAuth }, async (request, reply) => {
+  if (!storageReady) return reply.code(503).send({ error: 'El almacenamiento de video aún no está configurado' });
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [exercise] = await sql`SELECT id, owner_id, video_object_key, video_content_type, video_size_bytes, video_duration_seconds, video_uploaded_at FROM exercises WHERE id = ${id}`;
+  if (!exercise) return reply.code(404).send({ error: 'Ejercicio no encontrado' });
+  const allowed = ['admin', 'trainer'].includes(auth.role)
+    ? exercise.owner_id === auth.sub
+    : (await portalClient(auth.sub))?.owner_id === exercise.owner_id;
+  if (!allowed) return reply.code(403).send({ error: 'Sin acceso a este video' });
+  const variants = await sql`
+    SELECT id, label, content_type, size_bytes, duration_seconds, uploaded_at, object_key
+    FROM exercise_videos WHERE exercise_id = ${id} ORDER BY sort_order, created_at
+  `;
+  const rows = variants.length ? variants : exercise.video_object_key ? [{ id: null, label: 'Demostración', content_type: exercise.video_content_type, size_bytes: exercise.video_size_bytes, duration_seconds: exercise.video_duration_seconds, uploaded_at: exercise.video_uploaded_at, object_key: exercise.video_object_key }] : [];
+  if (!rows.length) return reply.code(404).send({ error: 'Este ejercicio todavía no tiene video' });
+  return {
+    exerciseId: id,
+    videos: await Promise.all(rows.map(video => ({
+      id: video.id, label: video.label, contentType: video.content_type, sizeBytes: video.size_bytes,
+      durationSeconds: video.duration_seconds, uploadedAt: video.uploaded_at,
+      videoUrl: createDownloadUrl(video.object_key)
+    })).map(async video => ({ ...video, videoUrl: await video.videoUrl }))),
+    expiresInSeconds: 300
+  };
 });
 
 // Agendar a alguien que ya no entrena no tiene sentido y ensucia su expediente:
@@ -7077,7 +7218,9 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
     // video que mostrar. La URL firmada se pide aparte, al darle reproducir.
     sql`
       SELECT id, slug, name, english, section, level, machine, free_weight, cues,
-             video_duration_seconds, (video_object_key IS NOT NULL) AS has_video
+             video_duration_seconds,
+             (video_object_key IS NOT NULL OR EXISTS (SELECT 1 FROM exercise_videos ev WHERE ev.exercise_id = exercises.id)) AS has_video,
+             (SELECT count(*)::int FROM exercise_videos ev WHERE ev.exercise_id = exercises.id) AS video_count
       FROM exercises WHERE owner_id = ${client.owner_id} AND archived = false
     `,
     // Su saldo de clases: es lo primero que quiere saber quien entrena y no
