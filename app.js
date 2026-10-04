@@ -1,4 +1,4 @@
-const APP_VERSION = '276';
+const APP_VERSION = '277';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1801,6 +1801,34 @@ const DIAS_CORTOS = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
 // Rutina en lugar de la clase (J-102). Se pide la propuesta a la IA (que solo puede elegir ejercicios del catálogo y ya sabe lesiones y rutinas recientes del cliente),
 // se abre el editor de rutinas con el borrador para que Eileen lo revise, y al guardarla se liga a la clase. El cliente la verá en el portal con la demostración en video de
 // cada ejercicio del catálogo y un cronómetro; al cumplirla, su clase pasa a realizada.
+// Guía corta de cómo se comportan las cancelaciones (J-106). Es texto fijo: refleja lo que hace el servidor al cancelar, no lo decide.
+function guiaDeCancelaciones() {
+  const caja = document.createElement('div');
+  caja.className = 'guia-cancelaciones';
+  caja.innerHTML = `<p class="eyebrow">AGENDA</p><h2>Cómo funcionan las cancelaciones</h2>
+    <p class="section-note">Se cancela desde la clase: ábrela en la agenda y toca el botón rojo <b>Cancelar</b>.</p>
+    <h3>Cancela el cliente <small>todo es opcional</small></h3>
+    <ul>
+      <li><b>Se reprogramará a otro día.</b> No afecta su cumplimiento; suma a sus reprogramaciones del mes. La clase nueva descuenta cuando se dé.</li>
+      <li><b>Proponer rutina.</b> La clase no se cancela. Si la cumple <u>ese mismo día</u>, cuenta como clase dada. Si no, pasado el día la clase se da por perdida.</li>
+      <li><b>Cancelar sin reprogramar ni rutina.</b> Cuenta como incumplida y <b>se le descuenta automáticamente una clase</b> de su plan.</li>
+      <li><b>A crédito (Julio):</b> no hay descuento de clase. Tú decides si la cancelación se cobra ($25) o no; en ambos casos cuenta como incumplida.</li>
+    </ul>
+    <h3>Cancelas tú</h3>
+    <ul>
+      <li><b>Marcar para reprogramar.</b> No toca su cumplimiento ni su saldo; la clase nueva descuenta cuando se dé.</li>
+      <li><b>Proponer rutina.</b> La clase no se cancela. Si la cumple ese día, cuenta como clase dada. Si no, queda pendiente y no pierde nada: tú decides.</li>
+      <li><b>Cancelar sin reprogramar ni rutina.</b> No descuenta clase ni dinero y no afecta su cumplimiento. Puedes reponerla después.</li>
+    </ul>
+    <h3>Siempre</h3>
+    <ul>
+      <li>La rutina propuesta <b>solo vale el día de la clase</b> (hora de Panamá).</li>
+      <li>"Descontar" es una clase menos en su mensualidad o paquete, no dinero. No hay descuentos en dólares por cancelar.</li>
+      <li><b>Eliminar</b> no es cancelar: borra una clase agendada por error sin contar como incumplida.</li>
+      <li>Una clase cuya hora ya pasó y sigue sin resolverse aparece en <b>Falta marcar</b> (campana).</li>
+    </ul>`;
+  openModal(caja, true);
+}
 function ofrecerRutinaEnLugarDeClase(sesion, origen = 'trainer') {
   const cliente = data.clients.find(item => item.id === sesion.clientId);
   const nombre = cliente?.name?.split(' ')[0] || 'el cliente';
@@ -1855,7 +1883,9 @@ function cancelSessionDialog(sesion) {
       <p class="section-note">Cuenta en su historial del mes y puede afectar su cumplimiento.</p>
       <button class="secondary wide-button" id="cancela-entrenadora">La cancelo yo</button>
       <p class="section-note">No toca su cumplimiento ni su contador, y no descuenta clase ni dinero: se reprograma o se cancela sin más.</p>
-      <p class="section-note">Si la agendaste por error, cierra esto y usa <b>Eliminar</b>: desaparece sin contar como incumplida.</p>`;
+      <p class="section-note">Si la agendaste por error, cierra esto y usa <b>Eliminar</b>: desaparece sin contar como incumplida.</p>
+      <button type="button" class="text-button" id="guia-cancelaciones">ⓘ Cómo funcionan las cancelaciones</button>`;
+    box.querySelector('#guia-cancelaciones').onclick = guiaDeCancelaciones;
     box.querySelector('#cancela-cliente').onclick = preguntarDestinoCliente;
     box.querySelector('#cancela-entrenadora').onclick = preguntarCompensacion;
   };
@@ -4949,6 +4979,7 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'daily-log') dailyTrainingLog();
   if (actionButton?.dataset.action === 'recurrences') recurrenceManager();
   if (actionButton?.dataset.action === 'working-hours') workingHoursEditor();
+  if (actionButton?.dataset.action === 'cancel-guide') guiaDeCancelaciones();
   if (actionButton?.dataset.action === 'pending-collections') pendingCollections();
   if (actionButton?.dataset.action === 'audit-log') auditLog();
   if (actionButton?.dataset.action === 'compliance-report') complianceReport();

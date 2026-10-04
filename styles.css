@@ -885,3 +885,8 @@ body:has(#portal-routines.active) .portal-weight-fab{display:none}
 .aviso-rutina{display:grid;gap:8px;margin:10px 0 14px;padding:14px 16px;border-radius:14px;background:linear-gradient(135deg,#fdeef3,#f4e7f0);border:1.5px solid #e2b4c8}
 .aviso-rutina b{font-size:15px;color:#7a4560}.aviso-rutina span{font-size:13px;line-height:1.45;color:#5a4650}
 .aviso-reprogramar{margin:0 0 8px;padding:10px 12px;border-radius:12px;background:#eef4fb;color:#3d5a7a;font-size:13px}
+
+/* Guía de cancelaciones (J-106) */
+.agenda-ayuda{margin:2px 0 10px}
+.guia-cancelaciones h3{margin:18px 0 6px;font:600 17px Fraunces;color:#5a3f4c}.guia-cancelaciones h3 small{font:500 12px 'DM Sans';color:#8a7a82;margin-left:6px}
+.guia-cancelaciones ul{margin:0;padding-left:20px;display:grid;gap:8px}.guia-cancelaciones li{font-size:14px;line-height:1.5;color:#4a3a42}

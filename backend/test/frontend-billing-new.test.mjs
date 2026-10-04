@@ -209,3 +209,12 @@ test('rutina en lugar de la clase (J-102): diálogo de cancelación, IA para el 
   assert.match(sw, /requireInteraction = true/); assert.match(sw, /type: 'EILEEN_PUSH'/);
   assert.match(css, /\.routine-timer\.corriendo/); assert.match(css, /\.portal-offer-card/);
 });
+
+test('guía de cancelaciones (J-106): enlace en la agenda y en el diálogo, con las reglas vigentes', async () => {
+  const app = await leer('app.js'); const html = await leer('index.html');
+  assert.match(html, /data-action="cancel-guide"/);
+  assert.match(app, /dataset\.action === 'cancel-guide'\) guiaDeCancelaciones\(\)/);
+  assert.match(app, /id="guia-cancelaciones"/);
+  const guia = app.slice(app.indexOf('function guiaDeCancelaciones'), app.indexOf('function ofrecerRutinaEnLugarDeClase'));
+  for (const frase of ['se le descuenta automáticamente una clase', 'solo vale el día de la clase', 'no hay descuentos en dólares', 'Falta marcar']) assert.ok(guia.toLowerCase().includes(frase.toLowerCase()), frase);
+});
