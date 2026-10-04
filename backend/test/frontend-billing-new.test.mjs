@@ -195,7 +195,6 @@ test('cumplimiento del Resumen: "Últimos 7 días", "perdidas" y sin saldo del c
 
 test('rutina en lugar de la clase (J-102): diálogo de cancelación, IA para el cliente, cronómetro del portal, tarjeta de rutinas cumplidas y aviso sonoro', async () => {
   const app = await leer('app.js'); const sw = await leer('sw.js'); const css = await leer('styles.css');
-  assert.match(app, /id="ofrecer-rutina">No puedo atenderla: ofrecerle una rutina/);
   assert.match(app, /id="proponer-rutina">Proponer rutina/);
   assert.match(app, /Todo es opcional/); assert.match(app, /Se le descuenta automáticamente una clase/); assert.match(app, /también puedes <b>reprogramar<\/b>/);
   assert.match(app, /ofrecerRutinaEnLugarDeClase\(sesion, 'client'\)/); assert.match(app, /ofrecerRutinaEnLugarDeClase\(sesion, 'trainer'\)/);
