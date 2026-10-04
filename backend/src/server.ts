@@ -3258,7 +3258,7 @@ app.post('/api/routines/suggest', { preHandler: requireStaff }, async (request, 
   const input = routineSuggestionSchema.parse(request.body);
 
   const catalogo = await sql`
-    SELECT name, section, level, machine FROM exercises
+    SELECT name, section, level, machine, free_weight FROM exercises
     WHERE owner_id = ${auth.sub} AND NOT archived ORDER BY section, name
   `;
   if (!catalogo.length) return reply.code(409).send({ error: 'No hay ejercicios en el catálogo para proponer una rutina' });
@@ -3302,7 +3302,7 @@ app.post('/api/routines/suggest', { preHandler: requireStaff }, async (request, 
   try {
     const propuesta = await suggestRoutine({
       descripcion: input.description,
-      catalogo: catalogo.map(e => ({ name: String(e.name), section: String(e.section), level: e.level as string, machine: e.machine as string })),
+      catalogo: catalogo.map(e => ({ name: String(e.name), section: String(e.section), level: e.level as string, machine: e.machine as string, freeWeight: e.free_weight as string })),
       historial, condiciones,
       repetirGrupos: input.repeatMuscleGroups,
       clienteNombre,

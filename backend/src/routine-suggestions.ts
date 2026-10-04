@@ -11,7 +11,7 @@ import { config } from './config.js';
 
 export const routineSuggestionsReady = Boolean(config.DEEPSEEK_API_KEY);
 
-export type CatalogEntry = { name: string; section: string; level?: string | null; machine?: string | null };
+export type CatalogEntry = { name: string; section: string; level?: string | null; machine?: string | null; freeWeight?: string | null };
 export type HistoryEntry = { title: string; assignedOn: string | null; sections: string[] };
 
 export type SuggestedRoutine = {
@@ -57,6 +57,10 @@ export async function suggestRoutine(entrada: {
   const instrucciones = [
     'Eres asistente de una entrenadora personal en Panamá. Propones rutinas, no las apruebas.',
     'Elige ejercicios ÚNICAMENTE de la lista del catálogo, copiando el nombre exacto. No inventes ejercicios.',
+    // La entrenadora escribe una línea breve (J-111), p. ej. "45 minutos, espalda, tríceps y pierna; tiene mancuernas y bandas". Es la autoridad: ella sabe con qué cuenta el cliente.
+    'Lo que escribe la entrenadora MANDA: si indica la duración, los grupos musculares a trabajar o el equipo o lugar con que cuenta el cliente, respétalo. '
+      + 'Si dice qué equipo tiene disponible, elige ÚNICAMENTE ejercicios del catálogo que se puedan hacer con ese equipo y no incluyas ejercicios que requieran otro. '
+      + 'En el catálogo, la máquina y el peso libre de cada ejercicio aparecen entre paréntesis; "peso corporal" significa que no requiere equipo.',
     'Responde sólo JSON válido con esta forma: {"title":string,"description":string,"sessionsPerWeek":number,'
       + '"exercises":[{"name":string,"sets":number,"reps":string,"notes":string}],"rationale":string}',
     'Entre 4 y 10 ejercicios. "reps" es texto libre ("12", "30 seg", "10 por lado").',
@@ -66,7 +70,7 @@ export async function suggestRoutine(entrada: {
   if (entrada.paraCliente) {
     instrucciones.push(
       'Esta rutina la hará el cliente POR SU CUENTA, sin entrenadora al lado, en lugar de su clase cancelada. '
-      + `Dimensiónala para unos ${entrada.duracionMinutos || 45} minutos en total, calentamiento incluido, con ejercicios simples de ejecutar solo y con buena técnica. `
+      + `Dimensiónala para unos ${entrada.duracionMinutos || 45} minutos en total, calentamiento incluido (salvo que la entrenadora indique otra duración), con ejercicios simples de ejecutar solo y con buena técnica. `
       + 'El campo "description" son las INSTRUCCIONES para el cliente, escritas en segunda persona (tú) y en español: cómo calentar unos 5 minutos, cuánto descansar entre series, '
       + 'a qué esfuerzo trabajar, que mire la demostración en video de cada ejercicio antes de hacerlo y que pare si siente dolor. Máximo 450 caracteres, sin listas largas. '
       + 'En "notes" de cada ejercicio escribe una pista corta de técnica para esa persona.'
@@ -74,9 +78,8 @@ export async function suggestRoutine(entrada: {
   }
   if (entrada.paraViaje) {
     instrucciones.push(
-      'El cliente está DE VIAJE: la hará en un cuarto de hotel, un parque o un gimnasio pequeño. Prefiere ejercicios con peso corporal o con bandas y sin máquinas '
-      + '(en el catálogo, los que dicen "No aplica" o no listan máquina). Evita todo lo que necesite máquina, barra o aparatos grandes. '
-      + 'En "description" incluye una indicación de que puede hacerla en cualquier día del viaje, que si no tiene equipo use peso corporal y que descanse bien entre series.'
+      'El cliente está DE VIAJE y la hará por su cuenta, fuera de su gimnasio habitual. Si la entrenadora NO dice con qué equipo cuenta, supón peso corporal o bandas y evita lo que necesite máquina, barra o aparatos grandes; '
+      + 'si lo dice, lo que ella indique manda. En "description" incluye una indicación de que puede hacerla en cualquier día del viaje y que descanse bien entre series.'
     );
   }
   if (entrada.condiciones.length) {
@@ -96,7 +99,11 @@ export async function suggestRoutine(entrada: {
   }
 
   const catalogoTexto = entrada.catalogo
-    .map(e => `- ${e.name} [${SECCIONES[e.section] || e.section}]${e.machine ? ` (${e.machine})` : ''}`)
+    .map(e => {
+      const libre = e.freeWeight && !/^no aplica/i.test(e.freeWeight) ? `peso libre: ${e.freeWeight}` : '';
+      const maquina = e.machine && !/^no aplica/i.test(e.machine) ? `máquina: ${e.machine}` : '';
+      return `- ${e.name} [${SECCIONES[e.section] || e.section}] (${[maquina, libre].filter(Boolean).join('; ') || 'peso corporal'})`;
+    })
     .join('\n');
   const historialTexto = entrada.historial.length
     ? entrada.historial.map(h => `- ${h.assignedOn || 'sin fecha'}: ${h.title} → ${h.sections.map(s => SECCIONES[s] || s).join(', ') || 'sin clasificar'}`).join('\n')

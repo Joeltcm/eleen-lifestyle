@@ -1,4 +1,4 @@
-const APP_VERSION = '281';
+const APP_VERSION = '282';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1875,6 +1875,20 @@ function proponerRutinaDesdeAgenda(sesion) {
   caja.querySelector('#propuesta-cliente').onclick = () => ofrecerRutinaEnLugarDeClase(sesion, 'client');
 }
 
+// Un ejercicio admite que se le fije un peso si el catálogo lo marca "Lleva peso" o si usa máquina o peso libre (una plancha o la caminadora no lo piden).
+const admitePeso = ejercicio => Boolean(ejercicio) && Boolean(ejercicio.usesWeight
+  || (ejercicio.freeWeight && !/^no aplica/i.test(ejercicio.freeWeight))
+  || (ejercicio.machine && !/^no aplica/i.test(ejercicio.machine)));
+
+// ── Especificación breve de la rutina (J-111) ──────────────────────────────────────────────────
+// Eileen sabe con qué cuenta el cliente, así que antes de generar con IA escribe UNA línea: "rutina de 45 min de espalda, tríceps y pierna; tiene mancuernas y bandas". La IA la toma como
+// autoridad (duración, grupos y equipo). Es opcional: vacía, se genera una rutina general.
+const campoEspecificacion = (ejemplo = 'Ej. Rutina de 45 min: espalda, tríceps y pierna. Tiene disponible: mancuernas y bandas') =>
+  `<label>Especificación breve <small>(opcional)</small><textarea name="especificacion" rows="3" maxlength="300" placeholder="${escapeHtml(ejemplo)}"></textarea></label>
+   <p class="section-note">En una línea: la duración, qué trabajar y con qué cuenta el cliente. Si lo dejas vacío, se genera una rutina general.</p>`;
+const textoEspecificacion = formulario => String(new FormData(formulario).get('especificacion') || '').trim();
+const descripcionConEspecificacion = (base, texto) => (texto ? `${base} Indicación de la entrenadora, que manda sobre lo demás: ${texto}` : base).slice(0, 600);
+
 function ofrecerRutinaEnLugarDeClase(sesion, origen = 'trainer') {
   const cliente = data.clients.find(item => item.id === sesion.clientId);
   const nombre = cliente?.name?.split(' ')[0] || 'el cliente';
@@ -1883,24 +1897,30 @@ function ofrecerRutinaEnLugarDeClase(sesion, origen = 'trainer') {
   openModal(caja, true);
   const enviarAlEditor = propuesta => { modal.close(); newRoutine(null, false, { ...propuesta, clientId: sesion.clientId, ofertaSesionId: sesion.id, ofertaCliente: sesion.client, ofertaOrigen: origen, ofertaDuracion: sesion.durationMinutes }); };
   const manual = () => enviarAlEditor({ title: `Rutina para ${nombre}`, description: '', sessionsPerWeek: 1, exercises: [], rationale: '', avoided: [], descartados: [] });
-  // Un clic genera la rutina: la IA solo puede elegir ejercicios del catálogo y ya conoce lesiones y rutinas recientes del cliente. El resultado se abre en el editor para revisarla.
-  const generar = async () => {
+  const pedirEspecificacion = () => {
+    caja.innerHTML = `${resumen}<form id="oferta-especificaciones">${campoEspecificacion()}
+      <button class="primary wide-button">Generar con IA</button><button type="button" class="secondary wide-button" id="oferta-sin-ia">Armarla yo, sin IA</button></form>`;
+    caja.querySelector('#oferta-sin-ia').onclick = manual;
+    caja.querySelector('#oferta-especificaciones').addEventListener('submit', evento => { evento.preventDefault(); generar(textoEspecificacion(evento.target)); });
+  };
+  const generar = async texto => {
     caja.innerHTML = `${resumen}<p class="section-note" role="status">Generando la rutina con tu catálogo de ejercicios… puede tardar unos segundos.</p>`;
     try {
       enviarAlEditor(await api('/api/routines/suggest', { method: 'POST', body: {
-        description: `Rutina para que ${nombre} la haga por su cuenta en lugar de su clase de ${sesion.durationMinutes} min, con lo que tenga a mano.`,
+        description: descripcionConEspecificacion(`Rutina para que ${nombre} la haga por su cuenta en lugar de su clase de ${sesion.durationMinutes} min, con lo que tenga a mano.`, texto),
         clientId: sesion.clientId, forClient: true, durationMinutes: sesion.durationMinutes
       } }));
     } catch (error) {
       caja.innerHTML = `${resumen}<p class="conflict-warn">${escapeHtml(error.message)}</p>
-        <button class="primary wide-button" id="rutina-reintentar">Reintentar</button>
+        <button class="primary wide-button" id="rutina-reintentar">Cambiar la especificación y reintentar</button>
         <button class="secondary wide-button" id="rutina-manual">Armarla yo, sin IA</button>`;
-      caja.querySelector('#rutina-reintentar').onclick = generar;
+      caja.querySelector('#rutina-reintentar').onclick = pedirEspecificacion;
       caja.querySelector('#rutina-manual').onclick = manual;
     }
   };
-  generar();
+  pedirEspecificacion();
 }
+
 function cancelSessionDialog(sesion) {
   if (!sesion) return;
   const cliente = data.clients.find(c => c.id === sesion.clientId);
@@ -2881,7 +2901,7 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
     caja.innerHTML = `<p class="eyebrow">ENTRENAMIENTO</p><h2>Proponer con IA</h2>
       <p style="color:#6f7b75;margin-top:-12px">Describe lo que buscas. Se usarán sólo ejercicios de tu catálogo, y se tendrán en cuenta las lesiones del cliente y sus rutinas recientes.</p>
       <form id="sugerencia-form">
-        <label>Qué quieres para esta rutina<textarea name="description" rows="3" required minlength="10" maxlength="600" placeholder="Ej. Fuerza de tren inferior, nivel intermedio, sin saltos por su rodilla"></textarea></label>
+        <label>Qué quieres para esta rutina<textarea name="description" rows="3" required minlength="10" maxlength="600" placeholder="Ej. Rutina de 45 min: espalda, tríceps y pierna. Tiene disponible: mancuernas y bandas"></textarea></label>
         <label>Para cliente<select name="clientId"><option value="">Sin cliente · sin historial que considerar</option>${data.clients.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('')}</select></label>
         <label class="checkbox-line"><input type="checkbox" name="repeat" /> Repetir los mismos grupos musculares aunque se hayan trabajado hace poco</label>
         <button class="primary wide-button">Proponer</button>
@@ -2929,6 +2949,8 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
     if (propuesta.rationale) avisos.push(propuesta.rationale);
     if (propuesta.avoided?.length) avisos.push(`Se evitó repetir: ${propuesta.avoided.join(', ')}.`);
     if (propuesta.descartados?.length) avisos.push(`Se descartaron por no estar en tu catálogo: ${propuesta.descartados.join(', ')}.`);
+    // La IA no inventa cargas: no conoce al cliente. Eileen las fija a su criterio.
+    if (selectedExercises.some(item => admitePeso(exerciseCatalog.find(entrada => entrada.id === item.catalogId || entrada.name === item.name)))) avisos.push('Fija el peso de los ejercicios con carga.');
     if (avisos.length) {
       const nota = document.createElement('p');
       nota.className = 'section-note aviso-ambito';
@@ -2946,6 +2968,14 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
     if (!selectedExercises.length) {
       const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = 'Todavía no has agregado ejercicios. Usa el selector superior para construir la rutina.'; selectedList.append(empty); return;
     }
+    // Si el cliente ya usó pesos en rutinas anteriores, se pueden traer todos de una vez; cada uno se puede cambiar después.
+    const pendientes = selectedExercises.filter(item => !item.weight && pesosPrevios[item.name]);
+    if (pendientes.length) {
+      const traer = document.createElement('button'); traer.type = 'button'; traer.className = 'secondary usar-ultimos-pesos';
+      traer.textContent = `Usar los últimos pesos del cliente (${pendientes.length})`;
+      traer.onclick = () => { pendientes.forEach(item => { item.weight = pesosPrevios[item.name].weight; }); renderSelected(); };
+      selectedList.append(traer);
+    }
     selectedExercises.forEach((exercise, index) => {
       const row = document.createElement('div'); row.className = 'selected-exercise';
       const order = document.createElement('span'); order.className = 'selected-exercise-number'; order.textContent = String(index + 1);
@@ -2957,7 +2987,7 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
       // El peso sólo se pide donde tiene sentido: una plancha o la caminadora
       // no llevan kilos, y pedirlos en todos llenaría la rutina de huecos.
       const enCatalogo = exerciseCatalog.find(item => item.id === exercise.catalogId || item.name === exercise.name);
-      if (enCatalogo?.usesWeight) {
+      if (admitePeso(enCatalogo)) {
         const pesoLabel = document.createElement('label'); pesoLabel.className = 'selected-exercise-field';
         const pesoTitulo = document.createElement('span'); pesoTitulo.textContent = 'Peso';
         const peso = document.createElement('input');
@@ -4441,23 +4471,29 @@ async function viajesSection(target, client) {
 function prepararRutinaDeViaje(client, viaje) {
   const nombre = client.name.split(' ')[0];
   const caja = document.createElement('div');
-  const resumen = `<p class="eyebrow">VIAJE</p><h2>Rutina de viaje</h2><p class="form-summary"><b>${escapeHtml(client.name)}</b><br>✈ ${fechaViaje(viaje.starts_on)} → ${viaje.ends_on ? fechaViaje(viaje.ends_on) : 'regreso sin definir'}</p>`;
+  const resumen = `<p class="eyebrow">VIAJE</p><h2>Rutina de viaje</h2><p class="form-summary"><b>${escapeHtml(client.name)}</b><br>✈ ${fechaViaje(viaje.starts_on)} → ${viaje.ends_on ? fechaViaje(viaje.ends_on) : 'regreso sin definir'}${viaje.destination ? ` · ${escapeHtml(viaje.destination)}` : ''}</p>`;
   openModal(caja, true);
   const alEditor = propuesta => { modal.close(); newRoutine(null, false, { ...propuesta, clientId: client.id, enlaceViajeId: viaje.id, enlaceCliente: client.name }); };
   const manual = () => alEditor({ title: `Rutina de viaje de ${nombre}`, description: '', sessionsPerWeek: 3, exercises: [], rationale: '', avoided: [], descartados: [] });
-  const generar = async () => {
+  const pedirEspecificacion = () => {
+    caja.innerHTML = `${resumen}<form id="viaje-especificaciones">${campoEspecificacion('Ej. Rutina de 30 min de pierna y core. Tiene gimnasio en el hotel: mancuernas y caminadora')}
+      <button class="primary wide-button">Generar con IA</button><button type="button" class="secondary wide-button" id="viaje-sin-ia">Armarla yo, sin IA</button></form>`;
+    caja.querySelector('#viaje-sin-ia').onclick = manual;
+    caja.querySelector('#viaje-especificaciones').addEventListener('submit', evento => { evento.preventDefault(); generar(textoEspecificacion(evento.target)); });
+  };
+  const generar = async texto => {
     caja.innerHTML = `${resumen}<p class="section-note" role="status">Generando una rutina que se pueda hacer de viaje, con tu catálogo de ejercicios… puede tardar unos segundos.</p>`;
     try {
       alEditor(await api('/api/routines/suggest', { method: 'POST', body: {
-        description: `Rutina de viaje para que ${nombre} entrene por su cuenta mientras está fuera, sin máquinas, en un cuarto de hotel o con peso corporal.`,
+        description: descripcionConEspecificacion(`Rutina de viaje para que ${nombre} entrene por su cuenta mientras está fuera${viaje.destination ? ` (${viaje.destination})` : ''}.`, texto),
         clientId: client.id, forTravel: true, durationMinutes: 40
       } }));
     } catch (error) {
-      caja.innerHTML = `${resumen}<p class="conflict-warn">${escapeHtml(error.message)}</p><button class="primary wide-button" id="viaje-reintentar">Reintentar</button><button class="secondary wide-button" id="viaje-manual">Armarla yo, sin IA</button>`;
-      caja.querySelector('#viaje-reintentar').onclick = generar; caja.querySelector('#viaje-manual').onclick = manual;
+      caja.innerHTML = `${resumen}<p class="conflict-warn">${escapeHtml(error.message)}</p><button class="primary wide-button" id="viaje-reintentar">Cambiar la especificación y reintentar</button><button class="secondary wide-button" id="viaje-manual">Armarla yo, sin IA</button>`;
+      caja.querySelector('#viaje-reintentar').onclick = pedirEspecificacion; caja.querySelector('#viaje-manual').onclick = manual;
     }
   };
-  generar();
+  pedirEspecificacion();
 }
 
 // Enviar una rutina por enlace temporal: sin cuenta ni contraseña para el cliente, con la vigencia que elija Eileen.
@@ -5545,7 +5581,7 @@ function exerciseRows(exercises, catalog, prefix = 'video') {
     // rutinas viejas también muestren video.
     const catalogEntry = (catalog || []).find(item => item.id === exercise.catalogId || item.slug === exercise.catalogId);
     const tieneVideo = Boolean(catalogEntry?.has_video ?? catalogEntry?.hasVideo);
-    const dose = [exercise.sets && setsLabel(exercise.sets), exercise.reps].filter(Boolean).join(' · ');
+    const dose = [exercise.sets && setsLabel(exercise.sets), exercise.reps, exercise.weight && `Peso: ${exercise.weight}`].filter(Boolean).join(' · ');
     // La posición entra en el id porque una rutina puede repetir el mismo
     // ejercicio —el mismo movimiento en dos rangos de repeticiones es normal— y
     // dos contenedores con el mismo id harían que el segundo botón abriera el

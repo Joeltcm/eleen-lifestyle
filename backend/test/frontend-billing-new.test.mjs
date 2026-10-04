@@ -258,3 +258,20 @@ test('proponer rutina desde la agenda y demostraciones en bucle dentro del edito
   assert.match(app, /forTravel: Boolean\(contextoPropuesta\.enlaceViajeId\)/);
   assert.match(css, /\.exercise-demo-item video/);
 });
+
+test('especificación breve de la rutina (J-111): una línea de la entrenadora antes de generar con IA, sin formulario largo', async () => {
+  const app = await leer('app.js');
+  assert.match(app, /const campoEspecificacion = /); assert.match(app, /const descripcionConEspecificacion = /);
+  assert.match(app, /<form id="oferta-especificaciones">/); assert.match(app, /<form id="viaje-especificaciones">/);
+  assert.match(app, /Especificación breve/); assert.match(app, /Cambiar la especificación y reintentar/);
+  assert.match(app, /espalda, tríceps y pierna. Tiene disponible: mancuernas y bandas/);
+  assert.doesNotMatch(app, /EQUIPOS_RUTINA/, 'no hay chips ni campos de equipo: es una sola línea');
+});
+
+test('pesos de la rutina generada (J-112): se pueden fijar, se pueden traer los últimos y el cliente ve el peso', async () => {
+  const app = await leer('app.js');
+  assert.match(app, /const admitePeso = /); assert.match(app, /if \(admitePeso\(enCatalogo\)\) \{/);
+  assert.match(app, /Fija el peso de los ejercicios con carga\./);
+  assert.match(app, /Usar los últimos pesos del cliente/);
+  assert.match(app, /exercise\.weight && `Peso: \$\{exercise\.weight\}`/);
+});
