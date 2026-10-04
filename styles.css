@@ -942,3 +942,12 @@ body:has(#portal-routines.active) .portal-weight-fab{display:none}
 /* Dosis del ejercicio en dos columnas: el selector de bloque ocupa la fila entera para que se lea "Bloque 1" completo. */
 .selected-exercise-dose{grid-template-columns:repeat(2,minmax(0,1fr))!important}
 .selected-exercise-field.campo-bloque{grid-column:1/-1}
+
+/* Días de viaje en el portal del cliente (J-114) */
+.portal-viaje-card{margin:0 0 14px;padding:16px 18px;border-radius:18px;background:linear-gradient(135deg,#e6f2fb,#dcedfa);border:1.5px solid #9cc9ea}
+.portal-viaje-card h3{margin:6px 0 4px;font:600 20px Fraunces;color:#245d86}.portal-viaje-card p{margin:0;color:#35566f;font-size:14px;line-height:1.45}
+.portal-viaje-tag{background:#3c86bd}
+.portal-col-dia.viaje{background:#dcedfa;border-color:#9cc9ea;color:#245d86}.portal-avion{display:block;font-style:normal;font-size:12px;line-height:1}
+.portal-tramo.viaje{background:#eaf4fb}.portal-tramo.viaje.pasado{background:#e3eef6}
+.marca-viaje{color:#3c86bd}
+.portal-viaje-dia{margin:6px 0 10px;padding:9px 12px;border-radius:12px;background:#dcedfa;color:#245d86;font-size:13px;font-weight:600}

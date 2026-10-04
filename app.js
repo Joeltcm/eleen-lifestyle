@@ -1,4 +1,4 @@
-const APP_VERSION = '283';
+const APP_VERSION = '284';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -4505,7 +4505,7 @@ async function viajesSection(target, client) {
     const estado = viaje => viaje.ends_on && viaje.ends_on < hoy ? 'pasado' : viaje.starts_on > hoy ? 'próximo' : 'en curso';
     const activos = enlaces.filter(item => item.active);
     target.innerHTML = `<button type="button" class="secondary wide-button" id="marcar-viaje">✈ Marcar viaje</button>
-      ${viajes.length ? viajes.map(viaje => `<div class="viaje-fila ${estado(viaje).replace(' ', '-')}"><div><b>✈ ${fechaViaje(viaje.starts_on)} → ${viaje.ends_on ? fechaViaje(viaje.ends_on) : 'regreso sin definir'}</b><small>${estado(viaje)}${viaje.destination ? ` · ${escapeHtml(viaje.destination)}` : ''}${viaje.note ? ` · ${escapeHtml(viaje.note)}` : ''}${viaje.cancelled_sessions ? ` · <b>${viaje.cancelled_sessions} clase${viaje.cancelled_sessions === 1 ? '' : 's'} cancelada${viaje.cancelled_sessions === 1 ? '' : 's'} por este viaje</b>` : ''}</small></div>
+      ${viajes.length ? viajes.map(viaje => `<div class="viaje-fila ${estado(viaje).replace(' ', '-')}"><div><b>✈ ${fechaViaje(viaje.starts_on)} → ${viaje.ends_on ? fechaViaje(viaje.ends_on) : 'regreso sin definir'}${viaje.ends_on ? ` · ${Math.round((new Date(`${viaje.ends_on}T12:00:00`) - new Date(`${viaje.starts_on}T12:00:00`)) / 86400000) + 1} días` : ''}</b><small>${estado(viaje)}${viaje.destination ? ` · ${escapeHtml(viaje.destination)}` : ''}${viaje.note ? ` · ${escapeHtml(viaje.note)}` : ''}${viaje.cancelled_sessions ? ` · <b>${viaje.cancelled_sessions} clase${viaje.cancelled_sessions === 1 ? '' : 's'} cancelada${viaje.cancelled_sessions === 1 ? '' : 's'} por este viaje</b>` : ''}</small></div>
         <div class="viaje-acciones">${estado(viaje) !== 'pasado' ? `<button type="button" class="secondary" data-viaje-rutina="${viaje.id}">Preparar rutina</button>` : ''}<button type="button" class="secondary" data-viaje-editar="${viaje.id}">Editar</button>${viaje.cancelled_sessions ? '' : `<button type="button" class="secondary" data-viaje-borrar="${viaje.id}">Quitar</button>`}</div></div>`).join('')
         : '<p class="empty">No hay viajes marcados.</p>'}
       ${activos.length ? `<p class="section-note" style="margin-top:12px"><b>Enlaces de rutina activos</b></p>${activos.map(item => `<div class="viaje-fila"><div><b>${escapeHtml(item.routine_title)}</b><small>Vence el ${venceTexto(item.expires_at)} · abierto ${item.opens} vez${item.opens === 1 ? '' : 'es'}</small></div><div class="viaje-acciones"><button type="button" class="secondary" data-enlace-revocar="${item.id}">Revocar</button></div></div>`).join('')}` : ''}`;
@@ -5938,9 +5938,9 @@ function renderPortalCalendar(ownSessions) {
   const hoyClave = dateKey(today);
   const cabecera = dias.map(fecha => {
     const clave = dateKey(fecha);
-    return `<button type="button" class="portal-col-dia ${clave === hoyClave ? 'hoy' : ''}" style="grid-row:1;grid-column:${clavesSemana.indexOf(clave) + 2}" data-portal-dia="${clave}">
+    return `<button type="button" class="portal-col-dia ${clave === hoyClave ? 'hoy' : ''} ${viajeDeFecha(clave) ? 'viaje' : ''}" style="grid-row:1;grid-column:${clavesSemana.indexOf(clave) + 2}" data-portal-dia="${clave}" ${viajeDeFecha(clave) ? 'title="Día de viaje"' : ''}>
       <b>${['L', 'M', 'X', 'J', 'V', 'S', 'D'][(fecha.getDay() + 6) % 7]}</b>
-      <i>${fecha.getDate()}</i>
+      <i>${fecha.getDate()}</i>${viajeDeFecha(clave) ? '<em class="portal-avion" aria-label="De viaje">✈</em>' : ''}
     </button>`;
   }).join('');
 
@@ -5952,7 +5952,7 @@ function renderPortalCalendar(ownSessions) {
     const filaInicio = banda * unidadesPorBanda + 2;
     const celdas = clavesSemana.map((clave, columna) => {
       const yaPaso = new Date(`${clave}T00:00:00`).getTime() + (minuto + PORTAL_BANDA_MINUTOS) * 60_000 < Date.now();
-      return `<span class="portal-tramo ${yaPaso ? 'pasado' : 'libre'}" style="grid-row:${filaInicio} / span ${unidadesPorBanda};grid-column:${columna + 2}" title="${yaPaso ? 'Ya pasó' : 'Disponible'}"></span>`;
+      return `<span class="portal-tramo ${yaPaso ? 'pasado' : 'libre'} ${viajeDeFecha(clave) ? 'viaje' : ''}" style="grid-row:${filaInicio} / span ${unidadesPorBanda};grid-column:${columna + 2}" title="${yaPaso ? 'Ya pasó' : 'Disponible'}"></span>`;
     }).join('');
     const etiqueta = `<span class="portal-hora" style="grid-row:${filaInicio} / span ${unidadesPorBanda};grid-column:1">${minuto % 60 === 0 ? comoHora(minuto) : ''}</span>`;
     return etiqueta + celdas;
@@ -5987,8 +5987,9 @@ function renderPortalCalendar(ownSessions) {
       ${fondo}
       ${bloques}
     </div>
-    <p class="portal-leyenda"><span class="marca-mia">●</span> Tu sesión &nbsp; <span class="marca-ocupada">▪</span> Ocupado &nbsp; <span class="marca-libre">▫</span> Disponible &nbsp; <span class="marca-pasada">▫</span> Ya pasó</p>
+    <p class="portal-leyenda"><span class="marca-mia">●</span> Tu sesión &nbsp; <span class="marca-ocupada">▪</span> Ocupado &nbsp; <span class="marca-libre">▫</span> Disponible &nbsp; <span class="marca-pasada">▫</span> Ya pasó &nbsp; <span class="marca-viaje">✈</span> Día de viaje</p>
     <h4 class="portal-dia-titulo">${new Intl.DateTimeFormat('es-PA', { weekday: 'long', day: 'numeric', month: 'long' }).format(fechaElegida)}</h4>
+    ${viajeDeFecha(portalSelectedDay) ? '<p class="portal-viaje-dia">✈ Estás de viaje este día. Si tienes clase, confirma tu rutina ese mismo día para que cuente.</p>' : ''}
     ${delDia.length ? delDia.map(o => portalSlotCard(o.slot, ownSessions)).join('') : '<p class="empty">Sin horarios ocupados este día.</p>'}`;
 
   // Fuera de la ventana que envía el servidor todo saldría vacío, y una semana
@@ -6109,6 +6110,23 @@ const cronometroClave = 'eileen-cronometro-rutina';
 const cronometroActual = () => { try { return JSON.parse(localStorage.getItem(cronometroClave) || 'null'); } catch { return null; } };
 const segundosCronometro = crono => crono ? Math.floor((Date.now() - crono.startedAt) / 1000) : 0;
 const ofertaDeRutina = routineId => (portalData?.routineOffers || []).find(item => item.routine_id === routineId);
+
+// ── Días de viaje en el portal del cliente (J-114) ───────────────────────────────────────────────
+const viajeDeFecha = clave => (portalData?.travel || []).find(item => item.starts_on <= clave && (!item.ends_on || item.ends_on >= clave));
+const diasDeViaje = viaje => viaje.ends_on ? Math.round((new Date(`${viaje.ends_on}T12:00:00`) - new Date(`${viaje.starts_on}T12:00:00`)) / 86400000) + 1 : null;
+function renderViajePortal() {
+  const raiz = document.getElementById('portal-dashboard'); if (!raiz) return;
+  let contenedor = document.getElementById('portal-travel-dashboard');
+  if (!contenedor) { contenedor = document.createElement('div'); contenedor.id = 'portal-travel-dashboard'; const ofertas = document.getElementById('portal-offers-dashboard'); if (ofertas) ofertas.after(contenedor); else raiz.prepend(contenedor); }
+  const hoy = dateKey(today);
+  const viajes = (portalData?.travel || []).filter(item => !item.ends_on || item.ends_on >= hoy).sort((x, y) => x.starts_on.localeCompare(y.starts_on)).slice(0, 2);
+  contenedor.innerHTML = viajes.map(viaje => {
+    const enCurso = viaje.starts_on <= hoy; const dias = diasDeViaje(viaje);
+    return `<article class="portal-viaje-card"><span class="portal-offer-tag portal-viaje-tag">✈ ${enCurso ? 'Estás de viaje' : 'Tu próximo viaje'}</span>
+      <h3>${fechaViaje(viaje.starts_on)} → ${viaje.ends_on ? fechaViaje(viaje.ends_on) : 'regreso por definir'}${viaje.destination ? ` · ${escapeHtml(viaje.destination)}` : ''}</h3>
+      <p>${dias ? `${dias} ${dias === 1 ? 'día' : 'días'} de viaje. ` : ''}Tu plan sigue igual. Si tienes clase durante el viaje, <b>confirma la rutina que Eileen te envíe el mismo día</b> para que cuente; si no, esa clase se cancela.</p></article>`;
+  }).join('');
+}
 
 function renderOfertasRutina() {
   const ofertas = portalData?.routineOffers || [];
@@ -6264,6 +6282,7 @@ function renderPortal() {
   if (credito > 0) tarjetas.push(`<article class="destacada"><span>A tu favor</span><strong>${money.format(credito)}</strong><small>se descuenta del próximo cobro</small></article>`);
   document.getElementById('portal-metrics').innerHTML = tarjetas.join('');
   renderOfertasRutina();
+  renderViajePortal();
 
   renderPortalReports();
   const allActivities = portalActivities();

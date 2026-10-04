@@ -158,6 +158,19 @@ test('los bloques de una rutina (bloque y rondas por ejercicio) se guardan, se d
   assert.equal((await api.post('/api/routines', { title: 'Mal', sessionsPerWeek: 3, exercises: [{ name: 'X', block: 0 }] })).estado, 400, 'el bloque 0 no existe');
 });
 
+test('el cliente ve sus propios días de viaje en su portal (y no los de otros)', async () => {
+  const mio = (await api.post('/api/clients', { fullName: 'Portal Viajero', cutoffDay: 1, email: 'portal.viajero@prueba.test' })).datos.id;
+  const otro = (await api.post('/api/clients', { fullName: 'Otro Viajero', cutoffDay: 1 })).datos.id;
+  await api.post(`/api/clients/${mio}/travel`, { startsOn: panama(2), endsOn: panama(9), destination: 'Roma' });
+  await api.post(`/api/clients/${otro}/travel`, { startsOn: panama(2), endsOn: panama(9), destination: 'París' });
+  const enlace = await api.post(`/api/clients/${mio}/access-link`, {});
+  const acceso = await api.post(`/api/auth/access-link/${String(enlace.datos.url).split('acceso=')[1]}`, { password: 'clave-del-portal-larga' });
+  const portal = cliente(servidor.base); portal.usarToken(acceso.datos.token);
+  const resumen = await portal.get('/api/portal/summary');
+  assert.equal(resumen.estado, 200, JSON.stringify(resumen.datos).slice(0, 200));
+  assert.deepEqual(resumen.datos.travel.map(v => [v.starts_on, v.ends_on, v.destination]), [[panama(2), panama(9), 'Roma']]);
+});
+
 // Van al final a propósito: las reversas borran columnas y tablas.
 test('la reversa de 060 se niega a perder la justificación de cancelaciones sin orden expresa, y con la orden quita las columnas sin descancelar las clases', async () => {
   const archivo = new URL('../migrations-down/060_cancelacion_por_viaje.down.sql', import.meta.url).pathname;

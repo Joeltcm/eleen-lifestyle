@@ -7208,6 +7208,11 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   const auth = request.user as AuthUser;
   if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
   const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+  // Sus días de viaje (J-114): el cliente los ve marcados en su agenda y sabe que debe confirmar su rutina el día de cada clase.
+  const viajes = await sql`
+    SELECT id, starts_on::text AS starts_on, ends_on::text AS ends_on, destination
+    FROM client_travel WHERE client_id = ${client.id} AND COALESCE(ends_on, DATE '9999-12-31') >= (now() AT TIME ZONE 'America/Panama')::date - 60
+    ORDER BY starts_on`;
   const [invoices, routines, sessions, complianceSessions, busySlots, assessments, completions, exercises, packages, credits, weightLogs] = await Promise.all([
     sql`
       SELECT id, concept, amount, currency, due_on, status, payment_method, invoice_number, issued_on, line_items,
@@ -7282,9 +7287,9 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   // Tras el corte (estado `new`) el portal lee la facturación nueva y ya no muestra saldos de clases (D-14).
   if (billingEngine.state === 'new') {
     const fromNew = await portalBillingFromNewSource(client.id as string, client.owner_id as string);
-    return { client: profile, invoices: fromNew.invoices, billingNotice: fromNew.notice, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, exercises, packages: [], credits: [], weightLogs };
+    return { client: profile, travel: viajes, invoices: fromNew.invoices, billingNotice: fromNew.notice, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, exercises, packages: [], credits: [], weightLogs };
   }
-  return { client: profile, invoices, billingNotice: null, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, exercises, packages, credits, weightLogs };
+  return { client: profile, travel: viajes, invoices, billingNotice: null, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, exercises, packages, credits, weightLogs };
 });
 
 const clientWeightLogSchema = z.object({

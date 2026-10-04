@@ -285,3 +285,13 @@ test('bloques de la rutina (J-113): el editor los arma y edita, y el cliente los
   assert.match(app, /!bloque && exercise\.sets && setsLabel\(exercise\.sets\)/, 'en un bloque no se muestran series sueltas');
   assert.match(css, /\.bloque-cabecera/); assert.match(css, /\.routine-block-title/);
 });
+
+test('días de viaje visibles para el cliente en su portal (J-114): aviso, calendario con ✈ y leyenda; el expediente dice cuántos días', async () => {
+  const app = await leer('app.js'); const css = await leer('styles.css');
+  assert.match(app, /function renderViajePortal/); assert.match(app, /const viajeDeFecha = /);
+  assert.match(app, /Estás de viaje/); assert.match(app, /portal-col-dia \$\{clave === hoyClave \? 'hoy' : ''\} \$\{viajeDeFecha\(clave\) \? 'viaje' : ''\}/);
+  assert.match(app, /portal-tramo \$\{yaPaso \? 'pasado' : 'libre'\} \$\{viajeDeFecha\(clave\) \? 'viaje' : ''\}/);
+  assert.match(app, /Día de viaje<\/p>/); assert.match(app, /Estás de viaje este día/);
+  assert.match(app, /86400000\) \+ 1} días/);
+  assert.match(css, /\.portal-col-dia\.viaje/); assert.match(css, /\.portal-tramo\.viaje/);
+});
