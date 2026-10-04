@@ -917,3 +917,15 @@ body:has(#portal-routines.active) .portal-weight-fab{display:none}
 .public-porcentaje{display:flex;align-items:center;gap:8px;margin:14px 0 8px}.public-porcentaje input{max-width:90px}
 .notification-item.travel{border-left-color:#5aa7dc;background:#eaf4fb}
 .session-viaje-razon{color:#245d86;font-weight:600}
+
+/* Demostraciones en bucle dentro del editor de rutinas (J-110) */
+.selected-exercise .exercise-demo{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:10px;margin-top:6px}
+.exercise-demo-item{flex:1 1 220px;max-width:340px;margin:0;border-radius:12px;overflow:hidden;background:#000}
+.exercise-demo-item video{display:block;width:100%;max-height:240px;background:#000;object-fit:contain}
+.exercise-demo-item figcaption{padding:5px 9px;background:#2b2227;color:#f2e8ed;font-size:11px}
+.exercise-demo-espera,.exercise-demo-sin{grid-column:1/-1;color:#8a7a82;font-size:12px;font-style:italic}
+.exercise-demo-sin{display:block;margin-top:4px}
+
+/* La demostración ocupa su propia fila bajo el nombre (la regla de móvil mandaba todos los div a la fila 1 y tapaba el título). */
+.selected-exercise>div.exercise-demo,.selected-exercise>.exercise-demo-sin{grid-column:1/-1;grid-row:2}
+@media(max-width:650px){.selected-exercise>div.exercise-demo,.selected-exercise>.exercise-demo-sin{grid-column:1/-1;grid-row:2}.selected-exercise-dose{grid-row:3}}

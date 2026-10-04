@@ -246,3 +246,15 @@ test('clientes a crédito (J-109): la rutina cumplida se cobra como clase dada y
   assert.match(app, /Como entrena a crédito, si la cumple se cobra como clase dada/);
   assert.match(app, /A crédito y rutina cumplida/); assert.match(app, /Editar cancelación<\/b> antes de que salga su factura/);
 });
+
+test('proponer rutina desde la agenda y demostraciones en bucle dentro del editor (J-110)', async () => {
+  const app = await leer('app.js'); const css = await leer('styles.css');
+  assert.match(app, /data-proponer-rutina="\$\{session\.id\}">Proponer rutina/);
+  assert.match(app, /function proponerRutinaDesdeAgenda/); assert.match(app, /viajeDelCliente\(sesion\.clientId, sesion\.date\)/);
+  assert.match(app, /No puedo atender la clase/); assert.match(app, /El cliente no puede venir/);
+  assert.match(app, /function observarDemos/); assert.match(app, /<video muted loop autoplay playsinline controls/);
+  assert.match(app, /data-demo-ejercicio/); assert.match(app, /new IntersectionObserver/);
+  assert.match(app, /\.\.\.generada, \.\.\.contextoPropuesta/, 'regenerar con IA conserva la clase o el viaje');
+  assert.match(app, /forTravel: Boolean\(contextoPropuesta\.enlaceViajeId\)/);
+  assert.match(css, /\.exercise-demo-item video/);
+});

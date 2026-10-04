@@ -1,4 +1,4 @@
-const APP_VERSION = '280';
+const APP_VERSION = '281';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -780,7 +780,7 @@ function renderCalendar() {
         ${session.creditCharge ? '<small class="session-charge">Cancelación cobrada · crédito por sesión</small>' : session.status === 'cancelled' && session.cancellationKind === 'not_rescheduled' && session.cancelledBy === 'client' && data.clients.find(c => c.id === session.clientId)?.paymentMode === 'no_anticipado' ? '<small class="session-charge">Cancelación del cliente · sin cobro</small>' : ''}
         ${session.status === 'cancelled'
           ? `<div class="session-management"><button type="button" class="secondary" data-reactivar-sesion="${session.id}">Reactivar</button><button type="button" class="secondary" data-edit-cancellation="${session.id}">Editar cancelación</button><button type="button" class="secondary" data-purge-session="${session.id}">Quitar de la agenda</button></div>`
-          : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button><button type="button" class="secondary" data-purge-session="${session.id}">Eliminar</button>${session.routineOfferStatus === 'offered' && !session.routineOfferExpired ? `<button type="button" class="secondary" data-retirar-rutina="${session.id}">Retirar la rutina ofrecida</button>` : ''}${sessionComplianceForm(session)}</div>`}
+          : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button><button type="button" class="secondary" data-purge-session="${session.id}">Eliminar</button>${session.status === 'scheduled' && !session.routineOfferStatus && !sesionEnPausa(session) ? `<button type="button" class="secondary proponer-rutina-fila" data-proponer-rutina="${session.id}">Proponer rutina</button>` : ''}${session.routineOfferStatus === 'offered' && !session.routineOfferExpired ? `<button type="button" class="secondary" data-retirar-rutina="${session.id}">Retirar la rutina ofrecida</button>` : ''}${sessionComplianceForm(session)}</div>`}
       </details>`).join('')
     : '<p class="empty">No hay clases este día.</p>';
 }
@@ -1852,13 +1852,36 @@ function guiaDeCancelaciones() {
     </ul>`;
   openModal(caja, true);
 }
+// "Proponer rutina" directo desde la clase (J-110), sin pasar por Cancelar. En un día de viaje va directo a la rutina de viaje; si no, se pregunta por qué se propone, que es lo que
+// decide qué pasa si el cliente no la cumple.
+function proponerRutinaDesdeAgenda(sesion) {
+  if (!sesion) return;
+  const cliente = data.clients.find(item => item.id === sesion.clientId);
+  if (!cliente) return;
+  const viaje = viajeDelCliente(sesion.clientId, sesion.date);
+  if (viaje && sesion.status === 'scheduled') { prepararRutinaDeViaje(cliente, viaje); return; }
+  const esCredito = cliente.paymentMode === 'no_anticipado';
+  const caja = document.createElement('div');
+  caja.innerHTML = `<p class="eyebrow">AGENDA</p><h2>Proponer rutina</h2>
+    <p class="form-summary"><b>${escapeHtml(sesion.client)}</b><br>${sesion.date} · ${sesion.time} · ${sesion.durationMinutes} min</p>
+    <p style="color:#6f7b75">¿Por qué le propones una rutina en lugar de la clase?</p>
+    <button class="secondary wide-button" id="propuesta-eileen">No puedo atender la clase</button>
+    <p class="section-note">La clase NO se cancela. Si el cliente cumple la rutina ese día, cuenta como su clase; si no, no pierde nada y tú decides cómo cerrarla.</p>
+    <button class="secondary wide-button" id="propuesta-cliente">El cliente no puede venir</button>
+    <p class="section-note">Si cumple la rutina ese día, cuenta como su clase; si no, la clase se cancela sola (cancelación del cliente${esCredito ? '' : ' y se le descuenta una clase'}).</p>
+    ${esCredito ? `<p class="aviso-reprogramar">Como entrena a crédito, si cumple la rutina <b>se cobra como clase dada (${money.format(Number(cliente.creditSessionPrice || 25))})</b>.</p>` : ''}`;
+  openModal(caja, true);
+  caja.querySelector('#propuesta-eileen').onclick = () => ofrecerRutinaEnLugarDeClase(sesion, 'trainer');
+  caja.querySelector('#propuesta-cliente').onclick = () => ofrecerRutinaEnLugarDeClase(sesion, 'client');
+}
+
 function ofrecerRutinaEnLugarDeClase(sesion, origen = 'trainer') {
   const cliente = data.clients.find(item => item.id === sesion.clientId);
   const nombre = cliente?.name?.split(' ')[0] || 'el cliente';
   const caja = document.createElement('div');
   const resumen = `<p class="eyebrow">AGENDA</p><h2>Proponer rutina</h2><p class="form-summary"><b>${escapeHtml(sesion.client)}</b><br>${sesion.date} · ${sesion.time} · ${sesion.durationMinutes} min</p>`;
   openModal(caja, true);
-  const enviarAlEditor = propuesta => { modal.close(); newRoutine(null, false, { ...propuesta, clientId: sesion.clientId, ofertaSesionId: sesion.id, ofertaCliente: sesion.client, ofertaOrigen: origen }); };
+  const enviarAlEditor = propuesta => { modal.close(); newRoutine(null, false, { ...propuesta, clientId: sesion.clientId, ofertaSesionId: sesion.id, ofertaCliente: sesion.client, ofertaOrigen: origen, ofertaDuracion: sesion.durationMinutes }); };
   const manual = () => enviarAlEditor({ title: `Rutina para ${nombre}`, description: '', sessionsPerWeek: 1, exercises: [], rationale: '', avoided: [], descartados: [] });
   // Un clic genera la rutina: la IA solo puede elegir ejercicios del catálogo y ya conoce lesiones y rutinas recientes del cliente. El resultado se abre en el editor para revisarla.
   const generar = async () => {
@@ -2769,8 +2792,44 @@ async function exerciseVideoUploader(exercise) {
 // duplicate = true reutiliza una rutina existente como punto de partida para
 // otro cliente: copia los ejercicios pero nace sin asignar y se guarda como
 // rutina nueva, sin tocar la original.
+// ── Demostraciones en bucle (J-110) ──────────────────────────────────────────────────────────────
+// Las URLs firmadas duran 5 minutos: se piden al aparecer el ejercicio en pantalla y se reutilizan 4 minutos. Los videos se reproducen solos, en bucle y sin sonido (el navegador no deja
+// autoplay con sonido) y se pausan al salir de pantalla para no gastar datos con una rutina larga.
+const demosEnMemoria = new Map();
+async function demosDelEjercicio(exerciseId, { renovar = false } = {}) {
+  const previo = demosEnMemoria.get(exerciseId);
+  if (!renovar && previo && Date.now() - previo.at < 240_000) return previo.videos;
+  const respuesta = await api(`/api/exercises/${exerciseId}/video-urls`);
+  demosEnMemoria.set(exerciseId, { at: Date.now(), videos: respuesta.videos });
+  return respuesta.videos;
+}
+async function pintarDemos(caja, renovar = false) {
+  try {
+    const videos = await demosDelEjercicio(caja.dataset.demoEjercicio, { renovar });
+    caja.innerHTML = videos.map(video => `<figure class="exercise-demo-item"><video muted loop autoplay playsinline controls preload="metadata" src="${escapeHtml(video.videoUrl)}"></video>${videos.length > 1 ? `<figcaption>${escapeHtml(video.label || 'Demostración')}</figcaption>` : ''}</figure>`).join('');
+    caja.dataset.cargado = '1';
+    // Si la URL firmada venció con el editor abierto, se pide otra una sola vez.
+    caja.querySelectorAll('video').forEach(video => { video.addEventListener('error', () => { if (!caja.dataset.renovado) { caja.dataset.renovado = '1'; pintarDemos(caja, true); } }, { once: true }); video.play().catch(() => {}); });
+  } catch (error) { caja.textContent = 'No se pudo cargar la demostración.'; caja.dataset.cargado = ''; }
+}
+function observarDemos(contenedor) {
+  const cajas = [...contenedor.querySelectorAll('[data-demo-ejercicio]')];
+  if (!cajas.length) return null;
+  if (!('IntersectionObserver' in window)) { cajas.forEach(caja => pintarDemos(caja)); return null; }
+  const observador = new IntersectionObserver(entradas => entradas.forEach(entrada => {
+    const caja = entrada.target;
+    if (entrada.isIntersecting) {
+      if (!caja.dataset.cargado) pintarDemos(caja); else caja.querySelectorAll('video').forEach(video => video.play().catch(() => {}));
+    } else caja.querySelectorAll('video').forEach(video => video.pause());
+  }), { rootMargin: '160px' });
+  cajas.forEach(caja => observador.observe(caja));
+  return observador;
+}
+
 function newRoutine(routine = null, duplicate = false, propuesta = null) {
   const editing = Boolean(routine) && !duplicate;
+  // Si la propuesta viene de una clase (oferta en lugar de la clase) o de un viaje, ese contexto se conserva al regenerarla con IA: sin esto, el segundo "Proponer con IA" tiraba el vínculo con la clase o el viaje.
+  const contextoPropuesta = propuesta ? Object.fromEntries(['ofertaSesionId', 'ofertaCliente', 'ofertaOrigen', 'ofertaDuracion', 'enlaceViajeId', 'enlaceCliente'].filter(clave => propuesta[clave] !== undefined).map(clave => [clave, propuesta[clave]])) : {};
   const content = formFromTemplate('new-routine-template'); openModal(content, true);
   if (routine) {
     content.querySelector('h2').textContent = editing ? 'Editar rutina' : 'Reutilizar rutina';
@@ -2836,17 +2895,20 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
       const boton = evento.target.querySelector('button');
       boton.disabled = true; boton.textContent = 'Pensando…';
       try {
-        const propuesta = await api('/api/routines/suggest', { method: 'POST', body: {
+        const generada = await api('/api/routines/suggest', { method: 'POST', body: {
           description: valores.get('description'),
           clientId: valores.get('clientId') || undefined,
-          repeatMuscleGroups: Boolean(valores.get('repeat'))
+          repeatMuscleGroups: Boolean(valores.get('repeat')),
+          forClient: Boolean(contextoPropuesta.ofertaSesionId),
+          forTravel: Boolean(contextoPropuesta.enlaceViajeId),
+          durationMinutes: contextoPropuesta.ofertaDuracion || (contextoPropuesta.enlaceViajeId ? 40 : undefined)
         } });
         modal.close();
         // Se pasa como argumento y no por un evento en window: cada apertura
         // del formulario registraba un escucha que sólo se retiraba al
         // dispararse, así que los de las veces anteriores seguían vivos y la
         // nota de la propuesta salía repetida una vez por cada uno.
-        newRoutine(null, false, { ...propuesta, clientId: valores.get('clientId') || '' });
+        newRoutine(null, false, { ...generada, ...contextoPropuesta, clientId: valores.get('clientId') || '' });
       } catch (error) { toast(error.message, true); boton.disabled = false; boton.textContent = 'Proponer'; }
     });
   };
@@ -2876,7 +2938,9 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
     toast('Propuesta lista · revísala antes de guardar');
   };
 
+  let observadorDemos = null;
   const renderSelected = () => {
+    observadorDemos?.disconnect();
     selectedList.replaceChildren();
     exerciseCount.textContent = `${selectedExercises.length} ejercicio${selectedExercises.length !== 1 ? 's' : ''}`;
     if (!selectedExercises.length) {
@@ -2928,8 +2992,17 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
         dose.append(pesoLabel);
       }
       const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'exercise-remove'; remove.dataset.removeExercise = String(index); remove.setAttribute('aria-label', `Quitar ${exercise.name}`); remove.textContent = '×';
-      row.append(order, copy, dose, remove); selectedList.append(row);
+      row.append(order, copy, dose, remove);
+      // La demostración del catálogo se ve aquí mismo, en bucle y sin sonido, para revisar la rutina sin abrir ejercicio por ejercicio (J-110). Se carga al aparecer en pantalla.
+      if (enCatalogo?.hasVideo) {
+        const demo = document.createElement('div'); demo.className = 'exercise-demo'; demo.dataset.demoEjercicio = enCatalogo.id;
+        demo.innerHTML = '<span class="exercise-demo-espera">Cargando demostración…</span>'; row.append(demo);
+      } else {
+        const sin = document.createElement('small'); sin.className = 'exercise-demo-sin'; sin.textContent = enCatalogo ? 'Sin video de demostración todavía' : 'Ejercicio fuera del catálogo · sin demostración'; row.append(sin);
+      }
+      selectedList.append(row);
     });
+    observadorDemos = observarDemos(selectedList);
   };
   // Se copia explícitamente lo que la rutina necesita guardar. catalogId es lo
   // que después permite al portal encontrar el video del ejercicio.
@@ -5251,6 +5324,7 @@ document.addEventListener('click', event => {
   if (event.target.dataset.deleteInbody) deleteResource(`/api/inbody/${event.target.dataset.deleteInbody}`, '¿Eliminar esta medición InBody? El archivo original permanecerá en el expediente.', 'Medición InBody eliminada');
   if (event.target.dataset.deleteDocument) deleteResource(`/api/documents/${event.target.dataset.deleteDocument}`, '¿Eliminar este archivo? Si corresponde a un InBody, también se eliminarán sus métricas asociadas.', 'Archivo del expediente eliminado');
   if (event.target.dataset.cancelSession) cancelSessionDialog(data.sessions.find(item => item.id === event.target.dataset.cancelSession));
+  if (event.target.dataset.proponerRutina) proponerRutinaDesdeAgenda(data.sessions.find(item => item.id === event.target.dataset.proponerRutina));
   if (event.target.dataset.shareRoutine) {
     const rutina = data.routines.find(item => item.id === event.target.dataset.shareRoutine);
     const clienteRutina = data.clients.find(item => item.id === rutina?.assignedClientIds?.[0]);
