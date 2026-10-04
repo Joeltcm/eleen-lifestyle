@@ -6,7 +6,7 @@ import webpush from 'web-push';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
 import { config } from './config.js';
-import type { TransactionSql } from 'postgres';
+import type { Fragment, TransactionSql } from 'postgres';
 import { sql } from './db.js';
 import { createDownloadUrl, createUploadUrl, deleteObject, downloadObject, storageReady, uploadObject, verifyUpload } from './storage.js';
 import { extractInBodyDocument, extractInBodyImage, inbodyAnalysisReady, inbodyAnalysisSetup, prepareInBodyImage, validateExtraction, validateInBodyValues } from './inbody-analysis.js';
@@ -3213,6 +3213,7 @@ const routineSuggestionSchema = z.object({
   clientId: z.string().uuid().optional(),
   repeatMuscleGroups: z.boolean().default(false),
   forClient: z.boolean().default(false),
+  forTravel: z.boolean().default(false),
   durationMinutes: z.coerce.number().int().min(15).max(180).optional()
 });
 
@@ -3305,7 +3306,8 @@ app.post('/api/routines/suggest', { preHandler: requireStaff }, async (request, 
       historial, condiciones,
       repetirGrupos: input.repeatMuscleGroups,
       clienteNombre,
-      paraCliente: input.forClient,
+      paraCliente: input.forClient || input.forTravel,
+      paraViaje: input.forTravel,
       duracionMinutos: input.durationMinutes
     });
     return propuesta;
@@ -6923,14 +6925,32 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
       AND s.starts_at >= now() - interval '7 days'
     ORDER BY s.starts_at DESC
   `;
+  // Viajes que empiezan pronto (o ya empezaron) sin ninguna rutina enviada: sin enlace, el cliente no puede confirmar nada y Eileen tiene que decidir sus clases a mano.
+  const viajesSinRutina = await sql`
+    SELECT t.id, t.client_id, t.starts_on::text AS starts_on, t.ends_on::text AS ends_on, c.full_name
+    FROM client_travel t JOIN clients c ON c.id = t.client_id
+    WHERE c.owner_id = ${auth.sub} AND c.status = 'active'
+      AND t.starts_on <= (now() AT TIME ZONE 'America/Panama')::date + 1
+      AND COALESCE(t.ends_on, DATE '9999-12-31') >= (now() AT TIME ZONE 'America/Panama')::date
+      AND NOT EXISTS (SELECT 1 FROM routine_share_links l WHERE l.client_id = t.client_id AND l.revoked_at IS NULL AND l.expires_at > now())
+    ORDER BY t.starts_on`;
   // Rutinas que los clientes cumplieron en las últimas 24 horas (con o sin clase de por medio).
   const rutinasCumplidas = await sql`
     SELECT rc.id, rc.completion_percent, rc.duration_seconds, rc.updated_at, c.full_name, r.title
     FROM routine_completions rc JOIN clients c ON c.id = rc.client_id JOIN routines r ON r.id = rc.routine_id
-    WHERE c.owner_id = ${auth.sub} AND rc.completion_percent > 0 AND rc.marked_by_user_id = c.portal_user_id
+    WHERE c.owner_id = ${auth.sub} AND rc.completion_percent > 0 AND (rc.marked_by_user_id = c.portal_user_id OR rc.via_link)
       AND rc.updated_at >= now() - interval '24 hours'
     ORDER BY rc.updated_at DESC LIMIT 20`;
   return [
+    ...viajesSinRutina.map(viaje => {
+      const [a, m, d] = String(viaje.starts_on).split('-'); const [a2, m2, d2] = viaje.ends_on ? String(viaje.ends_on).split('-') : [];
+      return {
+        type: 'travel', clientId: viaje.client_id, travelId: viaje.id,
+        title: `${viaje.full_name} viaja${viaje.starts_on > new Date(Date.now() - 5 * 3600_000).toISOString().slice(0, 10) ? ' pronto' : ': está de viaje'}`,
+        body: `${d}-${m}-${a}${viaje.ends_on ? ` al ${d2}-${m2}-${a2}` : ' (regreso sin definir)'}. No tiene una rutina enviada: sin confirmarla, sus clases de esos días cuentan como cancelación. ¿Le preparas una?`,
+        scheduledFor: viaje.starts_on
+      };
+    }),
     ...rutinasCumplidas.map(item => ({
       type: 'routine', title: `Rutina cumplida: ${item.full_name}`,
       body: `«${item.title}»${duracionTexto(item.duration_seconds === null ? null : Number(item.duration_seconds))} · ${item.completion_percent}%`,
@@ -8066,9 +8086,271 @@ purgaIntentos.unref();
 // Mantiene creadas las sesiones de los horarios fijos. Corre cada seis horas:
 // el horizonte es de ocho semanas, así que no hay ninguna prisa, y si el
 // servicio estuvo caído un rato se pone al día en el siguiente ciclo.
-// Ofertas de rutina por cancelación DEL CLIENTE cuyo día ya pasó sin cumplirse: la clase se da por perdida (J-104). Es la misma consecuencia de "cancela el cliente y no
-// reprograma": cuenta como incumplida y consume la clase del plan; a quien entrena a crédito no se le cobra nada solo (cobrar una cancelación la decide Eileen).
-// Las ofertas por cancelación de Eileen NO vencen así: el cliente no tiene la culpa y la clase queda pendiente para que ella decida.
+// ── Viajes y rutina por enlace (J-107) ──────────────────────────────────────────────────────────────
+// Un viaje es solo un MARCADOR: no pausa el plan ni mueve el corte (si viaja, la mensualidad se cobra igual). Lo que el cliente puede hacer para que su clase de un día de viaje cuente es
+// confirmar la rutina que Eileen le manda por un enlace temporal; sin confirmarla ese día equivale a una cancelación suya (ver darPorPerdidasClasesDeViajeSinRutina).
+const viajeSchema = z.object({
+  startsOn: z.string().date(),
+  endsOn: z.string().date().nullable().optional(),
+  destination: z.string().trim().max(80).optional(),
+  note: z.string().trim().max(300).optional()
+}).refine(valor => !valor.endsOn || valor.endsOn >= valor.startsOn, { message: 'El regreso no puede ser antes de la salida' });
+
+const viajeSelect = (where: Fragment) => sql`
+  SELECT t.id, t.client_id, t.starts_on::text AS starts_on, t.ends_on::text AS ends_on, t.destination, t.note, c.full_name
+  FROM client_travel t JOIN clients c ON c.id = t.client_id ${where} ORDER BY t.starts_on DESC`;
+
+app.get('/api/travel', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  return viajeSelect(sql`WHERE c.owner_id = ${auth.sub} AND COALESCE(t.ends_on, DATE '9999-12-31') >= (now() AT TIME ZONE 'America/Panama')::date - 400`);
+});
+app.get('/api/clients/:id/travel', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [cliente] = await sql`SELECT id FROM clients WHERE id = ${id} AND owner_id = ${auth.sub}`;
+  if (!cliente) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  return viajeSelect(sql`WHERE t.client_id = ${id}`);
+});
+async function viajeTraslapado(clientId: string, startsOn: string, endsOn: string | null | undefined, exceptId: string | null) {
+  const [fila] = await sql`
+    SELECT t.id FROM client_travel t
+    WHERE t.client_id = ${clientId} AND (${exceptId}::uuid IS NULL OR t.id <> ${exceptId}::uuid)
+      AND t.starts_on <= COALESCE(${endsOn ?? null}::date, DATE '9999-12-31') AND COALESCE(t.ends_on, DATE '9999-12-31') >= ${startsOn}::date LIMIT 1`;
+  return Boolean(fila);
+}
+app.post('/api/clients/:id/travel', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = viajeSchema.parse(request.body);
+  const [cliente] = await sql`SELECT id FROM clients WHERE id = ${id} AND owner_id = ${auth.sub}`;
+  if (!cliente) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  if (await viajeTraslapado(id, input.startsOn, input.endsOn, null)) return reply.code(409).send({ error: 'Ya tiene un viaje marcado en esas fechas.' });
+  const [viaje] = await sql`
+    INSERT INTO client_travel (client_id, starts_on, ends_on, destination, note, created_by)
+    VALUES (${id}, ${input.startsOn}, ${input.endsOn ?? null}, ${input.destination || null}, ${input.note || null}, ${auth.sub})
+    RETURNING id, client_id, starts_on::text AS starts_on, ends_on::text AS ends_on, destination, note`;
+  return reply.code(201).send(viaje);
+});
+app.patch('/api/travel/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = viajeSchema.parse(request.body);
+  const [actual] = await sql`SELECT t.id, t.client_id FROM client_travel t JOIN clients c ON c.id = t.client_id WHERE t.id = ${id} AND c.owner_id = ${auth.sub}`;
+  if (!actual) return reply.code(404).send({ error: 'Viaje no encontrado' });
+  if (await viajeTraslapado(String(actual.client_id), input.startsOn, input.endsOn, id)) return reply.code(409).send({ error: 'Ya tiene otro viaje marcado en esas fechas.' });
+  const [viaje] = await sql`
+    UPDATE client_travel SET starts_on = ${input.startsOn}, ends_on = ${input.endsOn ?? null}, destination = ${input.destination || null}, note = ${input.note || null}, updated_at = now()
+    WHERE id = ${id} RETURNING id, client_id, starts_on::text AS starts_on, ends_on::text AS ends_on, destination, note`;
+  return viaje;
+});
+app.delete('/api/travel/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [borrado] = await sql`DELETE FROM client_travel t USING clients c WHERE t.id = ${id} AND c.id = t.client_id AND c.owner_id = ${auth.sub} RETURNING t.id`;
+  if (!borrado) return reply.code(404).send({ error: 'Viaje no encontrado' });
+  return { deleted: true };
+});
+
+// Enlaces temporales para abrir una rutina sin cuenta. El token se muestra una sola vez; en la base solo vive su hash.
+const enlaceSchema = z.object({
+  clientId: z.string().uuid(),
+  hours: z.coerce.number().int().min(1).max(24 * 90).optional(),
+  until: z.string().date().optional(),
+  travelId: z.string().uuid().optional()
+}).refine(valor => Boolean(valor.hours) !== Boolean(valor.until), { message: 'Indica la vigencia en horas o hasta una fecha' });
+
+app.post('/api/routines/:id/share-links', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = enlaceSchema.parse(request.body);
+  const [rutina] = await sql`
+    SELECT r.id, r.title FROM routines r JOIN routine_assignments ra ON ra.routine_id = r.id AND ra.active = true AND ra.client_id = ${input.clientId}
+    WHERE r.id = ${id} AND r.owner_id = ${auth.sub}`;
+  if (!rutina) return reply.code(409).send({ error: 'La rutina debe estar asignada a ese cliente.' });
+  if (input.travelId) {
+    const [viaje] = await sql`SELECT t.id FROM client_travel t JOIN clients c ON c.id = t.client_id WHERE t.id = ${input.travelId} AND t.client_id = ${input.clientId} AND c.owner_id = ${auth.sub}`;
+    if (!viaje) return reply.code(404).send({ error: 'Viaje no encontrado' });
+  }
+  // "Hasta una fecha" vence a la medianoche de Panamá al terminar ese día.
+  const [vence] = input.hours
+    ? await sql`SELECT now() + (${input.hours}::int * interval '1 hour') AS expires_at`
+    : await sql`SELECT ((${input.until!}::date + 1)::timestamp AT TIME ZONE 'America/Panama') AS expires_at`;
+  const expiresAt = new Date(vence.expires_at as string);
+  if (expiresAt.getTime() < Date.now() + 3600_000) return reply.code(400).send({ error: 'La vigencia debe ser de al menos una hora.' });
+  if (expiresAt.getTime() > Date.now() + 90 * 86400_000) return reply.code(400).send({ error: 'La vigencia no puede pasar de 90 días.' });
+  const token = randomBytes(32).toString('base64url');
+  const [enlace] = await sql`
+    INSERT INTO routine_share_links (owner_id, client_id, routine_id, travel_id, token_hash, expires_at, created_by)
+    VALUES (${auth.sub}, ${input.clientId}, ${id}, ${input.travelId ?? null}, ${hashToken(token)}, ${expiresAt}, ${auth.sub})
+    RETURNING id, expires_at`;
+  return reply.code(201).send({ id: enlace.id, url: new URL(`/#rutina=${token}`, config.APP_URL).toString(), expiresAt: enlace.expires_at, routineTitle: rutina.title });
+});
+app.get('/api/clients/:id/share-links', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [cliente] = await sql`SELECT id FROM clients WHERE id = ${id} AND owner_id = ${auth.sub}`;
+  if (!cliente) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  return sql`
+    SELECT l.id, l.routine_id, r.title AS routine_title, l.travel_id, l.expires_at, l.revoked_at, l.opens, l.last_opened_at, l.created_at,
+      (l.revoked_at IS NULL AND l.expires_at > now()) AS active
+    FROM routine_share_links l JOIN routines r ON r.id = l.routine_id
+    WHERE l.client_id = ${id} ORDER BY l.created_at DESC LIMIT 20`;
+});
+app.delete('/api/share-links/:id', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [enlace] = await sql`UPDATE routine_share_links SET revoked_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} AND revoked_at IS NULL RETURNING id`;
+  if (!enlace) return reply.code(404).send({ error: 'Enlace no encontrado o ya revocado' });
+  return { revoked: true };
+});
+
+// Páginas públicas (sin sesión). Un límite sencillo por IP frena el sondeo de tokens; el token es de 256 bits, así que adivinarlo no es viable de todos modos.
+const visitasPublicas = new Map<string, { n: number; desde: number }>();
+function demasiadasVisitas(request: { ip: string }) {
+  const ahora = Date.now(); const previo = visitasPublicas.get(request.ip);
+  if (!previo || ahora - previo.desde > 60_000) { visitasPublicas.set(request.ip, { n: 1, desde: ahora }); return false; }
+  previo.n += 1;
+  if (visitasPublicas.size > 5000) visitasPublicas.clear();
+  return previo.n > 90;
+}
+async function enlaceDeRutina(token: string) {
+  if (!/^[A-Za-z0-9_-]{30,80}$/.test(token)) return { estado: 'desconocido' as const };
+  const [fila] = await sql`
+    SELECT l.*, r.title, r.description, r.exercises, c.full_name, c.owner_id AS client_owner_id, c.portal_user_id, c.status AS client_status
+    FROM routine_share_links l JOIN routines r ON r.id = l.routine_id JOIN clients c ON c.id = l.client_id
+    WHERE l.token_hash = ${hashToken(token)}`;
+  if (!fila) return { estado: 'desconocido' as const };
+  if (fila.revoked_at) return { estado: 'revocado' as const };
+  if (new Date(fila.expires_at as string).getTime() <= Date.now()) return { estado: 'expirado' as const };
+  return { estado: 'ok' as const, fila };
+}
+const mensajeEnlace = { desconocido: 'Este enlace no existe.', revocado: 'Eileen retiró este enlace.', expirado: 'Este enlace ya venció. Pídele uno nuevo a Eileen.' };
+
+// Ejercicios del catálogo que aparecen en la rutina (por id o por el slug antiguo), con la marca de si tienen video.
+async function ejerciciosDeLaRutina(ownerId: string, ejercicios: unknown) {
+  const lista = Array.isArray(ejercicios) ? ejercicios as Array<{ catalogId?: string }> : [];
+  const ids = [...new Set(lista.map(item => String(item?.catalogId ?? '')).filter(Boolean))];
+  if (!ids.length) return [];
+  return sql`
+    SELECT e.id, e.slug, e.name, e.english, e.section, e.level, e.machine, e.free_weight, e.cues,
+      (EXISTS (SELECT 1 FROM exercise_videos ev WHERE ev.exercise_id = e.id) OR e.video_object_key IS NOT NULL) AS has_video
+    FROM exercises e WHERE e.owner_id = ${ownerId} AND NOT e.archived AND (e.id::text = ANY(${ids}) OR e.slug = ANY(${ids}))`;
+}
+
+app.get('/api/public/routine/:token', async (request, reply) => {
+  if (demasiadasVisitas(request)) return reply.code(429).send({ error: 'Demasiados intentos. Espera un minuto.' });
+  const encontrado = await enlaceDeRutina(String((request.params as { token: string }).token));
+  if (encontrado.estado !== 'ok') return reply.code(encontrado.estado === 'desconocido' ? 404 : 410).send({ error: mensajeEnlace[encontrado.estado] });
+  const fila = encontrado.fila;
+  await sql`UPDATE routine_share_links SET opens = opens + 1, last_opened_at = now() WHERE id = ${fila.id} AND (last_opened_at IS NULL OR last_opened_at < now() - interval '1 minute')`;
+  const [hoyFila] = await sql`SELECT (now() AT TIME ZONE 'America/Panama')::date::text AS hoy`;
+  const hoy = String(hoyFila.hoy);
+  const [hecha] = await sql`SELECT 1 AS ok FROM routine_completions WHERE client_id = ${fila.client_id} AND routine_id = ${fila.routine_id} AND completed_on = ${hoy}::date AND completion_percent > 0`;
+  // Las clases de su viaje que siguen por delante (o la de hoy): le dicen qué cuenta y cuándo.
+  const clases = await sql`
+    SELECT to_char(s.starts_at AT TIME ZONE 'America/Panama', 'YYYY-MM-DD') AS dia, to_char(s.starts_at AT TIME ZONE 'America/Panama', 'HH24:MI') AS hora, s.status
+    FROM sessions s
+    WHERE s.client_id = ${fila.client_id} AND s.status IN ('scheduled', 'completed')
+      AND (s.starts_at AT TIME ZONE 'America/Panama')::date BETWEEN ${hoy}::date AND ${hoy}::date + 21
+      AND EXISTS (SELECT 1 FROM client_travel t WHERE t.client_id = s.client_id
+        AND (s.starts_at AT TIME ZONE 'America/Panama')::date BETWEEN t.starts_on AND COALESCE(t.ends_on, DATE '9999-12-31'))
+    ORDER BY s.starts_at LIMIT 12`;
+  return {
+    clientFirstName: String(fila.full_name).trim().split(/\s+/)[0],
+    expiresAt: fila.expires_at, today: hoy, completedToday: Boolean(hecha),
+    routine: { title: fila.title, description: fila.description, exercises: fila.exercises },
+    exercises: await ejerciciosDeLaRutina(String(fila.owner_id), fila.exercises),
+    classes: clases
+  };
+});
+
+app.get('/api/public/routine/:token/exercises/:exerciseId/video-urls', async (request, reply) => {
+  if (demasiadasVisitas(request)) return reply.code(429).send({ error: 'Demasiados intentos. Espera un minuto.' });
+  if (!storageReady) return reply.code(503).send({ error: 'El almacenamiento de video aún no está configurado' });
+  const params = request.params as { token: string; exerciseId: string };
+  const encontrado = await enlaceDeRutina(params.token);
+  if (encontrado.estado !== 'ok') return reply.code(encontrado.estado === 'desconocido' ? 404 : 410).send({ error: mensajeEnlace[encontrado.estado] });
+  const ejercicioId = z.string().uuid().parse(params.exerciseId);
+  // Solo los ejercicios de ESTA rutina: el enlace no da acceso al resto del catálogo.
+  const permitidos = await ejerciciosDeLaRutina(String(encontrado.fila.owner_id), encontrado.fila.exercises);
+  if (!permitidos.some(item => item.id === ejercicioId)) return reply.code(404).send({ error: 'Ejercicio no encontrado en esta rutina' });
+  const [ejercicio] = await sql`SELECT id, video_object_key, video_content_type, video_size_bytes, video_duration_seconds, video_uploaded_at FROM exercises WHERE id = ${ejercicioId}`;
+  const variantes = await sql`SELECT id, label, content_type, size_bytes, duration_seconds, uploaded_at, object_key FROM exercise_videos WHERE exercise_id = ${ejercicioId} ORDER BY sort_order, created_at`;
+  const filas = variantes.length ? variantes : ejercicio?.video_object_key
+    ? [{ id: null, label: 'Demostración', content_type: ejercicio.video_content_type, size_bytes: ejercicio.video_size_bytes, duration_seconds: ejercicio.video_duration_seconds, uploaded_at: ejercicio.video_uploaded_at, object_key: ejercicio.video_object_key }] : [];
+  if (!filas.length) return reply.code(404).send({ error: 'Este ejercicio todavía no tiene video' });
+  return {
+    exerciseId: ejercicioId,
+    videos: await Promise.all(filas.map(async video => ({
+      id: video.id, label: video.label, contentType: video.content_type, sizeBytes: video.size_bytes, durationSeconds: video.duration_seconds, uploadedAt: video.uploaded_at,
+      videoUrl: await createDownloadUrl(video.object_key as string)
+    }))),
+    expiresInSeconds: 300
+  };
+});
+
+app.post('/api/public/routine/:token/complete', async (request, reply) => {
+  if (demasiadasVisitas(request)) return reply.code(429).send({ error: 'Demasiados intentos. Espera un minuto.' });
+  const encontrado = await enlaceDeRutina(String((request.params as { token: string }).token));
+  if (encontrado.estado !== 'ok') return reply.code(encontrado.estado === 'desconocido' ? 404 : 410).send({ error: mensajeEnlace[encontrado.estado] });
+  const fila = encontrado.fila;
+  const input = z.object({ completionPercent: z.coerce.number().int().min(1).max(100).default(100), durationSeconds: z.coerce.number().int().min(1).max(21600).optional() }).parse(request.body ?? {});
+  const [hoyFila] = await sql`SELECT (now() AT TIME ZONE 'America/Panama')::date::text AS hoy`;
+  const hoy = String(hoyFila.hoy);
+  // Una confirmación por rutina y día: la segunda del mismo día solo actualiza el registro y no cierra otra clase.
+  const [registro] = await sql`
+    INSERT INTO routine_completions (routine_id, client_id, completed_on, completion_percent, marked_by_user_id, duration_seconds, via_link)
+    VALUES (${fila.routine_id}, ${fila.client_id}, ${hoy}::date, ${input.completionPercent}, NULL, ${input.durationSeconds ?? null}, true)
+    ON CONFLICT (routine_id, client_id, completed_on) DO UPDATE SET completion_percent = EXCLUDED.completion_percent, via_link = true,
+      duration_seconds = COALESCE(EXCLUDED.duration_seconds, routine_completions.duration_seconds), updated_at = now()
+    RETURNING (xmax = 0) AS nueva`;
+  // En un día de viaje, confirmar la rutina cuenta como su clase de ESE día (J-107). Solo ese día: las clases de días anteriores ya se resolvieron.
+  let claseCerrada: Record<string, unknown> | null = null;
+  if (registro.nueva) {
+    const [clase] = await sql`
+      SELECT s.id FROM sessions s
+      WHERE s.client_id = ${fila.client_id} AND s.status = 'scheduled' AND NOT COALESCE(s.paused_hold, false)
+        AND (s.starts_at AT TIME ZONE 'America/Panama')::date = ${hoy}::date
+        AND EXISTS (SELECT 1 FROM client_travel t WHERE t.client_id = s.client_id AND ${hoy}::date BETWEEN t.starts_on AND COALESCE(t.ends_on, DATE '9999-12-31'))
+      ORDER BY s.starts_at LIMIT 1`;
+    if (clase) {
+      try { claseCerrada = await recordSessionCompliance(String(clase.id), String(fila.owner_id), String(fila.portal_user_id ?? fila.owner_id), 'completed', input.completionPercent, { permitirAnticipada: true }); }
+      catch (error) { app.log.warn({ err: error, sessionId: clase.id }, 'La rutina por enlace se cumplió pero la clase no pudo marcarse como realizada'); }
+    }
+  }
+  await avisarRutinaCumplida({ id: fila.client_id, owner_id: fila.owner_id, full_name: fila.full_name }, String(fila.title), input.completionPercent, input.durationSeconds ?? null, Boolean(claseCerrada));
+  return { completed: true, sessionCompleted: Boolean(claseCerrada) };
+});
+
+// Dar por perdida una clase programada (J-104/J-107): es la consecuencia de "cancela el cliente y no reprograma": cuenta como incumplida y consume la clase del plan; a quien entrena
+// a crédito no se le cobra nada solo (cobrar una cancelación la decide Eileen). Se usa para (a) la rutina ofrecida por cancelación del cliente que no se cumplió ese día y
+// (b) la clase de un día de viaje sin rutina confirmada. Devuelve true si la clase seguía programada y se cerró.
+async function cancelarComoPerdidaPorElCliente(sessionId: string, despues?: (transaction: typeof sql) => Promise<void>) {
+  return sql.begin(async transaction => {
+    const [actual] = await transaction`
+      SELECT s.*, c.payment_mode FROM sessions s JOIN clients c ON c.id = s.client_id
+      WHERE s.id = ${sessionId} AND s.status = 'scheduled' FOR UPDATE`;
+    if (!actual) return false;
+    const esCredito = actual.payment_mode === 'no_anticipado';
+    await transaction`
+      UPDATE sessions SET status = 'cancelled', cancellation_kind = 'not_rescheduled', cancelled_by = 'client',
+        cancellation_resolution = ${esCredito ? 'none' : 'debit'}, credit_charge = false, updated_at = now()
+      WHERE id = ${sessionId}`;
+    if (!esCredito && !actual.package_debited) {
+      const pack = await seleccionarSaldoParaSesion(transaction, actual.client_id as string, actual.starts_at as Date | string);
+      if (pack) {
+        const siguiente = Number(pack.used_sessions) + 1;
+        await transaction`UPDATE session_packages SET used_sessions = ${siguiente}, status = CASE WHEN ${siguiente} >= total_sessions THEN 'exhausted' ELSE 'active' END WHERE id = ${pack.id}`;
+        await transaction`UPDATE sessions SET package_id = ${pack.id}, package_debited = true, debited_group_id = ${actual.client_id}, updated_at = now() WHERE id = ${sessionId}`;
+      }
+    }
+    if (despues) await despues(transaction as unknown as typeof sql);
+    return true;
+  });
+}
+
+// Ofertas de rutina por cancelación DEL CLIENTE cuyo día ya pasó sin cumplirse: la clase se da por perdida. Las ofertas por cancelación de Eileen NO vencen así: el cliente no tiene
+// la culpa y la clase queda pendiente para que ella decida.
 async function darPorPerdidasClasesConRutinaVencida(ownerId?: string) {
   const vencidas = await sql`
     SELECT o.id AS offer_id, o.session_id
@@ -8079,37 +8361,56 @@ async function darPorPerdidasClasesConRutinaVencida(ownerId?: string) {
   let perdidas = 0;
   for (const fila of vencidas) {
     try {
-      await sql.begin(async transaction => {
-        const [actual] = await transaction`
-          SELECT s.*, c.payment_mode FROM sessions s JOIN clients c ON c.id = s.client_id
-          WHERE s.id = ${fila.session_id} AND s.status = 'scheduled' FOR UPDATE`;
-        if (!actual) return;
-        const esCredito = actual.payment_mode === 'no_anticipado';
-        await transaction`
-          UPDATE sessions SET status = 'cancelled', cancellation_kind = 'not_rescheduled', cancelled_by = 'client',
-            cancellation_resolution = ${esCredito ? 'none' : 'debit'}, credit_charge = false, updated_at = now()
-          WHERE id = ${fila.session_id}`;
-        if (!esCredito && !actual.package_debited) {
-          const pack = await seleccionarSaldoParaSesion(transaction, actual.client_id as string, actual.starts_at as Date | string);
-          if (pack) {
-            const siguiente = Number(pack.used_sessions) + 1;
-            await transaction`UPDATE session_packages SET used_sessions = ${siguiente}, status = CASE WHEN ${siguiente} >= total_sessions THEN 'exhausted' ELSE 'active' END WHERE id = ${pack.id}`;
-            await transaction`UPDATE sessions SET package_id = ${pack.id}, package_debited = true, debited_group_id = ${actual.client_id}, updated_at = now() WHERE id = ${fila.session_id}`;
-          }
-        }
+      const cerrada = await cancelarComoPerdidaPorElCliente(String(fila.session_id), async transaction => {
         await transaction`UPDATE session_routine_offers SET status = 'expired' WHERE id = ${fila.offer_id}`;
       });
-      perdidas += 1;
+      if (cerrada) perdidas += 1;
     } catch (error) { app.log.warn({ err: error, sessionId: fila.session_id }, 'No se pudo dar por perdida una clase con rutina vencida'); }
   }
   return perdidas;
 }
+
+// Clases de un día de VIAJE sin rutina confirmada ese día: equivalen a una cancelación del cliente (J-107). El viaje no pausa el plan ni el cobro; lo que el cliente puede hacer para que la clase
+// cuente es confirmar la rutina que Eileen le envió por enlace. Dos salvaguardas: (1) solo si ese día había un enlace vigente (si Eileen nunca le mandó una rutina, el cliente no tenía cómo confirmar:
+// la clase queda pendiente y ella decide); (2) nunca hacia atrás: solo clases de días desde que se registró el viaje.
+async function darPorPerdidasClasesDeViajeSinRutina(ownerId?: string) {
+  const candidatas = await sql`
+    SELECT DISTINCT s.id
+    FROM sessions s
+    JOIN clients c ON c.id = s.client_id
+    JOIN client_travel t ON t.client_id = s.client_id
+      AND (s.starts_at AT TIME ZONE 'America/Panama')::date BETWEEN t.starts_on AND COALESCE(t.ends_on, DATE '9999-12-31')
+      AND (s.starts_at AT TIME ZONE 'America/Panama')::date >= (t.created_at AT TIME ZONE 'America/Panama')::date
+    WHERE s.status = 'scheduled' AND NOT COALESCE(s.paused_hold, false) AND c.status = 'active'
+      AND (s.starts_at AT TIME ZONE 'America/Panama')::date < (now() AT TIME ZONE 'America/Panama')::date
+      AND (${ownerId ?? null}::uuid IS NULL OR c.owner_id = ${ownerId ?? null}::uuid)
+      AND EXISTS (
+        SELECT 1 FROM routine_share_links l
+        WHERE l.client_id = s.client_id
+          AND (l.created_at AT TIME ZONE 'America/Panama')::date <= (s.starts_at AT TIME ZONE 'America/Panama')::date
+          AND (l.expires_at AT TIME ZONE 'America/Panama')::date >= (s.starts_at AT TIME ZONE 'America/Panama')::date
+          AND (l.revoked_at IS NULL OR (l.revoked_at AT TIME ZONE 'America/Panama')::date > (s.starts_at AT TIME ZONE 'America/Panama')::date))
+      AND NOT EXISTS (
+        SELECT 1 FROM routine_completions rc
+        WHERE rc.client_id = s.client_id AND rc.via_link AND rc.completion_percent > 0
+          AND rc.completed_on = (s.starts_at AT TIME ZONE 'America/Panama')::date)`;
+  let perdidas = 0;
+  for (const fila of candidatas) {
+    try { if (await cancelarComoPerdidaPorElCliente(String(fila.id))) perdidas += 1; }
+    catch (error) { app.log.warn({ err: error, sessionId: fila.id }, 'No se pudo dar por perdida una clase de viaje sin rutina'); }
+  }
+  return perdidas;
+}
+async function vigilarClasesSinCumplir(ownerId?: string) {
+  const [rutinaVencida, viaje] = await Promise.all([darPorPerdidasClasesConRutinaVencida(ownerId), darPorPerdidasClasesDeViajeSinRutina(ownerId)]);
+  return { perdidas: rutinaVencida + viaje, porRutinaVencida: rutinaVencida, porViaje: viaje };
+}
 app.post('/api/maintenance/vencer-ofertas-rutina', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
-  return { perdidas: await darPorPerdidasClasesConRutinaVencida(auth.sub) };
+  return vigilarClasesSinCumplir(auth.sub);
 });
-const primeraVigilanciaRutinas = setTimeout(() => darPorPerdidasClasesConRutinaVencida().catch(error => app.log.error(error)), 30_000);
-const vigilanciaRutinas = setInterval(() => darPorPerdidasClasesConRutinaVencida().catch(error => app.log.error(error)), 15 * 60_000);
+const primeraVigilanciaRutinas = setTimeout(() => vigilarClasesSinCumplir().catch(error => app.log.error(error)), 30_000);
+const vigilanciaRutinas = setInterval(() => vigilarClasesSinCumplir().catch(error => app.log.error(error)), 15 * 60_000);
 primeraVigilanciaRutinas.unref();
 vigilanciaRutinas.unref();
 const primeraExtension = setTimeout(() => extenderRecurrencias().catch(error => app.log.error(error)), 20_000);

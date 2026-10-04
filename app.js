@@ -1,4 +1,4 @@
-const APP_VERSION = '277';
+const APP_VERSION = '278';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -30,7 +30,7 @@ if (authToken && !localStorage.getItem(authKey)) {
   localStorage.removeItem(legacyAuthKey);
 }
 let currentUser = null;
-let data = { clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, notifications: [], googleCalendar: { configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } } };
+let data = { travel: [], clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, notifications: [], googleCalendar: { configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } } };
 let portalData = null;
 let portalPeriodMode = 'month';
 let portalPeriodMonth = dateKey(today).slice(0, 7);
@@ -260,7 +260,7 @@ async function refreshGoogleCalendarState() {
   data.googleCalendar = await api('/api/integrations/google-calendar/status').catch(() => ({ configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } }));
 }
 async function loadData() {
-  const [clients, invoices, packages, sessions, routines, plans, compliance, notifications, googleCalendar, catalog, allInbody] = await Promise.all([
+  const [clients, invoices, packages, sessions, routines, plans, compliance, notifications, googleCalendar, catalog, allInbody, travel] = await Promise.all([
     api('/api/clients'), api('/api/invoices'), api('/api/packages'), api('/api/sessions'), api('/api/routines'),
     api('/api/plans'),
     api(`/api/compliance/summary?period=${compliancePeriod}`).catch(() => ({ compliancePercent: 0, activities: 0, clients: [] })),
@@ -269,8 +269,10 @@ async function loadData() {
     // El catálogo iba en un segundo viaje, después de esperar a los otros
     // nueve: un viaje de ida y vuelta entero por nada.
     api('/api/exercises').catch(() => null),
-    api('/api/inbody').catch(() => [])
+    api('/api/inbody').catch(() => []),
+    api('/api/travel').catch(() => [])
   ]);
+  data.travel = Array.isArray(travel) ? travel : [];
   exerciseCatalog = catalog ? catalog.map(exercise => ({
     id: exercise.id, slug: exercise.slug, name: exercise.name, english: exercise.english || '',
     section: exercise.section, pattern: exercise.pattern || '', level: exercise.level,
@@ -490,10 +492,13 @@ const sessionsThisWeek = () => { const start = mondayFor(today); const end = new
 // sesiones aún por delante: una clase ya dada conserva su "Realizada".
 const sesionEnPausa = session => session.status === 'scheduled'
   && (session.pausedHold || (data.clients || []).some(c => c.id === session.clientId && c.statusRaw === 'paused'));
-const sessionStateLabel = session => sesionEnPausa(session) ? 'Reservado (En Pausa)' : session.status === 'completed' ? 'Realizada' : session.status === 'no_show' ? 'No asistió' : session.status === 'cancelled' ? 'Cancelada' : 'Programada';
+// Cliente de viaje (J-107): el viaje no pausa el plan; sus clases de esos días salen en azul con ✈ y piden la rutina confirmada ese día.
+const viajeDelCliente = (clientId, fecha) => (data.travel || []).find(item => item.client_id === clientId && item.starts_on <= fecha && (!item.ends_on || item.ends_on >= fecha));
+const sesionDeViaje = session => session.status === 'scheduled' && !sesionEnPausa(session) && Boolean(viajeDelCliente(session.clientId, session.date));
+const sessionStateLabel = session => sesionEnPausa(session) ? 'Reservado (En Pausa)' : sesionDeViaje(session) ? '✈ De viaje' : session.status === 'completed' ? 'Realizada' : session.status === 'no_show' ? 'No asistió' : session.status === 'cancelled' ? 'Cancelada' : 'Programada';
 // La clase visual: una sesión congelada por pausa manda sobre su status, para
 // que no tome prestado el verde de "programada" en el calendario.
-const estadoSesion = session => sesionEnPausa(session) ? 'pausa' : session.status;
+const estadoSesion = session => sesionEnPausa(session) ? 'pausa' : sesionDeViaje(session) ? 'viaje' : session.status;
 // El resultado se elige, no se deduce de una casilla. Con la casilla, quitar
 // una marca puesta por error dejaba la sesión como incumplida —y le bajaba el
 // cumplimiento al cliente por una clase que ni siquiera había llegado—. Los
@@ -563,7 +568,7 @@ function renderClients(filter = '') {
       : client.billingModel === 'single'
       ? `<span class="commercial-label single-label">Sesión suelta</span><b>${escapeHtml(client.planName || 'Sesiones individuales')} · ${money.format(client.plan)}</b><small>Por sesión, sin corte mensual</small>`
       : `<span class="commercial-label">Mensualidad</span><b>${escapeHtml(client.planName || 'Mensualidad')} · ${money.format(client.plan)}</b><small>${client.catalogPlan != null && Math.abs(client.plan - client.catalogPlan) > 0.009 ? `Precio propio · catálogo ${money.format(client.catalogPlan)} · ` : ''}${saldoDelMes(client)}Corte día ${client.cutoffDay}</small>`;
-    return `<article class="client-card"><header><span class="initials">${escapeHtml(initials(client.name))}</span><div><h3>${escapeHtml(client.name)}</h3><small>${escapeHtml(client.goal)}</small></div><span class="status estado-${client.statusRaw}">${client.status}</span></header><p>${client.inbody ? `Último InBody: ${client.inbody.date}` : 'Aún no se ha cargado un InBody.'}${client.portalActive ? ' · Portal activo' : ''}</p><div class="commercial-summary">${commercial}</div>${alertaCredito}${movimientosDelCiclo(client)}${data.packages.some(item => item.clientId === client.id && item.status === 'confirmed' && item.kind === 'makeup' && remainingSessions(item) > 0) ? `<button class="secondary wide-button" data-colocar-reposicion="${client.id}" style="margin-top:9px">Colocar reposición</button>` : ''}<div class="mini-data">${client.inbody ? `<div><b>${client.inbody.weight} kg</b><span>Peso</span></div><div><b>${client.inbody.smm} kg</b><span>Músculo</span></div><div><b>${client.inbody.pbf}%</b><span>Grasa</span></div>` : `<div><b>—</b><span>Evaluación pendiente</span></div>`}</div><div class="client-actions"><button class="secondary" data-client="${client.id}">Ver expediente</button><button class="secondary" data-edit-client="${client.id}">Editar</button><button class="secondary" data-inbody="${client.id}">+ InBody</button></div></article>`;
+    return `<article class="client-card"><header><span class="initials">${escapeHtml(initials(client.name))}</span><div><h3>${escapeHtml(client.name)}</h3><small>${escapeHtml(client.goal)}</small></div><span class="status estado-${client.statusRaw}">${client.status}</span></header><p>${client.inbody ? `Último InBody: ${client.inbody.date}` : 'Aún no se ha cargado un InBody.'}${client.portalActive ? ' · Portal activo' : ''}</p>${etiquetaViaje(client.id)}<div class="commercial-summary">${commercial}</div>${alertaCredito}${movimientosDelCiclo(client)}${data.packages.some(item => item.clientId === client.id && item.status === 'confirmed' && item.kind === 'makeup' && remainingSessions(item) > 0) ? `<button class="secondary wide-button" data-colocar-reposicion="${client.id}" style="margin-top:9px">Colocar reposición</button>` : ''}<div class="mini-data">${client.inbody ? `<div><b>${client.inbody.weight} kg</b><span>Peso</span></div><div><b>${client.inbody.smm} kg</b><span>Músculo</span></div><div><b>${client.inbody.pbf}%</b><span>Grasa</span></div>` : `<div><b>—</b><span>Evaluación pendiente</span></div>`}</div><div class="client-actions"><button class="secondary" data-client="${client.id}">Ver expediente</button><button class="secondary" data-edit-client="${client.id}">Editar</button><button class="secondary" data-inbody="${client.id}">+ InBody</button></div></article>`;
   };
 
   const grupos = ESTADOS_CLIENTE
@@ -702,7 +707,7 @@ function renderCalendar() {
     grid.innerHTML = names.map((name, index) => {
       const date = addDays(range.start, index); const key = dateKey(date);
       const sessions = visibleSessions.filter(session => session.date === key);
-      return `<button type="button" class="day-col ${key === dateKey(today) ? 'today' : ''} ${key === dateKey(calendarCursor) ? 'selected' : ''}" data-calendar-date="${key}"><span class="day-name">${name}</span><span class="day-num">${date.getDate()}</span>${sessions.map(session => `<span class="session-chip ${estadoSesion(session)} ${sesionAMover === session.id ? 'moviendo' : ''}" data-mover-sesion="${session.id}" draggable="${session.status === 'scheduled' && !sesionEnPausa(session)}"><b>${session.time}</b> ${sesionEnPausa(session) ? '⏸ ' : ''}${session.client.split(' ')[0]}</span>`).join('')}</button>`;
+      return `<button type="button" class="day-col ${key === dateKey(today) ? 'today' : ''} ${key === dateKey(calendarCursor) ? 'selected' : ''}" data-calendar-date="${key}"><span class="day-name">${name}</span><span class="day-num">${date.getDate()}</span>${sessions.map(session => `<span class="session-chip ${estadoSesion(session)} ${sesionAMover === session.id ? 'moviendo' : ''}" data-mover-sesion="${session.id}" draggable="${session.status === 'scheduled' && !sesionEnPausa(session)}"><b>${session.time}</b> ${sesionEnPausa(session) ? '⏸ ' : ''}${sesionDeViaje(session) ? '✈ ' : ''}${session.client.split(' ')[0]}</span>`).join('')}</button>`;
     }).join('');
     requestAnimationFrame(() => {
       const selected = grid.querySelector('.selected');
@@ -718,7 +723,7 @@ function renderCalendar() {
     grid.innerHTML = `${names.map(name => `<span class="month-weekday">${name}</span>`).join('')}${Array.from({ length: cells }, (_, index) => {
       const date = addDays(gridStart, index); const key = dateKey(date);
       const sessions = data.sessions.filter(session => session.date === key).sort((a, b) => a.time.localeCompare(b.time));
-      return `<button type="button" class="month-day ${date.getMonth() !== calendarCursor.getMonth() ? 'outside' : ''} ${key === dateKey(today) ? 'today' : ''}" data-calendar-date="${key}"><span class="month-day-number">${date.getDate()}</span><span class="month-events">${sessions.slice(0, 2).map(session => `<span class="month-event ${estadoSesion(session)}"><i></i><b>${session.time}</b> ${sesionEnPausa(session) ? '⏸ ' : ''}${session.client.split(' ')[0]}</span>`).join('')}${sessions.length > 2 ? `<small>+${sessions.length - 2} más</small>` : ''}</span></button>`;
+      return `<button type="button" class="month-day ${date.getMonth() !== calendarCursor.getMonth() ? 'outside' : ''} ${key === dateKey(today) ? 'today' : ''}" data-calendar-date="${key}"><span class="month-day-number">${date.getDate()}</span><span class="month-events">${sessions.slice(0, 2).map(session => `<span class="month-event ${estadoSesion(session)}"><i></i><b>${session.time}</b> ${sesionEnPausa(session) ? '⏸ ' : ''}${sesionDeViaje(session) ? '✈ ' : ''}${session.client.split(' ')[0]}</span>`).join('')}${sessions.length > 2 ? `<small>+${sessions.length - 2} más</small>` : ''}</span></button>`;
     }).join('')}`;
   }
   // Después de las ramas: cada una reescribe grid.className entero, así que
@@ -784,7 +789,7 @@ const routineVideoCount = routine => (routine.exercises || []).filter(exercise =
 }).length;
 
 function renderRoutines() {
-  document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${escapeHtml(routine.title)}</h3><p>${escapeHtml(routine.description)}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''} · ${routineVideoCount(routine)} con video${routine.dueOn ? `<br><span class="routine-due${dateOnly(routine.dueOn) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">Fecha límite: ${fechaCorta(routine.dueOn)}</span>` : ''}</footer><div class="client-actions"><button class="secondary" data-open-routine="${routine.id}">Ver rutina</button><button class="secondary" data-edit-routine="${routine.id}">Editar</button><button class="secondary" data-duplicate-routine="${routine.id}">Reutilizar</button><button class="secondary" data-delete-routine="${routine.id}">Eliminar</button></div></article>`).join('');
+  document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${escapeHtml(routine.title)}</h3><p>${escapeHtml(routine.description)}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''} · ${routineVideoCount(routine)} con video${routine.dueOn ? `<br><span class="routine-due${dateOnly(routine.dueOn) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">Fecha límite: ${fechaCorta(routine.dueOn)}</span>` : ''}</footer><div class="client-actions">${routine.assignedClientIds?.[0] ? `<button class="secondary" data-share-routine="${routine.id}">Enviar enlace</button>` : ''}<button class="secondary" data-open-routine="${routine.id}">Ver rutina</button><button class="secondary" data-edit-routine="${routine.id}">Editar</button><button class="secondary" data-duplicate-routine="${routine.id}">Reutilizar</button><button class="secondary" data-delete-routine="${routine.id}">Eliminar</button></div></article>`).join('');
 }
 function renderBillingInsights() {
   const chart = document.getElementById('billing-line-chart');
@@ -1456,11 +1461,19 @@ async function exportCompliance(period = compliancePeriod) {
 }
 async function notificationCenter(isPortal = false) {
   const [notifications, preferences] = await Promise.all([api('/api/notifications'), api('/api/notification-preferences')]);
-  const box = document.createElement('div'); box.innerHTML = `<form id="notification-form"><p class="eyebrow">RECORDATORIOS</p><h2>Notificaciones</h2><div class="notification-list">${notifications.length ? notifications.map(item => `<div class="notification-item ${item.type}"><b>${escapeHtml(item.title)}</b><span>${escapeHtml(item.body)}</span>${item.type === 'pending' && !isPortal ? `<div class="notification-actions"><button type="button" class="secondary outcome-btn outcome-done outcome-solid" data-marcar="completed" data-sesion="${item.sessionId}">Cumplió</button><button type="button" class="secondary outcome-btn outcome-cancel" data-marcar="cancel" data-sesion="${item.sessionId}">Cancelar clase</button></div>` : ''}</div>`).join('') : '<p class="empty">No hay recordatorios pendientes.</p>'}</div><div class="notification-settings"><label class="checkbox-line"><input name="inAppEnabled" type="checkbox" ${preferences.in_app_enabled ? 'checked' : ''} /> Mostrar dentro de la aplicación</label><label class="checkbox-line"><input name="browserEnabled" type="checkbox" ${preferences.browser_enabled ? 'checked' : ''} /> Notificaciones push en este dispositivo</label><p class="section-note">Hay que activarlas en cada teléfono o computadora por separado. En iPhone sólo funcionan con la aplicación instalada en la pantalla de inicio.</p>${preferences.browser_enabled ? '<button type="button" class="secondary wide-button" id="push-test">Enviar notificación de prueba</button>' : ''}<div class="form-row"><label>Avisar sesión con horas de anticipación<input name="sessionReminderHours" type="number" min="1" max="168" value="${preferences.session_reminder_hours}" /></label><label>Avisar pago con días de anticipación<input name="paymentReminderDays" type="number" min="0" max="30" value="${preferences.payment_reminder_days}" /></label></div></div><button class="primary wide-button">Guardar preferencias</button></form>`;
+  const box = document.createElement('div'); box.innerHTML = `<form id="notification-form"><p class="eyebrow">RECORDATORIOS</p><h2>Notificaciones</h2><div class="notification-list">${notifications.length ? notifications.map(item => `<div class="notification-item ${item.type}"><b>${escapeHtml(item.title)}</b><span>${escapeHtml(item.body)}</span>${item.type === 'travel' && !isPortal ? `<div class="notification-actions"><button type="button" class="secondary outcome-btn outcome-done outcome-solid" data-viaje-aviso="${item.travelId}" data-viaje-cliente="${item.clientId}">Preparar rutina de viaje</button></div>` : ''}${item.type === 'pending' && !isPortal ? `<div class="notification-actions"><button type="button" class="secondary outcome-btn outcome-done outcome-solid" data-marcar="completed" data-sesion="${item.sessionId}">Cumplió</button><button type="button" class="secondary outcome-btn outcome-cancel" data-marcar="cancel" data-sesion="${item.sessionId}">Cancelar clase</button></div>` : ''}</div>`).join('') : '<p class="empty">No hay recordatorios pendientes.</p>'}</div><div class="notification-settings"><label class="checkbox-line"><input name="inAppEnabled" type="checkbox" ${preferences.in_app_enabled ? 'checked' : ''} /> Mostrar dentro de la aplicación</label><label class="checkbox-line"><input name="browserEnabled" type="checkbox" ${preferences.browser_enabled ? 'checked' : ''} /> Notificaciones push en este dispositivo</label><p class="section-note">Hay que activarlas en cada teléfono o computadora por separado. En iPhone sólo funcionan con la aplicación instalada en la pantalla de inicio.</p>${preferences.browser_enabled ? '<button type="button" class="secondary wide-button" id="push-test">Enviar notificación de prueba</button>' : ''}<div class="form-row"><label>Avisar sesión con horas de anticipación<input name="sessionReminderHours" type="number" min="1" max="168" value="${preferences.session_reminder_hours}" /></label><label>Avisar pago con días de anticipación<input name="paymentReminderDays" type="number" min="0" max="30" value="${preferences.payment_reminder_days}" /></label></div></div><button class="primary wide-button">Guardar preferencias</button></form>`;
   openModal(box, true);
   // Resolver desde el propio aviso. Mandarla a buscar la sesión en la agenda
   // para marcar lo que el aviso ya le está preguntando es pedirle que haga dos
   // veces el mismo camino, y por eso se quedaban sin marcar.
+  box.querySelectorAll('[data-viaje-aviso]').forEach(boton => {
+    boton.onclick = async () => {
+      const clienteViaje = data.clients.find(item => item.id === boton.dataset.viajeCliente);
+      const viaje = (data.travel || []).find(item => item.id === boton.dataset.viajeAviso);
+      if (!clienteViaje || !viaje) { toast('No se encontró el viaje', true); return; }
+      modal.close(); prepararRutinaDeViaje(clienteViaje, viaje);
+    };
+  });
   box.querySelectorAll('[data-marcar]').forEach(boton => {
     boton.onclick = async () => {
       const fila = boton.closest('.notification-item');
@@ -1819,6 +1832,13 @@ function guiaDeCancelaciones() {
       <li><b>Marcar para reprogramar.</b> No toca su cumplimiento ni su saldo; la clase nueva descuenta cuando se dé.</li>
       <li><b>Proponer rutina.</b> La clase no se cancela. Si la cumple ese día, cuenta como clase dada. Si no, queda pendiente y no pierde nada: tú decides.</li>
       <li><b>Cancelar sin reprogramar ni rutina.</b> No descuenta clase ni dinero y no afecta su cumplimiento. Puedes reponerla después.</li>
+    </ul>
+    <h3>Cliente de viaje <small>marcado en su expediente</small></h3>
+    <ul>
+      <li>Viajar <b>no pausa su plan ni su cobro</b>. Sus clases de esos días salen en azul con ✈.</li>
+      <li>Para que cada clase cuente, debe <b>confirmar la rutina que le enviaste por enlace el día de esa clase</b>. Si la confirma, la clase cuenta como dada.</li>
+      <li>Si no la confirma, esa clase se da por perdida: es una cancelación del cliente (cuenta como incumplida y se le descuenta una clase; a crédito, sin cobro automático).</li>
+      <li>Solo se da por perdida si ese día tenía un enlace vigente. Si nunca le enviaste una rutina, la clase queda pendiente y tú decides.</li>
     </ul>
     <h3>Siempre</h3>
     <ul>
@@ -2948,6 +2968,11 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
   // y la lista de ejercicios.
   if (propuesta) {
     const form = document.getElementById('routine-form');
+    if (propuesta.enlaceViajeId) {
+      const aviso = document.createElement('p'); aviso.className = 'conflict-warn';
+      aviso.innerHTML = `Rutina de viaje para <b>${escapeHtml(propuesta.enlaceCliente || 'el cliente')}</b>. Al guardarla podrás enviársela por un <b>enlace temporal</b>, elegir su vigencia y compartirlo por WhatsApp.`;
+      form.prepend(aviso);
+    }
     if (propuesta.ofertaSesionId) {
       const aviso = document.createElement('p'); aviso.className = 'conflict-warn';
       aviso.innerHTML = `Esta rutina se le ofrecerá a <b>${escapeHtml(propuesta.ofertaCliente || 'el cliente')}</b> <b>en lugar de su clase, y solo vale el día de la clase</b>. Al guardarla se le avisa; si la cumple ese día, la clase cuenta como realizada${propuesta.ofertaOrigen === 'client' ? '; si no la cumple, <b>la clase se da por perdida</b>' : ''}.`;
@@ -2965,6 +2990,14 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
     try {
       event.target.classList.add('loading-state');
       const guardada = await api(editing ? `/api/routines/${routine.id}` : '/api/routines', { method: editing ? 'PATCH' : 'POST', body: { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: assigned || undefined, dueOn: form.get('dueOn') || null, exercises: selectedExercises } });
+      if (propuesta?.enlaceViajeId) {
+        if (assigned !== propuesta.clientId) throw new Error('La rutina de viaje debe quedar asignada al mismo cliente.');
+        await loadData(); renderAll(); modal.close();
+        const clienteViaje = data.clients.find(item => item.id === propuesta.clientId);
+        const viajeActual = (data.travel || []).find(item => item.id === propuesta.enlaceViajeId) || null;
+        enviarEnlaceRutina({ id: guardada.id, title: String(form.get('title')) }, clienteViaje, viajeActual);
+        return;
+      }
       if (propuesta?.ofertaSesionId) {
         if (assigned !== propuesta.clientId) throw new Error('La rutina ofrecida debe quedar asignada al mismo cliente de la clase.');
         await api(`/api/sessions/${propuesta.ofertaSesionId}/routine-offer`, { method: 'POST', body: { routineId: guardada.id, origin: propuesta.ofertaOrigen || 'trainer' } });
@@ -4255,6 +4288,145 @@ function pausePackageDialog(client) {
   });
 }
 
+// ── Viajes del cliente y rutina por enlace (J-107) ───────────────────────────────────────────────
+// Un enlace "hasta el día X" vence a la medianoche siguiente: se muestra como las 11:59 p. m. de X para que no parezca que vence al empezar el día.
+const venceTexto = iso => { const d = new Date(iso); const hm = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'America/Panama' }).format(d); return fechaHoraPanama(hm === '00:00' ? new Date(d.getTime() - 60000) : d); };
+const fechaViaje = valor => valor ? fechaCorta(`${String(valor).slice(0, 10)}T12:00:00-05:00`) : '';
+function etiquetaViaje(clientId) {
+  const hoy = dateKey(today);
+  const actual = viajeDelCliente(clientId, hoy);
+  if (actual) return `<p class="viaje-etiqueta">✈ De viaje${actual.ends_on ? ` hasta el ${fechaViaje(actual.ends_on)}` : ' · regreso sin definir'}${actual.destination ? ` · ${escapeHtml(actual.destination)}` : ''}</p>`;
+  const proximo = (data.travel || []).filter(item => item.client_id === clientId && item.starts_on > hoy).sort((x, y) => x.starts_on.localeCompare(y.starts_on))[0];
+  return proximo ? `<p class="viaje-etiqueta proximo">✈ Viaja el ${fechaViaje(proximo.starts_on)}</p>` : '';
+}
+
+function viajeDialog(client, viaje = null) {
+  const box = document.createElement('div');
+  box.innerHTML = `<form id="viaje-form"><p class="eyebrow">VIAJE</p><h2>${viaje ? 'Editar viaje' : 'Marcar viaje'}</h2>
+    <p class="form-summary"><b>${escapeHtml(client.name)}</b></p>
+    <div class="aviso-reprogramar">Viajar <b>no pausa su plan ni su cobro</b>. Para que sus clases de esos días cuenten, debe confirmar la rutina que le envíes <b>el día de cada clase</b>; si no la confirma, esa clase se da por perdida (cancelación del cliente).</div>
+    <div class="form-row"><label>Sale el<input type="date" name="startsOn" required value="${viaje?.starts_on || dateKey(today)}" /></label>
+    <label>Regresa el<input type="date" name="endsOn" value="${viaje?.ends_on || ''}" /><small>Déjalo vacío si aún no lo sabe.</small></label></div>
+    <label>Destino (opcional)<input name="destination" maxlength="80" value="${escapeHtml(viaje?.destination || '')}" placeholder="Ej. Madrid" /></label>
+    <label>Nota (opcional)<textarea name="note" rows="2" maxlength="300">${escapeHtml(viaje?.note || '')}</textarea></label>
+    <button class="primary wide-button">${viaje ? 'Guardar cambios' : 'Marcar viaje'}</button></form>`;
+  openModal(box);
+  document.getElementById('viaje-form').addEventListener('submit', async evento => {
+    evento.preventDefault();
+    const valores = new FormData(evento.target);
+    const cuerpo = { startsOn: valores.get('startsOn'), endsOn: valores.get('endsOn') || null, destination: valores.get('destination') || undefined, note: valores.get('note') || undefined };
+    try {
+      evento.target.classList.add('loading-state');
+      const guardado = viaje
+        ? await api(`/api/travel/${viaje.id}`, { method: 'PATCH', body: cuerpo })
+        : await api(`/api/clients/${client.id}/travel`, { method: 'POST', body: cuerpo });
+      await loadData(); renderAll(); modal.close();
+      toast(viaje ? 'Viaje actualizado' : 'Viaje marcado');
+      if (!viaje && confirm(`¿Preparar ahora una rutina de viaje para ${client.name.split(' ')[0]}?\n\nSin una rutina que confirmar, sus clases de esos días no tienen cómo contar.`)) prepararRutinaDeViaje(client, guardado);
+      else clientDetail(client.id);
+    } catch (error) { toast(error.message, true); evento.target.classList.remove('loading-state'); }
+  });
+}
+
+async function viajesSection(target, client) {
+  if (!target) return;
+  try {
+    const [viajes, enlaces] = await Promise.all([api(`/api/clients/${client.id}/travel`), api(`/api/clients/${client.id}/share-links`).catch(() => [])]);
+    if (!target.isConnected) return;
+    const hoy = dateKey(today);
+    const estado = viaje => viaje.ends_on && viaje.ends_on < hoy ? 'pasado' : viaje.starts_on > hoy ? 'próximo' : 'en curso';
+    const activos = enlaces.filter(item => item.active);
+    target.innerHTML = `<button type="button" class="secondary wide-button" id="marcar-viaje">✈ Marcar viaje</button>
+      ${viajes.length ? viajes.map(viaje => `<div class="viaje-fila ${estado(viaje).replace(' ', '-')}"><div><b>✈ ${fechaViaje(viaje.starts_on)} → ${viaje.ends_on ? fechaViaje(viaje.ends_on) : 'regreso sin definir'}</b><small>${estado(viaje)}${viaje.destination ? ` · ${escapeHtml(viaje.destination)}` : ''}${viaje.note ? ` · ${escapeHtml(viaje.note)}` : ''}</small></div>
+        <div class="viaje-acciones">${estado(viaje) !== 'pasado' ? `<button type="button" class="secondary" data-viaje-rutina="${viaje.id}">Preparar rutina</button>` : ''}<button type="button" class="secondary" data-viaje-editar="${viaje.id}">Editar</button><button type="button" class="secondary" data-viaje-borrar="${viaje.id}">Quitar</button></div></div>`).join('')
+        : '<p class="empty">No hay viajes marcados.</p>'}
+      ${activos.length ? `<p class="section-note" style="margin-top:12px"><b>Enlaces de rutina activos</b></p>${activos.map(item => `<div class="viaje-fila"><div><b>${escapeHtml(item.routine_title)}</b><small>Vence el ${venceTexto(item.expires_at)} · abierto ${item.opens} vez${item.opens === 1 ? '' : 'es'}</small></div><div class="viaje-acciones"><button type="button" class="secondary" data-enlace-revocar="${item.id}">Revocar</button></div></div>`).join('')}` : ''}`;
+    target.querySelector('#marcar-viaje').onclick = () => viajeDialog(client);
+    target.querySelectorAll('[data-viaje-editar]').forEach(boton => { boton.onclick = () => viajeDialog(client, viajes.find(item => item.id === boton.dataset.viajeEditar)); });
+    target.querySelectorAll('[data-viaje-rutina]').forEach(boton => { boton.onclick = () => prepararRutinaDeViaje(client, viajes.find(item => item.id === boton.dataset.viajeRutina)); });
+    target.querySelectorAll('[data-viaje-borrar]').forEach(boton => {
+      boton.onclick = async () => {
+        if (!confirm('¿Quitar este viaje? Sus clases dejarán de marcarse como de viaje.')) return;
+        try { await api(`/api/travel/${boton.dataset.viajeBorrar}`, { method: 'DELETE' }); await loadData(); renderAll(); viajesSection(target, client); toast('Viaje quitado'); }
+        catch (error) { toast(error.message, true); }
+      };
+    });
+    target.querySelectorAll('[data-enlace-revocar]').forEach(boton => {
+      boton.onclick = async () => {
+        if (!confirm('¿Revocar este enlace? Quien lo tenga dejará de poder abrirlo.')) return;
+        try { await api(`/api/share-links/${boton.dataset.enlaceRevocar}`, { method: 'DELETE' }); viajesSection(target, client); toast('Enlace revocado'); }
+        catch (error) { toast(error.message, true); }
+      };
+    });
+  } catch (error) { if (target.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; }
+}
+
+// Preparar la rutina de viaje: un clic la genera con IA y el catálogo (sin máquinas ni equipo), se revisa en el editor y al guardarla se ofrece el enlace para enviarla.
+function prepararRutinaDeViaje(client, viaje) {
+  const nombre = client.name.split(' ')[0];
+  const caja = document.createElement('div');
+  const resumen = `<p class="eyebrow">VIAJE</p><h2>Rutina de viaje</h2><p class="form-summary"><b>${escapeHtml(client.name)}</b><br>✈ ${fechaViaje(viaje.starts_on)} → ${viaje.ends_on ? fechaViaje(viaje.ends_on) : 'regreso sin definir'}</p>`;
+  openModal(caja, true);
+  const alEditor = propuesta => { modal.close(); newRoutine(null, false, { ...propuesta, clientId: client.id, enlaceViajeId: viaje.id, enlaceCliente: client.name }); };
+  const manual = () => alEditor({ title: `Rutina de viaje de ${nombre}`, description: '', sessionsPerWeek: 3, exercises: [], rationale: '', avoided: [], descartados: [] });
+  const generar = async () => {
+    caja.innerHTML = `${resumen}<p class="section-note" role="status">Generando una rutina que se pueda hacer de viaje, con tu catálogo de ejercicios… puede tardar unos segundos.</p>`;
+    try {
+      alEditor(await api('/api/routines/suggest', { method: 'POST', body: {
+        description: `Rutina de viaje para que ${nombre} entrene por su cuenta mientras está fuera, sin máquinas, en un cuarto de hotel o con peso corporal.`,
+        clientId: client.id, forTravel: true, durationMinutes: 40
+      } }));
+    } catch (error) {
+      caja.innerHTML = `${resumen}<p class="conflict-warn">${escapeHtml(error.message)}</p><button class="primary wide-button" id="viaje-reintentar">Reintentar</button><button class="secondary wide-button" id="viaje-manual">Armarla yo, sin IA</button>`;
+      caja.querySelector('#viaje-reintentar').onclick = generar; caja.querySelector('#viaje-manual').onclick = manual;
+    }
+  };
+  generar();
+}
+
+// Enviar una rutina por enlace temporal: sin cuenta ni contraseña para el cliente, con la vigencia que elija Eileen.
+function enviarEnlaceRutina(rutina, client, viaje = null) {
+  const nombre = client.name.split(' ')[0];
+  const box = document.createElement('div');
+  const hastaRegreso = viaje?.ends_on && viaje.ends_on >= dateKey(today);
+  box.innerHTML = `<form id="enlace-form"><p class="eyebrow">RUTINA POR ENLACE</p><h2>Enviar a ${escapeHtml(nombre)}</h2>
+    <p class="form-summary"><b>${escapeHtml(rutina.title)}</b></p>
+    <p class="section-note">El cliente la abre sin cuenta ni contraseña, ve los videos de cada ejercicio, usa el cronómetro y confirma al terminar. Pasada la vigencia el enlace deja de funcionar, y puedes revocarlo antes.</p>
+    <fieldset class="enlace-vigencia"><legend>Vigencia</legend>
+      ${hastaRegreso ? `<label class="checkbox-line"><input type="radio" name="vigencia" value="regreso" checked /> Hasta su regreso (${fechaViaje(viaje.ends_on)})</label>` : ''}
+      <label class="checkbox-line"><input type="radio" name="vigencia" value="24" ${hastaRegreso ? '' : 'checked'} /> 24 horas</label>
+      <label class="checkbox-line"><input type="radio" name="vigencia" value="72" /> 3 días</label>
+      <label class="checkbox-line"><input type="radio" name="vigencia" value="168" /> 7 días</label>
+      <label class="checkbox-line"><input type="radio" name="vigencia" value="fecha" /> Hasta una fecha <input type="date" name="hasta" min="${dateKey(today)}" /></label>
+    </fieldset>
+    ${viaje ? '<div class="aviso-reprogramar">Recuerda: durante el viaje, confirmar la rutina <b>el día de su clase</b> es lo que hace que esa clase cuente.</div>' : ''}
+    <button class="primary wide-button">Crear enlace</button></form>`;
+  openModal(box);
+  document.getElementById('enlace-form').addEventListener('submit', async evento => {
+    evento.preventDefault();
+    const valores = new FormData(evento.target); const vigencia = valores.get('vigencia');
+    const cuerpo = { clientId: client.id, travelId: viaje?.id };
+    if (vigencia === 'regreso') cuerpo.until = viaje.ends_on;
+    else if (vigencia === 'fecha') { if (!valores.get('hasta')) { toast('Elige la fecha hasta la que vale', true); return; } cuerpo.until = valores.get('hasta'); }
+    else cuerpo.hours = Number(vigencia);
+    try {
+      evento.target.classList.add('loading-state');
+      const enlace = await api(`/api/routines/${rutina.id}/share-links`, { method: 'POST', body: cuerpo });
+      const mensaje = `Hola ${nombre}, te dejé tu rutina${viaje ? ' para el viaje' : ''}: ${enlace.url}\n\nÁbrela, mira los videos y confirma al terminar${viaje ? ' (confírmala el día de tu clase para que cuente)' : ''}. El enlace vale hasta el ${venceTexto(enlace.expiresAt)}`;
+      box.innerHTML = `<p class="eyebrow">RUTINA POR ENLACE</p><h2>Enlace listo</h2>
+        <p class="form-summary">Vale hasta el <b>${venceTexto(enlace.expiresAt)}</b> (hora de Panamá).</p>
+        <label>Enlace<input id="enlace-url" readonly value="${escapeHtml(enlace.url)}" /></label>
+        <button type="button" class="primary wide-button" id="enlace-copiar">Copiar enlace</button>
+        <a class="secondary wide-button enlace-whatsapp" id="enlace-whatsapp" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(mensaje)}">Enviar por WhatsApp</a>
+        <p class="section-note">El enlace no se vuelve a mostrar completo después; si lo pierdes, crea otro. Lo ves y revocas en el expediente, sección Viajes.</p>`;
+      document.getElementById('enlace-copiar').onclick = async () => {
+        try { await navigator.clipboard.writeText(enlace.url); toast('Enlace copiado'); }
+        catch { const campo = document.getElementById('enlace-url'); campo.select(); document.execCommand('copy'); toast('Enlace copiado'); }
+      };
+    } catch (error) { toast(error.message, true); evento.target.classList.remove('loading-state'); }
+  });
+}
+
 function clientDetail(id) {
   const client = data.clients.find(item => item.id === id); const inbody = client.inbody;
   const pack = clientPackage(client.name);
@@ -4282,8 +4454,12 @@ function clientDetail(id) {
     const target = document.getElementById('client-billing-subscriptions'); if (target) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
   });
   document.getElementById('add-billing-subscription-detail').onclick = () => billingSubscriptionDialog(client);
+  // Viajes: arriba del expediente, junto al resumen del cliente, para encontrarlos sin recorrer todo el modal.
+  box.querySelector('h2').nextElementSibling?.insertAdjacentHTML('afterend', '<p class="eyebrow" style="margin-top:20px">VIAJES</p><div id="client-travel"><p class="empty">Cargando…</p></div>');
+  viajesSection(document.getElementById('client-travel'), client);
   const balanceTarget = document.getElementById('client-balances');
   if (balanceTarget) {
+
     balanceTarget.insertAdjacentHTML('beforebegin', '<p class="eyebrow" style="margin-top:20px">PESO REGISTRADO POR EL CLIENTE</p><div id="client-weight-logs"><p class="empty">Cargando registros…</p></div>');
     clientWeightLogsSection(document.getElementById('client-weight-logs'), client.id);
   }
@@ -5072,6 +5248,11 @@ document.addEventListener('click', event => {
   if (event.target.dataset.deleteInbody) deleteResource(`/api/inbody/${event.target.dataset.deleteInbody}`, '¿Eliminar esta medición InBody? El archivo original permanecerá en el expediente.', 'Medición InBody eliminada');
   if (event.target.dataset.deleteDocument) deleteResource(`/api/documents/${event.target.dataset.deleteDocument}`, '¿Eliminar este archivo? Si corresponde a un InBody, también se eliminarán sus métricas asociadas.', 'Archivo del expediente eliminado');
   if (event.target.dataset.cancelSession) cancelSessionDialog(data.sessions.find(item => item.id === event.target.dataset.cancelSession));
+  if (event.target.dataset.shareRoutine) {
+    const rutina = data.routines.find(item => item.id === event.target.dataset.shareRoutine);
+    const clienteRutina = data.clients.find(item => item.id === rutina?.assignedClientIds?.[0]);
+    if (rutina && clienteRutina) enviarEnlaceRutina(rutina, clienteRutina, (data.travel || []).filter(item => item.client_id === clienteRutina.id && (!item.ends_on || item.ends_on >= dateKey(today))).sort((x, y) => x.starts_on.localeCompare(y.starts_on))[0] || null);
+  }
   if (event.target.dataset.retirarRutina) {
     if (!confirm('¿Retirar la rutina ofrecida? La clase sigue programada y el cliente ya no la verá como pendiente.')) return;
     api(`/api/sessions/${event.target.dataset.retirarRutina}/routine-offer`, { method: 'DELETE' })
@@ -5313,6 +5494,7 @@ function portalExerciseRows(exercises) {
 
 // La URL firmada se pide al darle reproducir, no al cargar la pantalla: dura
 // cinco minutos y pedir cuarenta de golpe las vencería antes de usarlas.
+let publicRoutineToken = null;
 async function playExerciseVideo(exerciseId, button) {
   // El contenedor se nombra desde el botón: el mismo ejercicio puede aparecer
   // en la rutina del cliente y en la vista de la entrenadora, y dos elementos
@@ -5328,7 +5510,9 @@ async function playExerciseVideo(exerciseId, button) {
   }
   button.disabled = true; button.textContent = 'Cargando…';
   try {
-    const source = await api(`/api/exercises/${exerciseId}/video-urls`);
+    const source = publicRoutineToken
+      ? await api(`/api/public/routine/${publicRoutineToken}/exercises/${exerciseId}/video-urls`, { auth: false })
+      : await api(`/api/exercises/${exerciseId}/video-urls`);
     container.innerHTML = source.videos.map(video => `<section class="exercise-video-variant"><b>${escapeHtml(video.label || 'Demostración')}</b><div class="exercise-video"><video controls loop muted autoplay playsinline preload="auto" src="${escapeHtml(video.videoUrl)}"></video></div></section>`).join('');
     container.dataset.loaded = 'true'; container.hidden = false;
     button.textContent = 'Ocultar demostraciones';
@@ -6097,12 +6281,67 @@ async function showAccessLink(token) {
   }, { once: false });
 }
 
+// ── Rutina por enlace (página pública, sin cuenta) ──────────────────────────────────────────────
+const rutinaPublicaDelHash = () => (location.hash.match(/^#rutina=([A-Za-z0-9_-]{30,80})$/) || [])[1] || null;
+async function mostrarRutinaPublica(token) {
+  publicRoutineToken = token;
+  for (const id of ['auth-screen', 'app-shell', 'portal-shell']) document.getElementById(id).hidden = true;
+  const raiz = document.getElementById('public-routine'); raiz.hidden = false;
+  const claveReloj = `eileen-cronometro-enlace-${token.slice(0, 12)}`;
+  const marca = '<div class="public-brand"><span class="brand-mark">EL</span><span>Eileen <b>Lifestyle</b></span></div>';
+  try {
+    const vista = await api(`/api/public/routine/${token}`, { auth: false });
+    const rutina = vista.routine; const ejercicios = Array.isArray(rutina.exercises) ? rutina.exercises : [];
+    const catalogo = (vista.exercises || []).map(item => ({ ...item, hasVideo: item.has_video }));
+    const hoyClase = (vista.classes || []).find(item => item.dia === vista.today && item.status === 'scheduled');
+    const proximas = (vista.classes || []).filter(item => item.status === 'scheduled' && item.dia !== vista.today);
+    raiz.innerHTML = `${marca}
+      <article class="public-card"><p class="eyebrow">TU RUTINA</p><h1>Hola, ${escapeHtml(vista.clientFirstName)}</h1><h2>${escapeHtml(rutina.title)}</h2>
+        ${rutina.description ? `<p class="public-instrucciones">${escapeHtml(rutina.description)}</p>` : ''}
+        ${hoyClase ? `<p class="portal-offer-inline">Hoy tienes clase a las ${escapeHtml(hoyClase.hora)}: <b>si confirmas esta rutina hoy, cuenta como tu clase</b>.</p>`
+          : proximas.length ? `<p class="portal-offer-inline">Tus próximas clases durante el viaje: ${proximas.slice(0, 4).map(item => `${fechaCorta(`${item.dia}T12:00:00-05:00`)} ${escapeHtml(item.hora)}`).join(' · ')}. Confirma tu rutina <b>el día de cada clase</b> para que cuente.</p>` : ''}
+        <div class="routine-timer" id="public-timer"><span class="routine-timer-display" id="public-reloj">00:00</span><button type="button" class="primary routine-timer-button" id="public-toggle">▶ Iniciar rutina</button></div>
+        <div class="exercise-preview">${exerciseRows(ejercicios, catalogo, 'pub')}</div>
+        <div id="public-final">${vista.completedToday ? '<p class="portal-payment-ok">Ya confirmaste esta rutina hoy. ¡Gracias!</p>' : ''}
+          <label class="completion-percent public-porcentaje"><input id="public-pct" type="number" min="1" max="100" value="100" /><span>% completado</span></label>
+          <button type="button" class="primary wide-button" id="public-terminar">Terminé mi rutina</button></div>
+        <small class="public-vigencia">Este enlace vale hasta el ${venceTexto(vista.expiresAt)}</small>
+      </article>`;
+    const reloj = () => { try { return JSON.parse(localStorage.getItem(claveReloj) || 'null'); } catch { return null; } };
+    const pintar = () => {
+      const r = reloj(); const caja = document.getElementById('public-timer'); if (!caja) return;
+      document.getElementById('public-reloj').textContent = r ? relojTexto((Date.now() - r.startedAt) / 1000) : '00:00';
+      const boton = document.getElementById('public-toggle'); boton.textContent = r ? '■ Detener cronómetro' : '▶ Iniciar rutina';
+      boton.classList.toggle('en-marcha', Boolean(r)); caja.classList.toggle('corriendo', Boolean(r));
+    };
+    pintar(); const reloj1 = setInterval(pintar, 1000);
+    document.getElementById('public-toggle').onclick = () => {
+      if (reloj()) localStorage.removeItem(claveReloj); else localStorage.setItem(claveReloj, JSON.stringify({ startedAt: Date.now() }));
+      pintar();
+    };
+    document.getElementById('public-terminar').onclick = async event => {
+      const boton = event.currentTarget; boton.disabled = true;
+      const r = reloj(); const segundos = r ? Math.min(21600, Math.max(1, Math.floor((Date.now() - r.startedAt) / 1000))) : undefined;
+      try {
+        const resultado = await api(`/api/public/routine/${token}/complete`, { method: 'POST', auth: false, body: { completionPercent: Number(document.getElementById('public-pct').value) || 100, durationSeconds: segundos } });
+        localStorage.removeItem(claveReloj); clearInterval(reloj1);
+        document.getElementById('public-timer').hidden = true;
+        document.getElementById('public-final').innerHTML = `<p class="portal-payment-ok"><b>¡Listo!</b> Eileen ya sabe que terminaste${segundos ? ` en ${duracionLegible(segundos)}` : ''}.${resultado.sessionCompleted ? ' Cuenta como tu clase de hoy.' : ''}</p>`;
+      } catch (error) { toast(error.message, true); boton.disabled = false; }
+    };
+  } catch (error) {
+    raiz.innerHTML = `${marca}<article class="public-card"><p class="eyebrow">ENLACE</p><h2>No se puede abrir la rutina</h2><p class="public-instrucciones">${escapeHtml(error.message)}</p></article>`;
+  }
+}
+
 async function start() {
   const accessToken = accessTokenFromHash();
   // Se atiende antes que la sesión guardada: quien abre un enlace de acceso
   // quiere entrar como el cliente del enlace, no como quien quedó logueado en
   // ese teléfono —que muy probablemente sea la entrenadora.
   if (accessToken) return showAccessLink(accessToken);
+  const rutinaPublica = rutinaPublicaDelHash();
+  if (rutinaPublica) return mostrarRutinaPublica(rutinaPublica);
   try {
     const status = await api('/api/auth/setup-status', { auth: false });
     if (!authToken) return showAuth(status.required);

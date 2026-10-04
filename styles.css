@@ -890,3 +890,29 @@ body:has(#portal-routines.active) .portal-weight-fab{display:none}
 .agenda-ayuda{margin:2px 0 10px}
 .guia-cancelaciones h3{margin:18px 0 6px;font:600 17px Fraunces;color:#5a3f4c}.guia-cancelaciones h3 small{font:500 12px 'DM Sans';color:#8a7a82;margin-left:6px}
 .guia-cancelaciones ul{margin:0;padding-left:20px;display:grid;gap:8px}.guia-cancelaciones li{font-size:14px;line-height:1.5;color:#4a3a42}
+
+/* ===== Cliente de viaje y rutina por enlace (J-107) ===== */
+.session-chip.viaje{background:#dcedfa;color:#245d86;border-left:3px solid #5aa7dc}
+.month-event.viaje{color:#245d86}.month-event.viaje i{background:#5aa7dc}
+.session-state.viaje{background:#dcedfa;color:#245d86;font-weight:700}
+.day-session.viaje,.session-row:has(.session-state.viaje){border-left-color:#5aa7dc}
+.calendar-leyenda{display:flex;flex-wrap:wrap;gap:6px 14px;margin:12px 2px 0;font-size:12px;color:#7a6b73}
+.calendar-leyenda span{display:inline-flex;align-items:center;gap:6px}
+.calendar-leyenda .ley{display:inline-block;width:12px;height:12px;border-radius:4px;border:1px solid #0001}
+.ley.programada{background:#dde8df}.ley.hoy{background:#f0e1e8}.ley.viaje{background:#dcedfa;border-color:#5aa7dc}.ley.pausa{background:#efe6fa}.ley.completed{background:#cfe6d8}
+.viaje-etiqueta{margin:8px 0 0;padding:7px 11px;border-radius:10px;background:#dcedfa;color:#245d86;font-size:13px;font-weight:700}
+.viaje-etiqueta.proximo{background:#eef6fc;font-weight:600}
+.viaje-fila{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between;margin-top:10px;padding:11px 13px;border-radius:12px;background:#f6f1f3;border-left:4px solid #c9b8c1}
+.viaje-fila.en-curso,.viaje-fila.próximo{background:#eaf4fb;border-left-color:#5aa7dc}.viaje-fila.pasado{opacity:.7}
+.viaje-fila small{display:block;margin-top:2px;color:#6f6168}.viaje-acciones{display:flex;flex-wrap:wrap;gap:6px}
+.viaje-acciones .secondary{min-height:38px;padding:6px 12px;font-size:12px}
+.enlace-vigencia{border:1px solid #e7dce1;border-radius:12px;padding:10px 14px;margin:10px 0;display:grid;gap:8px}.enlace-vigencia legend{font-size:12px;color:#7a6b73;padding:0 6px}
+.enlace-whatsapp{display:flex;align-items:center;justify-content:center;margin-top:8px;text-decoration:none;color:#1f6b3e;border-color:#9fd3b2;background:#eef9f1;font-weight:700}
+/* Página pública de la rutina */
+.public-routine{min-height:100vh;padding:18px 16px 60px;background:#fbf8f9}.public-routine[hidden]{display:none}
+.public-brand{display:flex;align-items:center;gap:10px;max-width:640px;margin:0 auto 14px;font-size:17px;color:#4a3a42}.public-brand .brand-mark{display:grid;place-content:center;width:36px;height:36px;border-radius:10px;background:#4f3a45;color:#fff;font:700 13px 'DM Sans'}
+.public-card{max-width:640px;margin:0 auto;padding:22px 20px;border-radius:20px;background:#fff;box-shadow:0 8px 28px #5a3e4a14}
+.public-card h1{margin:2px 0 0;font:600 30px Fraunces;color:#4a3a42}.public-card h2{margin:4px 0 10px;font:600 22px Fraunces;color:#7a4560}
+.public-instrucciones{margin:0 0 14px;color:#5a4650;line-height:1.5;font-size:15px}.public-vigencia{display:block;margin-top:18px;color:#8a7a82;text-align:center}
+.public-porcentaje{display:flex;align-items:center;gap:8px;margin:14px 0 8px}.public-porcentaje input{max-width:90px}
+.notification-item.travel{border-left-color:#5aa7dc;background:#eaf4fb}

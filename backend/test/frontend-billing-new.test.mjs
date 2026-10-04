@@ -218,3 +218,17 @@ test('guía de cancelaciones (J-106): enlace en la agenda y en el diálogo, con 
   const guia = app.slice(app.indexOf('function guiaDeCancelaciones'), app.indexOf('function ofrecerRutinaEnLugarDeClase'));
   for (const frase of ['se le descuenta automáticamente una clase', 'solo vale el día de la clase', 'no hay descuentos en dólares', 'Falta marcar']) assert.ok(guia.toLowerCase().includes(frase.toLowerCase()), frase);
 });
+
+test('cliente de viaje y rutina por enlace (J-107): marcador en calendario, expediente, aviso, enlace temporal y página pública', async () => {
+  const app = await leer('app.js'); const html = await leer('index.html'); const css = await leer('styles.css'); const sw = await leer('sw.js');
+  assert.match(app, /const sesionDeViaje = /); assert.match(app, /sesionDeViaje\(session\) \? 'viaje' : session\.status/);
+  assert.match(app, /sesionDeViaje\(session\) \? '✈ ' : ''/);
+  assert.match(css, /\.session-chip\.viaje/); assert.match(css, /\.calendar-leyenda/); assert.match(html, /class="calendar-leyenda"/);
+  assert.match(app, /function viajeDialog/); assert.match(app, /function viajesSection/); assert.match(app, /no pausa su plan ni su cobro/);
+  assert.match(app, /function prepararRutinaDeViaje/); assert.match(app, /forTravel: true/);
+  assert.match(app, /function enviarEnlaceRutina/); assert.match(app, /Hasta su regreso/); assert.match(app, /wa\.me/);
+  assert.match(app, /data-viaje-aviso/); assert.match(app, /data-share-routine/);
+  assert.match(app, /rutinaPublicaDelHash/); assert.match(app, /mostrarRutinaPublica/); assert.match(app, /\/api\/public\/routine\//);
+  assert.ok(html.indexOf('id="public-routine"') < html.indexOf('<script src="./app.js'), 'el contenedor público existe antes de que corra app.js');
+  assert.match(app, /confirmar la rutina que le enviaste por enlace el día de esa clase/);
+});

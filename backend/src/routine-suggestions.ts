@@ -46,6 +46,8 @@ export async function suggestRoutine(entrada: {
   // Rutina para que el cliente la haga por su cuenta (clase cancelada): se dimensiona a la duración de la clase y la descripción son las instrucciones que él leerá.
   paraCliente?: boolean;
   duracionMinutos?: number;
+  // Rutina para un cliente que viaja (J-107): sin máquinas ni equipo, que se pueda hacer en un cuarto de hotel o con peso corporal.
+  paraViaje?: boolean;
 }) {
   if (!routineSuggestionsReady) throw new Error('Falta configurar la clave de DeepSeek');
 
@@ -68,6 +70,13 @@ export async function suggestRoutine(entrada: {
       + 'El campo "description" son las INSTRUCCIONES para el cliente, escritas en segunda persona (tú) y en español: cómo calentar unos 5 minutos, cuánto descansar entre series, '
       + 'a qué esfuerzo trabajar, que mire la demostración en video de cada ejercicio antes de hacerlo y que pare si siente dolor. Máximo 450 caracteres, sin listas largas. '
       + 'En "notes" de cada ejercicio escribe una pista corta de técnica para esa persona.'
+    );
+  }
+  if (entrada.paraViaje) {
+    instrucciones.push(
+      'El cliente está DE VIAJE: la hará en un cuarto de hotel, un parque o un gimnasio pequeño. Prefiere ejercicios con peso corporal o con bandas y sin máquinas '
+      + '(en el catálogo, los que dicen "No aplica" o no listan máquina). Evita todo lo que necesite máquina, barra o aparatos grandes. '
+      + 'En "description" incluye una indicación de que puede hacerla en cualquier día del viaje, que si no tiene equipo use peso corporal y que descanse bien entre series.'
     );
   }
   if (entrada.condiciones.length) {
