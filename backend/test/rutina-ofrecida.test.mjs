@@ -140,7 +140,19 @@ test('oferta por cancelación DEL CLIENTE: cumplida cierra la clase; sin cumplir
   assert.equal((await api.post('/api/maintenance/vencer-ofertas-rutina', {})).datos.perdidas, 0, 'idempotente');
 });
 
-// Va al final a propósito: la reversa borra la tabla.
+// Van al final a propósito: las reversas modifican/borran la tabla.
+test('la reversa de 058 se niega a perder ofertas por cancelación del cliente sin orden expresa, y con la orden deja la tabla como en 057', async () => {
+  const archivo = new URL('../migrations-down/058_rutina_origen_cliente.down.sql', import.meta.url).pathname;
+  const db = postgres(servidor.databaseUrl, { onnotice: () => {}, max: 2 });
+  try {
+    assert.ok((await db`SELECT count(*)::int AS n FROM session_routine_offers WHERE origin = 'client'`)[0].n >= 1);
+    await assert.rejects(ejecutar('psql', ['-v', 'ON_ERROR_STOP=1', '-q', servidor.databaseUrl, '-f', archivo]), /ofertas de rutina por cancelación del cliente o vencidas/);
+    await ejecutar('psql', ['-v', 'ON_ERROR_STOP=1', '-q', servidor.databaseUrl, '-c', "SET billing.allow_destructive_down = 'on'", '-f', archivo]);
+    assert.equal((await db`SELECT count(*)::int AS n FROM information_schema.columns WHERE table_name = 'session_routine_offers' AND column_name = 'origin'`)[0].n, 0);
+    assert.equal((await db`SELECT count(*)::int AS n FROM session_routine_offers WHERE status = 'expired'`)[0].n, 0);
+  } finally { await db.end({ timeout: 1 }).catch(() => {}); }
+});
+
 test('la reversa de 057 se niega a borrar ofertas y duraciones sin orden expresa, y con la orden las quita', async () => {
   const archivo = new URL('../migrations-down/057_rutina_en_lugar_de_clase.down.sql', import.meta.url).pathname;
   const db = postgres(servidor.databaseUrl, { onnotice: () => {}, max: 2 });
