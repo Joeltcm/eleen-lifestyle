@@ -1,4 +1,4 @@
-const APP_VERSION = '275';
+const APP_VERSION = '276';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1803,35 +1803,29 @@ const DIAS_CORTOS = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
 // cada ejercicio del catálogo y un cronómetro; al cumplirla, su clase pasa a realizada.
 function ofrecerRutinaEnLugarDeClase(sesion, origen = 'trainer') {
   const cliente = data.clients.find(item => item.id === sesion.clientId);
+  const nombre = cliente?.name?.split(' ')[0] || 'el cliente';
   const caja = document.createElement('div');
-  const sugerida = `Rutina para que ${cliente?.name?.split(' ')[0] || 'el cliente'} la haga por su cuenta en lugar de su clase de ${sesion.durationMinutes} min, con lo que tenga a mano.`;
-  caja.innerHTML = `<p class="eyebrow">AGENDA</p><h2>Rutina en lugar de la clase</h2>
-    <p class="form-summary"><b>${escapeHtml(sesion.client)}</b><br>${sesion.date} · ${sesion.time} · ${sesion.durationMinutes} min</p>
-    <p style="color:#6f7b75;margin-top:-6px">La IA propone ejercicios únicamente de tu catálogo, tomando en cuenta sus lesiones y sus rutinas recientes, y escribe las instrucciones para el cliente. Tú la revisas antes de enviarla.</p>
-    <p class="conflict-warn">${origen === 'client'
-      ? 'Cancelación del cliente: la rutina solo vale el día de la clase. Si no la cumple ese día, <b>la clase se da por perdida</b>.'
-      : 'Tú no puedes atender la clase: la rutina solo vale el día de la clase. Si no la cumple, no pierde nada y tú decides cómo cerrarla.'}</p>
-    <form id="oferta-rutina-form">
-      <label>Qué quieres para esta rutina<textarea name="description" rows="3" required minlength="10" maxlength="600">${escapeHtml(sugerida)}</textarea></label>
-      <button class="primary wide-button" data-accion="ia">Proponer con IA</button>
-      <button type="button" class="secondary wide-button" id="oferta-sin-ia">Armarla yo, sin IA</button>
-    </form>`;
+  const resumen = `<p class="eyebrow">AGENDA</p><h2>Proponer rutina</h2><p class="form-summary"><b>${escapeHtml(sesion.client)}</b><br>${sesion.date} · ${sesion.time} · ${sesion.durationMinutes} min</p>`;
   openModal(caja, true);
   const enviarAlEditor = propuesta => { modal.close(); newRoutine(null, false, { ...propuesta, clientId: sesion.clientId, ofertaSesionId: sesion.id, ofertaCliente: sesion.client, ofertaOrigen: origen }); };
-  caja.querySelector('#oferta-sin-ia').onclick = () => enviarAlEditor({
-    title: `Rutina para ${cliente?.name?.split(' ')[0] || 'cliente'}`, description: '', sessionsPerWeek: 1, exercises: [], rationale: '', avoided: [], descartados: []
-  });
-  document.getElementById('oferta-rutina-form').addEventListener('submit', async evento => {
-    evento.preventDefault();
-    const boton = evento.target.querySelector('[data-accion="ia"]');
-    boton.disabled = true; boton.textContent = 'Pensando…';
+  const manual = () => enviarAlEditor({ title: `Rutina para ${nombre}`, description: '', sessionsPerWeek: 1, exercises: [], rationale: '', avoided: [], descartados: [] });
+  // Un clic genera la rutina: la IA solo puede elegir ejercicios del catálogo y ya conoce lesiones y rutinas recientes del cliente. El resultado se abre en el editor para revisarla.
+  const generar = async () => {
+    caja.innerHTML = `${resumen}<p class="section-note" role="status">Generando la rutina con tu catálogo de ejercicios… puede tardar unos segundos.</p>`;
     try {
-      const propuesta = await api('/api/routines/suggest', { method: 'POST', body: {
-        description: new FormData(evento.target).get('description'), clientId: sesion.clientId, forClient: true, durationMinutes: sesion.durationMinutes
-      } });
-      enviarAlEditor(propuesta);
-    } catch (error) { toast(error.message, true); boton.disabled = false; boton.textContent = 'Proponer con IA'; }
-  });
+      enviarAlEditor(await api('/api/routines/suggest', { method: 'POST', body: {
+        description: `Rutina para que ${nombre} la haga por su cuenta en lugar de su clase de ${sesion.durationMinutes} min, con lo que tenga a mano.`,
+        clientId: sesion.clientId, forClient: true, durationMinutes: sesion.durationMinutes
+      } }));
+    } catch (error) {
+      caja.innerHTML = `${resumen}<p class="conflict-warn">${escapeHtml(error.message)}</p>
+        <button class="primary wide-button" id="rutina-reintentar">Reintentar</button>
+        <button class="secondary wide-button" id="rutina-manual">Armarla yo, sin IA</button>`;
+      caja.querySelector('#rutina-reintentar').onclick = generar;
+      caja.querySelector('#rutina-manual').onclick = manual;
+    }
+  };
+  generar();
 }
 function cancelSessionDialog(sesion) {
   if (!sesion) return;
@@ -1866,22 +1860,27 @@ function cancelSessionDialog(sesion) {
     box.querySelector('#cancela-entrenadora').onclick = preguntarCompensacion;
   };
 
+  // Al cancelar (quien sea) aparece el aviso "Proponer rutina": un clic genera la rutina con IA y el catálogo (J-105). Cancela el cliente: todo es opcional (reprogramar, rutina o nada),
+  // y lo único seguro es que, sin reprogramación ni rutina, se le descuenta automáticamente una clase. Cancela Eileen: se recuerda que también puede reprogramar.
+  const avisoRutina = texto => `<div class="aviso-rutina"><b>💡 Proponer rutina</b><span>${texto}</span><button class="primary wide-button" id="proponer-rutina">Proponer rutina</button></div>`;
+
   const preguntarDestinoCliente = () => {
+    const puedeRutina = sesion.status === 'scheduled';
     box.innerHTML = `${cabecera}
-      <p style="color:#6f7b75">La cancela el cliente. ¿Va a reponerla?</p>
+      <p style="color:#6f7b75">La cancela el cliente. <b>Todo es opcional</b>:</p>
+      ${puedeRutina ? avisoRutina('Para que no pierda la clase, puedes proponerle una rutina que haga por su cuenta. Solo vale el día de la clase: si la cumple, cuenta como su clase.') : ''}
       <button class="secondary wide-button" id="cancelar-reprogramada">Se reprogramará a otro día</button>
       <p class="section-note">No afecta el cumplimiento: contará la sesión nueva. Suma a sus reprogramaciones del mes.</p>
-      ${sesion.status === 'scheduled' ? `<button class="primary wide-button" id="ofrecer-rutina-cliente">Ofrecerle una rutina en lugar de la clase</button>
-      <p class="section-note">Solo vale el día de la clase. Si la cumple, cuenta como su clase; si no la cumple ese día, <b>la clase se da por perdida</b> (cuenta como incumplida).</p>` : ''}
-      ${!esCredito ? `<button class="secondary wide-button" id="cancelar-perdida">No se reprograma</button>
-      <p class="section-note">Cuenta como sesión incumplida y baja su porcentaje.</p>` : ''}
+      ${!esCredito ? `<button class="secondary wide-button" id="cancelar-perdida">Cancelar sin reprogramar ni rutina</button>
+      <p class="section-note"><b>Se le descuenta automáticamente una clase</b> de su plan. Cuenta como incumplida y baja su porcentaje.</p>` : ''}
       ${esCredito ? `<p style="color:#6f7b75">Como entrena a crédito, Eileen decide si esta cancelación se cobra.</p>
         <button class="secondary wide-button" id="cancelar-cobrada">Cancelar y cobrar ${money.format(tarifaCredito)}</button>
         <p class="section-note">Aparecerá como “Cancelación cobrada” en la factura y en tu portal.</p>
         <button class="secondary wide-button" id="cancelar-sin-cobro">Cancelar sin cobro</button>
-        <p class="section-note">Se registra en asistencia, pero no genera cargo.</p>` : ''}`;
+        <p class="section-note">Se registra en asistencia, pero no genera cargo.</p>` : ''}
+      ${puedeRutina ? `<p class="section-note">Si no la reprograma ni cumple la rutina, la clase se da por perdida${esCredito ? '' : ' y se le descuenta una clase'}.</p>` : ''}`;
     box.querySelector('#cancelar-reprogramada').onclick = () => cancelar({ reprogramada: true, quien: 'client' });
-    box.querySelector('#ofrecer-rutina-cliente')?.addEventListener('click', () => ofrecerRutinaEnLugarDeClase(sesion, 'client'));
+    box.querySelector('#proponer-rutina')?.addEventListener('click', () => ofrecerRutinaEnLugarDeClase(sesion, 'client'));
     const cancelarPerdida = box.querySelector('#cancelar-perdida');
     if (cancelarPerdida) cancelarPerdida.onclick = () => cancelar({ reprogramada: false, quien: 'client' });
     if (esCredito) {
@@ -1891,15 +1890,16 @@ function cancelSessionDialog(sesion) {
   };
 
   const preguntarCompensacion = () => {
+    const puedeRutina = sesion.status === 'scheduled';
     box.innerHTML = `${cabecera}
       <p style="color:#6f7b75">La cancelas tú. ¿Qué hacemos?</p>
+      ${puedeRutina ? avisoRutina('Si no puedes atenderla, propónle una rutina para que entrene por su cuenta. Solo vale el día de la clase; si no la cumple, no pierde nada y tú decides cómo cerrarla.') : ''}
+      <p class="aviso-reprogramar"><b>Recuerda:</b> también puedes <b>reprogramar</b> la clase.</p>
       <button class="secondary wide-button" id="compensar-reprogramar">Marcar para reprogramar</button>
       <p class="section-note">La nueva sesión se descontará del saldo mensual o paquete que corresponda a su fecha. No se crea un saldo de reposición.</p>
-      <button class="secondary wide-button" id="compensar-nada">Ninguna de las dos por ahora</button>
-      <p class="section-note">Se cancela sin más. No descuenta ni toca su cumplimiento; puedes reponerla después.</p>
-      ${sesion.status === 'scheduled' ? `<button class="primary wide-button" id="ofrecer-rutina">No puedo atenderla: ofrecerle una rutina</button>
-      <p class="section-note">Solo para cuando tú no puedes dar la clase. Se arma con IA a partir de tu catálogo. La clase NO se cancela: si cumple la rutina ese mismo día, cuenta como su clase. Pasado el día, la oferta vence.</p>` : ''}`;
-    box.querySelector('#ofrecer-rutina')?.addEventListener('click', () => ofrecerRutinaEnLugarDeClase(sesion, 'trainer'));
+      <button class="secondary wide-button" id="compensar-nada">Cancelar sin reprogramar ni rutina</button>
+      <p class="section-note">Se cancela sin más. No descuenta ni toca su cumplimiento; puedes reponerla después.</p>`;
+    box.querySelector('#proponer-rutina')?.addEventListener('click', () => ofrecerRutinaEnLugarDeClase(sesion, 'trainer'));
     box.querySelector('#compensar-reprogramar').onclick = () => cancelar({ reprogramada: true, quien: 'trainer', compensa: 'none' });
     box.querySelector('#compensar-nada').onclick = () => cancelar({ reprogramada: false, quien: 'trainer', compensa: 'none' });
   };

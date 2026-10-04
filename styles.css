@@ -880,3 +880,8 @@ body .portal-period-nav button{white-space:nowrap;padding-left:4px;padding-right
 @media(max-width:600px){.routine-timer{flex-wrap:wrap}.routine-timer-button{flex:1 1 100%}.routine-timer-display{font-size:40px;flex:1 1 100%;text-align:center}}
 /* En Rutinas el botón flotante de peso tapaba el de guardar. */
 body:has(#portal-routines.active) .portal-weight-fab{display:none}
+
+/* Aviso "Proponer rutina" en el diálogo de cancelación (J-105) */
+.aviso-rutina{display:grid;gap:8px;margin:10px 0 14px;padding:14px 16px;border-radius:14px;background:linear-gradient(135deg,#fdeef3,#f4e7f0);border:1.5px solid #e2b4c8}
+.aviso-rutina b{font-size:15px;color:#7a4560}.aviso-rutina span{font-size:13px;line-height:1.45;color:#5a4650}
+.aviso-reprogramar{margin:0 0 8px;padding:10px 12px;border-radius:12px;background:#eef4fb;color:#3d5a7a;font-size:13px}
