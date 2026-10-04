@@ -275,3 +275,13 @@ test('pesos de la rutina generada (J-112): se pueden fijar, se pueden traer los 
   assert.match(app, /Usar los últimos pesos del cliente/);
   assert.match(app, /exercise\.weight && `Peso: \$\{exercise\.weight\}`/);
 });
+
+test('bloques de la rutina (J-113): el editor los arma y edita, y el cliente los ve con sus rondas', async () => {
+  const app = await leer('app.js'); const css = await leer('styles.css');
+  assert.match(app, /function normalizarBloques/); assert.match(app, /Dividir en bloques de/); assert.match(app, /id="armar-bloques"/);
+  assert.match(app, /data-bloque-rondas/); assert.match(app, /data-exercise-block/);
+  assert.match(app, /block: sugerido\.block, rounds: sugerido\.rounds/);
+  assert.match(app, /routine-block-title/); assert.match(app, /y repite el bloque/);
+  assert.match(app, /!bloque && exercise\.sets && setsLabel\(exercise\.sets\)/, 'en un bloque no se muestran series sueltas');
+  assert.match(css, /\.bloque-cabecera/); assert.match(css, /\.routine-block-title/);
+});

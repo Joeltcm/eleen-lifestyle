@@ -146,6 +146,18 @@ test('viaje registrado después: nunca cancela clases de días anteriores a su r
   assert.match(cancelada.cancellation_reason, /No confirmó una rutina ese día/);
 });
 
+test('los bloques de una rutina (bloque y rondas por ejercicio) se guardan, se devuelven y viajan en la página pública del enlace', async () => {
+  const ejercicios = [1, 2, 3, 4, 5, 6].map(n => ({ name: `Ejercicio ${n}`, reps: '12', sets: 3, block: n <= 3 ? 1 : 2, rounds: 3 }));
+  const r = await api.post('/api/routines', { title: 'En bloques', sessionsPerWeek: 3, exercises: ejercicios, clientId: c });
+  assert.equal(r.estado, 201, JSON.stringify(r.datos));
+  const guardada = (await api.get('/api/routines')).datos.find(x => x.id === r.datos.id);
+  assert.deepEqual(guardada.exercises.map(e => [e.block, e.rounds]), [[1, 3], [1, 3], [1, 3], [2, 3], [2, 3], [2, 3]]);
+  const e = await api.post(`/api/routines/${r.datos.id}/share-links`, { clientId: c, hours: 24 });
+  const vista = await publico.get(`/api/public/routine/${tokenDe(e.datos.url)}`);
+  assert.deepEqual(vista.datos.routine.exercises.map(x => x.block), [1, 1, 1, 2, 2, 2]);
+  assert.equal((await api.post('/api/routines', { title: 'Mal', sessionsPerWeek: 3, exercises: [{ name: 'X', block: 0 }] })).estado, 400, 'el bloque 0 no existe');
+});
+
 // Van al final a propósito: las reversas borran columnas y tablas.
 test('la reversa de 060 se niega a perder la justificación de cancelaciones sin orden expresa, y con la orden quita las columnas sin descancelar las clases', async () => {
   const archivo = new URL('../migrations-down/060_cancelacion_por_viaje.down.sql', import.meta.url).pathname;

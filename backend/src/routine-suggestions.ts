@@ -18,7 +18,7 @@ export type SuggestedRoutine = {
   title: string;
   description: string;
   sessionsPerWeek: number;
-  exercises: Array<{ name: string; sets?: number; reps?: string; notes?: string }>;
+  exercises: Array<{ name: string; sets?: number; reps?: string; notes?: string; block?: number; rounds?: number }>;
   rationale: string;
   avoided: string[];
 };
@@ -62,7 +62,12 @@ export async function suggestRoutine(entrada: {
       + 'Si dice qué equipo tiene disponible, elige ÚNICAMENTE ejercicios del catálogo que se puedan hacer con ese equipo y no incluyas ejercicios que requieran otro. '
       + 'En el catálogo, la máquina y el peso libre de cada ejercicio aparecen entre paréntesis; "peso corporal" significa que no requiere equipo.',
     'Responde sólo JSON válido con esta forma: {"title":string,"description":string,"sessionsPerWeek":number,'
-      + '"exercises":[{"name":string,"sets":number,"reps":string,"notes":string}],"rationale":string}',
+      + '"exercises":[{"name":string,"sets":number,"reps":string,"notes":string,"block":number,"rounds":number}],"rationale":string}',
+    // Bloques (J-113): Eileen arma sus rutinas en circuitos, p. ej. "3 rondas de los primeros 3 ejercicios y otras 3 rondas del segundo bloque de tres".
+    'ESTRUCTURA EN BLOQUES: organiza la rutina en bloques (circuitos). Cada ejercicio lleva "block" (1, 2, 3…, en el orden en que se hacen) y "rounds" (cuántas rondas se repite ese bloque; es el MISMO número para todos los ejercicios del bloque). '
+      + 'En un bloque se hacen sus ejercicios seguidos, en orden, y se repite el bloque "rounds" veces; por eso "sets" debe ser igual a "rounds" y "reps" es lo que se hace en cada ronda. '
+      + 'Por omisión usa bloques de 3 ejercicios (2 a 4 si hace falta) y 3 rondas por bloque. Si la entrenadora indica otra estructura (por ejemplo "2 bloques de 4 ejercicios, 4 rondas cada uno"), respétala. '
+      + 'Solo si la entrenadora pide expresamente ejercicios sueltos por series, omite "block" y "rounds".',
     'Entre 4 y 10 ejercicios. "reps" es texto libre ("12", "30 seg", "10 por lado").',
     'El campo rationale explica en una o dos frases por qué elegiste ese enfoque, en español.'
   ];
@@ -157,15 +162,19 @@ export async function suggestRoutine(entrada: {
     const encontrado = porNombre.get(nombre.toLowerCase());
     if (!encontrado) { if (nombre) descartados.push(nombre); return []; }
     const series = Number(item?.sets);
+    const bloque = Number(item?.block); const rondas = Number(item?.rounds);
     return [{
       name: encontrado.name,
       sets: Number.isFinite(series) && series >= 1 && series <= 20 ? Math.round(series) : 3,
       reps: String(item?.reps ?? '').slice(0, 40) || '12',
-      notes: String(item?.notes ?? '').slice(0, 300) || undefined
+      notes: String(item?.notes ?? '').slice(0, 300) || undefined,
+      block: Number.isFinite(bloque) && bloque >= 1 && bloque <= 20 ? Math.round(bloque) : undefined,
+      rounds: Number.isFinite(rondas) && rondas >= 1 && rondas <= 10 ? Math.round(rondas) : undefined
     }];
   });
 
   if (!ejercicios.length) throw new Error('La propuesta no incluyó ningún ejercicio del catálogo. Prueba a describirla de otra forma.');
+  normalizarBloques(ejercicios);
 
   const semanales = Number(cruda.sessionsPerWeek);
   return {
@@ -177,4 +186,21 @@ export async function suggestRoutine(entrada: {
     avoided: evitar.map(s => SECCIONES[s] || s),
     descartados
   };
+}
+
+// Deja los bloques coherentes aunque el modelo se equivoque: sin números repetidos fuera de orden, todos los ejercicios de un bloque con las mismas rondas (las del primero) y "sets" igual a
+// "rounds". Un ejercicio sin bloque entre otros con bloque se queda en el bloque del anterior; si ninguno trae bloque, la rutina queda como lista de ejercicios sueltos.
+export function normalizarBloques(ejercicios: Array<{ sets?: number; block?: number; rounds?: number }>) {
+  if (!ejercicios.some(item => item.block)) { ejercicios.forEach(item => { delete item.block; delete item.rounds; }); return; }
+  let anterior: number | undefined;
+  for (const item of ejercicios) { if (!item.block) item.block = anterior ?? 1; anterior = item.block; }
+  const orden = ejercicios.map((item, posicion) => ({ item, posicion })).sort((a, b) => (a.item.block! - b.item.block!) || (a.posicion - b.posicion)).map(entrada => entrada.item);
+  ejercicios.splice(0, ejercicios.length, ...orden);
+  const numeros = new Map<number, number>(); const rondas = new Map<number, number>();
+  for (const item of ejercicios) {
+    if (!numeros.has(item.block!)) numeros.set(item.block!, numeros.size + 1);
+    const nuevo = numeros.get(item.block!)!;
+    if (!rondas.has(nuevo)) rondas.set(nuevo, item.rounds ?? 3);
+    item.block = nuevo; item.rounds = rondas.get(nuevo); item.sets = item.rounds;
+  }
 }

@@ -3193,7 +3193,9 @@ const routineExerciseSchema = z.object({
   freeWeight: z.string().max(180).optional(), sets: z.coerce.number().int().min(1).max(20).optional(), reps: z.string().max(40).optional(),
   // Texto libre y no un número: aquí se escribe "20 lb", "12 kg" o "barra sola",
   // y forzar una unidad sería adivinar cómo trabaja cada quien.
-  weight: z.string().max(40).optional(), notes: z.string().max(300).optional()
+  weight: z.string().max(40).optional(), notes: z.string().max(300).optional(),
+  // Bloques o circuitos (J-113): el número de bloque y cuántas rondas se repite; sin ellos, el ejercicio va suelto con sus series.
+  block: z.coerce.number().int().min(1).max(20).optional(), rounds: z.coerce.number().int().min(1).max(10).optional()
 });
 const routineSchema = z.object({ title: z.string().min(2), description: z.string().optional(), sessionsPerWeek: z.coerce.number().int().min(1).max(7), exercises: z.array(routineExerciseSchema).max(80).default([]), clientId: z.string().uuid().optional(), dueOn: z.union([z.literal(''), z.null(), z.string().date()]).optional().transform(value => (value === '' || value === undefined ? null : value)) });
 app.get('/api/routines', { preHandler: requireStaff }, async request => {

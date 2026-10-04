@@ -929,3 +929,16 @@ body:has(#portal-routines.active) .portal-weight-fab{display:none}
 /* La demostración ocupa su propia fila bajo el nombre (la regla de móvil mandaba todos los div a la fila 1 y tapaba el título). */
 .selected-exercise>div.exercise-demo,.selected-exercise>.exercise-demo-sin{grid-column:1/-1;grid-row:2}
 @media(max-width:650px){.selected-exercise>div.exercise-demo,.selected-exercise>.exercise-demo-sin{grid-column:1/-1;grid-row:2}.selected-exercise-dose{grid-row:3}}
+
+/* Bloques o circuitos de una rutina (J-113) */
+.routine-block-title{display:grid;gap:2px;margin:14px 0 4px;padding:9px 12px;border-radius:10px;background:#f4e0ea;color:#7a4560;font-size:14px}
+.routine-block-title:first-child{margin-top:0}.routine-block-title small{color:#8a6577;font-size:12px;font-weight:500}
+.bloques-herramienta{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 10px;padding:10px 12px;border-radius:12px;background:#f6f1f3;font-size:13px;color:#5a4650}
+.bloques-herramienta select{min-height:36px;padding:4px 8px;border-radius:8px;width:auto}.bloques-herramienta .secondary{min-height:36px;padding:4px 12px;font-size:12px}
+.bloque-cabecera{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;margin:12px 0 2px;padding:9px 12px;border-radius:10px;background:#f4e0ea;color:#7a4560}
+.bloque-cabecera.suelto{background:#efe9ec;color:#6f6168}.bloque-cabecera small{flex:1 1 100%;color:#8a6577;font-size:12px}
+.bloque-cabecera label{display:inline-flex;align-items:center;gap:6px;font-size:13px}.bloque-cabecera input{width:64px;min-height:36px}
+
+/* Dosis del ejercicio en dos columnas: el selector de bloque ocupa la fila entera para que se lea "Bloque 1" completo. */
+.selected-exercise-dose{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+.selected-exercise-field.campo-bloque{grid-column:1/-1}

@@ -1,4 +1,4 @@
-const APP_VERSION = '282';
+const APP_VERSION = '283';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -236,7 +236,7 @@ function equivalenciaPeso(texto) {
   return `≈ ${redondeado} ${enKilos ? 'lb' : 'kg'}`;
 }
 
-const exerciseLabel = exercise => typeof exercise === 'string' ? exercise : [exercise.name, exercise.sets && setsLabel(exercise.sets), exercise.reps, exercise.weight].filter(Boolean).join(' · ');
+const exerciseLabel = exercise => typeof exercise === 'string' ? exercise : [exercise.block && `B${exercise.block}`, exercise.name, !exercise.block && exercise.sets && setsLabel(exercise.sets), exercise.reps, exercise.weight].filter(Boolean).join(' · ');
 const sessionFromApi = item => {
   const starts = panamaDateTimeParts(item.starts_at);
   return {
@@ -1875,6 +1875,25 @@ function proponerRutinaDesdeAgenda(sesion) {
   caja.querySelector('#propuesta-cliente').onclick = () => ofrecerRutinaEnLugarDeClase(sesion, 'client');
 }
 
+// ── Bloques o circuitos (J-113) ────────────────────────────────────────────────────────────────
+// Cada ejercicio puede llevar `block` (1, 2, 3…) y `rounds` (rondas del bloque, iguales para todo el bloque). En un bloque se hacen sus ejercicios seguidos y se repite el bloque `rounds` veces,
+// así que `sets` = `rounds`. Sin `block`, el ejercicio va suelto con sus series. Deja la lista coherente: bloques contiguos y en orden, sin huecos de numeración, las rondas del primero.
+function normalizarBloques(lista) {
+  if (!lista.some(item => item.block)) { lista.forEach(item => { delete item.block; delete item.rounds; }); return; }
+  const ordenados = lista.map((item, posicion) => ({ item, posicion })).filter(x => x.item.block).sort((x, y) => (x.item.block - y.item.block) || (x.posicion - y.posicion)).map(x => x.item);
+  const sueltos = lista.filter(item => !item.block);
+  lista.splice(0, lista.length, ...ordenados, ...sueltos);
+  const numeros = new Map(); const rondas = new Map();
+  for (const item of lista) {
+    if (!item.block) { delete item.rounds; continue; }
+    if (!numeros.has(item.block)) numeros.set(item.block, numeros.size + 1);
+    const nuevo = numeros.get(item.block);
+    if (!rondas.has(nuevo)) rondas.set(nuevo, Number(item.rounds) || 3);
+    item.block = nuevo; item.rounds = rondas.get(nuevo); item.sets = item.rounds;
+  }
+}
+const textoRondas = rondas => `${rondas} ${Number(rondas) === 1 ? 'ronda' : 'rondas'}`;
+
 // Un ejercicio admite que se le fije un peso si el catálogo lo marca "Lleva peso" o si usa máquina o peso libre (una plancha o la caminadora no lo piden).
 const admitePeso = ejercicio => Boolean(ejercicio) && Boolean(ejercicio.usesWeight
   || (ejercicio.freeWeight && !/^no aplica/i.test(ejercicio.freeWeight))
@@ -2938,6 +2957,7 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
     for (const sugerido of propuesta.exercises) {
       const enCatalogo = exerciseCatalog.find(item => item.name.toLowerCase() === sugerido.name.toLowerCase());
       selectedExercises.push({
+        block: sugerido.block, rounds: sugerido.rounds,
         catalogId: enCatalogo?.id, name: sugerido.name, english: enCatalogo?.english || '',
         category: enCatalogo ? exerciseSectionLabels[enCatalogo.section] : 'Propuesto',
         level: enCatalogo?.level || '', machine: enCatalogo?.machine || '',
@@ -2961,12 +2981,27 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
   };
 
   let observadorDemos = null;
+  let bloqueTamano = 3; let bloqueRondas = 3;
   const renderSelected = () => {
     observadorDemos?.disconnect();
+    normalizarBloques(selectedExercises);
     selectedList.replaceChildren();
     exerciseCount.textContent = `${selectedExercises.length} ejercicio${selectedExercises.length !== 1 ? 's' : ''}`;
     if (!selectedExercises.length) {
       const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = 'Todavía no has agregado ejercicios. Usa el selector superior para construir la rutina.'; selectedList.append(empty); return;
+    }
+    // Armar bloques de un golpe (J-113): "bloques de 3 ejercicios con 3 rondas". Después se puede cambiar el bloque de cada ejercicio y las rondas de cada bloque.
+    if (selectedExercises.length >= 2) {
+      const herramienta = document.createElement('div'); herramienta.className = 'bloques-herramienta';
+      const opciones = (valores, elegido) => valores.map(valor => `<option value="${valor}" ${valor === elegido ? 'selected' : ''}>${valor}</option>`).join('');
+      herramienta.innerHTML = `<span>Dividir en bloques de</span><select id="bloque-tamano" aria-label="Ejercicios por bloque">${opciones([2, 3, 4, 5, 6], bloqueTamano)}</select><span>ejercicios, con</span><select id="bloque-rondas" aria-label="Rondas por bloque">${opciones([1, 2, 3, 4, 5, 6], bloqueRondas)}</select><span>rondas</span><button type="button" class="secondary" id="armar-bloques">Armar bloques</button>${selectedExercises.some(item => item.block) ? '<button type="button" class="secondary" id="quitar-bloques">Quitar bloques</button>' : ''}`;
+      selectedList.append(herramienta);
+      herramienta.querySelector('#armar-bloques').onclick = () => {
+        bloqueTamano = Number(herramienta.querySelector('#bloque-tamano').value); bloqueRondas = Number(herramienta.querySelector('#bloque-rondas').value);
+        selectedExercises.forEach((item, posicion) => { item.block = Math.floor(posicion / bloqueTamano) + 1; item.rounds = bloqueRondas; item.sets = bloqueRondas; });
+        renderSelected();
+      };
+      herramienta.querySelector('#quitar-bloques')?.addEventListener('click', () => { selectedExercises.forEach(item => { delete item.block; delete item.rounds; if (item.sets > 6) item.sets = 3; }); renderSelected(); });
     }
     // Si el cliente ya usó pesos en rutinas anteriores, se pueden traer todos de una vez; cada uno se puede cambiar después.
     const pendientes = selectedExercises.filter(item => !item.weight && pesosPrevios[item.name]);
@@ -2977,13 +3012,26 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
       selectedList.append(traer);
     }
     selectedExercises.forEach((exercise, index) => {
+      // Cabecera del bloque, con sus rondas editables (valen para todo el bloque).
+      if (exercise.block && (index === 0 || selectedExercises[index - 1].block !== exercise.block)) {
+        const cabecera = document.createElement('div'); cabecera.className = 'bloque-cabecera';
+        cabecera.innerHTML = `<b>Bloque ${exercise.block}</b><label>Rondas <input type="number" min="1" max="10" value="${exercise.rounds || 3}" data-bloque-rondas="${exercise.block}" /></label><small>Los ejercicios se hacen seguidos y se repite el bloque.</small>`;
+        selectedList.append(cabecera);
+      } else if (!exercise.block && index > 0 && selectedExercises[index - 1].block) {
+        const suelto = document.createElement('div'); suelto.className = 'bloque-cabecera suelto'; suelto.innerHTML = '<b>Sin bloque</b><small>Ejercicios sueltos, con sus series.</small>'; selectedList.append(suelto);
+      }
       const row = document.createElement('div'); row.className = 'selected-exercise';
       const order = document.createElement('span'); order.className = 'selected-exercise-number'; order.textContent = String(index + 1);
       const copy = document.createElement('div'); const name = document.createElement('b'); const details = document.createElement('span');
       name.textContent = exercise.name; details.textContent = [exercise.category, exercise.level].filter(Boolean).join(' · '); copy.append(name, details);
       const dose = document.createElement('div'); dose.className = 'selected-exercise-dose';
       const setsLabel = document.createElement('label'); setsLabel.className = 'selected-exercise-field'; const setsTitle = document.createElement('span'); setsTitle.textContent = 'Series'; const sets = document.createElement('input'); sets.type = 'number'; sets.min = '1'; sets.max = '20'; sets.value = exercise.sets; sets.dataset.exerciseSets = String(index); setsLabel.append(setsTitle, sets);
-      const repsLabel = document.createElement('label'); repsLabel.className = 'selected-exercise-field'; const repsTitle = document.createElement('span'); repsTitle.textContent = 'Repeticiones / tiempo'; const reps = document.createElement('input'); reps.value = exercise.reps; reps.dataset.exerciseReps = String(index); repsLabel.append(repsTitle, reps); dose.append(setsLabel, repsLabel);
+      const repsLabel = document.createElement('label'); repsLabel.className = 'selected-exercise-field'; const repsTitle = document.createElement('span'); repsTitle.textContent = 'Repeticiones / tiempo'; const reps = document.createElement('input'); reps.value = exercise.reps; reps.dataset.exerciseReps = String(index); repsLabel.append(repsTitle, reps);
+      // Un ejercicio de bloque no lleva series propias: sus rondas son las del bloque.
+      const bloqueLabel = document.createElement('label'); bloqueLabel.className = 'selected-exercise-field campo-bloque';
+      const maxBloque = Math.max(0, ...selectedExercises.map(item => item.block || 0));
+      bloqueLabel.innerHTML = `<span>Bloque</span><select data-exercise-block="${index}"><option value="">Sin bloque</option>${Array.from({ length: Math.min(20, maxBloque + 1) }, (_, n) => `<option value="${n + 1}" ${exercise.block === n + 1 ? 'selected' : ''}>Bloque ${n + 1}</option>`).join('')}</select>`;
+      if (exercise.block) dose.append(bloqueLabel, repsLabel); else dose.append(bloqueLabel, setsLabel, repsLabel);
       // El peso sólo se pide donde tiene sentido: una plancha o la caminadora
       // no llevan kilos, y pedirlos en todos llenaría la rutina de huecos.
       const enCatalogo = exerciseCatalog.find(item => item.id === exercise.catalogId || item.name === exercise.name);
@@ -3061,8 +3109,22 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
     selectedExercises.push({ name, category: 'Personalizado', level: 'Personalizado', sets: Number(document.getElementById('exercise-sets').value) || 3, reps: document.getElementById('exercise-reps').value.trim() || '10' });
     input.value = ''; renderSelected();
   });
+  selectedList.addEventListener('change', event => {
+    if (!event.target.matches('[data-exercise-block]')) return;
+    const item = selectedExercises[Number(event.target.dataset.exerciseBlock)]; if (!item) return;
+    const bloque = Number(event.target.value) || undefined;
+    if (!bloque) { delete item.block; delete item.rounds; } else {
+      const companero = selectedExercises.find(otro => otro !== item && otro.block === bloque);
+      item.block = bloque; item.rounds = companero?.rounds || 3; item.sets = item.rounds;
+    }
+    renderSelected();
+  });
   selectedList.addEventListener('click', event => { const button = event.target.closest('[data-remove-exercise]'); if (!button) return; selectedExercises.splice(Number(button.dataset.removeExercise), 1); renderSelected(); });
   selectedList.addEventListener('input', event => {
+    if (event.target.matches('[data-bloque-rondas]')) {
+      const rondas = Math.max(1, Math.min(10, Number(event.target.value) || 1));
+      selectedExercises.filter(item => item.block === Number(event.target.dataset.bloqueRondas)).forEach(item => { item.rounds = rondas; item.sets = rondas; });
+    }
     if (event.target.matches('[data-exercise-sets]')) selectedExercises[Number(event.target.dataset.exerciseSets)].sets = Math.max(1, Math.min(20, Number(event.target.value) || 1));
     if (event.target.matches('[data-exercise-reps]')) selectedExercises[Number(event.target.dataset.exerciseReps)].reps = event.target.value.trim() || '1';
     // El peso puede quedarse vacío: no todos los días se anota, y forzar un
@@ -5573,21 +5635,29 @@ const portalViewTitles = { 'portal-dashboard': 'Mi progreso', 'portal-routines':
 // (has_video, tal como llega de la API) y el que tiene la entrenadora en
 // memoria (hasVideo, ya mapeado). Por eso se leen las dos formas.
 function exerciseRows(exercises, catalog, prefix = 'video') {
+  let bloqueActual = null;
   return exercises.map((exercise, position) => {
     if (typeof exercise === 'string') return `<span>${escapeHtml(exercise)}</span>`;
+    // Encabezado del bloque (J-113): dice cuántas rondas y que los ejercicios se hacen seguidos.
+    const bloque = exercise.block || null; let encabezado = '';
+    if (bloque !== bloqueActual) {
+      if (bloque) encabezado = `<div class="routine-block-title"><b>Bloque ${bloque}</b> · ${textoRondas(exercise.rounds || exercise.sets || 3)}<small>Haz estos ejercicios seguidos, en orden, y repite el bloque ${exercise.rounds || exercise.sets || 3} ${Number(exercise.rounds || exercise.sets || 3) === 1 ? 'vez' : 'veces'}.</small></div>`;
+      else if (bloqueActual) encabezado = '<div class="routine-block-title"><b>Además</b></div>';
+      bloqueActual = bloque;
+    }
     // Las rutinas creadas antes de mover el catálogo a la base guardaron el
     // slug del archivo estático como catalogId; las nuevas guardan el uuid. La
     // siembra conservó esos mismos slugs, así que buscar por ambos hace que las
     // rutinas viejas también muestren video.
     const catalogEntry = (catalog || []).find(item => item.id === exercise.catalogId || item.slug === exercise.catalogId);
     const tieneVideo = Boolean(catalogEntry?.has_video ?? catalogEntry?.hasVideo);
-    const dose = [exercise.sets && setsLabel(exercise.sets), exercise.reps, exercise.weight && `Peso: ${exercise.weight}`].filter(Boolean).join(' · ');
+    const dose = [!bloque && exercise.sets && setsLabel(exercise.sets), exercise.reps, exercise.weight && `Peso: ${exercise.weight}`].filter(Boolean).join(' · ');
     // La posición entra en el id porque una rutina puede repetir el mismo
     // ejercicio —el mismo movimiento en dos rangos de repeticiones es normal— y
     // dos contenedores con el mismo id harían que el segundo botón abriera el
     // video del primero.
     const videoId = `${prefix}-${catalogEntry?.id}-${position}`;
-    return `<div class="portal-exercise">
+    return `${encabezado}<div class="portal-exercise">
       <b>${escapeHtml(exercise.name)}</b>
       ${dose ? `<small>${escapeHtml(dose)}</small>` : ''}
       ${catalogEntry?.cues ? `<small>${escapeHtml(catalogEntry.cues)}</small>` : ''}
