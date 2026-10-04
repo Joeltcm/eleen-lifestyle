@@ -6947,7 +6947,7 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
       return {
         type: 'travel', clientId: viaje.client_id, travelId: viaje.id,
         title: `${viaje.full_name} viaja${viaje.starts_on > new Date(Date.now() - 5 * 3600_000).toISOString().slice(0, 10) ? ' pronto' : ': está de viaje'}`,
-        body: `${d}-${m}-${a}${viaje.ends_on ? ` al ${d2}-${m2}-${a2}` : ' (regreso sin definir)'}. No tiene una rutina enviada: sin confirmarla, sus clases de esos días cuentan como cancelación. ¿Le preparas una?`,
+        body: `${d}-${m}-${a}${viaje.ends_on ? ` al ${d2}-${m2}-${a2}` : ' (regreso sin definir)'}. No tiene una rutina enviada. Si no recibe y confirma una rutina, sus clases de esos días se cancelan solas. ¿Se la ofreces?`,
         scheduledFor: viaje.starts_on
       };
     }),
@@ -8097,7 +8097,8 @@ const viajeSchema = z.object({
 }).refine(valor => !valor.endsOn || valor.endsOn >= valor.startsOn, { message: 'El regreso no puede ser antes de la salida' });
 
 const viajeSelect = (where: Fragment) => sql`
-  SELECT t.id, t.client_id, t.starts_on::text AS starts_on, t.ends_on::text AS ends_on, t.destination, t.note, c.full_name
+  SELECT t.id, t.client_id, t.starts_on::text AS starts_on, t.ends_on::text AS ends_on, t.destination, t.note, c.full_name,
+    (SELECT count(*)::int FROM sessions s WHERE s.cancelled_travel_id = t.id) AS cancelled_sessions
   FROM client_travel t JOIN clients c ON c.id = t.client_id ${where} ORDER BY t.starts_on DESC`;
 
 app.get('/api/travel', { preHandler: requireStaff }, async request => {
@@ -8146,6 +8147,12 @@ app.patch('/api/travel/:id', { preHandler: requireStaff }, async (request, reply
 app.delete('/api/travel/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [viaje] = await sql`
+    SELECT t.id, (SELECT count(*)::int FROM sessions s WHERE s.cancelled_travel_id = t.id) AS canceladas
+    FROM client_travel t JOIN clients c ON c.id = t.client_id WHERE t.id = ${id} AND c.owner_id = ${auth.sub}`;
+  if (!viaje) return reply.code(404).send({ error: 'Viaje no encontrado' });
+  // El viaje es la justificación de esas cancelaciones: se conserva como registro.
+  if (Number(viaje.canceladas) > 0) return reply.code(409).send({ error: `Este viaje justificó ${viaje.canceladas} ${viaje.canceladas === 1 ? 'cancelación' : 'cancelaciones'}: se conserva como registro y no se puede quitar.` });
   const [borrado] = await sql`DELETE FROM client_travel t USING clients c WHERE t.id = ${id} AND c.id = t.client_id AND c.owner_id = ${auth.sub} RETURNING t.id`;
   if (!borrado) return reply.code(404).send({ error: 'Viaje no encontrado' });
   return { deleted: true };
@@ -8363,6 +8370,7 @@ async function darPorPerdidasClasesConRutinaVencida(ownerId?: string) {
     try {
       const cerrada = await cancelarComoPerdidaPorElCliente(String(fila.session_id), async transaction => {
         await transaction`UPDATE session_routine_offers SET status = 'expired' WHERE id = ${fila.offer_id}`;
+        await transaction`UPDATE sessions SET cancellation_reason = 'Cancelación del cliente: no cumplió la rutina que se le ofreció en lugar de la clase.' WHERE id = ${fila.session_id}`;
       });
       if (cerrada) perdidas += 1;
     } catch (error) { app.log.warn({ err: error, sessionId: fila.session_id }, 'No se pudo dar por perdida una clase con rutina vencida'); }
@@ -8370,12 +8378,14 @@ async function darPorPerdidasClasesConRutinaVencida(ownerId?: string) {
   return perdidas;
 }
 
-// Clases de un día de VIAJE sin rutina confirmada ese día: equivalen a una cancelación del cliente (J-107). El viaje no pausa el plan ni el cobro; lo que el cliente puede hacer para que la clase
-// cuente es confirmar la rutina que Eileen le envió por enlace. Dos salvaguardas: (1) solo si ese día había un enlace vigente (si Eileen nunca le mandó una rutina, el cliente no tenía cómo confirmar:
-// la clase queda pendiente y ella decide); (2) nunca hacia atrás: solo clases de días desde que se registró el viaje.
+// Clases de un día de VIAJE sin rutina confirmada ese día: se CANCELAN SOLAS como cancelación del cliente (J-107/J-108). El viaje no pausa el plan ni el cobro; lo que el cliente puede
+// hacer para que la clase cuente es aceptar y confirmar la rutina que Eileen le manda por enlace. Si no hay acción (no se le envió rutina, no la aceptó o no la confirmó), la clase se
+// cancela al terminar su día, y la cancelación queda JUSTIFICADA con el viaje (cancelled_travel_id + cancellation_reason). Salvaguarda: nunca hacia atrás — solo clases de días desde que se
+// registró el viaje, para que registrar un viaje tarde no cancele clases ya pasadas.
 async function darPorPerdidasClasesDeViajeSinRutina(ownerId?: string) {
   const candidatas = await sql`
-    SELECT DISTINCT s.id
+    SELECT DISTINCT ON (s.id) s.id AS session_id, t.id AS travel_id,
+      to_char(t.starts_on, 'DD-MM-YYYY') AS desde, to_char(t.ends_on, 'DD-MM-YYYY') AS hasta, t.destination
     FROM sessions s
     JOIN clients c ON c.id = s.client_id
     JOIN client_travel t ON t.client_id = s.client_id
@@ -8384,20 +8394,23 @@ async function darPorPerdidasClasesDeViajeSinRutina(ownerId?: string) {
     WHERE s.status = 'scheduled' AND NOT COALESCE(s.paused_hold, false) AND c.status = 'active'
       AND (s.starts_at AT TIME ZONE 'America/Panama')::date < (now() AT TIME ZONE 'America/Panama')::date
       AND (${ownerId ?? null}::uuid IS NULL OR c.owner_id = ${ownerId ?? null}::uuid)
-      AND EXISTS (
-        SELECT 1 FROM routine_share_links l
-        WHERE l.client_id = s.client_id
-          AND (l.created_at AT TIME ZONE 'America/Panama')::date <= (s.starts_at AT TIME ZONE 'America/Panama')::date
-          AND (l.expires_at AT TIME ZONE 'America/Panama')::date >= (s.starts_at AT TIME ZONE 'America/Panama')::date
-          AND (l.revoked_at IS NULL OR (l.revoked_at AT TIME ZONE 'America/Panama')::date > (s.starts_at AT TIME ZONE 'America/Panama')::date))
       AND NOT EXISTS (
         SELECT 1 FROM routine_completions rc
         WHERE rc.client_id = s.client_id AND rc.via_link AND rc.completion_percent > 0
-          AND rc.completed_on = (s.starts_at AT TIME ZONE 'America/Panama')::date)`;
+          AND rc.completed_on = (s.starts_at AT TIME ZONE 'America/Panama')::date)
+    ORDER BY s.id, t.starts_on`;
   let perdidas = 0;
   for (const fila of candidatas) {
-    try { if (await cancelarComoPerdidaPorElCliente(String(fila.id))) perdidas += 1; }
-    catch (error) { app.log.warn({ err: error, sessionId: fila.id }, 'No se pudo dar por perdida una clase de viaje sin rutina'); }
+    try {
+      const razon = `Cancelación del cliente: de viaje del ${fila.desde} ${fila.hasta ? `al ${fila.hasta}` : '(regreso sin definir)'}${fila.destination ? ` · ${fila.destination}` : ''}. No confirmó una rutina ese día.`;
+      const cerrada = await cancelarComoPerdidaPorElCliente(String(fila.session_id), async transaction => {
+        await transaction`
+          UPDATE sessions SET cancelled_travel_id = ${fila.travel_id}, cancellation_reason = ${razon},
+            notes = CASE WHEN COALESCE(notes, '') LIKE '%Cancelada automáticamente por viaje del cliente%' THEN notes ELSE COALESCE(notes || E'\n', '') || 'Cancelada automáticamente por viaje del cliente.' END
+          WHERE id = ${fila.session_id}`;
+      });
+      if (cerrada) perdidas += 1;
+    } catch (error) { app.log.warn({ err: error, sessionId: fila.session_id }, 'No se pudo cancelar una clase de viaje sin rutina'); }
   }
   return perdidas;
 }

@@ -1,4 +1,4 @@
-const APP_VERSION = '278';
+const APP_VERSION = '279';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -250,7 +250,7 @@ const sessionFromApi = item => {
     cancelledBy: item.cancelled_by || '', cancellationKind: item.cancellation_kind || '', cancellationResolution: item.cancellation_resolution || '', creditCharge: Boolean(item.credit_charge), pausedHold: Boolean(item.paused_hold),
     googleSynced: Boolean(item.google_event_id), googleEventLink: item.google_event_link || '',
     googleSyncError: item.google_sync_error || '',
-    routineOfferStatus: item.routine_offer_status || '', routineOfferExpired: Boolean(item.routine_offer_expired), routineOfferOrigin: item.routine_offer_origin || '', routineOfferDuration: item.routine_offer_duration_seconds ? Number(item.routine_offer_duration_seconds) : null
+    routineOfferStatus: item.routine_offer_status || '', routineOfferExpired: Boolean(item.routine_offer_expired), routineOfferOrigin: item.routine_offer_origin || '', cancelledTravelId: item.cancelled_travel_id || '', cancellationReason: item.cancellation_reason || '', routineOfferDuration: item.routine_offer_duration_seconds ? Number(item.routine_offer_duration_seconds) : null
   };
 };
 async function refreshSessions() {
@@ -495,7 +495,7 @@ const sesionEnPausa = session => session.status === 'scheduled'
 // Cliente de viaje (J-107): el viaje no pausa el plan; sus clases de esos días salen en azul con ✈ y piden la rutina confirmada ese día.
 const viajeDelCliente = (clientId, fecha) => (data.travel || []).find(item => item.client_id === clientId && item.starts_on <= fecha && (!item.ends_on || item.ends_on >= fecha));
 const sesionDeViaje = session => session.status === 'scheduled' && !sesionEnPausa(session) && Boolean(viajeDelCliente(session.clientId, session.date));
-const sessionStateLabel = session => sesionEnPausa(session) ? 'Reservado (En Pausa)' : sesionDeViaje(session) ? '✈ De viaje' : session.status === 'completed' ? 'Realizada' : session.status === 'no_show' ? 'No asistió' : session.status === 'cancelled' ? 'Cancelada' : 'Programada';
+const sessionStateLabel = session => sesionEnPausa(session) ? 'Reservado (En Pausa)' : sesionDeViaje(session) ? '✈ De viaje' : session.status === 'cancelled' && session.cancelledTravelId ? '✈ Cancelada (viaje)' : session.status === 'completed' ? 'Realizada' : session.status === 'no_show' ? 'No asistió' : session.status === 'cancelled' ? 'Cancelada' : 'Programada';
 // La clase visual: una sesión congelada por pausa manda sobre su status, para
 // que no tome prestado el verde de "programada" en el calendario.
 const estadoSesion = session => sesionEnPausa(session) ? 'pausa' : sesionDeViaje(session) ? 'viaje' : session.status;
@@ -775,6 +775,7 @@ function renderCalendar() {
         </summary>
         ${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}
         ${session.packageLabel && session.packageId ? `<small class="session-charge">Descontada de «${escapeHtml(session.packageLabel)}»${session.packageUsed != null && session.packageTotal != null ? ` · quedan ${Math.max(0, session.packageTotal - session.packageUsed)}` : ''}</small>` : ''}
+        ${session.cancellationReason ? `<small class="session-charge session-viaje-razon">${session.cancelledTravelId ? '✈ ' : ''}${escapeHtml(session.cancellationReason)}</small>` : ''}
         ${session.routineOfferStatus === 'expired' ? `<small class="session-charge session-routine-offer">Rutina ofrecida por su cancelación y no cumplida el día de la clase · la clase se dio por perdida</small>` : session.routineOfferStatus === 'offered' && session.routineOfferExpired ? `<small class="session-charge session-routine-offer">La rutina ofrecida venció (solo valía este día) sin cumplirse · cierra la clase como corresponda</small>` : session.routineOfferStatus === 'offered' ? `<small class="session-charge session-routine-offer">Rutina ofrecida en lugar de la clase · vale solo este día${session.routineOfferOrigin === 'client' ? ' · si no la cumple, la clase se da por perdida' : ''} · esperando que ${escapeHtml(session.client.split(' ')[0])} la cumpla</small>` : session.routineOfferStatus === 'completed' ? `<small class="session-charge session-routine-done">Cumplió la rutina en lugar de la clase${session.routineOfferDuration ? ` · ${Math.max(1, Math.round(session.routineOfferDuration / 60))} min` : ''}</small>` : ''}
         ${session.creditCharge ? '<small class="session-charge">Cancelación cobrada · crédito por sesión</small>' : session.status === 'cancelled' && session.cancellationKind === 'not_rescheduled' && session.cancelledBy === 'client' && data.clients.find(c => c.id === session.clientId)?.paymentMode === 'no_anticipado' ? '<small class="session-charge">Cancelación del cliente · sin cobro</small>' : ''}
         ${session.status === 'cancelled'
@@ -1837,8 +1838,9 @@ function guiaDeCancelaciones() {
     <ul>
       <li>Viajar <b>no pausa su plan ni su cobro</b>. Sus clases de esos días salen en azul con ✈.</li>
       <li>Para que cada clase cuente, debe <b>confirmar la rutina que le enviaste por enlace el día de esa clase</b>. Si la confirma, la clase cuenta como dada.</li>
-      <li>Si no la confirma, esa clase se da por perdida: es una cancelación del cliente (cuenta como incumplida y se le descuenta una clase; a crédito, sin cobro automático).</li>
-      <li>Solo se da por perdida si ese día tenía un enlace vigente. Si nunca le enviaste una rutina, la clase queda pendiente y tú decides.</li>
+      <li>Si no hay acción —no se le envió rutina, no quiso recibirla o no la confirmó—, esa clase <b>se cancela sola al terminar el día</b>: cancelación del cliente (cuenta como incumplida y se le descuenta una clase; a crédito, sin cobro automático).</li>
+      <li>La cancelación queda <b>justificada con el viaje</b>: se ve en la clase y en el expediente (Viajes). Un viaje que justificó cancelaciones no se puede quitar, se conserva como registro.</li>
+      <li>Solo se cancelan clases de días desde que registraste el viaje; no las anteriores.</li>
     </ul>
     <h3>Siempre</h3>
     <ul>
@@ -4304,7 +4306,7 @@ function viajeDialog(client, viaje = null) {
   const box = document.createElement('div');
   box.innerHTML = `<form id="viaje-form"><p class="eyebrow">VIAJE</p><h2>${viaje ? 'Editar viaje' : 'Marcar viaje'}</h2>
     <p class="form-summary"><b>${escapeHtml(client.name)}</b></p>
-    <div class="aviso-reprogramar">Viajar <b>no pausa su plan ni su cobro</b>. Para que sus clases de esos días cuenten, debe confirmar la rutina que le envíes <b>el día de cada clase</b>; si no la confirma, esa clase se da por perdida (cancelación del cliente).</div>
+    <div class="aviso-reprogramar">Viajar <b>no pausa su plan ni su cobro</b>. Pregúntale si quiere una rutina: si la acepta y la confirma <b>el día de cada clase</b>, esa clase cuenta. Si no hay acción, esa clase <b>se cancela sola</b> al terminar el día (cancelación del cliente) y queda registrada con este viaje.</div>
     <div class="form-row"><label>Sale el<input type="date" name="startsOn" required value="${viaje?.starts_on || dateKey(today)}" /></label>
     <label>Regresa el<input type="date" name="endsOn" value="${viaje?.ends_on || ''}" /><small>Déjalo vacío si aún no lo sabe.</small></label></div>
     <label>Destino (opcional)<input name="destination" maxlength="80" value="${escapeHtml(viaje?.destination || '')}" placeholder="Ej. Madrid" /></label>
@@ -4337,8 +4339,8 @@ async function viajesSection(target, client) {
     const estado = viaje => viaje.ends_on && viaje.ends_on < hoy ? 'pasado' : viaje.starts_on > hoy ? 'próximo' : 'en curso';
     const activos = enlaces.filter(item => item.active);
     target.innerHTML = `<button type="button" class="secondary wide-button" id="marcar-viaje">✈ Marcar viaje</button>
-      ${viajes.length ? viajes.map(viaje => `<div class="viaje-fila ${estado(viaje).replace(' ', '-')}"><div><b>✈ ${fechaViaje(viaje.starts_on)} → ${viaje.ends_on ? fechaViaje(viaje.ends_on) : 'regreso sin definir'}</b><small>${estado(viaje)}${viaje.destination ? ` · ${escapeHtml(viaje.destination)}` : ''}${viaje.note ? ` · ${escapeHtml(viaje.note)}` : ''}</small></div>
-        <div class="viaje-acciones">${estado(viaje) !== 'pasado' ? `<button type="button" class="secondary" data-viaje-rutina="${viaje.id}">Preparar rutina</button>` : ''}<button type="button" class="secondary" data-viaje-editar="${viaje.id}">Editar</button><button type="button" class="secondary" data-viaje-borrar="${viaje.id}">Quitar</button></div></div>`).join('')
+      ${viajes.length ? viajes.map(viaje => `<div class="viaje-fila ${estado(viaje).replace(' ', '-')}"><div><b>✈ ${fechaViaje(viaje.starts_on)} → ${viaje.ends_on ? fechaViaje(viaje.ends_on) : 'regreso sin definir'}</b><small>${estado(viaje)}${viaje.destination ? ` · ${escapeHtml(viaje.destination)}` : ''}${viaje.note ? ` · ${escapeHtml(viaje.note)}` : ''}${viaje.cancelled_sessions ? ` · <b>${viaje.cancelled_sessions} clase${viaje.cancelled_sessions === 1 ? '' : 's'} cancelada${viaje.cancelled_sessions === 1 ? '' : 's'} por este viaje</b>` : ''}</small></div>
+        <div class="viaje-acciones">${estado(viaje) !== 'pasado' ? `<button type="button" class="secondary" data-viaje-rutina="${viaje.id}">Preparar rutina</button>` : ''}<button type="button" class="secondary" data-viaje-editar="${viaje.id}">Editar</button>${viaje.cancelled_sessions ? '' : `<button type="button" class="secondary" data-viaje-borrar="${viaje.id}">Quitar</button>`}</div></div>`).join('')
         : '<p class="empty">No hay viajes marcados.</p>'}
       ${activos.length ? `<p class="section-note" style="margin-top:12px"><b>Enlaces de rutina activos</b></p>${activos.map(item => `<div class="viaje-fila"><div><b>${escapeHtml(item.routine_title)}</b><small>Vence el ${venceTexto(item.expires_at)} · abierto ${item.opens} vez${item.opens === 1 ? '' : 'es'}</small></div><div class="viaje-acciones"><button type="button" class="secondary" data-enlace-revocar="${item.id}">Revocar</button></div></div>`).join('')}` : ''}`;
     target.querySelector('#marcar-viaje').onclick = () => viajeDialog(client);

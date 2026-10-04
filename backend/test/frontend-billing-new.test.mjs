@@ -232,3 +232,11 @@ test('cliente de viaje y rutina por enlace (J-107): marcador en calendario, expe
   assert.ok(html.indexOf('id="public-routine"') < html.indexOf('<script src="./app.js'), 'el contenedor público existe antes de que corra app.js');
   assert.match(app, /confirmar la rutina que le enviaste por enlace el día de esa clase/);
 });
+
+test('cancelación automática por viaje (J-108): la guía, el aviso y la agenda dejan el registro del viaje como justificación', async () => {
+  const app = await leer('app.js');
+  assert.match(app, /se cancela sola al terminar el día/); assert.match(app, /justificada con el viaje/);
+  assert.match(app, /session-viaje-razon/); assert.match(app, /cancellationReason: item\.cancellation_reason/);
+  assert.match(app, /cancelada\$\{viaje\.cancelled_sessions === 1 \? '' : 's'\} por este viaje/);
+  assert.doesNotMatch(app, /Solo se da por perdida si ese día tenía un enlace vigente/);
+});

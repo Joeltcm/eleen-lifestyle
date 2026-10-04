@@ -11,7 +11,8 @@ BEGIN
   END IF;
 END $$;
 DROP TABLE IF EXISTS routine_share_links;
-DROP TABLE IF EXISTS client_travel;
+-- CASCADE: si la 060 sigue aplicada, sessions.cancelled_travel_id depende de esta tabla; se suelta solo la restricción (la 060 quita la columna).
+DROP TABLE IF EXISTS client_travel CASCADE;
 ALTER TABLE routine_completions DROP COLUMN IF EXISTS via_link;
 DELETE FROM schema_migrations WHERE name = '059_viajes_y_enlaces_de_rutina.sql';
 COMMIT;

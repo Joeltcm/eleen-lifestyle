@@ -102,43 +102,59 @@ test('confirmar la rutina por enlace el día de la clase en viaje la cuenta como
   assert.equal((await sesionDe(otraClase)).status, 'scheduled');
 });
 
-test('clase de un día de viaje sin rutina confirmada = cancelación del cliente (incumplida); solo con un enlace vigente ese día, nunca hacia atrás y no si confirmó', async () => {
+test('clase de un día de viaje sin rutina confirmada se CANCELA sola (cancelación del cliente, incumplida) y queda justificada con el viaje; no si confirmó; con o sin enlace enviado', async () => {
   const cc = (await api.post('/api/clients', { fullName: 'Pedro Viajero', cutoffDay: 1, email: 'pedro.viaje@prueba.test' })).datos.id;
   const rr = (await api.post('/api/routines', { title: 'Viaje Pedro', sessionsPerWeek: 3, exercises: [{ name: 'Sentadilla', sets: 3, reps: '12' }], clientId: cc })).datos.id;
   const hace4 = panama(-4); const hace3 = panama(-3); const hace2 = panama(-2); const hace1 = panama(-1);
-  const viaje = (await api.post(`/api/clients/${cc}/travel`, { startsOn: hace4, endsOn: panama(5) })).datos.id;
-  // clases: 4 días atrás (antes del enlace), 3 días (con enlace, sin confirmar), 2 días (con enlace, CONFIRMÓ), ayer (con enlace, sin confirmar)
-  const s4 = (await api.post('/api/sessions', { clientId: cc, startsAt: aHora(hace4, '09:00'), durationMinutes: 45, mode: 'Presencial' })).datos.id;
-  const s3 = (await api.post('/api/sessions', { clientId: cc, startsAt: aHora(hace3, '09:00'), durationMinutes: 45, mode: 'Presencial' })).datos.id;
-  const s2 = (await api.post('/api/sessions', { clientId: cc, startsAt: aHora(hace2, '09:00'), durationMinutes: 45, mode: 'Presencial' })).datos.id;
-  const s1 = (await api.post('/api/sessions', { clientId: cc, startsAt: aHora(hace1, '09:00'), durationMinutes: 45, mode: 'Presencial' })).datos.id;
+  const viaje = (await api.post(`/api/clients/${cc}/travel`, { startsOn: hace4, endsOn: panama(5), destination: 'Lisboa' })).datos.id;
+  // clases: hace 4 días (sin ningún enlace aún), hace 3 (sin confirmar), hace 2 (CONFIRMÓ por enlace), ayer (sin confirmar) y mañana (aún no)
+  const crear = async dia => (await api.post('/api/sessions', { clientId: cc, startsAt: aHora(dia, '09:00'), durationMinutes: 45, mode: 'Presencial' })).datos.id;
+  const s4 = await crear(hace4); const s3 = await crear(hace3); const s2 = await crear(hace2); const s1 = await crear(hace1); const manana = await crear(panama(1));
   const enlace = (await api.post(`/api/routines/${rr}/share-links`, { clientId: cc, until: panama(5), travelId: viaje })).datos.id;
-  // Retroceder el calendario: el viaje se registró hace 4 días y el enlace se creó hace 3 (no cubre la clase de hace 4).
+  // El viaje se registró hace 4 días (sin esto, "nunca hacia atrás" protegería todas las clases).
   await db`UPDATE client_travel SET created_at = now() - interval '4 days' WHERE id = ${viaje}`;
   await db`UPDATE routine_share_links SET created_at = now() - interval '3 days' WHERE id = ${enlace}`;
   await db`INSERT INTO routine_completions (routine_id, client_id, completed_on, completion_percent, via_link) VALUES (${rr}, ${cc}, ${hace2}::date, 100, true)`;
   const r = await api.post('/api/maintenance/vencer-ofertas-rutina', {});
-  assert.equal(r.estado, 200); assert.equal(r.datos.porViaje, 2, 'hace 3 días y ayer');
-  for (const [id, esperado] of [[s3, 'cancelled'], [s1, 'cancelled'], [s4, 'scheduled'], [s2, 'scheduled']]) assert.equal((await sesionDe(id)).status, esperado);
+  assert.equal(r.estado, 200); assert.equal(r.datos.porViaje, 3, 'hace 4 días (sin enlace), hace 3 y ayer');
+  for (const [id, esperado] of [[s4, 'cancelled'], [s3, 'cancelled'], [s1, 'cancelled'], [s2, 'scheduled'], [manana, 'scheduled']]) assert.equal((await sesionDe(id)).status, esperado);
   const perdida = await sesionDe(s3);
   assert.equal(perdida.cancelled_by, 'client'); assert.equal(perdida.cancellation_kind, 'not_rescheduled');
+  assert.equal(perdida.cancelled_travel_id, viaje, 'ligada al viaje que la justifica');
+  assert.match(perdida.cancellation_reason, /de viaje del \d{2}-\d{2}-\d{4} al \d{2}-\d{2}-\d{4} · Lisboa/);
+  assert.match(perdida.notes, /Cancelada automáticamente por viaje del cliente/);
   const resumen = (await api.get('/api/compliance/summary?period=week')).datos.clients.find(x => x.clientId === cc);
-  assert.equal(resumen.missed, 2, 'cuentan como incumplidas en su cumplimiento');
+  assert.equal(resumen.missed, 3, 'cuentan como incumplidas en su cumplimiento');
+  assert.equal((await api.get(`/api/clients/${cc}/travel`)).datos[0].cancelled_sessions, 3, 'el viaje muestra cuántas cancelaciones justificó');
   assert.equal((await api.post('/api/maintenance/vencer-ofertas-rutina', {})).datos.porViaje, 0, 'idempotente');
+  // El viaje es el registro: mientras justifique cancelaciones no se puede quitar.
+  const intento = await api.delete(`/api/travel/${viaje}`);
+  assert.equal(intento.estado, 409); assert.match(intento.datos.error, /justificó 3 cancelaciones/);
+  assert.equal((await api.get(`/api/clients/${cc}/travel`)).datos.length, 1);
 });
 
-test('viaje registrado después: no castiga clases de días anteriores a su registro; sin enlace nunca se pierde sola', async () => {
+test('viaje registrado después: nunca cancela clases de días anteriores a su registro; un cliente sin ningún enlace enviado igual pierde sus clases de viaje', async () => {
   const cc = (await api.post('/api/clients', { fullName: 'Lucia Retro', cutoffDay: 1 })).datos.id;
-  const ayer = panama(-1);
   const viaje = (await api.post(`/api/clients/${cc}/travel`, { startsOn: panama(-3), endsOn: panama(3) })).datos.id;
-  const clase = (await api.post('/api/sessions', { clientId: cc, startsAt: aHora(ayer, '09:00'), durationMinutes: 45, mode: 'Presencial' })).datos.id;
-  assert.equal((await api.post('/api/maintenance/vencer-ofertas-rutina', {})).datos.porViaje, 0, 'registrado hoy: ayer es retroactivo y no se castiga');
-  await db`UPDATE client_travel SET created_at = now() - interval '5 days' WHERE id = ${viaje}`;
-  assert.equal((await api.post('/api/maintenance/vencer-ofertas-rutina', {})).datos.porViaje, 0, 'sin ningún enlace enviado, el cliente no tenía cómo confirmar: la clase queda pendiente');
+  const clase = (await api.post('/api/sessions', { clientId: cc, startsAt: aHora(panama(-1), '09:00'), durationMinutes: 45, mode: 'Presencial' })).datos.id;
+  assert.equal((await api.post('/api/maintenance/vencer-ofertas-rutina', {})).datos.porViaje, 0, 'registrado hoy: ayer es retroactivo y no se cancela');
   assert.equal((await sesionDe(clase)).status, 'scheduled');
+  await db`UPDATE client_travel SET created_at = now() - interval '5 days' WHERE id = ${viaje}`;
+  assert.equal((await api.post('/api/maintenance/vencer-ofertas-rutina', {})).datos.porViaje, 1, 'sin acción (nunca se le envió rutina) la clase se cancela sola');
+  const cancelada = await sesionDe(clase);
+  assert.equal(cancelada.status, 'cancelled'); assert.equal(cancelada.cancelled_travel_id, viaje);
+  assert.match(cancelada.cancellation_reason, /No confirmó una rutina ese día/);
 });
 
-// Va al final a propósito: la reversa borra las tablas.
+// Van al final a propósito: las reversas borran columnas y tablas.
+test('la reversa de 060 se niega a perder la justificación de cancelaciones sin orden expresa, y con la orden quita las columnas sin descancelar las clases', async () => {
+  const archivo = new URL('../migrations-down/060_cancelacion_por_viaje.down.sql', import.meta.url).pathname;
+  await assert.rejects(ejecutar('psql', ['-v', 'ON_ERROR_STOP=1', '-q', servidor.databaseUrl, '-f', archivo]), /cancelaciones con su justificación guardada/);
+  await ejecutar('psql', ['-v', 'ON_ERROR_STOP=1', '-q', servidor.databaseUrl, '-c', "SET billing.allow_destructive_down = 'on'", '-f', archivo]);
+  assert.equal((await db`SELECT count(*)::int AS n FROM information_schema.columns WHERE table_name = 'sessions' AND column_name IN ('cancellation_reason', 'cancelled_travel_id')`)[0].n, 0);
+  assert.ok((await db`SELECT count(*)::int AS n FROM sessions WHERE status = 'cancelled'`)[0].n >= 4, 'las clases siguen canceladas');
+});
+
 test('la reversa de 059 se niega a borrar viajes y enlaces sin orden expresa, y con la orden los quita', async () => {
   const archivo = new URL('../migrations-down/059_viajes_y_enlaces_de_rutina.down.sql', import.meta.url).pathname;
   await assert.rejects(ejecutar('psql', ['-v', 'ON_ERROR_STOP=1', '-q', servidor.databaseUrl, '-f', archivo]), /hay viajes o enlaces de rutina guardados/);

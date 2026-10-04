@@ -916,3 +916,4 @@ body:has(#portal-routines.active) .portal-weight-fab{display:none}
 .public-instrucciones{margin:0 0 14px;color:#5a4650;line-height:1.5;font-size:15px}.public-vigencia{display:block;margin-top:18px;color:#8a7a82;text-align:center}
 .public-porcentaje{display:flex;align-items:center;gap:8px;margin:14px 0 8px}.public-porcentaje input{max-width:90px}
 .notification-item.travel{border-left-color:#5aa7dc;background:#eaf4fb}
+.session-viaje-razon{color:#245d86;font-weight:600}
