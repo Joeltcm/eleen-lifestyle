@@ -110,6 +110,37 @@ test('la rutina cumplida suelta también guarda la duración del cronómetro y a
   assert.equal(mala.estado, 400, 'una duración absurda se rechaza');
 });
 
+test('oferta por cancelación DEL CLIENTE: cumplida cierra la clase; sin cumplir, pasado el día la clase se da por perdida (cuenta como incumplida). La de Eileen no se pierde sola', async () => {
+  const mk = async hora => (await api.post('/api/sessions', { clientId: c, startsAt: hora, durationMinutes: 45, mode: 'Presencial' })).datos.id;
+  const sClienteIncumple = await mk(hoyALas23());
+  const sEileen = await mk(hoyALas23());
+  const sClienteCumple = await mk(hoyALas23());
+  const oc = await api.post(`/api/sessions/${sClienteIncumple}/routine-offer`, { routineId: rutinaId, origin: 'client' });
+  assert.equal(oc.estado, 201); assert.equal(oc.datos.origin, 'client');
+  assert.match((await sesionDe(sClienteIncumple)).notes, /cancelación del cliente.*se da por perdida/);
+  assert.equal((await api.post(`/api/sessions/${sEileen}/routine-offer`, { routineId: rutinaId })).datos.origin, 'trainer', 'por omisión es de Eileen');
+  const oCumple = await api.post(`/api/sessions/${sClienteCumple}/routine-offer`, { routineId: rutinaId, origin: 'client' });
+  const ofertas = (await portal.get('/api/portal/routine-offers')).datos;
+  assert.deepEqual(ofertas.map(o => o.origin).sort(), ['client', 'client', 'trainer']);
+  // El cliente cumple una; las otras dos "se quedan sin hacer" y su día pasa.
+  assert.equal((await portal.post(`/api/portal/routine-offers/${oCumple.datos.id}/complete`, { completionPercent: 100, durationSeconds: 600 })).datos.sessionCompleted, true);
+  const db = postgres(servidor.databaseUrl, { onnotice: () => {}, max: 2 });
+  try { await db`UPDATE sessions SET starts_at = now() - interval '30 hours' WHERE id IN ${db([sClienteIncumple, sEileen])}`; } finally { await db.end({ timeout: 1 }).catch(() => {}); }
+  const antes = (await api.get('/api/compliance/summary?period=week')).datos.clients.find(x => x.clientId === c)?.missed ?? 0;
+  const r = await api.post('/api/maintenance/vencer-ofertas-rutina', {});
+  assert.equal(r.datos.perdidas, 1, 'solo la del cliente se da por perdida');
+  const perdida = await sesionDe(sClienteIncumple);
+  assert.equal(perdida.status, 'cancelled'); assert.equal(perdida.cancelled_by, 'client'); assert.equal(perdida.cancellation_kind, 'not_rescheduled');
+  assert.equal(perdida.routine_offer_status, 'expired');
+  const despues = (await api.get('/api/compliance/summary?period=week')).datos.clients.find(x => x.clientId === c)?.missed ?? 0;
+  assert.equal(despues, antes + 1, 'cuenta como incumplida en el cumplimiento del cliente');
+  const deEileen = await sesionDe(sEileen);
+  assert.equal(deEileen.status, 'scheduled', 'la clase que Eileen no pudo atender no se pierde sola');
+  assert.equal(deEileen.routine_offer_expired, true);
+  assert.equal((await api.post('/api/maintenance/vencer-ofertas-rutina', {})).datos.perdidas, 0, 'idempotente');
+});
+
+// Va al final a propósito: la reversa borra la tabla.
 test('la reversa de 057 se niega a borrar ofertas y duraciones sin orden expresa, y con la orden las quita', async () => {
   const archivo = new URL('../migrations-down/057_rutina_en_lugar_de_clase.down.sql', import.meta.url).pathname;
   const db = postgres(servidor.databaseUrl, { onnotice: () => {}, max: 2 });

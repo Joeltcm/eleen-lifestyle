@@ -1,4 +1,4 @@
-const APP_VERSION = '274';
+const APP_VERSION = '275';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -250,7 +250,7 @@ const sessionFromApi = item => {
     cancelledBy: item.cancelled_by || '', cancellationKind: item.cancellation_kind || '', cancellationResolution: item.cancellation_resolution || '', creditCharge: Boolean(item.credit_charge), pausedHold: Boolean(item.paused_hold),
     googleSynced: Boolean(item.google_event_id), googleEventLink: item.google_event_link || '',
     googleSyncError: item.google_sync_error || '',
-    routineOfferStatus: item.routine_offer_status || '', routineOfferExpired: Boolean(item.routine_offer_expired), routineOfferDuration: item.routine_offer_duration_seconds ? Number(item.routine_offer_duration_seconds) : null
+    routineOfferStatus: item.routine_offer_status || '', routineOfferExpired: Boolean(item.routine_offer_expired), routineOfferOrigin: item.routine_offer_origin || '', routineOfferDuration: item.routine_offer_duration_seconds ? Number(item.routine_offer_duration_seconds) : null
   };
 };
 async function refreshSessions() {
@@ -770,7 +770,7 @@ function renderCalendar() {
         </summary>
         ${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}
         ${session.packageLabel && session.packageId ? `<small class="session-charge">Descontada de «${escapeHtml(session.packageLabel)}»${session.packageUsed != null && session.packageTotal != null ? ` · quedan ${Math.max(0, session.packageTotal - session.packageUsed)}` : ''}</small>` : ''}
-        ${session.routineOfferStatus === 'offered' && session.routineOfferExpired ? `<small class="session-charge session-routine-offer">La rutina ofrecida venció (solo valía este día) sin cumplirse · cierra la clase como corresponda</small>` : session.routineOfferStatus === 'offered' ? `<small class="session-charge session-routine-offer">Rutina ofrecida en lugar de la clase · vale solo este día · esperando que ${escapeHtml(session.client.split(' ')[0])} la cumpla</small>` : session.routineOfferStatus === 'completed' ? `<small class="session-charge session-routine-done">Cumplió la rutina en lugar de la clase${session.routineOfferDuration ? ` · ${Math.max(1, Math.round(session.routineOfferDuration / 60))} min` : ''}</small>` : ''}
+        ${session.routineOfferStatus === 'expired' ? `<small class="session-charge session-routine-offer">Rutina ofrecida por su cancelación y no cumplida el día de la clase · la clase se dio por perdida</small>` : session.routineOfferStatus === 'offered' && session.routineOfferExpired ? `<small class="session-charge session-routine-offer">La rutina ofrecida venció (solo valía este día) sin cumplirse · cierra la clase como corresponda</small>` : session.routineOfferStatus === 'offered' ? `<small class="session-charge session-routine-offer">Rutina ofrecida en lugar de la clase · vale solo este día${session.routineOfferOrigin === 'client' ? ' · si no la cumple, la clase se da por perdida' : ''} · esperando que ${escapeHtml(session.client.split(' ')[0])} la cumpla</small>` : session.routineOfferStatus === 'completed' ? `<small class="session-charge session-routine-done">Cumplió la rutina en lugar de la clase${session.routineOfferDuration ? ` · ${Math.max(1, Math.round(session.routineOfferDuration / 60))} min` : ''}</small>` : ''}
         ${session.creditCharge ? '<small class="session-charge">Cancelación cobrada · crédito por sesión</small>' : session.status === 'cancelled' && session.cancellationKind === 'not_rescheduled' && session.cancelledBy === 'client' && data.clients.find(c => c.id === session.clientId)?.paymentMode === 'no_anticipado' ? '<small class="session-charge">Cancelación del cliente · sin cobro</small>' : ''}
         ${session.status === 'cancelled'
           ? `<div class="session-management"><button type="button" class="secondary" data-reactivar-sesion="${session.id}">Reactivar</button><button type="button" class="secondary" data-edit-cancellation="${session.id}">Editar cancelación</button><button type="button" class="secondary" data-purge-session="${session.id}">Quitar de la agenda</button></div>`
@@ -1801,20 +1801,23 @@ const DIAS_CORTOS = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
 // Rutina en lugar de la clase (J-102). Se pide la propuesta a la IA (que solo puede elegir ejercicios del catálogo y ya sabe lesiones y rutinas recientes del cliente),
 // se abre el editor de rutinas con el borrador para que Eileen lo revise, y al guardarla se liga a la clase. El cliente la verá en el portal con la demostración en video de
 // cada ejercicio del catálogo y un cronómetro; al cumplirla, su clase pasa a realizada.
-function ofrecerRutinaEnLugarDeClase(sesion) {
+function ofrecerRutinaEnLugarDeClase(sesion, origen = 'trainer') {
   const cliente = data.clients.find(item => item.id === sesion.clientId);
   const caja = document.createElement('div');
   const sugerida = `Rutina para que ${cliente?.name?.split(' ')[0] || 'el cliente'} la haga por su cuenta en lugar de su clase de ${sesion.durationMinutes} min, con lo que tenga a mano.`;
   caja.innerHTML = `<p class="eyebrow">AGENDA</p><h2>Rutina en lugar de la clase</h2>
     <p class="form-summary"><b>${escapeHtml(sesion.client)}</b><br>${sesion.date} · ${sesion.time} · ${sesion.durationMinutes} min</p>
     <p style="color:#6f7b75;margin-top:-6px">La IA propone ejercicios únicamente de tu catálogo, tomando en cuenta sus lesiones y sus rutinas recientes, y escribe las instrucciones para el cliente. Tú la revisas antes de enviarla.</p>
+    <p class="conflict-warn">${origen === 'client'
+      ? 'Cancelación del cliente: la rutina solo vale el día de la clase. Si no la cumple ese día, <b>la clase se da por perdida</b>.'
+      : 'Tú no puedes atender la clase: la rutina solo vale el día de la clase. Si no la cumple, no pierde nada y tú decides cómo cerrarla.'}</p>
     <form id="oferta-rutina-form">
       <label>Qué quieres para esta rutina<textarea name="description" rows="3" required minlength="10" maxlength="600">${escapeHtml(sugerida)}</textarea></label>
       <button class="primary wide-button" data-accion="ia">Proponer con IA</button>
       <button type="button" class="secondary wide-button" id="oferta-sin-ia">Armarla yo, sin IA</button>
     </form>`;
   openModal(caja, true);
-  const enviarAlEditor = propuesta => { modal.close(); newRoutine(null, false, { ...propuesta, clientId: sesion.clientId, ofertaSesionId: sesion.id, ofertaCliente: sesion.client }); };
+  const enviarAlEditor = propuesta => { modal.close(); newRoutine(null, false, { ...propuesta, clientId: sesion.clientId, ofertaSesionId: sesion.id, ofertaCliente: sesion.client, ofertaOrigen: origen }); };
   caja.querySelector('#oferta-sin-ia').onclick = () => enviarAlEditor({
     title: `Rutina para ${cliente?.name?.split(' ')[0] || 'cliente'}`, description: '', sessionsPerWeek: 1, exercises: [], rationale: '', avoided: [], descartados: []
   });
@@ -1868,6 +1871,8 @@ function cancelSessionDialog(sesion) {
       <p style="color:#6f7b75">La cancela el cliente. ¿Va a reponerla?</p>
       <button class="secondary wide-button" id="cancelar-reprogramada">Se reprogramará a otro día</button>
       <p class="section-note">No afecta el cumplimiento: contará la sesión nueva. Suma a sus reprogramaciones del mes.</p>
+      ${sesion.status === 'scheduled' ? `<button class="primary wide-button" id="ofrecer-rutina-cliente">Ofrecerle una rutina en lugar de la clase</button>
+      <p class="section-note">Solo vale el día de la clase. Si la cumple, cuenta como su clase; si no la cumple ese día, <b>la clase se da por perdida</b> (cuenta como incumplida).</p>` : ''}
       ${!esCredito ? `<button class="secondary wide-button" id="cancelar-perdida">No se reprograma</button>
       <p class="section-note">Cuenta como sesión incumplida y baja su porcentaje.</p>` : ''}
       ${esCredito ? `<p style="color:#6f7b75">Como entrena a crédito, Eileen decide si esta cancelación se cobra.</p>
@@ -1876,6 +1881,7 @@ function cancelSessionDialog(sesion) {
         <button class="secondary wide-button" id="cancelar-sin-cobro">Cancelar sin cobro</button>
         <p class="section-note">Se registra en asistencia, pero no genera cargo.</p>` : ''}`;
     box.querySelector('#cancelar-reprogramada').onclick = () => cancelar({ reprogramada: true, quien: 'client' });
+    box.querySelector('#ofrecer-rutina-cliente')?.addEventListener('click', () => ofrecerRutinaEnLugarDeClase(sesion, 'client'));
     const cancelarPerdida = box.querySelector('#cancelar-perdida');
     if (cancelarPerdida) cancelarPerdida.onclick = () => cancelar({ reprogramada: false, quien: 'client' });
     if (esCredito) {
@@ -1893,7 +1899,7 @@ function cancelSessionDialog(sesion) {
       <p class="section-note">Se cancela sin más. No descuenta ni toca su cumplimiento; puedes reponerla después.</p>
       ${sesion.status === 'scheduled' ? `<button class="primary wide-button" id="ofrecer-rutina">No puedo atenderla: ofrecerle una rutina</button>
       <p class="section-note">Solo para cuando tú no puedes dar la clase. Se arma con IA a partir de tu catálogo. La clase NO se cancela: si cumple la rutina ese mismo día, cuenta como su clase. Pasado el día, la oferta vence.</p>` : ''}`;
-    box.querySelector('#ofrecer-rutina')?.addEventListener('click', () => ofrecerRutinaEnLugarDeClase(sesion));
+    box.querySelector('#ofrecer-rutina')?.addEventListener('click', () => ofrecerRutinaEnLugarDeClase(sesion, 'trainer'));
     box.querySelector('#compensar-reprogramar').onclick = () => cancelar({ reprogramada: true, quien: 'trainer', compensa: 'none' });
     box.querySelector('#compensar-nada').onclick = () => cancelar({ reprogramada: false, quien: 'trainer', compensa: 'none' });
   };
@@ -2914,7 +2920,7 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
     const form = document.getElementById('routine-form');
     if (propuesta.ofertaSesionId) {
       const aviso = document.createElement('p'); aviso.className = 'conflict-warn';
-      aviso.innerHTML = `Esta rutina se le ofrecerá a <b>${escapeHtml(propuesta.ofertaCliente || 'el cliente')}</b> <b>en lugar de su clase, y solo vale el día de la clase</b>. Al guardarla se le avisa; si la cumple ese día, la clase cuenta como realizada.`;
+      aviso.innerHTML = `Esta rutina se le ofrecerá a <b>${escapeHtml(propuesta.ofertaCliente || 'el cliente')}</b> <b>en lugar de su clase, y solo vale el día de la clase</b>. Al guardarla se le avisa; si la cumple ese día, la clase cuenta como realizada${propuesta.ofertaOrigen === 'client' ? '; si no la cumple, <b>la clase se da por perdida</b>' : ''}.`;
       form.prepend(aviso);
     }
     form.elements.title.value = propuesta.title;
@@ -2931,7 +2937,7 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
       const guardada = await api(editing ? `/api/routines/${routine.id}` : '/api/routines', { method: editing ? 'PATCH' : 'POST', body: { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: assigned || undefined, dueOn: form.get('dueOn') || null, exercises: selectedExercises } });
       if (propuesta?.ofertaSesionId) {
         if (assigned !== propuesta.clientId) throw new Error('La rutina ofrecida debe quedar asignada al mismo cliente de la clase.');
-        await api(`/api/sessions/${propuesta.ofertaSesionId}/routine-offer`, { method: 'POST', body: { routineId: guardada.id } });
+        await api(`/api/sessions/${propuesta.ofertaSesionId}/routine-offer`, { method: 'POST', body: { routineId: guardada.id, origin: propuesta.ofertaOrigen || 'trainer' } });
         await loadData(); renderAll(); modal.close(); toast(`Rutina ofrecida a ${propuesta.ofertaCliente || 'el cliente'} · la clase sigue pendiente`);
         return;
       }
@@ -5716,7 +5722,7 @@ function renderOfertasRutina() {
     if (!contenedor) { contenedor = document.createElement('div'); contenedor.id = destino; if (alInicio) ancla.prepend(contenedor); else ancla.before(contenedor); }
     contenedor.innerHTML = ofertas.map(oferta => {
       const hora = new Intl.DateTimeFormat('es-PA', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'America/Panama' }).format(new Date(oferta.starts_at));
-            return `<article class="portal-offer-card"><span class="portal-offer-tag">Eileen te dejó una rutina</span><h3>${escapeHtml(oferta.routine_title)}</h3><p>En lugar de tu clase de hoy (${hora}), que Eileen no pudo dar. Si la cumples <b>hoy</b>, cuenta como tu clase; mañana ya no vale.</p><button type="button" class="primary" data-ir-rutina="${oferta.routine_id}">Ver la rutina e iniciar</button></article>`;
+            return `<article class="portal-offer-card"><span class="portal-offer-tag">Eileen te dejó una rutina</span><h3>${escapeHtml(oferta.routine_title)}</h3><p>${oferta.origin === 'client' ? `Cancelaste tu clase de hoy (${hora}). Si haces esta rutina <b>hoy</b>, cuenta como tu clase; si no, <b>la clase se da por perdida</b>.` : `En lugar de tu clase de hoy (${hora}), que Eileen no pudo dar. Si la cumples <b>hoy</b>, cuenta como tu clase; mañana ya no vale.`}</p><button type="button" class="primary" data-ir-rutina="${oferta.routine_id}">Ver la rutina e iniciar</button></article>`;
     }).join('');
   }
 }
@@ -5873,7 +5879,7 @@ function renderPortal() {
     return `<div class="chart-column" title="${completed} de ${measured} sesiones medibles · ${percent === null ? 'sin datos' : `${percent}% promedio`}"><span>${label}</span><i style="height:${Math.max(4, percent || 0)}%"></i><small>${monthLabel(bucket.date)}</small></div>`;
   }).join('');
   document.getElementById('portal-inbody').innerHTML = portalData.assessments.length ? `<div class="portal-inbody-grid">${portalData.assessments.slice(-4).reverse().map(item => `<article><span>${String(item.tested_at).slice(0, 10)}</span><b>${Number(item.values.weightKg || 0).toFixed(1)} kg</b><small>${Number(item.values.percentBodyFat || 0).toFixed(1)}% grasa · ${Number(item.values.skeletalMuscleMassKg || 0).toFixed(1)} kg músculo</small></article>`).join('')}</div>` : '<p class="empty">Todavía no hay evaluaciones confirmadas.</p>';
-  document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(routine => { const todayCompletion = portalData.routineCompletions.find(item => item.routine_id === routine.id && item.completed_on === dateKey(today)); return `<article class="card portal-routine-card"><div class="card-head"><div><h3>${escapeHtml(routine.title)}</h3><p>${escapeHtml(routine.description || '')} · ${routine.sessions_per_week} veces por semana</p>${routine.due_on ? `<p class="routine-due${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? 'Venció el' : 'Para cumplirla antes del'} ${fechaCorta(routine.due_on)}</p>` : ''}</div></div>${ofertaDeRutina(routine.id) ? '<p class="portal-offer-inline">Rutina de hoy en lugar de tu clase: si la cumples hoy, cuenta como clase.</p>' : ''}<div class="routine-timer" data-routine-timer="${routine.id}"><span class="routine-timer-display" data-timer-display>00:00</span><button type="button" class="primary routine-timer-button" data-timer-toggle>▶ Iniciar rutina</button></div><div class="exercise-preview">${portalExerciseRows(routine.exercises || [])}</div><form data-portal-routine="${routine.id}" class="portal-completion-form"><label class="completion-check"><input name="completed" type="checkbox" ${todayCompletion && Number(todayCompletion.completion_percent) > 0 ? 'checked' : ''} /><span>Entrenamiento realizado hoy</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${Number(todayCompletion?.completion_percent || 100)}" /><span>% completado</span></label><button class="primary">Guardar cumplimiento</button></form></article>`; }).join('') : '<p class="empty">La entrenadora todavía no te ha asignado una rutina.</p>';
+  document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(routine => { const todayCompletion = portalData.routineCompletions.find(item => item.routine_id === routine.id && item.completed_on === dateKey(today)); return `<article class="card portal-routine-card"><div class="card-head"><div><h3>${escapeHtml(routine.title)}</h3><p>${escapeHtml(routine.description || '')} · ${routine.sessions_per_week} veces por semana</p>${routine.due_on ? `<p class="routine-due${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? 'Venció el' : 'Para cumplirla antes del'} ${fechaCorta(routine.due_on)}</p>` : ''}</div></div>${ofertaDeRutina(routine.id) ? `<p class="portal-offer-inline">Rutina de hoy en lugar de tu clase: si la cumples hoy, cuenta como clase${ofertaDeRutina(routine.id).origin === 'client' ? '; si no, la clase se da por perdida' : ''}.</p>` : ''}<div class="routine-timer" data-routine-timer="${routine.id}"><span class="routine-timer-display" data-timer-display>00:00</span><button type="button" class="primary routine-timer-button" data-timer-toggle>▶ Iniciar rutina</button></div><div class="exercise-preview">${portalExerciseRows(routine.exercises || [])}</div><form data-portal-routine="${routine.id}" class="portal-completion-form"><label class="completion-check"><input name="completed" type="checkbox" ${todayCompletion && Number(todayCompletion.completion_percent) > 0 ? 'checked' : ''} /><span>Entrenamiento realizado hoy</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${Number(todayCompletion?.completion_percent || 100)}" /><span>% completado</span></label><button class="primary">Guardar cumplimiento</button></form></article>`; }).join('') : '<p class="empty">La entrenadora todavía no te ha asignado una rutina.</p>';
   pintarCronometros();
   const ownSessions = new Map(portalData.sessions.map(item => [item.id, portalSession(item)]));
   renderPortalCalendar(ownSessions);

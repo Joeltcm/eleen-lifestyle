@@ -3686,7 +3686,8 @@ app.get('/api/sessions', { preHandler: requireStaff }, async request => {
     charged.label AS charged_package_label, charged.used_sessions AS charged_package_used,
     charged.total_sessions AS charged_package_total,
     sro.status AS routine_offer_status, sro.duration_seconds AS routine_offer_duration_seconds,
-    (sro.status = 'offered' AND (s.starts_at AT TIME ZONE 'America/Panama')::date < (now() AT TIME ZONE 'America/Panama')::date) AS routine_offer_expired
+    (sro.status = 'offered' AND (s.starts_at AT TIME ZONE 'America/Panama')::date < (now() AT TIME ZONE 'America/Panama')::date) AS routine_offer_expired,
+    sro.origin AS routine_offer_origin
     FROM sessions s
     JOIN clients c ON c.id = s.client_id
     LEFT JOIN routines r ON r.id = s.routine_id
@@ -7388,7 +7389,9 @@ app.post('/api/portal/routine-completions', { preHandler: requireAuth }, async (
 });
 
 // ── Rutina ofrecida en lugar de la clase ───────────────────────────────────
-// Solo cuando Eileen no puede atender la clase (J-102), puede ofrecerle al cliente una rutina para hacer por su cuenta. Y SOLO VALE EL DÍA DE ESA CLASE (hora de Panamá): ni antes ni después. La clase NO se cancela: queda programada con la rutina ligada, y si el cliente
+// Eileen puede ofrecerle al cliente una rutina para hacer por su cuenta en lugar de la clase (J-102/J-103/J-104) en dos casos, y SOLO VALE EL DÍA DE ESA CLASE (hora de Panamá):
+//  · origin 'trainer': ella no puede atender la clase. Si el cliente no la cumple, la clase sigue pendiente y ella decide (el cliente no tiene culpa).
+//  · origin 'client': el cliente canceló. Si no la cumple ese día, la clase SE DA POR PERDIDA (cancelación del cliente sin reprogramar), automáticamente. La clase NO se cancela: queda programada con la rutina ligada, y si el cliente
 // la cumple en el portal pasa a "realizada" (cuenta como su clase del día y descuenta de su saldo como cualquier clase dada). Si no la cumple, la clase sigue
 // apareciendo entre las que faltan por marcar y Eileen decide cómo cerrarla.
 const duracionTexto = (segundos: number | null) => {
@@ -7410,7 +7413,7 @@ async function avisarRutinaCumplida(cliente: Record<string, unknown>, rutina: st
 app.post('/api/sessions/:id/routine-offer', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const input = z.object({ routineId: z.string().uuid() }).parse(request.body);
+  const input = z.object({ routineId: z.string().uuid(), origin: z.enum(['trainer', 'client']).default('trainer') }).parse(request.body);
   const [sesion] = await sql`
     SELECT s.id, s.status, s.client_id, s.starts_at, s.duration_minutes, s.notes, c.full_name, c.portal_user_id,
       ((s.starts_at AT TIME ZONE 'America/Panama')::date >= (now() AT TIME ZONE 'America/Panama')::date) AS dia_vigente,
@@ -7429,12 +7432,14 @@ app.post('/api/sessions/:id/routine-offer', { preHandler: requireStaff }, async 
 
   const [oferta] = await sql.begin(async transaction => {
     const filas = await transaction`
-      INSERT INTO session_routine_offers (session_id, routine_id, client_id, offered_by_user_id)
-      VALUES (${id}, ${rutina.id}, ${sesion.client_id}, ${auth.sub})
+      INSERT INTO session_routine_offers (session_id, routine_id, client_id, offered_by_user_id, origin)
+      VALUES (${id}, ${rutina.id}, ${sesion.client_id}, ${auth.sub}, ${input.origin})
       ON CONFLICT (session_id) DO UPDATE SET routine_id = EXCLUDED.routine_id, status = 'offered', offered_at = now(), offered_by_user_id = EXCLUDED.offered_by_user_id,
-        completed_at = NULL, completion_percent = NULL, duration_seconds = NULL
+        origin = EXCLUDED.origin, completed_at = NULL, completion_percent = NULL, duration_seconds = NULL
       RETURNING *`;
-    const nota = 'Rutina ofrecida en lugar de la clase (Eileen no pudo atenderla). Solo vale el día de la clase.';
+    const nota = input.origin === 'client'
+      ? 'Rutina ofrecida en lugar de la clase (cancelación del cliente). Solo vale el día de la clase; si no la cumple, la clase se da por perdida.'
+      : 'Rutina ofrecida en lugar de la clase (Eileen no pudo atenderla). Solo vale el día de la clase.';
     await transaction`
       UPDATE sessions SET routine_id = ${rutina.id}, updated_at = now(),
         notes = CASE WHEN COALESCE(notes, '') LIKE ${'%Rutina ofrecida en lugar de la clase%'} THEN notes ELSE COALESCE(notes || E'\n', '') || ${nota} END
@@ -7443,7 +7448,9 @@ app.post('/api/sessions/:id/routine-offer', { preHandler: requireStaff }, async 
   });
   if (sesion.portal_user_id) {
     await sendPushToUser(String(sesion.portal_user_id), {
-      title: 'Eileen te dejó una rutina', body: `Haz «${rutina.title}» ${sesion.es_hoy ? 'hoy' : `el ${sesion.dia_texto}`}: cuenta como tu clase. Solo vale ese día.`,
+      title: 'Eileen te dejó una rutina', body: input.origin === 'client'
+        ? `Haz «${rutina.title}» ${sesion.es_hoy ? 'hoy' : `el ${sesion.dia_texto}`}: cuenta como tu clase. Si no la cumples ese día, la clase se da por perdida.`
+        : `Haz «${rutina.title}» ${sesion.es_hoy ? 'hoy' : `el ${sesion.dia_texto}`}: cuenta como tu clase. Solo vale ese día.`,
       url: new URL('/#portal-routines', config.APP_URL).toString()
     });
   }
@@ -7467,7 +7474,7 @@ app.get('/api/portal/routine-offers', { preHandler: requireAuth }, async (reques
   const client = await portalClient(auth.sub);
   if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
   return sql`
-    SELECT o.id, o.routine_id, o.session_id, o.offered_at, s.starts_at, s.duration_minutes, r.title AS routine_title
+    SELECT o.id, o.routine_id, o.session_id, o.offered_at, o.origin, s.starts_at, s.duration_minutes, r.title AS routine_title
     FROM session_routine_offers o JOIN sessions s ON s.id = o.session_id JOIN routines r ON r.id = o.routine_id
     WHERE o.client_id = ${client.id} AND o.status = 'offered' AND s.status = 'scheduled'
       AND (s.starts_at AT TIME ZONE 'America/Panama')::date = (now() AT TIME ZONE 'America/Panama')::date
@@ -8059,6 +8066,52 @@ purgaIntentos.unref();
 // Mantiene creadas las sesiones de los horarios fijos. Corre cada seis horas:
 // el horizonte es de ocho semanas, así que no hay ninguna prisa, y si el
 // servicio estuvo caído un rato se pone al día en el siguiente ciclo.
+// Ofertas de rutina por cancelación DEL CLIENTE cuyo día ya pasó sin cumplirse: la clase se da por perdida (J-104). Es la misma consecuencia de "cancela el cliente y no
+// reprograma": cuenta como incumplida y consume la clase del plan; a quien entrena a crédito no se le cobra nada solo (cobrar una cancelación la decide Eileen).
+// Las ofertas por cancelación de Eileen NO vencen así: el cliente no tiene la culpa y la clase queda pendiente para que ella decida.
+async function darPorPerdidasClasesConRutinaVencida(ownerId?: string) {
+  const vencidas = await sql`
+    SELECT o.id AS offer_id, o.session_id
+    FROM session_routine_offers o JOIN sessions s ON s.id = o.session_id JOIN clients c ON c.id = s.client_id
+    WHERE o.origin = 'client' AND o.status = 'offered' AND s.status = 'scheduled'
+      AND (s.starts_at AT TIME ZONE 'America/Panama')::date < (now() AT TIME ZONE 'America/Panama')::date
+      AND (${ownerId ?? null}::uuid IS NULL OR c.owner_id = ${ownerId ?? null}::uuid)`;
+  let perdidas = 0;
+  for (const fila of vencidas) {
+    try {
+      await sql.begin(async transaction => {
+        const [actual] = await transaction`
+          SELECT s.*, c.payment_mode FROM sessions s JOIN clients c ON c.id = s.client_id
+          WHERE s.id = ${fila.session_id} AND s.status = 'scheduled' FOR UPDATE`;
+        if (!actual) return;
+        const esCredito = actual.payment_mode === 'no_anticipado';
+        await transaction`
+          UPDATE sessions SET status = 'cancelled', cancellation_kind = 'not_rescheduled', cancelled_by = 'client',
+            cancellation_resolution = ${esCredito ? 'none' : 'debit'}, credit_charge = false, updated_at = now()
+          WHERE id = ${fila.session_id}`;
+        if (!esCredito && !actual.package_debited) {
+          const pack = await seleccionarSaldoParaSesion(transaction, actual.client_id as string, actual.starts_at as Date | string);
+          if (pack) {
+            const siguiente = Number(pack.used_sessions) + 1;
+            await transaction`UPDATE session_packages SET used_sessions = ${siguiente}, status = CASE WHEN ${siguiente} >= total_sessions THEN 'exhausted' ELSE 'active' END WHERE id = ${pack.id}`;
+            await transaction`UPDATE sessions SET package_id = ${pack.id}, package_debited = true, debited_group_id = ${actual.client_id}, updated_at = now() WHERE id = ${fila.session_id}`;
+          }
+        }
+        await transaction`UPDATE session_routine_offers SET status = 'expired' WHERE id = ${fila.offer_id}`;
+      });
+      perdidas += 1;
+    } catch (error) { app.log.warn({ err: error, sessionId: fila.session_id }, 'No se pudo dar por perdida una clase con rutina vencida'); }
+  }
+  return perdidas;
+}
+app.post('/api/maintenance/vencer-ofertas-rutina', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  return { perdidas: await darPorPerdidasClasesConRutinaVencida(auth.sub) };
+});
+const primeraVigilanciaRutinas = setTimeout(() => darPorPerdidasClasesConRutinaVencida().catch(error => app.log.error(error)), 30_000);
+const vigilanciaRutinas = setInterval(() => darPorPerdidasClasesConRutinaVencida().catch(error => app.log.error(error)), 15 * 60_000);
+primeraVigilanciaRutinas.unref();
+vigilanciaRutinas.unref();
 const primeraExtension = setTimeout(() => extenderRecurrencias().catch(error => app.log.error(error)), 20_000);
 const extensionRecurrencias = setInterval(() => extenderRecurrencias().catch(error => app.log.error(error)), 6 * 60 * 60_000);
 primeraExtension.unref();
