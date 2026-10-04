@@ -240,3 +240,9 @@ test('cancelación automática por viaje (J-108): la guía, el aviso y la agenda
   assert.match(app, /cancelada\$\{viaje\.cancelled_sessions === 1 \? '' : 's'\} por este viaje/);
   assert.doesNotMatch(app, /Solo se da por perdida si ese día tenía un enlace vigente/);
 });
+
+test('clientes a crédito (J-109): la rutina cumplida se cobra como clase dada y la guía y el diálogo lo dicen', async () => {
+  const app = await leer('app.js');
+  assert.match(app, /Como entrena a crédito, si la cumple se cobra como clase dada/);
+  assert.match(app, /A crédito y rutina cumplida/); assert.match(app, /Editar cancelación<\/b> antes de que salga su factura/);
+});

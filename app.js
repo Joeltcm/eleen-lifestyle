@@ -1,4 +1,4 @@
-const APP_VERSION = '279';
+const APP_VERSION = '280';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1826,7 +1826,8 @@ function guiaDeCancelaciones() {
       <li><b>Se reprogramará a otro día.</b> No afecta su cumplimiento; suma a sus reprogramaciones del mes. La clase nueva descuenta cuando se dé.</li>
       <li><b>Proponer rutina.</b> La clase no se cancela. Si la cumple <u>ese mismo día</u>, cuenta como clase dada. Si no, pasado el día la clase se da por perdida.</li>
       <li><b>Cancelar sin reprogramar ni rutina.</b> Cuenta como incumplida y <b>se le descuenta automáticamente una clase</b> de su plan.</li>
-      <li><b>A crédito (Julio):</b> no hay descuento de clase. Tú decides si la cancelación se cobra ($25) o no; en ambos casos cuenta como incumplida.</li>
+      <li><b>A crédito (Julio):</b> no hay descuento de clase. Tú decides si la cancelación se cobra ($25) o no; en ambos casos cuenta como incumplida. Una clase cancelada sola (por viaje o por una rutina no cumplida) queda sin cobro; si quieres cobrarla, ábrela y usa <b>Editar cancelación</b> antes de que salga su factura (último día del mes, desde las 21:00).</li>
+      <li><b>A crédito y rutina cumplida:</b> la rutina que cumple en lugar de la clase —por cancelación suya, tuya o por viaje— <b>se cobra como clase dada</b>.</li>
     </ul>
     <h3>Cancelas tú</h3>
     <ul>
@@ -1920,7 +1921,7 @@ function cancelSessionDialog(sesion) {
     const puedeRutina = sesion.status === 'scheduled';
     box.innerHTML = `${cabecera}
       <p style="color:#6f7b75">La cancela el cliente. <b>Todo es opcional</b>:</p>
-      ${puedeRutina ? avisoRutina('Para que no pierda la clase, puedes proponerle una rutina que haga por su cuenta. Solo vale el día de la clase: si la cumple, cuenta como su clase.') : ''}
+      ${puedeRutina ? avisoRutina(`Para que no pierda la clase, puedes proponerle una rutina que haga por su cuenta. Solo vale el día de la clase: si la cumple, cuenta como su clase.${esCredito ? ' <b>Como entrena a crédito, si la cumple se cobra como clase dada ('+money.format(tarifaCredito)+').</b>' : ''}`) : ''}
       <button class="secondary wide-button" id="cancelar-reprogramada">Se reprogramará a otro día</button>
       <p class="section-note">No afecta el cumplimiento: contará la sesión nueva. Suma a sus reprogramaciones del mes.</p>
       ${!esCredito ? `<button class="secondary wide-button" id="cancelar-perdida">Cancelar sin reprogramar ni rutina</button>
@@ -1945,7 +1946,7 @@ function cancelSessionDialog(sesion) {
     const puedeRutina = sesion.status === 'scheduled';
     box.innerHTML = `${cabecera}
       <p style="color:#6f7b75">La cancelas tú. ¿Qué hacemos?</p>
-      ${puedeRutina ? avisoRutina('Si no puedes atenderla, propónle una rutina para que entrene por su cuenta. Solo vale el día de la clase; si no la cumple, no pierde nada y tú decides cómo cerrarla.') : ''}
+      ${puedeRutina ? avisoRutina(`Si no puedes atenderla, propónle una rutina para que entrene por su cuenta. Solo vale el día de la clase; si no la cumple, no pierde nada y tú decides cómo cerrarla.${esCredito ? ' <b>Como entrena a crédito, si la cumple se cobra como clase dada ('+money.format(tarifaCredito)+').</b>' : ''}`) : ''}
       <p class="aviso-reprogramar"><b>Recuerda:</b> también puedes <b>reprogramar</b> la clase.</p>
       <button class="secondary wide-button" id="compensar-reprogramar">Marcar para reprogramar</button>
       <p class="section-note">La nueva sesión se descontará del saldo mensual o paquete que corresponda a su fecha. No se crea un saldo de reposición.</p>
