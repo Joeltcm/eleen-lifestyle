@@ -1,4 +1,4 @@
-const VERSION = '272';
+const VERSION = '273';
 const CACHE = `eileen-lifestyle-v${VERSION}`;
 // Las URLs versionadas se arman con VERSION. Estuvieron fijas en ?v=47 mientras
 // VERSION seguía subiendo, así que la precarga guardaba direcciones que la
@@ -81,12 +81,24 @@ self.addEventListener('fetch', event => {
 self.addEventListener('push', event => {
   let payload = { title: 'Eileen Lifestyle', body: 'Tienes un nuevo recordatorio.', url: './' };
   try { payload = { ...payload, ...event.data.json() }; } catch {}
-  event.waitUntil(self.registration.showNotification(payload.title, {
+  // Una notificación "con sonido" (rutina cumplida por un cliente) se queda en pantalla hasta que se toca, vibra y, si la app está abierta, además suena dentro de ella.
+  const opciones = {
     body: payload.body,
     icon: './icon-192.png',
     badge: './favicon-32.png',
     data: { url: payload.url }
-  }));
+  };
+  if (payload.sound) {
+    opciones.tag = payload.tag || 'aviso-sonoro';
+    opciones.renotify = true;
+    opciones.requireInteraction = true;
+    opciones.silent = false;
+    opciones.vibrate = [220, 110, 220, 110, 380];
+  }
+  event.waitUntil(Promise.all([
+    self.registration.showNotification(payload.title, opciones),
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(ventanas => ventanas.forEach(ventana => ventana.postMessage({ type: 'EILEEN_PUSH', title: payload.title, body: payload.body, sound: Boolean(payload.sound) })))
+  ]));
 });
 self.addEventListener('notificationclick', event => {
   event.notification.close();

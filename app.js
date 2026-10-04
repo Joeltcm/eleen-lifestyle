@@ -1,4 +1,4 @@
-const APP_VERSION = '272';
+const APP_VERSION = '273';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -65,6 +65,52 @@ const toast = (message, error = false) => {
   const element = document.createElement('div'); element.className = `toast${error ? ' error' : ''}`; element.textContent = message;
   document.body.append(element); setTimeout(() => element.remove(), 3200);
 };
+// Aviso sonoro dentro de la app (J-102): un acorde corto de tres notas. Los navegadores solo dejan sonar audio después de un toque del usuario, por eso el contexto se
+// desbloquea con la primera interacción. Fuera de la app (pantalla bloqueada o app cerrada) suena el tono propio de la notificación push del teléfono.
+let audioAviso = null;
+const desbloquearAudio = () => {
+  try {
+    audioAviso = audioAviso || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioAviso.state === 'suspended') audioAviso.resume();
+  } catch { /* sin audio disponible */ }
+};
+['pointerdown', 'touchstart', 'keydown'].forEach(evento => window.addEventListener(evento, desbloquearAudio, { passive: true }));
+function sonarAviso() {
+  desbloquearAudio();
+  if (!audioAviso || audioAviso.state !== 'running') return false;
+  const t0 = audioAviso.currentTime;
+  [[880, 0], [1174.66, 0.2], [1567.98, 0.4]].forEach(([frecuencia, retraso]) => {
+    const oscilador = audioAviso.createOscillator(); const volumen = audioAviso.createGain();
+    oscilador.type = 'sine'; oscilador.frequency.value = frecuencia;
+    volumen.gain.setValueAtTime(0.0001, t0 + retraso);
+    volumen.gain.exponentialRampToValueAtTime(0.4, t0 + retraso + 0.03);
+    volumen.gain.exponentialRampToValueAtTime(0.0001, t0 + retraso + 0.5);
+    oscilador.connect(volumen); volumen.connect(audioAviso.destination);
+    oscilador.start(t0 + retraso); oscilador.stop(t0 + retraso + 0.55);
+  });
+  return true;
+}
+// Rutinas cumplidas por los clientes mientras la app está abierta: cada una se avisa una sola vez (toast + sonido). La primera lectura solo memoriza lo que ya había.
+const rutinasAvisadasClave = 'eileen-rutinas-avisadas';
+let rutinasAvisadasIniciado = false;
+async function vigilarRutinasCumplidas() {
+  if (!authToken || currentUser?.role === 'client' || document.hidden) return;
+  try {
+    const avisos = (await api('/api/notifications')).filter(item => item.type === 'routine');
+    const clave = item => `${item.title}|${item.scheduledFor}`;
+    let vistos = []; try { vistos = JSON.parse(localStorage.getItem(rutinasAvisadasClave) || '[]'); } catch { vistos = []; }
+    const nuevos = avisos.filter(item => !vistos.includes(clave(item)));
+    if (nuevos.length && rutinasAvisadasIniciado) {
+      sonarAviso();
+      nuevos.forEach(item => toast(`${item.title} · ${item.body}`));
+      loadData().then(renderAll).catch(() => {});
+    }
+    rutinasAvisadasIniciado = true;
+    localStorage.setItem(rutinasAvisadasClave, JSON.stringify(avisos.map(clave).slice(0, 60)));
+  } catch { /* se reintenta en el siguiente ciclo */ }
+}
+setInterval(vigilarRutinasCumplidas, 45_000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) vigilarRutinasCumplidas(); });
 async function showPendingBrowserNotification(notifications) {
   if (!notifications.length || !('Notification' in window) || Notification.permission !== 'granted' || !('serviceWorker' in navigator)) return;
   try {
@@ -203,7 +249,8 @@ const sessionFromApi = item => {
     packageTotal: item.charged_package_total == null ? null : Number(item.charged_package_total),
     cancelledBy: item.cancelled_by || '', cancellationKind: item.cancellation_kind || '', cancellationResolution: item.cancellation_resolution || '', creditCharge: Boolean(item.credit_charge), pausedHold: Boolean(item.paused_hold),
     googleSynced: Boolean(item.google_event_id), googleEventLink: item.google_event_link || '',
-    googleSyncError: item.google_sync_error || ''
+    googleSyncError: item.google_sync_error || '',
+    routineOfferStatus: item.routine_offer_status || '', routineOfferDuration: item.routine_offer_duration_seconds ? Number(item.routine_offer_duration_seconds) : null
   };
 };
 async function refreshSessions() {
@@ -722,10 +769,11 @@ function renderCalendar() {
         </summary>
         ${data.googleCalendar.connected ? `<small class="google-session-state ${session.googleSyncError ? 'error' : session.googleSynced ? 'synced' : ''}">${session.googleSyncError ? 'Google pendiente' : session.googleSynced ? 'Google Calendar ✓' : 'Por sincronizar'}</small>` : ''}
         ${session.packageLabel && session.packageId ? `<small class="session-charge">Descontada de «${escapeHtml(session.packageLabel)}»${session.packageUsed != null && session.packageTotal != null ? ` · quedan ${Math.max(0, session.packageTotal - session.packageUsed)}` : ''}</small>` : ''}
+        ${session.routineOfferStatus === 'offered' ? `<small class="session-charge session-routine-offer">Rutina ofrecida en lugar de la clase · esperando que ${escapeHtml(session.client.split(' ')[0])} la cumpla</small>` : session.routineOfferStatus === 'completed' ? `<small class="session-charge session-routine-done">Cumplió la rutina en lugar de la clase${session.routineOfferDuration ? ` · ${Math.max(1, Math.round(session.routineOfferDuration / 60))} min` : ''}</small>` : ''}
         ${session.creditCharge ? '<small class="session-charge">Cancelación cobrada · crédito por sesión</small>' : session.status === 'cancelled' && session.cancellationKind === 'not_rescheduled' && session.cancelledBy === 'client' && data.clients.find(c => c.id === session.clientId)?.paymentMode === 'no_anticipado' ? '<small class="session-charge">Cancelación del cliente · sin cobro</small>' : ''}
         ${session.status === 'cancelled'
           ? `<div class="session-management"><button type="button" class="secondary" data-reactivar-sesion="${session.id}">Reactivar</button><button type="button" class="secondary" data-edit-cancellation="${session.id}">Editar cancelación</button><button type="button" class="secondary" data-purge-session="${session.id}">Quitar de la agenda</button></div>`
-          : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button><button type="button" class="secondary" data-purge-session="${session.id}">Eliminar</button>${sessionComplianceForm(session)}</div>`}
+          : `<div class="session-management"><button type="button" class="secondary edit-session" data-edit-session="${session.id}">Editar horario</button><button type="button" class="secondary" data-purge-session="${session.id}">Eliminar</button>${session.routineOfferStatus === 'offered' ? `<button type="button" class="secondary" data-retirar-rutina="${session.id}">Retirar la rutina ofrecida</button>` : ''}${sessionComplianceForm(session)}</div>`}
       </details>`).join('')
     : '<p class="empty">No hay clases este día.</p>';
 }
@@ -1749,6 +1797,38 @@ const DIAS_CORTOS = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
 // clase movida a otro día no debe penalizar al cliente, y una que simplemente
 // no se dio, sí. Antes ninguna de las dos contaba, así que cancelar salía
 // gratis y quien cancelaba media agenda seguía apareciendo al 100%.
+// Rutina en lugar de la clase (J-102). Se pide la propuesta a la IA (que solo puede elegir ejercicios del catálogo y ya sabe lesiones y rutinas recientes del cliente),
+// se abre el editor de rutinas con el borrador para que Eileen lo revise, y al guardarla se liga a la clase. El cliente la verá en el portal con la demostración en video de
+// cada ejercicio del catálogo y un cronómetro; al cumplirla, su clase pasa a realizada.
+function ofrecerRutinaEnLugarDeClase(sesion) {
+  const cliente = data.clients.find(item => item.id === sesion.clientId);
+  const caja = document.createElement('div');
+  const sugerida = `Rutina para que ${cliente?.name?.split(' ')[0] || 'el cliente'} la haga por su cuenta en lugar de su clase de ${sesion.durationMinutes} min, con lo que tenga a mano.`;
+  caja.innerHTML = `<p class="eyebrow">AGENDA</p><h2>Rutina en lugar de la clase</h2>
+    <p class="form-summary"><b>${escapeHtml(sesion.client)}</b><br>${sesion.date} · ${sesion.time} · ${sesion.durationMinutes} min</p>
+    <p style="color:#6f7b75;margin-top:-6px">La IA propone ejercicios únicamente de tu catálogo, tomando en cuenta sus lesiones y sus rutinas recientes, y escribe las instrucciones para el cliente. Tú la revisas antes de enviarla.</p>
+    <form id="oferta-rutina-form">
+      <label>Qué quieres para esta rutina<textarea name="description" rows="3" required minlength="10" maxlength="600">${escapeHtml(sugerida)}</textarea></label>
+      <button class="primary wide-button" data-accion="ia">Proponer con IA</button>
+      <button type="button" class="secondary wide-button" id="oferta-sin-ia">Armarla yo, sin IA</button>
+    </form>`;
+  openModal(caja, true);
+  const enviarAlEditor = propuesta => { modal.close(); newRoutine(null, false, { ...propuesta, clientId: sesion.clientId, ofertaSesionId: sesion.id, ofertaCliente: sesion.client }); };
+  caja.querySelector('#oferta-sin-ia').onclick = () => enviarAlEditor({
+    title: `Rutina para ${cliente?.name?.split(' ')[0] || 'cliente'}`, description: '', sessionsPerWeek: 1, exercises: [], rationale: '', avoided: [], descartados: []
+  });
+  document.getElementById('oferta-rutina-form').addEventListener('submit', async evento => {
+    evento.preventDefault();
+    const boton = evento.target.querySelector('[data-accion="ia"]');
+    boton.disabled = true; boton.textContent = 'Pensando…';
+    try {
+      const propuesta = await api('/api/routines/suggest', { method: 'POST', body: {
+        description: new FormData(evento.target).get('description'), clientId: sesion.clientId, forClient: true, durationMinutes: sesion.durationMinutes
+      } });
+      enviarAlEditor(propuesta);
+    } catch (error) { toast(error.message, true); boton.disabled = false; boton.textContent = 'Proponer con IA'; }
+  });
+}
 function cancelSessionDialog(sesion) {
   if (!sesion) return;
   const cliente = data.clients.find(c => c.id === sesion.clientId);
@@ -1787,6 +1867,8 @@ function cancelSessionDialog(sesion) {
       <p style="color:#6f7b75">La cancela el cliente. ¿Va a reponerla?</p>
       <button class="secondary wide-button" id="cancelar-reprogramada">Se reprogramará a otro día</button>
       <p class="section-note">No afecta el cumplimiento: contará la sesión nueva. Suma a sus reprogramaciones del mes.</p>
+      ${sesion.status === 'scheduled' ? `<button class="primary wide-button" id="ofrecer-rutina">Ofrecerle una rutina en lugar de la clase</button>
+      <p class="section-note">Se arma con IA a partir de tu catálogo de ejercicios. La clase NO se cancela: si cumple la rutina, cuenta como su clase de hoy.</p>` : ''}
       ${!esCredito ? `<button class="secondary wide-button" id="cancelar-perdida">No se reprograma</button>
       <p class="section-note">Cuenta como sesión incumplida y baja su porcentaje.</p>` : ''}
       ${esCredito ? `<p style="color:#6f7b75">Como entrena a crédito, Eileen decide si esta cancelación se cobra.</p>
@@ -1795,6 +1877,7 @@ function cancelSessionDialog(sesion) {
         <button class="secondary wide-button" id="cancelar-sin-cobro">Cancelar sin cobro</button>
         <p class="section-note">Se registra en asistencia, pero no genera cargo.</p>` : ''}`;
     box.querySelector('#cancelar-reprogramada').onclick = () => cancelar({ reprogramada: true, quien: 'client' });
+    box.querySelector('#ofrecer-rutina')?.addEventListener('click', () => ofrecerRutinaEnLugarDeClase(sesion));
     const cancelarPerdida = box.querySelector('#cancelar-perdida');
     if (cancelarPerdida) cancelarPerdida.onclick = () => cancelar({ reprogramada: false, quien: 'client' });
     if (esCredito) {
@@ -2814,18 +2897,29 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
   // y la lista de ejercicios.
   if (propuesta) {
     const form = document.getElementById('routine-form');
+    if (propuesta.ofertaSesionId) {
+      const aviso = document.createElement('p'); aviso.className = 'conflict-warn';
+      aviso.innerHTML = `Esta rutina se le ofrecerá a <b>${escapeHtml(propuesta.ofertaCliente || 'el cliente')}</b> <b>en lugar de su clase</b>. Al guardarla se le avisa; si la cumple, la clase cuenta como realizada.`;
+      form.prepend(aviso);
+    }
     form.elements.title.value = propuesta.title;
     form.elements.description.value = propuesta.description || propuesta.title;
     form.elements.sessions.value = propuesta.sessionsPerWeek;
     if (propuesta.clientId) { clientSelect.value = propuesta.clientId; void cargarPesosPrevios(); }
-    aplicarPropuesta();
+    if (propuesta.exercises?.length) aplicarPropuesta();
   }
   document.getElementById('routine-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = new FormData(event.target); const assigned = form.get('client');
     if (!selectedExercises.length) { toast('Agrega al menos un ejercicio a la rutina', true); return; }
     try {
       event.target.classList.add('loading-state');
-      await api(editing ? `/api/routines/${routine.id}` : '/api/routines', { method: editing ? 'PATCH' : 'POST', body: { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: assigned || undefined, dueOn: form.get('dueOn') || null, exercises: selectedExercises } });
+      const guardada = await api(editing ? `/api/routines/${routine.id}` : '/api/routines', { method: editing ? 'PATCH' : 'POST', body: { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: assigned || undefined, dueOn: form.get('dueOn') || null, exercises: selectedExercises } });
+      if (propuesta?.ofertaSesionId) {
+        if (assigned !== propuesta.clientId) throw new Error('La rutina ofrecida debe quedar asignada al mismo cliente de la clase.');
+        await api(`/api/sessions/${propuesta.ofertaSesionId}/routine-offer`, { method: 'POST', body: { routineId: guardada.id } });
+        await loadData(); renderAll(); modal.close(); toast(`Rutina ofrecida a ${propuesta.ofertaCliente || 'el cliente'} · la clase sigue pendiente`);
+        return;
+      }
       await loadData(); renderAll(); modal.close(); navigate('routines'); toast('Rutina guardada');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
@@ -4926,6 +5020,12 @@ document.addEventListener('click', event => {
   if (event.target.dataset.deleteInbody) deleteResource(`/api/inbody/${event.target.dataset.deleteInbody}`, '¿Eliminar esta medición InBody? El archivo original permanecerá en el expediente.', 'Medición InBody eliminada');
   if (event.target.dataset.deleteDocument) deleteResource(`/api/documents/${event.target.dataset.deleteDocument}`, '¿Eliminar este archivo? Si corresponde a un InBody, también se eliminarán sus métricas asociadas.', 'Archivo del expediente eliminado');
   if (event.target.dataset.cancelSession) cancelSessionDialog(data.sessions.find(item => item.id === event.target.dataset.cancelSession));
+  if (event.target.dataset.retirarRutina) {
+    if (!confirm('¿Retirar la rutina ofrecida? La clase sigue programada y el cliente ya no la verá como pendiente.')) return;
+    api(`/api/sessions/${event.target.dataset.retirarRutina}/routine-offer`, { method: 'DELETE' })
+      .then(async () => { await loadData(); renderAll(); toast('Rutina retirada'); })
+      .catch(error => toast(error.message, true));
+  }
   if (event.target.dataset.editCancellation) editCancellationDialog(data.sessions.find(item => item.id === event.target.dataset.editCancellation));
 });
 document.addEventListener('submit', async event => {
@@ -5076,6 +5176,12 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   });
   navigator.serviceWorker.addEventListener('message', event => {
     if (event.data?.type === 'EILEEN_UPDATE_READY' && event.data.version !== APP_VERSION) reloadForUpdate();
+    // Llegó una notificación push con la app abierta: además de la burbuja del sistema, suena el acorde y se refrescan los datos.
+    if (event.data?.type === 'EILEEN_PUSH' && event.data.sound && currentUser?.role !== 'client') {
+      sonarAviso();
+      toast(`${event.data.title} · ${event.data.body}`);
+      loadData().then(renderAll).catch(() => {});
+    }
   });
   window.addEventListener('load', async () => {
     try {
@@ -5572,6 +5678,90 @@ function clientWeightLogsSection(target, clientId) {
   }).catch(error => { target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; });
 }
 
+// ── Rutina ofrecida y cronómetro (J-102) ────────────────────────────────────────
+const duracionLegible = segundos => {
+  const total = Math.max(0, Math.round(segundos));
+  const horas = Math.floor(total / 3600); const minutos = Math.floor((total % 3600) / 60);
+  return horas ? `${horas} h ${minutos} min` : `${Math.max(1, minutos)} min`;
+};
+const relojTexto = segundos => {
+  const total = Math.max(0, Math.floor(segundos));
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+  return `${h ? `${h}:${String(m).padStart(2, '0')}` : String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+};
+// El cronómetro vive en el teléfono (no se pierde al cambiar de pantalla o cerrar la app): guarda la hora de inicio y se calcula contra el reloj.
+const cronometroClave = 'eileen-cronometro-rutina';
+const cronometroActual = () => { try { return JSON.parse(localStorage.getItem(cronometroClave) || 'null'); } catch { return null; } };
+const segundosCronometro = crono => crono ? Math.floor((Date.now() - crono.startedAt) / 1000) : 0;
+const ofertaDeRutina = routineId => (portalData?.routineOffers || []).find(item => item.routine_id === routineId);
+
+function renderOfertasRutina() {
+  const ofertas = portalData?.routineOffers || [];
+  // Un solo contenedor por vista: encima de las tarjetas del Progreso y encima de la lista de rutinas.
+  // Arriba de todo en el Progreso (es lo primero que debe ver); en Rutinas la propia tarjeta de la rutina lo dice.
+  for (const [destino, ancla, alInicio] of [['portal-offers-dashboard', document.getElementById('portal-dashboard'), true]]) {
+    if (!ancla) continue;
+    let contenedor = document.getElementById(destino);
+    if (!contenedor) { contenedor = document.createElement('div'); contenedor.id = destino; if (alInicio) ancla.prepend(contenedor); else ancla.before(contenedor); }
+    contenedor.innerHTML = ofertas.map(oferta => {
+      const hora = new Intl.DateTimeFormat('es-PA', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'America/Panama' }).format(new Date(oferta.starts_at));
+      const dia = new Intl.DateTimeFormat('es-PA', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Panama' }).format(new Date(oferta.starts_at));
+      return `<article class="portal-offer-card"><span class="portal-offer-tag">Eileen te dejó una rutina</span><h3>${escapeHtml(oferta.routine_title)}</h3><p>En lugar de tu clase del ${escapeHtml(dia)} a las ${hora}. Si la cumples, <b>cuenta como tu clase</b>.</p><button type="button" class="primary" data-ir-rutina="${oferta.routine_id}">Ver la rutina e iniciar</button></article>`;
+    }).join('');
+  }
+}
+
+function pintarCronometros() {
+  const crono = cronometroActual();
+  document.querySelectorAll('[data-routine-timer]').forEach(caja => {
+    const mio = crono && crono.routineId === caja.dataset.routineTimer;
+    const reloj = caja.querySelector('[data-timer-display]');
+    const boton = caja.querySelector('[data-timer-toggle]');
+    if (reloj) reloj.textContent = mio ? relojTexto(segundosCronometro(crono)) : '00:00';
+    if (boton) { boton.textContent = mio ? '■ Terminar rutina' : '▶ Iniciar rutina'; boton.classList.toggle('en-marcha', Boolean(mio)); }
+    caja.classList.toggle('corriendo', Boolean(mio));
+  });
+}
+setInterval(pintarCronometros, 1000);
+
+async function terminarRutinaPortal(routineId, porcentaje = 100) {
+  const crono = cronometroActual();
+  const segundos = crono && crono.routineId === routineId ? Math.min(21600, Math.max(1, segundosCronometro(crono))) : undefined;
+  const oferta = ofertaDeRutina(routineId);
+  if (oferta) {
+    const r = await api(`/api/portal/routine-offers/${oferta.id}/complete`, { method: 'POST', body: { completionPercent: porcentaje || 100, durationSeconds: segundos } });
+    localStorage.removeItem(cronometroClave);
+    await loadPortalData();
+    toast(r.sessionCompleted ? `¡Rutina cumplida${segundos ? ` en ${duracionLegible(segundos)}` : ''}! Cuenta como tu clase de hoy` : 'Rutina cumplida');
+    return;
+  }
+  await api('/api/portal/routine-completions', { method: 'POST', body: { routineId, completedOn: dateKey(today), completionPercent: porcentaje || 100, durationSeconds: segundos } });
+  localStorage.removeItem(cronometroClave);
+  await loadPortalData();
+  toast(`¡Rutina cumplida${segundos ? ` en ${duracionLegible(segundos)}` : ''}!`);
+}
+
+document.addEventListener('click', async event => {
+  const ir = event.target.closest('[data-ir-rutina]');
+  if (ir) { location.hash = '#portal-routines'; setTimeout(() => document.querySelector(`[data-routine-timer="${ir.dataset.irRutina}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 250); return; }
+  const boton = event.target.closest('[data-timer-toggle]');
+  if (!boton) return;
+  const routineId = boton.closest('[data-routine-timer]').dataset.routineTimer;
+  const crono = cronometroActual();
+  if (crono && crono.routineId === routineId) {
+    const form = document.querySelector(`[data-portal-routine="${routineId}"]`);
+    const porcentaje = Number(form?.elements.completionPercent?.value) || 100;
+    boton.disabled = true;
+    try { await terminarRutinaPortal(routineId, porcentaje > 0 ? porcentaje : 100); }
+    catch (error) { toast(error.message, true); boton.disabled = false; }
+    return;
+  }
+  if (crono) { toast('Ya tienes otra rutina en marcha. Termínala primero.', true); return; }
+  localStorage.setItem(cronometroClave, JSON.stringify({ routineId, startedAt: Date.now() }));
+  pintarCronometros();
+  toast('Cronómetro en marcha · tócalo otra vez al terminar');
+});
+
 function renderPortal() {
   const client = portalData.client;
   const period = portalPeriod();
@@ -5652,9 +5842,14 @@ function renderPortal() {
   tarjetas.push(`<article class="portal-cancel-card${periodClientCancellations ? ' con-aviso' : ''}"><span>Cancelaciones cliente</span><strong>${periodClientCancellations}<em> de ${periodMeasured.length}</em></strong><small>${periodCancellationPercent}% de las sesiones medidas</small></article>`);
   tarjetas.push(`<article class="portal-reprogram-card"><span>Reprogramadas</span><strong>${periodReprogrammed}</strong><small>${period.kind === 'cutoff' ? 'en este corte' : 'en este mes'}</small></article>`);
   if (portalData.routines.length) tarjetas.push(`<article><span>Rutinas activas</span><strong>${portalData.routines.length}</strong><small>asignadas</small></article>`);
+  // Rutinas cumplidas en el período elegido (mes o corte), con el tiempo que entrenó cuando usó el cronómetro.
+  const rutinasDelPeriodo = (portalData.routineCompletions || []).filter(item => Number(item.completion_percent) > 0 && portalSessionInPeriod(`${String(item.completed_on).slice(0, 10)}T12:00:00-05:00`, period));
+  const segundosRutinas = rutinasDelPeriodo.reduce((total, item) => total + Number(item.duration_seconds || 0), 0);
+  tarjetas.push(`<article class="portal-routines-done-card"><span>Rutinas cumplidas</span><strong>${rutinasDelPeriodo.length}</strong><small>${period.kind === 'cutoff' ? 'en este corte' : 'en este mes'}${segundosRutinas ? ` · ${duracionLegible(segundosRutinas)} entrenando` : ''}</small></article>`);
   tarjetas.push(`<article class="portal-debt-card${pending > 0 ? ' pendiente' : ' pagado'}"><span>Saldo pendiente</span><strong>${money.format(pending)}</strong><small>${pending > 0 ? `por pagar · ${period.label}` : 'estás al día'}</small></article>`);
   if (credito > 0) tarjetas.push(`<article class="destacada"><span>A tu favor</span><strong>${money.format(credito)}</strong><small>se descuenta del próximo cobro</small></article>`);
   document.getElementById('portal-metrics').innerHTML = tarjetas.join('');
+  renderOfertasRutina();
 
   renderPortalReports();
   const allActivities = portalActivities();
@@ -5668,7 +5863,8 @@ function renderPortal() {
     return `<div class="chart-column" title="${completed} de ${measured} sesiones medibles · ${percent === null ? 'sin datos' : `${percent}% promedio`}"><span>${label}</span><i style="height:${Math.max(4, percent || 0)}%"></i><small>${monthLabel(bucket.date)}</small></div>`;
   }).join('');
   document.getElementById('portal-inbody').innerHTML = portalData.assessments.length ? `<div class="portal-inbody-grid">${portalData.assessments.slice(-4).reverse().map(item => `<article><span>${String(item.tested_at).slice(0, 10)}</span><b>${Number(item.values.weightKg || 0).toFixed(1)} kg</b><small>${Number(item.values.percentBodyFat || 0).toFixed(1)}% grasa · ${Number(item.values.skeletalMuscleMassKg || 0).toFixed(1)} kg músculo</small></article>`).join('')}</div>` : '<p class="empty">Todavía no hay evaluaciones confirmadas.</p>';
-  document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(routine => { const todayCompletion = portalData.routineCompletions.find(item => item.routine_id === routine.id && item.completed_on === dateKey(today)); return `<article class="card portal-routine-card"><div class="card-head"><div><h3>${escapeHtml(routine.title)}</h3><p>${escapeHtml(routine.description || '')} · ${routine.sessions_per_week} veces por semana</p>${routine.due_on ? `<p class="routine-due${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? 'Venció el' : 'Para cumplirla antes del'} ${fechaCorta(routine.due_on)}</p>` : ''}</div></div><div class="exercise-preview">${portalExerciseRows(routine.exercises || [])}</div><form data-portal-routine="${routine.id}" class="portal-completion-form"><label class="completion-check"><input name="completed" type="checkbox" ${todayCompletion && Number(todayCompletion.completion_percent) > 0 ? 'checked' : ''} /><span>Entrenamiento realizado hoy</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${Number(todayCompletion?.completion_percent || 100)}" /><span>% completado</span></label><button class="primary">Guardar cumplimiento</button></form></article>`; }).join('') : '<p class="empty">La entrenadora todavía no te ha asignado una rutina.</p>';
+  document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(routine => { const todayCompletion = portalData.routineCompletions.find(item => item.routine_id === routine.id && item.completed_on === dateKey(today)); return `<article class="card portal-routine-card"><div class="card-head"><div><h3>${escapeHtml(routine.title)}</h3><p>${escapeHtml(routine.description || '')} · ${routine.sessions_per_week} veces por semana</p>${routine.due_on ? `<p class="routine-due${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? 'Venció el' : 'Para cumplirla antes del'} ${fechaCorta(routine.due_on)}</p>` : ''}</div></div>${ofertaDeRutina(routine.id) ? '<p class="portal-offer-inline">Rutina de hoy en lugar de tu clase: si la cumples, cuenta como clase.</p>' : ''}<div class="routine-timer" data-routine-timer="${routine.id}"><span class="routine-timer-display" data-timer-display>00:00</span><button type="button" class="primary routine-timer-button" data-timer-toggle>▶ Iniciar rutina</button></div><div class="exercise-preview">${portalExerciseRows(routine.exercises || [])}</div><form data-portal-routine="${routine.id}" class="portal-completion-form"><label class="completion-check"><input name="completed" type="checkbox" ${todayCompletion && Number(todayCompletion.completion_percent) > 0 ? 'checked' : ''} /><span>Entrenamiento realizado hoy</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${Number(todayCompletion?.completion_percent || 100)}" /><span>% completado</span></label><button class="primary">Guardar cumplimiento</button></form></article>`; }).join('') : '<p class="empty">La entrenadora todavía no te ha asignado una rutina.</p>';
+  pintarCronometros();
   const ownSessions = new Map(portalData.sessions.map(item => [item.id, portalSession(item)]));
   renderPortalCalendar(ownSessions);
   document.getElementById('portal-plan').innerHTML = `<span class="commercial-label ${client.billing_model === 'package' ? 'package-label' : ''}">${client.payment_mode === 'no_anticipado' ? 'Crédito por sesión' : client.billing_model === 'package' ? 'Paquete' : 'Mensualidad'}</span><div><h3>${escapeHtml(client.plan_name || 'Plan personalizado')}</h3><p>${client.payment_mode === 'no_anticipado' ? `${money.format(Number(client.credit_session_price || 25))} por sesión · corte día ${client.billing_cutoff_day}` : `${money.format(Number(client.standard_price))}${client.billing_model === 'monthly' ? ` · corte día ${client.billing_cutoff_day}` : ` · ${client.sessions_included || 0} sesiones`}`}</p></div>`;
@@ -5695,8 +5891,8 @@ function renderPortal() {
   const portalCount = document.getElementById('portal-notification-count'); portalCount.textContent = portalData.notifications.length; portalCount.hidden = !portalData.notifications.length;
 }
 async function loadPortalData() {
-  const [summary, notifications] = await Promise.all([api('/api/portal/summary'), api('/api/notifications')]);
-  portalData = { ...summary, notifications };
+  const [summary, notifications, routineOffers] = await Promise.all([api('/api/portal/summary'), api('/api/notifications'), api('/api/portal/routine-offers').catch(() => [])]);
+  portalData = { ...summary, notifications, routineOffers };
   // El expediente es la fuente de verdad del nombre. El usuario del portal
   // puede conservar un nombre antiguo, por eso se actualiza también el menú y
   // el avatar después de leer el expediente.
@@ -5723,8 +5919,11 @@ document.addEventListener('submit', async event => {
   event.preventDefault(); const form = routineForm || sessionForm; const completed = form.elements.completed.checked; const completionPercent = completed ? Number(form.elements.completionPercent.value) : 0;
   try {
     form.classList.add('loading-state');
-    if (routineForm) await api('/api/portal/routine-completions', { method: 'POST', body: { routineId: routineForm.dataset.portalRoutine, completedOn: dateKey(today), completionPercent } });
-    else {
+    if (routineForm) {
+      // Si tiene oferta pendiente, cumplirla manualmente también cierra la clase; si el cronómetro corría, se guarda la duración.
+      if (completionPercent > 0) { await terminarRutinaPortal(routineForm.dataset.portalRoutine, completionPercent); return; }
+      await api('/api/portal/routine-completions', { method: 'POST', body: { routineId: routineForm.dataset.portalRoutine, completedOn: dateKey(today), completionPercent } });
+    } else {
       const resultado = await api(`/api/portal/sessions/${sessionForm.dataset.portalSession}/compliance`, { method: 'PATCH', body: { completed, completionPercent } });
       await loadPortalData(); toast(mensajeDeSaldo(resultado, 'Cumplimiento actualizado'));
       return;

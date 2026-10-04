@@ -43,6 +43,9 @@ export async function suggestRoutine(entrada: {
   condiciones: string[];
   repetirGrupos: boolean;
   clienteNombre?: string;
+  // Rutina para que el cliente la haga por su cuenta (clase cancelada): se dimensiona a la duración de la clase y la descripción son las instrucciones que él leerá.
+  paraCliente?: boolean;
+  duracionMinutos?: number;
 }) {
   if (!routineSuggestionsReady) throw new Error('Falta configurar la clave de DeepSeek');
 
@@ -58,6 +61,15 @@ export async function suggestRoutine(entrada: {
     'El campo rationale explica en una o dos frases por qué elegiste ese enfoque, en español.'
   ];
 
+  if (entrada.paraCliente) {
+    instrucciones.push(
+      'Esta rutina la hará el cliente POR SU CUENTA, sin entrenadora al lado, en lugar de su clase cancelada. '
+      + `Dimensiónala para unos ${entrada.duracionMinutos || 45} minutos en total, calentamiento incluido, con ejercicios simples de ejecutar solo y con buena técnica. `
+      + 'El campo "description" son las INSTRUCCIONES para el cliente, escritas en segunda persona (tú) y en español: cómo calentar unos 5 minutos, cuánto descansar entre series, '
+      + 'a qué esfuerzo trabajar, que mire la demostración en video de cada ejercicio antes de hacerlo y que pare si siente dolor. Máximo 450 caracteres, sin listas largas. '
+      + 'En "notes" de cada ejercicio escribe una pista corta de técnica para esa persona.'
+    );
+  }
   if (entrada.condiciones.length) {
     instrucciones.push(
       `El cliente tiene estas lesiones o condiciones: ${entrada.condiciones.join('; ')}. `
@@ -142,7 +154,7 @@ export async function suggestRoutine(entrada: {
   const semanales = Number(cruda.sessionsPerWeek);
   return {
     title: String(cruda.title ?? '').trim().slice(0, 120) || 'Rutina propuesta',
-    description: String(cruda.description ?? '').trim().slice(0, 400),
+    description: String(cruda.description ?? '').trim().slice(0, entrada.paraCliente ? 600 : 400),
     sessionsPerWeek: Number.isFinite(semanales) && semanales >= 1 && semanales <= 7 ? Math.round(semanales) : 3,
     exercises: ejercicios,
     rationale: String(cruda.rationale ?? '').trim().slice(0, 500),

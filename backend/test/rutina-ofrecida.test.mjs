@@ -1,0 +1,98 @@
+// Rutina ofrecida cuando un cliente cancela (J-102): la clase sigue programada; si el cliente cumple la rutina en el portal, la clase pasa a realizada y Eileen recibe el aviso.
+import test, { after, before } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import postgres from 'postgres';
+import { CREDENCIALES, SETUP_TOKEN, cliente, levantar } from './harness.mjs';
+
+const ejecutar = promisify(execFile);
+
+let servidor; let api; let portal; let c; let rutinaId; let otraRutinaId; let sesionId;
+const manana = () => new Date(Date.now() + 26 * 3600_000).toISOString();
+
+before(async () => {
+  servidor = await levantar();
+  api = cliente(servidor.base);
+  await api.post('/api/auth/setup', CREDENCIALES, { 'x-setup-token': SETUP_TOKEN });
+  const login = await api.post('/api/auth/login', { email: CREDENCIALES.email, password: CREDENCIALES.password });
+  api.usarToken(login.datos.token);
+  c = (await api.post('/api/clients', { fullName: 'Cliente Rutina', cutoffDay: 1, email: 'rutina@prueba.test' })).datos.id;
+  const ejercicios = [{ name: 'Sentadilla', sets: 3, reps: '12' }, { name: 'Plancha', sets: 3, reps: '30 seg' }];
+  rutinaId = (await api.post('/api/routines', { title: 'Rutina en casa', description: 'Calienta 5 minutos.', sessionsPerWeek: 1, exercises: ejercicios, clientId: c })).datos.id;
+  otraRutinaId = (await api.post('/api/routines', { title: 'Sin asignar', sessionsPerWeek: 1, exercises: ejercicios })).datos.id;
+  sesionId = (await api.post('/api/sessions', { clientId: c, startsAt: manana(), durationMinutes: 45, mode: 'Presencial' })).datos.id;
+  const enlace = await api.post(`/api/clients/${c}/access-link`, {});
+  const acceso = await api.post(`/api/auth/access-link/${String(enlace.datos.url).split('acceso=')[1]}`, { password: 'clave-del-portal-larga' });
+  portal = cliente(servidor.base); portal.usarToken(acceso.datos.token);
+}, { timeout: 90_000 });
+after(async () => { await servidor?.parar(); });
+
+const sesionDe = async id => (await api.get('/api/sessions')).datos.find(x => x.id === id);
+
+test('ofrecer una rutina no cancela la clase: queda programada con la rutina ligada y la oferta visible', async () => {
+  assert.equal((await api.post(`/api/sessions/${sesionId}/routine-offer`, { routineId: otraRutinaId })).estado, 409, 'una rutina no asignada al cliente no se ofrece');
+  const r = await api.post(`/api/sessions/${sesionId}/routine-offer`, { routineId: rutinaId });
+  assert.equal(r.estado, 201, JSON.stringify(r.datos));
+  const s = await sesionDe(sesionId);
+  assert.equal(s.status, 'scheduled');
+  assert.equal(s.routine_id, rutinaId);
+  assert.equal(s.routine_offer_status, 'offered');
+  assert.match(s.notes, /Rutina ofrecida en lugar de la clase/);
+  const ofertas = await portal.get('/api/portal/routine-offers');
+  assert.equal(ofertas.datos.length, 1);
+  assert.equal(ofertas.datos[0].routine_title, 'Rutina en casa');
+});
+
+test('cumplir la rutina cierra la clase como realizada (aunque su hora no haya llegado), guarda la duración y avisa a Eileen', async () => {
+  const oferta = (await portal.get('/api/portal/routine-offers')).datos[0];
+  const r = await portal.post(`/api/portal/routine-offers/${oferta.id}/complete`, { completionPercent: 100, durationSeconds: 1500 });
+  assert.equal(r.estado, 200, JSON.stringify(r.datos));
+  assert.equal(r.datos.completed, true);
+  assert.equal(r.datos.sessionCompleted, true);
+  const s = await sesionDe(sesionId);
+  assert.equal(s.status, 'completed');
+  assert.equal(s.routine_offer_status, 'completed');
+  assert.equal(s.routine_offer_duration_seconds, 1500);
+  assert.equal((await portal.get('/api/portal/routine-offers')).datos.length, 0);
+  const avisos = (await api.get('/api/notifications')).datos.filter(a => a.type === 'routine');
+  assert.equal(avisos.length, 1);
+  assert.match(avisos[0].title, /Cliente Rutina/);
+  assert.match(avisos[0].body, /Rutina en casa.*25 min.*100%/);
+  const otra = await portal.post(`/api/portal/routine-offers/${oferta.id}/complete`, { completionPercent: 100 });
+  assert.equal(otra.datos.alreadyCompleted, true, 'completarla dos veces no descuenta dos veces');
+  assert.equal((await api.post(`/api/sessions/${sesionId}/routine-offer`, { routineId: rutinaId })).estado, 409, 'ya no se ofrece en una clase realizada');
+});
+
+test('retirar la oferta la quita del portal sin tocar la clase; el portal no acepta ofertas ajenas', async () => {
+  const s2 = (await api.post('/api/sessions', { clientId: c, startsAt: new Date(Date.now() + 50 * 3600_000).toISOString(), durationMinutes: 45, mode: 'Presencial' })).datos.id;
+  assert.equal((await api.post(`/api/sessions/${s2}/routine-offer`, { routineId: rutinaId })).estado, 201);
+  assert.equal((await api.delete(`/api/sessions/${s2}/routine-offer`)).estado, 200);
+  assert.equal((await portal.get('/api/portal/routine-offers')).datos.length, 0);
+  assert.equal((await sesionDe(s2)).status, 'scheduled');
+  assert.equal((await api.delete(`/api/sessions/${s2}/routine-offer`)).estado, 404);
+  const sinSesion = await cliente(servidor.base).get('/api/portal/routine-offers');
+  assert.equal(sinSesion.estado, 401);
+  const comoStaff = await api.get('/api/portal/routine-offers');
+  assert.equal(comoStaff.estado, 403);
+});
+
+test('la rutina cumplida suelta también guarda la duración del cronómetro y avisa a Eileen', async () => {
+  const hoy = new Date(Date.now() - 5 * 3600_000).toISOString().slice(0, 10);
+  const r = await portal.post('/api/portal/routine-completions', { routineId: rutinaId, completedOn: hoy, completionPercent: 80, durationSeconds: 900 });
+  assert.equal(r.estado, 201, JSON.stringify(r.datos));
+  assert.equal(r.datos.duration_seconds, 900);
+  const mala = await portal.post('/api/portal/routine-completions', { routineId: rutinaId, completedOn: hoy, completionPercent: 80, durationSeconds: 999999 });
+  assert.equal(mala.estado, 400, 'una duración absurda se rechaza');
+});
+
+test('la reversa de 056 se niega a borrar ofertas y duraciones sin orden expresa, y con la orden las quita', async () => {
+  const archivo = new URL('../migrations-down/056_rutina_en_lugar_de_clase.down.sql', import.meta.url).pathname;
+  const db = postgres(servidor.databaseUrl, { onnotice: () => {}, max: 2 });
+  try {
+    await assert.rejects(ejecutar('psql', ['-v', 'ON_ERROR_STOP=1', '-q', servidor.databaseUrl, '-f', archivo]), /hay ofertas de rutina o duraciones guardadas/);
+    assert.ok((await db`SELECT count(*)::int AS n FROM session_routine_offers`)[0].n >= 1, 'las ofertas siguen ahí');
+    await ejecutar('psql', ['-v', 'ON_ERROR_STOP=1', '-q', servidor.databaseUrl, '-c', "SET billing.allow_destructive_down = 'on'", '-f', archivo]);
+    assert.equal((await db`SELECT to_regclass('session_routine_offers') AS t`)[0].t, null);
+  } finally { await db.end({ timeout: 1 }).catch(() => {}); }
+});

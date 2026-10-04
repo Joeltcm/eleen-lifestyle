@@ -862,3 +862,21 @@ button.active-filter{background:#2f6f4f;color:#fff;border-color:#2f6f4f}
 .portal-period-nav button{min-width:0;padding:10px 6px;font-size:12px;line-height:1.2;white-space:normal}
 body .portal-period-nav button,body .portal-view .portal-period-nav button.secondary{font-size:12.5px;line-height:1.2;min-height:44px}
 body .portal-period-nav button{white-space:nowrap;padding-left:4px;padding-right:4px}
+
+/* Rutina ofrecida, cronómetro y tarjeta de rutinas cumplidas (J-102) */
+.portal-offer-card{margin:0 0 14px;padding:18px 20px;border-radius:18px;background:linear-gradient(135deg,#fdeef3,#f4e7f0);border:1.5px solid #e2b4c8;box-shadow:0 8px 24px #b46f8e22}
+.portal-offer-card h3{margin:6px 0 4px;font:600 22px Fraunces}
+.portal-offer-card p{margin:0 0 12px;color:#5a4650;font-size:14px;line-height:1.45}
+.portal-offer-tag{display:inline-block;padding:4px 10px;border-radius:99px;background:#b46f8e;color:#fff;font:700 11px 'DM Sans';letter-spacing:.3px}
+.portal-offer-inline{margin:0 0 12px;padding:10px 12px;border-radius:12px;background:#fdeef3;color:#7a4560;font-size:13px;font-weight:600}
+.routine-timer{display:flex;align-items:center;gap:14px;margin:14px 0;padding:12px 14px;border-radius:14px;background:#f6f1f3}
+.routine-timer-display{font:600 34px/1 'DM Mono',monospace;letter-spacing:1px;color:#5a3f4c;min-width:104px}
+.routine-timer.corriendo{background:#e8f4ec}.routine-timer.corriendo .routine-timer-display{color:#2f7a52}
+.routine-timer-button{flex:1;min-height:48px;font-size:15px}
+.routine-timer-button.en-marcha{background:linear-gradient(135deg,#d7625f,#b13d45);color:#fff;border-color:#b13d45}
+.portal-routines-done-card{background:linear-gradient(135deg,#f1f8f3,#e4f1e8);border-color:#b5d6c1}
+.session-routine-offer{color:#7a4560;font-weight:700}.session-routine-done{color:#2f7a52;font-weight:700}
+.notification-item.routine{border-left-color:#5fae84;background:#eef7f1}
+@media(max-width:600px){.routine-timer{flex-wrap:wrap}.routine-timer-button{flex:1 1 100%}.routine-timer-display{font-size:40px;flex:1 1 100%;text-align:center}}
+/* En Rutinas el botón flotante de peso tapaba el de guardar. */
+body:has(#portal-routines.active) .portal-weight-fab{display:none}

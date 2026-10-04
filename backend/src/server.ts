@@ -3211,7 +3211,9 @@ app.get('/api/routines', { preHandler: requireStaff }, async request => {
 const routineSuggestionSchema = z.object({
   description: z.string().trim().min(10).max(600),
   clientId: z.string().uuid().optional(),
-  repeatMuscleGroups: z.boolean().default(false)
+  repeatMuscleGroups: z.boolean().default(false),
+  forClient: z.boolean().default(false),
+  durationMinutes: z.coerce.number().int().min(15).max(180).optional()
 });
 
 // Los pesos que este cliente ya manejó, por ejercicio. Salen de sus rutinas
@@ -3302,7 +3304,9 @@ app.post('/api/routines/suggest', { preHandler: requireStaff }, async (request, 
       catalogo: catalogo.map(e => ({ name: String(e.name), section: String(e.section), level: e.level as string, machine: e.machine as string })),
       historial, condiciones,
       repetirGrupos: input.repeatMuscleGroups,
-      clienteNombre
+      clienteNombre,
+      paraCliente: input.forClient,
+      duracionMinutos: input.durationMinutes
     });
     return propuesta;
   } catch (error) {
@@ -3539,11 +3543,13 @@ app.get('/api/sessions', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`SELECT s.*, c.full_name, r.title AS routine_title,
     charged.label AS charged_package_label, charged.used_sessions AS charged_package_used,
-    charged.total_sessions AS charged_package_total
+    charged.total_sessions AS charged_package_total,
+    sro.status AS routine_offer_status, sro.duration_seconds AS routine_offer_duration_seconds
     FROM sessions s
     JOIN clients c ON c.id = s.client_id
     LEFT JOIN routines r ON r.id = s.routine_id
     LEFT JOIN session_packages charged ON charged.id = s.package_id
+    LEFT JOIN session_routine_offers sro ON sro.session_id = s.id AND sro.status <> 'withdrawn'
     WHERE c.owner_id = ${auth.sub} ORDER BY s.starts_at`;
 });
 // El horario de trabajo, por tramos. Sin tramos configurados la aplicación
@@ -4650,7 +4656,7 @@ function sessionBillingNotice(pack: Record<string, unknown> | null | undefined, 
   };
 }
 
-async function recordSessionCompliance(id: string, ownerId: string, markedBy: string, resultado: ResultadoSesion, completionPercent: number) {
+async function recordSessionCompliance(id: string, ownerId: string, markedBy: string, resultado: ResultadoSesion, completionPercent: number, opciones: { permitirAnticipada?: boolean } = {}) {
   const completed = resultado === 'completed';
   return sql.begin(async transaction => {
     const [current] = await transaction`SELECT s.*, now() AS database_now FROM sessions s JOIN clients c ON c.id = s.client_id WHERE s.id = ${id} AND c.owner_id = ${ownerId} FOR UPDATE`;
@@ -4663,7 +4669,8 @@ async function recordSessionCompliance(id: string, ownerId: string, markedBy: st
     // clase antes de que llegara su fecha —el caso que dejó a Julieta con una
     // sesión usada pese a no haber entrenado—. Se compara contra now() de la
     // misma conexión para no depender del reloj del proceso ni de su zona horaria.
-    if (current.status === 'scheduled' && resultado !== 'scheduled'
+    // (Salvo la rutina ofrecida en lugar de la clase: ahí la prueba de que se entrenó es la propia rutina cumplida, aunque la hora de la clase no haya llegado.)
+    if (current.status === 'scheduled' && resultado !== 'scheduled' && !opciones.permitirAnticipada
       && new Date(current.starts_at as Date | string) > new Date(current.database_now as Date | string)) {
       sessionStateConflict('No se puede marcar una sesión futura como realizada o no cumplida.');
     }
@@ -6773,7 +6780,19 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
       AND s.starts_at >= now() - interval '7 days'
     ORDER BY s.starts_at DESC
   `;
+  // Rutinas que los clientes cumplieron en las últimas 24 horas (con o sin clase de por medio).
+  const rutinasCumplidas = await sql`
+    SELECT rc.id, rc.completion_percent, rc.duration_seconds, rc.updated_at, c.full_name, r.title
+    FROM routine_completions rc JOIN clients c ON c.id = rc.client_id JOIN routines r ON r.id = rc.routine_id
+    WHERE c.owner_id = ${auth.sub} AND rc.completion_percent > 0 AND rc.marked_by_user_id = c.portal_user_id
+      AND rc.updated_at >= now() - interval '24 hours'
+    ORDER BY rc.updated_at DESC LIMIT 20`;
   return [
+    ...rutinasCumplidas.map(item => ({
+      type: 'routine', title: `Rutina cumplida: ${item.full_name}`,
+      body: `«${item.title}»${duracionTexto(item.duration_seconds === null ? null : Number(item.duration_seconds))} · ${item.completion_percent}%`,
+      scheduledFor: item.updated_at
+    })),
     ...pendientes.map(session => ({
       type: 'pending', sessionId: session.id,
       title: `Falta marcar: ${session.full_name}`,
@@ -6826,7 +6845,7 @@ app.post('/api/push/test', { preHandler: requireAuth }, async (request, reply) =
   return { delivered: true, dispositivos: Number(count) };
 });
 
-async function sendPushToUser(userId: string, payload: { title: string; body: string; url: string }) {
+async function sendPushToUser(userId: string, payload: { title: string; body: string; url: string; sound?: boolean; tag?: string }) {
   if (!webPushReady) return false;
   const subscriptions = await sql`SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ${userId} AND active = true`;
   let delivered = false;
@@ -7052,7 +7071,7 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
       ORDER BY s.starts_at`,
     sql`SELECT s.id, s.starts_at, s.duration_minutes, (s.client_id = ${client.id}) AS is_mine FROM sessions s JOIN clients c ON c.id = s.client_id WHERE c.owner_id = ${client.owner_id} AND s.status <> 'cancelled' AND s.starts_at BETWEEN now() - interval '60 days' AND now() + interval '90 days' ORDER BY s.starts_at`,
     sql`SELECT tested_at, values FROM inbody_assessments WHERE client_id = ${client.id} AND extraction_status = 'ready' ORDER BY tested_at`,
-    sql`SELECT routine_id, completed_on, completion_percent FROM routine_completions WHERE client_id = ${client.id} AND completed_on >= current_date - interval '1 year' ORDER BY completed_on`,
+    sql`SELECT routine_id, completed_on, completion_percent, duration_seconds FROM routine_completions WHERE client_id = ${client.id} AND completed_on >= current_date - interval '1 year' ORDER BY completed_on`,
     // El catálogo entero, no sólo lo asignado: la rutina guarda los ejercicios
     // como copia en JSON, y es por catalogId que el portal sabe cuáles tienen
     // video que mostrar. La URL firmada se pide aparte, al darle reproducir.
@@ -7204,20 +7223,138 @@ app.get('/api/portal/reports/compliance.pdf', { preHandler: requireAuth }, async
   return sendPdf(reply, await compliancePdf({ id: client.id, full_name: client.full_name, email: client.email }, resumen, timeline), `cumplimiento-${String(client.full_name).toLowerCase().replace(/[^a-z0-9]+/g, '-')}.pdf`);
 });
 
-const routineCompletionSchema = z.object({ routineId: z.string().uuid(), completedOn: z.string().date(), completionPercent: z.coerce.number().int().min(0).max(100), notes: z.string().max(300).optional() });
+const routineCompletionSchema = z.object({ routineId: z.string().uuid(), completedOn: z.string().date(), completionPercent: z.coerce.number().int().min(0).max(100), notes: z.string().max(300).optional(), durationSeconds: z.coerce.number().int().min(1).max(21600).optional() });
 app.post('/api/portal/routine-completions', { preHandler: requireAuth }, async (request, reply) => {
   const auth = request.user as AuthUser; if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
   const input = routineCompletionSchema.parse(request.body); const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
   const [assignment] = await sql`SELECT id FROM routine_assignments WHERE routine_id = ${input.routineId} AND client_id = ${client.id} AND active = true`;
   if (!assignment) return reply.code(404).send({ error: 'La rutina no está asignada a este cliente' });
   const [completion] = await sql`
-    INSERT INTO routine_completions (routine_id, client_id, completed_on, completion_percent, marked_by_user_id, notes)
-    VALUES (${input.routineId}, ${client.id}, ${input.completedOn}, ${input.completionPercent}, ${auth.sub}, ${input.notes || null})
+    INSERT INTO routine_completions (routine_id, client_id, completed_on, completion_percent, marked_by_user_id, notes, duration_seconds)
+    VALUES (${input.routineId}, ${client.id}, ${input.completedOn}, ${input.completionPercent}, ${auth.sub}, ${input.notes || null}, ${input.durationSeconds ?? null})
     ON CONFLICT (routine_id, client_id, completed_on) DO UPDATE SET completion_percent = EXCLUDED.completion_percent,
-      marked_by_user_id = EXCLUDED.marked_by_user_id, notes = EXCLUDED.notes, updated_at = now()
+      marked_by_user_id = EXCLUDED.marked_by_user_id, notes = EXCLUDED.notes, duration_seconds = COALESCE(EXCLUDED.duration_seconds, routine_completions.duration_seconds), updated_at = now()
     RETURNING *
   `;
+  if (input.completionPercent > 0) {
+    const [rutina] = await sql`SELECT title FROM routines WHERE id = ${input.routineId}`;
+    await avisarRutinaCumplida(client, String(rutina?.title ?? 'su rutina'), input.completionPercent, input.durationSeconds ?? null, false);
+  }
   return reply.code(201).send(completion);
+});
+
+// ── Rutina ofrecida en lugar de la clase ───────────────────────────────────
+// Cuando un cliente cancela, Eileen puede ofrecerle una rutina para hacer por su cuenta. La clase NO se cancela: queda programada con la rutina ligada, y si el cliente
+// la cumple en el portal pasa a "realizada" (cuenta como su clase del día y descuenta de su saldo como cualquier clase dada). Si no la cumple, la clase sigue
+// apareciendo entre las que faltan por marcar y Eileen decide cómo cerrarla.
+const duracionTexto = (segundos: number | null) => {
+  if (!segundos) return '';
+  const minutos = Math.round(segundos / 60);
+  return minutos < 1 ? ` en ${segundos} s` : ` en ${minutos} min`;
+};
+
+async function avisarRutinaCumplida(cliente: Record<string, unknown>, rutina: string, porcentaje: number, duracion: number | null, enLugarDeClase: boolean) {
+  const client = cliente as { id: string; owner_id: string; full_name: string };
+  await sendPushToUser(client.owner_id, {
+    title: `Rutina cumplida · ${client.full_name}`,
+    body: `«${rutina}»${duracionTexto(duracion)} · ${porcentaje}%${enLugarDeClase ? '. Cuenta como su clase de hoy.' : '.'}`,
+    url: new URL('/#calendar', config.APP_URL).toString(),
+    sound: true, tag: `rutina-${client.id}`
+  });
+}
+
+app.post('/api/sessions/:id/routine-offer', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = z.object({ routineId: z.string().uuid() }).parse(request.body);
+  const [sesion] = await sql`
+    SELECT s.id, s.status, s.client_id, s.starts_at, s.duration_minutes, s.notes, c.full_name, c.portal_user_id
+    FROM sessions s JOIN clients c ON c.id = s.client_id WHERE s.id = ${id} AND c.owner_id = ${auth.sub}`;
+  if (!sesion) return reply.code(404).send({ error: 'Sesión no encontrada' });
+  if (sesion.status !== 'scheduled') return reply.code(409).send({ error: 'Solo se puede ofrecer una rutina en lugar de una clase programada.' });
+  const [rutina] = await sql`
+    SELECT r.id, r.title FROM routines r JOIN routine_assignments ra ON ra.routine_id = r.id AND ra.active = true AND ra.client_id = ${sesion.client_id}
+    WHERE r.id = ${input.routineId} AND r.owner_id = ${auth.sub}`;
+  if (!rutina) return reply.code(409).send({ error: 'La rutina debe estar asignada a este cliente.' });
+  const [previa] = await sql`SELECT status FROM session_routine_offers WHERE session_id = ${id}`;
+  if (previa?.status === 'completed') return reply.code(409).send({ error: 'El cliente ya cumplió una rutina en lugar de esta clase.' });
+
+  const [oferta] = await sql.begin(async transaction => {
+    const filas = await transaction`
+      INSERT INTO session_routine_offers (session_id, routine_id, client_id, offered_by_user_id)
+      VALUES (${id}, ${rutina.id}, ${sesion.client_id}, ${auth.sub})
+      ON CONFLICT (session_id) DO UPDATE SET routine_id = EXCLUDED.routine_id, status = 'offered', offered_at = now(), offered_by_user_id = EXCLUDED.offered_by_user_id,
+        completed_at = NULL, completion_percent = NULL, duration_seconds = NULL
+      RETURNING *`;
+    const nota = 'Rutina ofrecida en lugar de la clase (cancelación del cliente).';
+    await transaction`
+      UPDATE sessions SET routine_id = ${rutina.id}, updated_at = now(),
+        notes = CASE WHEN COALESCE(notes, '') LIKE ${'%' + nota + '%'} THEN notes ELSE COALESCE(notes || E'\n', '') || ${nota} END
+      WHERE id = ${id}`;
+    return filas;
+  });
+  if (sesion.portal_user_id) {
+    await sendPushToUser(String(sesion.portal_user_id), {
+      title: 'Eileen te dejó una rutina', body: `Haz «${rutina.title}» hoy: cuenta como tu clase.`,
+      url: new URL('/#portal-routines', config.APP_URL).toString()
+    });
+  }
+  return reply.code(201).send(oferta);
+});
+
+app.delete('/api/sessions/:id/routine-offer', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [oferta] = await sql`
+    UPDATE session_routine_offers o SET status = 'withdrawn' FROM sessions s JOIN clients c ON c.id = s.client_id
+    WHERE o.session_id = s.id AND s.id = ${id} AND c.owner_id = ${auth.sub} AND o.status = 'offered' RETURNING o.id`;
+  if (!oferta) return reply.code(404).send({ error: 'No hay una rutina ofrecida pendiente para esta clase.' });
+  return { withdrawn: true };
+});
+
+// Lo que el portal muestra como "Eileen te dejó una rutina": ofertas pendientes de clases que siguen programadas.
+app.get('/api/portal/routine-offers', { preHandler: requireAuth }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
+  const client = await portalClient(auth.sub);
+  if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+  return sql`
+    SELECT o.id, o.routine_id, o.session_id, o.offered_at, s.starts_at, s.duration_minutes, r.title AS routine_title
+    FROM session_routine_offers o JOIN sessions s ON s.id = o.session_id JOIN routines r ON r.id = o.routine_id
+    WHERE o.client_id = ${client.id} AND o.status = 'offered' AND s.status = 'scheduled'
+    ORDER BY s.starts_at`;
+});
+
+app.post('/api/portal/routine-offers/:id/complete', { preHandler: requireAuth }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = z.object({ completionPercent: z.coerce.number().int().min(1).max(100).default(100), durationSeconds: z.coerce.number().int().min(1).max(21600).optional() }).parse(request.body ?? {});
+  const client = await portalClient(auth.sub);
+  if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+  const [oferta] = await sql`
+    SELECT o.id, o.status, o.session_id, o.routine_id, r.title FROM session_routine_offers o JOIN routines r ON r.id = o.routine_id
+    WHERE o.id = ${id} AND o.client_id = ${client.id}`;
+  if (!oferta) return reply.code(404).send({ error: 'Rutina ofrecida no encontrada' });
+  if (oferta.status === 'completed') return { alreadyCompleted: true };
+  if (oferta.status === 'withdrawn') return reply.code(409).send({ error: 'Eileen retiró esta rutina.' });
+
+  await sql.begin(async transaction => {
+    await transaction`
+      INSERT INTO routine_completions (routine_id, client_id, completed_on, completion_percent, marked_by_user_id, duration_seconds)
+      VALUES (${oferta.routine_id}, ${client.id}, (now() AT TIME ZONE 'America/Panama')::date, ${input.completionPercent}, ${auth.sub}, ${input.durationSeconds ?? null})
+      ON CONFLICT (routine_id, client_id, completed_on) DO UPDATE SET completion_percent = EXCLUDED.completion_percent, marked_by_user_id = EXCLUDED.marked_by_user_id,
+        duration_seconds = COALESCE(EXCLUDED.duration_seconds, routine_completions.duration_seconds), updated_at = now()`;
+    await transaction`
+      UPDATE session_routine_offers SET status = 'completed', completed_at = now(), completion_percent = ${input.completionPercent}, duration_seconds = ${input.durationSeconds ?? null}
+      WHERE id = ${id}`;
+  });
+  // La clase pasa a realizada. Si ya no está programada (la cancelaron o ya la marcaron), no se toca: la rutina quedó registrada igual.
+  let clase: Record<string, unknown> | null = null;
+  try { clase = await recordSessionCompliance(String(oferta.session_id), client.owner_id, auth.sub, 'completed', input.completionPercent, { permitirAnticipada: true }); }
+  catch (error) { app.log.warn({ err: error, sessionId: oferta.session_id }, 'La rutina se cumplió pero la clase no pudo marcarse como realizada'); }
+  await avisarRutinaCumplida(client, String(oferta.title), input.completionPercent, input.durationSeconds ?? null, Boolean(clase));
+  return { completed: true, sessionCompleted: Boolean(clase), billing: clase?.billing ?? null };
 });
 
 app.patch('/api/portal/sessions/:id/compliance', { preHandler: requireAuth }, async (request, reply) => {
