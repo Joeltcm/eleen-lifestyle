@@ -1,4 +1,4 @@
-const APP_VERSION = '288';
+const APP_VERSION = '289';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -100,6 +100,21 @@ function stopRoutineTimer(routineId, elapsedSeconds = 0) {
   portalRoutineTimers.delete(routineId);
   localStorage.removeItem(portalRoutineTimerStorage(routineId));
   return elapsed;
+}
+// Cuenta regresiva 3-2-1 antes de arrancar el cronómetro de la tarjeta; devuelve false si ya había una en marcha.
+async function runRoutineCountdown(card, routineId, elapsedSeconds = 0) {
+  if (portalRoutineCountdowns.has(routineId)) return false;
+  portalRoutineCountdowns.set(routineId, true);
+  const reloj = card.querySelector('.routine-timer-clock');
+  try {
+    for (let n = 3; n >= 1; n -= 1) { if (reloj) reloj.textContent = String(n); await new Promise(resolver => setTimeout(resolver, 1000)); }
+    startRoutineTimer(routineId, elapsedSeconds);
+    return true;
+  } finally { portalRoutineCountdowns.delete(routineId); paintRoutineTimer(routineId, elapsedSeconds); }
+}
+// Aviso al terminar todos los ejercicios de la rutina.
+function showRoutineCelebration(titulo, completados, total, segundos) {
+  toast(`¡${titulo} completada! ${completados}/${total} ejercicios · ${formatRoutineElapsed(segundos)}`);
 }
 let compliancePeriod = 'week';
 let billingMonth = String(today.getMonth() + 1);

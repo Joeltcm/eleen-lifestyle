@@ -29,6 +29,19 @@ Usa `codex/` para trabajo de Codex/GPT y `claude/` para trabajo de Claude. Nunca
 3. Describe en el PR: alcance, archivos modificados, variables nuevas, migraciones y resultado de la verificación.
 4. Fusiona mediante PR cuando sea posible. Antes de continuar con una nueva tarea, actualiza nuevamente desde `main`.
 
+## Que un push no rompa nada
+
+Hay cuatro redes de seguridad; todas se pueden ejecutar a mano:
+
+1. **Guardia del frontend** (`npm run guard`, y se ejecuta sola dentro de `npm run build`): revisa sintaxis, que no se llame a funciones sin definir ni se declare dos veces lo mismo entre `app.js`, `zoho-migration.js` y compañía, que las versiones PWA coincidan (`APP_VERSION`, `VERSION` del service worker, `version.json` y los `?v=` de `index.html`) y que los recursos existan. **Si falla, no se construye ni se publica nada** (`npm run build && wrangler ...` se detiene). Solo en una emergencia: `SKIP_UI_GUARD=1 npm run build`.
+2. **Pruebas que abren la aplicación de verdad** (`backend/test/ui-smoke.test.mjs`, parte de `npm test`): entran como entrenadora y como cliente, recorren las secciones, abren el editor de una rutina guardada y usan cambiar/mover/agregar/quitar y guardar, abren el diálogo de cancelar, el portal y la página pública del enlace; **cualquier error de JavaScript hace fallar la prueba**. Las pruebas de servidor en verde no bastan: esa fue la lección de la v286.
+3. **CI de GitHub** (`.github/workflows/verify.yml`): ejecuta `npm run verify` y `npm test` en cada push y PR. Debe estar en verde: un CI siempre rojo no protege a nadie. Las pruebas del cobro anterior que ya fallaban están marcadas `todo` (siguen ejecutándose y reportándose, pero no ponen el CI en rojo) hasta que se retire ese código.
+4. **Vigilancia de producción** (`.github/workflows/produccion.yml`, `node scripts/check-live.mjs`): cada 30 minutos y tras cada push a `main` baja lo publicado y le pasa la misma guardia, y consulta `/health`. Si algo se publica roto, GitHub avisa por correo al dueño del repositorio.
+
+Antes de empujar: `npm run verify && npm test`. Antes de dar un cambio de pantalla por bueno: ábrelo en un navegador (Editar una rutina guardada y el portal de un cliente), no solo las pruebas.
+
+Recomendado (lo configura quien administra el repositorio en GitHub → Settings → Branches): proteger `main` exigiendo el chequeo **verify** en verde. Eso obliga a fusionar mediante pull request (ya no se puede empujar directo a `main`).
+
 ## Despliegues
 
 - Un push a `main` despliega la API de Railway.
