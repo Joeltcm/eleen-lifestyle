@@ -1,4 +1,4 @@
-const APP_VERSION = '287';
+const APP_VERSION = '288';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2941,17 +2941,20 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
   // Si la propuesta viene de una clase (oferta en lugar de la clase) o de un viaje, ese contexto se conserva al regenerarla con IA: sin esto, el segundo "Proponer con IA" tiraba el vínculo con la clase o el viaje.
   const contextoPropuesta = propuesta ? Object.fromEntries(['ofertaSesionId', 'ofertaCliente', 'ofertaOrigen', 'ofertaDuracion', 'enlaceViajeId', 'enlaceCliente'].filter(clave => propuesta[clave] !== undefined).map(clave => [clave, propuesta[clave]])) : {};
   const content = formFromTemplate('new-routine-template'); openModal(content, true);
+  // OJO: openModal MUEVE los nodos del fragmento al diálogo, así que `content` queda vacío. Todo lo que sigue se busca en el formulario ya montado: antes se consultaba el fragmento vacío,
+  // saltaba un TypeError al abrir "Editar" o "Reutilizar" y el editor se quedaba sin conectar (ningún botón respondía). Esto estaba así desde la primera versión del editor.
+  const formularioRutina = document.getElementById('routine-form');
   if (routine) {
-    content.querySelector('h2').textContent = editing ? 'Editar rutina' : 'Reutilizar rutina';
-    content.querySelector('[name="title"]').value = editing ? routine.title : `${routine.title} (copia)`;
-    content.querySelector('[name="description"]').value = routine.description;
-    content.querySelector('[name="sessions"]').value = routine.sessions;
-    content.querySelector('button.primary').textContent = editing ? 'Guardar cambios' : 'Guardar rutina completa';
+    formularioRutina.querySelector('h2').textContent = editing ? 'Editar rutina' : 'Reutilizar rutina';
+    formularioRutina.querySelector('[name="title"]').value = editing ? routine.title : `${routine.title} (copia)`;
+    formularioRutina.querySelector('[name="description"]').value = routine.description;
+    formularioRutina.querySelector('[name="sessions"]').value = routine.sessions;
+    formularioRutina.querySelector('button.primary').textContent = editing ? 'Guardar cambios' : 'Guardar rutina completa';
     if (editing) {
       const aviso = document.createElement('p');
       aviso.className = 'section-note';
-      aviso.textContent = 'Puedes agregar o quitar ejercicios. Las asignaciones actuales de esta rutina se conservarán.';
-      content.querySelector('#routine-form').prepend(aviso);
+      aviso.textContent = 'Puedes agregar, quitar, cambiar y mover ejercicios entre bloques. Las asignaciones actuales de esta rutina se conservarán.';
+      formularioRutina.prepend(aviso);
     }
   }
   const clientSelect = document.getElementById('routine-client');
@@ -3065,9 +3068,35 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
 
   let observadorDemos = null;
   let bloqueTamano = 3; let bloqueRondas = 3;
+  // Mover un ejercicio a un bloque lo deja al final del tramo de ese bloque (los bloques siguen contiguos); "sin bloque" lo manda al final de la lista; "nuevo" abre el bloque siguiente.
+  const colocarEnBloque = (item, destino) => {
+    const posicion = selectedExercises.indexOf(item); if (posicion >= 0) selectedExercises.splice(posicion, 1);
+    const maximo = Math.max(0, ...selectedExercises.map(otro => Number(otro.block) || 0));
+    const bloque = destino === 'nuevo' ? maximo + 1 : Number(destino) || 0;
+    if (!bloque) { delete item.block; delete item.rounds; selectedExercises.push(item); return; }
+    const companero = selectedExercises.find(otro => otro.block === bloque);
+    let ultimo = -1; selectedExercises.forEach((otro, k) => { if (otro.block === bloque) ultimo = k; });
+    item.block = bloque; item.rounds = companero?.rounds || 3; item.sets = item.rounds;
+    selectedExercises.splice(ultimo >= 0 ? ultimo + 1 : selectedExercises.length, 0, item);
+  };
+  const agregarEjercicio = item => {
+    selectedExercises.push(item);
+    const destino = document.getElementById('agregar-a')?.value || '';
+    if (destino) colocarEnBloque(item, destino);
+    renderSelected();
+    const filas = selectedList.querySelectorAll('.selected-exercise'); filas[selectedExercises.indexOf(item)]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  };
   const renderSelected = () => {
     observadorDemos?.disconnect();
     normalizarBloques(selectedExercises);
+    // "Agregar a": sin bloque, cualquiera de los bloques actuales o uno nuevo. Con bloques, lo natural es seguir en el último.
+    const agregarA = document.getElementById('agregar-a');
+    if (agregarA) {
+      const total = Math.max(0, ...selectedExercises.map(otro => Number(otro.block) || 0));
+      const previo = agregarA.value;
+      agregarA.innerHTML = `<option value="">Sin bloque (suelto)</option>${Array.from({ length: total }, (_, n) => `<option value="${n + 1}">Bloque ${n + 1}</option>`).join('')}<option value="nuevo">Un bloque nuevo (${total + 1})</option>`;
+      agregarA.value = [...agregarA.options].some(o => o.value === previo) ? previo : (total ? String(total) : '');
+    }
     selectedList.replaceChildren();
     exerciseCount.textContent = `${selectedExercises.length} ejercicio${selectedExercises.length !== 1 ? 's' : ''}`;
     if (!selectedExercises.length) {
@@ -3107,14 +3136,21 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
       const order = document.createElement('span'); order.className = 'selected-exercise-number'; order.textContent = String(index + 1);
       const copy = document.createElement('div'); const name = document.createElement('b'); const details = document.createElement('span');
       name.textContent = exercise.name; details.textContent = [exercise.category, exercise.level].filter(Boolean).join(' · '); copy.append(name, details);
+      const mover = document.createElement('div'); mover.className = 'mover-ejercicio';
+      mover.innerHTML = `<button type="button" class="secondary" data-mover-ejercicio="${index}" data-dir="-1" aria-label="Subir ${escapeHtml(exercise.name)}" ${index === 0 ? 'disabled' : ''}>↑</button><button type="button" class="secondary" data-mover-ejercicio="${index}" data-dir="1" aria-label="Bajar ${escapeHtml(exercise.name)}" ${index === selectedExercises.length - 1 ? 'disabled' : ''}>↓</button>`;
+      copy.append(mover);
       const dose = document.createElement('div'); dose.className = 'selected-exercise-dose';
       const setsLabel = document.createElement('label'); setsLabel.className = 'selected-exercise-field'; const setsTitle = document.createElement('span'); setsTitle.textContent = 'Series'; const sets = document.createElement('input'); sets.type = 'number'; sets.min = '1'; sets.max = '20'; sets.value = exercise.sets; sets.dataset.exerciseSets = String(index); setsLabel.append(setsTitle, sets);
       const repsLabel = document.createElement('label'); repsLabel.className = 'selected-exercise-field'; const repsTitle = document.createElement('span'); repsTitle.textContent = 'Repeticiones / tiempo'; const reps = document.createElement('input'); reps.value = exercise.reps; reps.dataset.exerciseReps = String(index); repsLabel.append(repsTitle, reps);
       // Un ejercicio de bloque no lleva series propias: sus rondas son las del bloque.
       const bloqueLabel = document.createElement('label'); bloqueLabel.className = 'selected-exercise-field campo-bloque';
       const maxBloque = Math.max(0, ...selectedExercises.map(item => item.block || 0));
-      bloqueLabel.innerHTML = `<span>Bloque</span><select data-exercise-block="${index}"><option value="">Sin bloque</option>${Array.from({ length: Math.min(20, maxBloque + 1) }, (_, n) => `<option value="${n + 1}" ${exercise.block === n + 1 ? 'selected' : ''}>Bloque ${n + 1}</option>`).join('')}</select>`;
-      if (exercise.block) dose.append(bloqueLabel, repsLabel); else dose.append(bloqueLabel, setsLabel, repsLabel);
+      bloqueLabel.innerHTML = `<span>Bloque</span><select data-exercise-block="${index}"><option value="" ${exercise.block ? '' : 'selected'}>Sin bloque</option>${Array.from({ length: Math.min(20, maxBloque) }, (_, n) => `<option value="${n + 1}" ${exercise.block === n + 1 ? 'selected' : ''}>Bloque ${n + 1}</option>`).join('')}<option value="nuevo">Bloque nuevo (${maxBloque + 1})</option></select>`;
+      // Cambiar por otro ejercicio del catálogo (agrupados por sección).
+      const cambiarLabel = document.createElement('label'); cambiarLabel.className = 'selected-exercise-field campo-bloque';
+      const porSeccion = exerciseSectionOrder.filter(seccion => seccion !== 'total_body').map(seccion => ({ seccion, lista: exerciseCatalog.filter(entrada => entrada.section === seccion) })).filter(grupo => grupo.lista.length);
+      cambiarLabel.innerHTML = `<span>Cambiar por otro ejercicio</span><select data-cambiar-ejercicio="${index}"><option value="">Elegir otro…</option>${porSeccion.map(grupo => `<optgroup label="${escapeHtml(exerciseSectionLabels[grupo.seccion] || grupo.seccion)}">${grupo.lista.map(entrada => `<option value="${entrada.id}">${escapeHtml(entrada.name)}</option>`).join('')}</optgroup>`).join('')}</select>`;
+      if (exercise.block) dose.append(bloqueLabel, cambiarLabel, repsLabel); else dose.append(bloqueLabel, cambiarLabel, setsLabel, repsLabel);
       // El peso sólo se pide donde tiene sentido: una plancha o la caminadora
       // no llevan kilos, y pedirlos en todos llenaría la rutina de huecos.
       const enCatalogo = exerciseCatalog.find(item => item.id === exercise.catalogId || item.name === exercise.name);
@@ -3186,20 +3222,35 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
     reps: document.getElementById('exercise-reps').value.trim() || '10'
   });
   categorySelect.addEventListener('change', renderChoices); levelSelect.addEventListener('change', renderChoices); exerciseSelect.addEventListener('change', renderReference);
-  document.getElementById('add-exercise').addEventListener('click', () => { const exercise = currentExercise(); if (!exercise) return; selectedExercises.push(prescription(exercise)); renderSelected(); selectedList.lastElementChild?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); });
+  document.getElementById('add-exercise').insertAdjacentHTML('beforebegin', '<label class="campo-agregar-a">Agregar a<select id="agregar-a"></select></label>');
+  renderSelected();
+  document.getElementById('add-exercise').addEventListener('click', () => { const exercise = currentExercise(); if (!exercise) return; agregarEjercicio(prescription(exercise)); });
   document.getElementById('add-custom-exercise').addEventListener('click', () => {
     const input = document.getElementById('custom-exercise'); const name = input.value.trim(); if (!name) return;
-    selectedExercises.push({ name, category: 'Personalizado', level: 'Personalizado', sets: Number(document.getElementById('exercise-sets').value) || 3, reps: document.getElementById('exercise-reps').value.trim() || '10' });
+    agregarEjercicio({ name, category: 'Personalizado', level: 'Personalizado', sets: Number(document.getElementById('exercise-sets').value) || 3, reps: document.getElementById('exercise-reps').value.trim() || '10' });
     input.value = ''; renderSelected();
   });
   selectedList.addEventListener('change', event => {
     if (!event.target.matches('[data-exercise-block]')) return;
     const item = selectedExercises[Number(event.target.dataset.exerciseBlock)]; if (!item) return;
-    const bloque = Number(event.target.value) || undefined;
-    if (!bloque) { delete item.block; delete item.rounds; } else {
-      const companero = selectedExercises.find(otro => otro !== item && otro.block === bloque);
-      item.block = bloque; item.rounds = companero?.rounds || 3; item.sets = item.rounds;
-    }
+    colocarEnBloque(item, event.target.value);
+    renderSelected();
+  });
+  // Cambiar un ejercicio por otro del catálogo conservando su lugar, su bloque y sus repeticiones (el peso y las notas eran del ejercicio anterior).
+  selectedList.addEventListener('change', event => {
+    if (!event.target.matches('[data-cambiar-ejercicio]')) return;
+    const item = selectedExercises[Number(event.target.dataset.cambiarEjercicio)]; const nuevo = exerciseCatalog.find(entrada => entrada.id === event.target.value);
+    if (!item || !nuevo) return;
+    Object.assign(item, { catalogId: nuevo.id, name: nuevo.name, english: nuevo.english, category: exerciseSectionLabels[nuevo.section] || nuevo.section, level: nuevo.level, machine: nuevo.machine, freeWeight: nuevo.freeWeight });
+    delete item.notes; if (!admitePeso(nuevo)) delete item.weight;
+    renderSelected(); toast(`Cambiado por ${nuevo.name}`);
+  });
+  // Subir o bajar un ejercicio dentro de la lista (también para pasarlo de un bloque a otro junto a su vecino).
+  selectedList.addEventListener('click', event => {
+    const boton = event.target.closest('[data-mover-ejercicio]'); if (!boton) return;
+    const posicion = Number(boton.dataset.moverEjercicio); const destino = posicion + Number(boton.dataset.dir);
+    if (destino < 0 || destino >= selectedExercises.length) return;
+    [selectedExercises[posicion], selectedExercises[destino]] = [selectedExercises[destino], selectedExercises[posicion]];
     renderSelected();
   });
   selectedList.addEventListener('click', event => { const button = event.target.closest('[data-remove-exercise]'); if (!button) return; selectedExercises.splice(Number(button.dataset.removeExercise), 1); renderSelected(); });
@@ -6267,6 +6318,16 @@ function renderViajePortal() {
   }).join('');
 }
 
+// Tarjeta de cada rutina en el portal del cliente. Volvió a ser una función propia porque la versión 286 llamaba a `portalRoutineCard` sin que existiera: renderPortal se caía y a todos los clientes
+// les salía "La sesión venció". Lleva el cronómetro con su aviso de rutina ofrecida, los bloques con sus rondas, los pesos y las demostraciones.
+const portalRoutineCompletion = routineId => (portalData?.routineCompletions || []).find(item => item.routine_id === routineId && String(item.completed_on).slice(0, 10) === dateKey(today));
+function portalRoutineCard(routine) {
+  const todayCompletion = portalRoutineCompletion(routine.id);
+  const oferta = ofertaDeRutina(routine.id);
+  const hoyIso = new Date().toISOString().slice(0, 10);
+  return `<article class="card portal-routine-card" data-portal-routine-card="${routine.id}"><div class="card-head"><div><h3>${escapeHtml(routine.title)}</h3><p>${escapeHtml(routine.description || '')} · ${routine.sessions_per_week} veces por semana</p>${routine.due_on ? `<p class="routine-due${dateOnly(routine.due_on) < hoyIso ? ' overdue' : ''}">${dateOnly(routine.due_on) < hoyIso ? 'Venció el' : 'Para cumplirla antes del'} ${fechaCorta(routine.due_on)}</p>` : ''}</div></div>${oferta ? `<p class="portal-offer-inline">Rutina de hoy en lugar de tu clase: si la cumples hoy, cuenta como clase${oferta.origin === 'client' ? '; si no, la clase se da por perdida' : ''}.</p>` : ''}<div class="routine-timer" data-routine-timer="${routine.id}"><span class="routine-timer-display" data-timer-display>00:00</span><button type="button" class="primary routine-timer-button" data-timer-toggle>▶ Iniciar rutina</button></div><div class="exercise-preview">${portalExerciseRows(routine.exercises || [])}</div><form data-portal-routine="${routine.id}" class="portal-completion-form"><label class="completion-check"><input name="completed" type="checkbox" ${todayCompletion && Number(todayCompletion.completion_percent) > 0 ? 'checked' : ''} /><span>Entrenamiento realizado hoy</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${Number(todayCompletion?.completion_percent || 100)}" /><span>% completado</span></label><button class="primary">Guardar cumplimiento</button></form></article>`;
+}
+
 function renderOfertasRutina() {
   const ofertas = portalData?.routineOffers || [];
   // Un solo contenedor por vista: encima de las tarjetas del Progreso y encima de la lista de rutinas.
@@ -6436,6 +6497,7 @@ function renderPortal() {
   }).join('');
   document.getElementById('portal-inbody').innerHTML = portalData.assessments.length ? `<div class="portal-inbody-grid">${portalData.assessments.slice(-4).reverse().map(item => `<article><span>${String(item.tested_at).slice(0, 10)}</span><b>${Number(item.values.weightKg || 0).toFixed(1)} kg</b><small>${Number(item.values.percentBodyFat || 0).toFixed(1)}% grasa · ${Number(item.values.skeletalMuscleMassKg || 0).toFixed(1)} kg músculo</small></article>`).join('')}</div>` : '<p class="empty">Todavía no hay evaluaciones confirmadas.</p>';
   document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(portalRoutineCard).join('') : '<p class="empty">La entrenadora todavía no te ha asignado una rutina.</p>';
+  pintarCronometros();
   const ownSessions = new Map(portalData.sessions.map(item => [item.id, portalSession(item)]));
   renderPortalCalendar(ownSessions);
   document.getElementById('portal-plan').innerHTML = `<span class="commercial-label ${client.billing_model === 'package' ? 'package-label' : ''}">${client.payment_mode === 'no_anticipado' ? 'Crédito por sesión' : client.billing_model === 'package' ? 'Paquete' : 'Mensualidad'}</span><div><h3>${escapeHtml(client.plan_name || 'Plan personalizado')}</h3><p>${client.payment_mode === 'no_anticipado' ? `${money.format(Number(client.credit_session_price || 25))} por sesión · corte día ${client.billing_cutoff_day}` : `${money.format(Number(client.standard_price))}${client.billing_model === 'monthly' ? ` · corte día ${client.billing_cutoff_day}` : ` · ${client.sessions_included || 0} sesiones`}`}</p></div>`;

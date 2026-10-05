@@ -303,3 +303,16 @@ test('días de viaje visibles para el cliente en su portal (J-114): aviso, calen
   assert.match(app, /86400000\) \+ 1} días/);
   assert.match(css, /\.portal-col-dia\.viaje/); assert.match(css, /\.portal-tramo\.viaje/);
 });
+
+test('regresión v286/v287: el editor de rutinas existentes abre y el portal del cliente renderiza (J-115)', async () => {
+  const app = await leer('app.js');
+  // 1) Editar/Reutilizar: openModal MUEVE el fragmento al diálogo; el relleno debe hacerse sobre el formulario montado, no sobre el fragmento vacío.
+  const editor = app.slice(app.indexOf('function newRoutine('), app.indexOf('function mensajeDeSaldo'));
+  assert.match(editor, /const formularioRutina = document\.getElementById\('routine-form'\);/);
+  assert.doesNotMatch(editor, /content\.querySelector/, 'consultar el fragmento vacío rompía Editar y Reutilizar');
+  // 2) Todo identificador de la tarjeta de rutina del portal que se llama debe estar definido (la v286 llamaba a portalRoutineCard sin definirla y tumbaba el portal entero).
+  assert.match(app, /function portalRoutineCard\(routine\)/);
+  for (const nombre of ['portalRoutineCompletion', 'ofertaDeRutina', 'portalExerciseRows', 'pintarCronometros']) assert.match(app, new RegExp(`(function|const) ${nombre}\\b`), `${nombre} debe estar definido`);
+  // 3) Editar ejercicios: cambiar, mover, agregar a un bloque, quitar.
+  for (const marca of ['data-cambiar-ejercicio', 'data-mover-ejercicio', 'id="agregar-a"', 'const colocarEnBloque', 'const agregarEjercicio']) assert.ok(editor.includes(marca) || app.includes(marca), marca);
+});

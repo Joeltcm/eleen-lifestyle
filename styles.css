@@ -953,3 +953,8 @@ body:has(#portal-routines.active) .portal-weight-fab{display:none}
 .portal-tramo.viaje{background:#eaf4fb}.portal-tramo.viaje.pasado{background:#e3eef6}
 .marca-viaje{color:#3c86bd}
 .portal-viaje-dia{margin:6px 0 10px;padding:9px 12px;border-radius:12px;background:#dcedfa;color:#245d86;font-size:13px;font-weight:600}
+
+/* Editar una rutina: mover, cambiar y agregar a un bloque */
+.mover-ejercicio{display:flex;gap:6px;margin-top:6px}
+.mover-ejercicio button{min-width:44px;min-height:36px;padding:2px 10px;font-size:16px;line-height:1}
+.campo-agregar-a{display:grid;gap:4px;margin:8px 0}.campo-agregar-a select{width:100%}
