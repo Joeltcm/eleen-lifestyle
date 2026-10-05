@@ -2886,6 +2886,92 @@ describe('lo que el portal dice que se debe', () => {
       assert.equal(slot.id, undefined);
     }
   });
+
+  test('el portal marca ejercicios por separado y cierra la ronda al completar todos o al confirmarla', async () => {
+    const c = await api.post('/api/clients', {
+      fullName: 'Rutina por ejercicios', billingModel: 'single', standardPrice: 25,
+      cutoffDay: 1, email: 'rutina-ejercicios@prueba.test'
+    });
+    const rutina = await api.post('/api/routines', {
+      title: 'Ronda de prueba', sessionsPerWeek: 3, clientId: c.datos.id,
+      exercises: [
+        { name: 'Sentadilla', sets: 3, reps: '10' },
+        { name: 'Press', sets: 3, reps: '10' },
+        { name: 'Plancha', sets: 3, reps: '30 s' }
+      ]
+    });
+    assert.equal(rutina.estado, 201);
+
+    const enlace = await api.post(`/api/clients/${c.datos.id}/access-link`, {});
+    const token = String(enlace.datos.url).split('acceso=')[1];
+    const acceso = await api.post(`/api/auth/access-link/${token}`, { password: 'clave-del-portal-larga' });
+    assert.equal(acceso.estado, 200);
+    const portal = cliente(servidor.base); portal.usarToken(acceso.datos.token);
+    const completedOn = hoyPa();
+
+    const iniciado = await portal.post('/api/portal/routine-activity', {
+      routineId: rutina.datos.id, completedOn, kind: 'started'
+    });
+    assert.equal(iniciado.estado, 201);
+    const avisoInicio = (await api.get('/api/notifications')).datos.find(item => item.notificationId && item.title.includes('Rutina por ejercicios'));
+    assert.match(avisoInicio?.body || '', /inició/);
+
+    const uno = await portal.post('/api/portal/routine-exercise-completions', {
+      routineId: rutina.datos.id, completedOn, exerciseIndex: 0, completed: true, elapsedSeconds: 12
+    });
+    assert.equal(uno.estado, 201);
+    assert.deepEqual({ completedCount: uno.datos.completedCount, total: uno.datos.totalExercises, finished: uno.datos.routineCompleted }, { completedCount: 1, total: 3, finished: false });
+    assert.equal(Number(uno.datos.completion.completion_percent), 33);
+
+    const dos = await portal.post('/api/portal/routine-exercise-completions', {
+      routineId: rutina.datos.id, completedOn, exerciseIndex: 1, completed: true, elapsedSeconds: 24
+    });
+    assert.equal(Number(dos.datos.completion.completion_percent), 67);
+    assert.equal(dos.datos.routineCompleted, false);
+
+    const tres = await portal.post('/api/portal/routine-exercise-completions', {
+      routineId: rutina.datos.id, completedOn, exerciseIndex: 2, completed: true, elapsedSeconds: 36
+    });
+    assert.equal(tres.datos.routineCompleted, true, 'el último ejercicio completa automáticamente la ronda');
+    assert.equal(Number(tres.datos.completion.completion_percent), 100);
+    assert.equal(Number(tres.datos.completion.elapsed_seconds), 36);
+
+    const desmarcado = await portal.post('/api/portal/routine-exercise-completions', {
+      routineId: rutina.datos.id, completedOn, exerciseIndex: 1, completed: false, elapsedSeconds: 40
+    });
+    assert.equal(Number(desmarcado.datos.completion.completion_percent), 67);
+    assert.equal(desmarcado.datos.routineCompleted, false);
+
+    const confirmada = await portal.post('/api/portal/routine-exercise-completions', {
+      routineId: rutina.datos.id, completedOn, completeAll: true, completed: true, elapsedSeconds: 48
+    });
+    assert.equal(confirmada.datos.routineCompleted, true, 'el botón permite completar la ronda completa');
+    assert.equal(Number(confirmada.datos.completion.completion_percent), 100);
+    assert.equal(Number(confirmada.datos.completion.elapsed_seconds), 48);
+
+    const feedback = await portal.post('/api/portal/routine-feedback', {
+      routineId: rutina.datos.id, completedOn, feeling: 'excelente', difficulty: 'bien', feedback: 'Me sentí con mucha energía'
+    });
+    assert.equal(feedback.estado, 200);
+    const avisos = (await api.get('/api/notifications')).datos.filter(item => item.notificationId && item.body.includes('Ronda de prueba'));
+    assert.ok(avisos.some(item => item.title.includes('Rutina completada')));
+    assert.ok(avisos.some(item => item.title.includes('Feedback recibido') && item.body.includes('mucha energía')));
+
+    const resumen = await portal.get('/api/portal/summary');
+    const detalles = resumen.datos.routineExerciseCompletions.filter(item => String(item.routine_id) === String(rutina.datos.id) && String(item.completed_on).slice(0, 10) === completedOn);
+    assert.equal(detalles.length, 3);
+    assert.ok(detalles.every(item => item.completed));
+
+    const historial = await api.get(`/api/clients/${c.datos.id}/routine-history?month=${completedOn.slice(0, 7)}`);
+    assert.equal(historial.estado, 200);
+    assert.equal(historial.datos.history[0].completion_percent, 100);
+    assert.equal(historial.datos.history[0].exercises.filter(item => item.completed).length, 3);
+    const corregida = await api.patch(`/api/clients/${c.datos.id}/routine-history/${historial.datos.history[0].id}`, { elapsedSeconds: 2700 });
+    assert.equal(corregida.estado, 200);
+    assert.equal(Number(corregida.datos.elapsed_seconds), 2700);
+    const auditoriaRutina = (await api.get('/api/audit-log?limit=30')).datos.find(item => item.action === 'CORRECT_ROUTINE_DURATION' && item.target_id === historial.datos.history[0].id);
+    assert.ok(auditoriaRutina, 'la corrección de duración debe dejar bitácora');
+  });
 });
 
 describe('el saldo se renueva aunque no haya pagado, pero se avisa', () => {
