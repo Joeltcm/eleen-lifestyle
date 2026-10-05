@@ -23,6 +23,21 @@ export type SuggestedRoutine = {
   avoided: string[];
 };
 
+const textoSeguro = (value: unknown, fallback: string, max = 500) => {
+  const texto = String(value ?? '').replace(/\r\n/g, '\n').trim().slice(0, max);
+  return texto || fallback;
+};
+
+export function formatRoutineDescription(partes: { objective?: unknown; warmup?: unknown; cooldown?: unknown; stretching?: unknown }) {
+  return [
+    `OBJETIVO\n${textoSeguro(partes.objective, 'Entrenamiento personalizado según la indicación de la entrenadora.')}`,
+    `CALENTAMIENTO · 5–10 MINUTOS\n${textoSeguro(partes.warmup, 'Realiza movilidad suave y aumenta gradualmente la intensidad antes de comenzar.')}`,
+    'EJERCICIOS PRINCIPALES\nRealiza los ejercicios que aparecen abajo en el orden indicado. Respeta las series, repeticiones y notas de cada ejercicio.',
+    `VUELTA A LA CALMA · 3–5 MINUTOS\n${textoSeguro(partes.cooldown, 'Baja poco a poco la intensidad, camina suavemente y controla la respiración.')}`,
+    `ESTIRAMIENTOS · 5–8 MINUTOS\n${textoSeguro(partes.stretching, 'Termina con estiramientos suaves, sin rebotes y sin llegar al dolor.')}`
+  ].join('\n\n');
+}
+
 const SECCIONES: Record<string, string> = {
   tren_inferior: 'tren inferior',
   tren_superior: 'tren superior',
@@ -61,7 +76,7 @@ export async function suggestRoutine(entrada: {
     'Lo que escribe la entrenadora MANDA: si indica la duración, los grupos musculares a trabajar o el equipo o lugar con que cuenta el cliente, respétalo. '
       + 'Si dice qué equipo tiene disponible, elige ÚNICAMENTE ejercicios del catálogo que se puedan hacer con ese equipo y no incluyas ejercicios que requieran otro. '
       + 'En el catálogo, la máquina y el peso libre de cada ejercicio aparecen entre paréntesis; "peso corporal" significa que no requiere equipo.',
-    'Responde sólo JSON válido con esta forma: {"title":string,"description":string,"sessionsPerWeek":number,'
+    'Responde sólo JSON válido con esta forma: {"title":string,"description":string,"warmup":string,"cooldown":string,"stretching":string,"sessionsPerWeek":number,'
       + '"exercises":[{"name":string,"sets":number,"reps":string,"notes":string,"block":number,"rounds":number}],"rationale":string}',
     // Bloques (J-113): Eileen arma sus rutinas en circuitos, p. ej. "3 rondas de los primeros 3 ejercicios y otras 3 rondas del segundo bloque de tres".
     'ESTRUCTURA EN BLOQUES: organiza la rutina en bloques (circuitos). Cada ejercicio lleva "block" (1, 2, 3…, en el orden en que se hacen) y "rounds" (cuántas rondas se repite ese bloque; es el MISMO número para todos los ejercicios del bloque). '
@@ -69,6 +84,9 @@ export async function suggestRoutine(entrada: {
       + 'Por omisión usa bloques de 3 ejercicios (2 a 4 si hace falta) y 3 rondas por bloque. Si la entrenadora indica otra estructura (por ejemplo "2 bloques de 4 ejercicios, 4 rondas cada uno"), respétala. '
       + 'Solo si la entrenadora pide expresamente ejercicios sueltos por series, omite "block" y "rounds".',
     'Entre 4 y 10 ejercicios. "reps" es texto libre ("12", "30 seg", "10 por lado").',
+    'El campo description resume el objetivo. Los campos warmup, cooldown y stretching son obligatorios: escribe instrucciones concretas, en español, con duración aproximada y sin dejarlos vacíos.',
+    'warmup debe explicar cómo preparar el cuerpo; cooldown debe indicar cómo bajar la intensidad y respirar; stretching debe nombrar los estiramientos recomendados y cómo hacerlos sin dolor.',
+    'La sección de ejercicios principales se mostrará con la lista de ejercicios, por lo que no la repitas dentro de description.',
     'El campo rationale explica en una o dos frases por qué elegiste ese enfoque, en español.'
   ];
 
@@ -179,7 +197,7 @@ export async function suggestRoutine(entrada: {
   const semanales = Number(cruda.sessionsPerWeek);
   return {
     title: String(cruda.title ?? '').trim().slice(0, 120) || 'Rutina propuesta',
-    description: String(cruda.description ?? '').trim().slice(0, entrada.paraCliente ? 600 : 400),
+    description: formatRoutineDescription({ objective: cruda.description, warmup: cruda.warmup, cooldown: cruda.cooldown, stretching: cruda.stretching }),
     sessionsPerWeek: Number.isFinite(semanales) && semanales >= 1 && semanales <= 7 ? Math.round(semanales) : 3,
     exercises: ejercicios,
     rationale: String(cruda.rationale ?? '').trim().slice(0, 500),

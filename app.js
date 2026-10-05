@@ -1,4 +1,4 @@
-const APP_VERSION = '284';
+const APP_VERSION = '285';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -35,6 +35,72 @@ let portalData = null;
 let portalPeriodMode = 'month';
 let portalPeriodMonth = dateKey(today).slice(0, 7);
 let portalCutOffset = 0;
+const portalRoutineTimers = new Map();
+const portalRoutineCountdowns = new Map();
+const portalRoutineTimerStorage = routineId => `eileen-routine-timer:${routineId}:${dateKey(today)}`;
+const formatRoutineElapsed = seconds => {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+};
+function routineTimerState(routineId, elapsedSeconds = 0) {
+  if (portalRoutineTimers.has(routineId)) return portalRoutineTimers.get(routineId);
+  try {
+    const saved = JSON.parse(localStorage.getItem(portalRoutineTimerStorage(routineId)) || 'null');
+    if (saved && (saved.startedAt === null || Number.isFinite(Number(saved.startedAt)))) {
+      const state = { startedAt: saved.startedAt === null ? null : Number(saved.startedAt), elapsedBefore: Number(saved.elapsedBefore || elapsedSeconds), paused: Boolean(saved.paused) };
+      portalRoutineTimers.set(routineId, state);
+      if (!state.paused && state.startedAt) state.interval = window.setInterval(() => paintRoutineTimer(routineId, elapsedSeconds), 1000);
+      paintRoutineTimer(routineId, elapsedSeconds);
+      return state;
+    }
+  } catch {}
+  return null;
+}
+function routineElapsed(routineId, elapsedSeconds = 0) {
+  const state = routineTimerState(routineId, elapsedSeconds);
+  return state ? state.elapsedBefore + (state.paused || !state.startedAt ? 0 : Math.floor((Date.now() - state.startedAt) / 1000)) : Number(elapsedSeconds || 0);
+}
+function paintRoutineTimer(routineId, elapsedSeconds = 0) {
+  const clock = document.querySelector(`[data-portal-routine-card="${routineId}"] .routine-timer-clock`);
+  if (clock) clock.textContent = formatRoutineElapsed(routineElapsed(routineId, elapsedSeconds));
+}
+function startRoutineTimer(routineId, elapsedSeconds = 0) {
+  const existing = routineTimerState(routineId, elapsedSeconds);
+  if (existing && !existing.paused) return;
+  if (existing?.paused) return resumeRoutineTimer(routineId, elapsedSeconds);
+  const state = { startedAt: Date.now(), elapsedBefore: Number(elapsedSeconds || 0) };
+  portalRoutineTimers.set(routineId, state);
+  localStorage.setItem(portalRoutineTimerStorage(routineId), JSON.stringify(state));
+  state.interval = window.setInterval(() => paintRoutineTimer(routineId, elapsedSeconds), 1000);
+  paintRoutineTimer(routineId, elapsedSeconds);
+  void api('/api/portal/routine-activity', { method: 'POST', body: { routineId, completedOn: dateKey(today), kind: 'started' } }).catch(() => {});
+}
+function persistRoutineTimer(routineId, state) {
+  localStorage.setItem(portalRoutineTimerStorage(routineId), JSON.stringify({ startedAt: state.startedAt, elapsedBefore: state.elapsedBefore, paused: Boolean(state.paused) }));
+}
+function pauseRoutineTimer(routineId, elapsedSeconds = 0) {
+  const state = routineTimerState(routineId, elapsedSeconds); if (!state || state.paused) return routineElapsed(routineId, elapsedSeconds);
+  const elapsed = routineElapsed(routineId, elapsedSeconds);
+  if (state.interval) window.clearInterval(state.interval);
+  state.startedAt = null; state.elapsedBefore = elapsed; state.paused = true; delete state.interval; persistRoutineTimer(routineId, state);
+  void api('/api/portal/routine-activity', { method: 'POST', body: { routineId, completedOn: dateKey(today), kind: 'paused', elapsedSeconds: elapsed } }).catch(() => {});
+  paintRoutineTimer(routineId, elapsedSeconds); return elapsed;
+}
+function resumeRoutineTimer(routineId, elapsedSeconds = 0) {
+  const state = routineTimerState(routineId, elapsedSeconds); if (!state) return startRoutineTimer(routineId, elapsedSeconds);
+  if (!state.paused) return;
+  state.startedAt = Date.now(); state.paused = false; persistRoutineTimer(routineId, state);
+  state.interval = window.setInterval(() => paintRoutineTimer(routineId, elapsedSeconds), 1000); paintRoutineTimer(routineId, elapsedSeconds);
+  void api('/api/portal/routine-activity', { method: 'POST', body: { routineId, completedOn: dateKey(today), kind: 'resumed', elapsedSeconds: state.elapsedBefore } }).catch(() => {});
+}
+function stopRoutineTimer(routineId, elapsedSeconds = 0) {
+  const state = routineTimerState(routineId, elapsedSeconds);
+  const elapsed = routineElapsed(routineId, elapsedSeconds);
+  if (state?.interval) window.clearInterval(state.interval);
+  portalRoutineTimers.delete(routineId);
+  localStorage.removeItem(portalRoutineTimerStorage(routineId));
+  return elapsed;
+}
 let compliancePeriod = 'week';
 let billingMonth = String(today.getMonth() + 1);
 let billingYear = String(today.getFullYear());
@@ -1497,6 +1563,13 @@ async function notificationCenter(isPortal = false) {
         toast(error.message, true);
         fila.querySelectorAll('button').forEach(b => { b.disabled = false; });
       }
+    };
+  });
+  box.querySelectorAll('[data-read-notification]').forEach(boton => {
+    boton.onclick = async () => {
+      boton.disabled = true;
+      try { await api(`/api/notifications/${boton.dataset.readNotification}/read`, { method: 'POST' }); boton.closest('.notification-item')?.remove(); await loadData(); renderAll(); }
+      catch (error) { boton.disabled = false; toast(error.message, true); }
     };
   });
   // La prueba recorre el circuito completo desde el servidor. El aviso que sale
@@ -4321,6 +4394,61 @@ function attendanceSection(target, clientId) {
   }).catch(error => { if (target.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; });
 }
 
+const routineHistoryFilters = new Map();
+function routineHistoryCycle(client, offset = 0) {
+  const cutoff = Math.max(1, Number(client.cutoffDay || client.billingCutoffDay) || 1);
+  const days = (year, month) => new Date(year, month + 1, 0).getDate();
+  const cut = (year, month) => `${year}-${String(month + 1).padStart(2, '0')}-${String(Math.min(cutoff, days(year, month))).padStart(2, '0')}`;
+  let year = today.getFullYear(); let month = today.getMonth();
+  if (dateKey(today) < cut(year, month)) month -= 1;
+  month += offset;
+  while (month > 11) { month -= 12; year += 1; }
+  while (month < 0) { month += 12; year -= 1; }
+  let nextYear = year; let nextMonth = month + 1;
+  if (nextMonth > 11) { nextMonth = 0; nextYear += 1; }
+  return { from: cut(year, month), to: cut(nextYear, nextMonth) };
+}
+function routineHistorySection(target, client) {
+  if (!target) return;
+  const key = client.id; const state = routineHistoryFilters.get(key) || { mode: 'month', month: dateKey(today).slice(0, 7), cutOffset: 0, from: '', to: '' };
+  routineHistoryFilters.set(key, state);
+  target.innerHTML = '<p class="empty">Cargando historial de rutinas…</p>';
+  api(`/api/clients/${encodeURIComponent(client.id)}/routine-history`).then(initialPayload => {
+    let payload = initialPayload;
+    if (!target.isConnected || !modal.open) return;
+    const render = () => {
+      let from = ''; let to = '';
+      if (state.mode === 'month') {
+        const [year, month] = state.month.split('-').map(Number); from = `${state.month}-01`; to = `${state.month}-${String(new Date(year, month, 0).getDate()).padStart(2, '0')}`;
+      } else if (state.mode === 'cutoff') ({ from, to } = routineHistoryCycle(client, state.cutOffset));
+      else { from = state.from; to = state.to; }
+      const history = payload.history.filter(item => (!from || item.completed_on >= from) && (!to || item.completed_on <= to));
+      const seconds = value => formatRoutineElapsed(value);
+      const completed = history.filter(item => item.completion_percent >= 100).length;
+      const timed = history.filter(item => item.elapsed_seconds > 0);
+      const average = timed.length ? Math.round(timed.reduce((sum, item) => sum + item.elapsed_seconds, 0) / timed.length) : 0;
+      const omitted = new Map(); history.forEach(item => item.exercises.filter(exercise => !exercise.completed).forEach(exercise => omitted.set(exercise.name, (omitted.get(exercise.name) || 0) + 1)));
+      const omittedText = [...omitted.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name, count]) => `${name} (${count})`).join(' · ');
+      const modeLabel = state.mode === 'month' ? `Mes · ${attendanceMonthLabel(state.month)}` : state.mode === 'cutoff' ? `Corte ${state.cutOffset === 0 ? 'actual' : 'anterior'}` : 'Rango personalizado';
+      const rows = history.map(item => `<article class="routine-history-item"><header><div><b>${escapeHtml(item.title)}</b><small>${fechaCorta(item.completed_on)} · ${item.completion_percent}% de avance</small></div><strong>${seconds(item.elapsed_seconds)}</strong></header><p>${item.exercises.filter(exercise => exercise.completed).length} de ${item.exercises.length} ejercicios · ${item.feeling ? escapeHtml({ muy_dificil: '😣 Muy difícil', dificil: '😕 Difícil', bien: '🙂 Bien', excelente: '😄 Excelente' }[item.feeling] || item.feeling) : 'sin sensación indicada'}${item.difficulty ? ` · dificultad: ${escapeHtml({ facil: 'Fácil', bien: 'Bien', dificil: 'Difícil' }[item.difficulty] || item.difficulty)}` : ''}</p><div class="routine-history-exercises">${item.exercises.map(exercise => `<span class="${exercise.completed ? 'done' : ''}">${exercise.completed ? '✓' : '○'} ${escapeHtml(exercise.name)}</span>`).join('')}</div>${item.feedback ? `<p class="routine-history-feedback">${escapeHtml(item.feedback)}</p>` : ''}<button type="button" class="secondary routine-history-edit" data-correct-routine-duration="${item.id}" data-current-duration="${item.elapsed_seconds}">Corregir duración</button></article>`).join('');
+      target.innerHTML = `<div class="routine-history-controls${state.mode === 'range' ? ' range-mode' : ''}"><label>Filtrar por<select data-routine-history-mode><option value="month" ${state.mode === 'month' ? 'selected' : ''}>Mes</option><option value="cutoff" ${state.mode === 'cutoff' ? 'selected' : ''}>Corte</option><option value="range" ${state.mode === 'range' ? 'selected' : ''}>Rango de fechas</option></select></label><label>Mes<input type="month" data-routine-history-month value="${state.month}" max="${dateKey(today).slice(0, 7)}" /></label><label data-routine-history-range>Desde<input type="date" data-routine-history-from value="${state.from}" /></label><label data-routine-history-range>Hasta<input type="date" data-routine-history-to value="${state.to}" /></label><button type="button" class="secondary" data-routine-history-apply>Aplicar filtro</button><button type="button" class="secondary" data-routine-history-previous>${state.mode === 'cutoff' ? '‹ Corte anterior' : '‹ Mes anterior'}</button><button type="button" class="secondary" data-routine-history-current>${state.mode === 'cutoff' ? (state.cutOffset === 0 ? 'Corte actual' : 'Corte actual') : 'Mes actual'}</button></div><p class="section-note">${modeLabel} · ${from ? `${fechaCorta(from)} al ${fechaCorta(to)}` : 'elige un rango'}.</p><div class="routine-history-summary"><article><strong>${history.length}</strong><span>rutinas registradas</span></article><article><strong>${completed}</strong><span>completadas</span></article><article><strong>${seconds(average)}</strong><span>duración promedio</span></article></div>${omittedText ? `<p class="section-note">Ejercicios omitidos con más frecuencia: ${escapeHtml(omittedText)}</p>` : ''}<div>${rows || '<p class="routine-history-empty">No hay rutinas registradas en este período.</p>'}</div>`;
+      target.querySelector('[data-routine-history-mode]').onchange = event => { state.mode = event.target.value; render(); };
+      target.querySelector('[data-routine-history-month]').onchange = event => { state.month = event.target.value; state.mode = 'month'; render(); };
+      target.querySelector('[data-routine-history-from]').onchange = event => { state.from = event.target.value; };
+      target.querySelector('[data-routine-history-to]').onchange = event => { state.to = event.target.value; };
+      target.querySelector('[data-routine-history-apply]').onclick = () => render();
+      target.querySelector('[data-routine-history-previous]').onclick = () => { if (state.mode === 'cutoff') state.cutOffset = Math.max(-24, state.cutOffset - 1); else { const [year, month] = state.month.split('-').map(Number); const date = new Date(year, month - 2, 1); state.month = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`; } render(); };
+      target.querySelector('[data-routine-history-current]').onclick = () => { if (state.mode === 'cutoff') state.cutOffset = 0; else state.month = dateKey(today).slice(0, 7); render(); };
+      target.querySelectorAll('[data-correct-routine-duration]').forEach(button => button.onclick = async () => {
+        const current = Number(button.dataset.currentDuration || 0); const answer = window.prompt('Duración activa en minutos (Eileen puede corregirla dejando bitácora):', String(Math.round(current / 60)));
+        if (answer === null) return; const minutes = Number(answer); if (!Number.isFinite(minutes) || minutes < 0 || minutes > 1440) { toast('Indica minutos entre 0 y 1440', true); return; }
+        try { await api(`/api/clients/${client.id}/routine-history/${button.dataset.correctRoutineDuration}`, { method: 'PATCH', body: { elapsedSeconds: Math.round(minutes * 60) } }); toast('Duración corregida y registrada'); const fresh = await api(`/api/clients/${encodeURIComponent(client.id)}/routine-history`); payload = fresh; render(); } catch (error) { toast(error.message, true); }
+      });
+    };
+    render();
+  }).catch(error => { if (target.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; });
+}
+
 function conditionsSection(target, client) {
   api(`/api/clients/${encodeURIComponent(client.id)}/conditions`).then(items => {
     if (!target.isConnected || !modal.open) return;
@@ -4617,7 +4745,7 @@ function clientDetail(id) {
     : `${client.planName || 'Mensualidad'} · ${money.format(client.plan)} al mes · corte día ${client.cutoffDay}`;
   const box = document.createElement('div');
   const reviewNotice = client.inbodyReviews.length ? `<button class="secondary wide-button" id="review-inbody">Revisar ${client.inbodyReviews.length} evaluación${client.inbodyReviews.length > 1 ? 'es' : ''} pendiente${client.inbodyReviews.length > 1 ? 's' : ''}</button>` : '';
-  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${escapeHtml(client.name)}</h2><p style="color:#6f7b75;margin-top:-12px">${escapeHtml(client.goal)}<br>${commercialDescription}${notaPago}</p>${clientBillingSection(client)}<p class="eyebrow" style="margin-top:20px">PLAN DE FACTURACIÓN</p><div id="client-billing-subscriptions"><p class="empty">Cargando conceptos a facturar…</p></div><button type="button" class="secondary wide-button" id="add-billing-subscription-detail">Agregar concepto a facturar</button><p class="section-note">Preparado para el sistema nuevo; hoy la facturación automática sigue usando el monto mensual del cliente.</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">CAMBIO DESDE LA MEDICIÓN ANTERIOR</p>${inbodyComparison(inbody)}<p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th>vs. anterior</th><th></th></tr></thead><tbody>${inbody.history.slice().reverse().map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td class="delta-cell">${reading.delta ? `${deltaChip('weight', reading.delta.weight)}${deltaChip('smm', reading.delta.smm)}${deltaChip('pbf', reading.delta.pbf)}` : '<span class="delta neutral">primera</span>'}</td><td>${reading.documentId ? `<button class="secondary session-use" data-view-inbody="${reading.documentId}" data-inbody-client="${client.id}">Ver reporte</button>` : ''}<button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">SALDO DE SESIONES</p><div id="client-balances"><p class="empty">Cargando saldos…</p></div><p class="eyebrow" style="margin-top:20px">ASISTENCIA MENSUAL</p><div id="client-attendance"><p class="empty">Calculando cumplimiento…</p></div><p class="eyebrow" style="margin-top:20px">LESIONES Y PADECIMIENTOS</p><div id="client-conditions"><p class="empty">Cargando expediente clínico…</p></div><p class="eyebrow" style="margin-top:20px">FOTOS DE PROGRESO</p><div id="client-photos"><p class="empty">Cargando fotos…</p></div><p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="client-report">Informe de cumplimiento</button><button class="secondary" id="portal-link">${client.portalActive ? 'Enviar enlace de acceso' : 'Activar portal con enlace'}</button><button class="secondary" id="portal-access">${client.portalActive ? 'Poner contraseña a mano' : 'Activar con contraseña'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
+  box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${escapeHtml(client.name)}</h2><p style="color:#6f7b75;margin-top:-12px">${escapeHtml(client.goal)}<br>${commercialDescription}${notaPago}</p>${clientBillingSection(client)}<p class="eyebrow" style="margin-top:20px">PLAN DE FACTURACIÓN</p><div id="client-billing-subscriptions"><p class="empty">Cargando conceptos a facturar…</p></div><button type="button" class="secondary wide-button" id="add-billing-subscription-detail">Agregar concepto a facturar</button><p class="section-note">Preparado para el sistema nuevo; hoy la facturación automática sigue usando el monto mensual del cliente.</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">CAMBIO DESDE LA MEDICIÓN ANTERIOR</p>${inbodyComparison(inbody)}<p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th>vs. anterior</th><th></th></tr></thead><tbody>${inbody.history.slice().reverse().map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td class="delta-cell">${reading.delta ? `${deltaChip('weight', reading.delta.weight)}${deltaChip('smm', reading.delta.smm)}${deltaChip('pbf', reading.delta.pbf)}` : '<span class="delta neutral">primera</span>'}</td><td>${reading.documentId ? `<button class="secondary session-use" data-view-inbody="${reading.documentId}" data-inbody-client="${client.id}">Ver reporte</button>` : ''}<button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">SALDO DE SESIONES</p><div id="client-balances"><p class="empty">Cargando saldos…</p></div><p class="eyebrow" style="margin-top:20px">ASISTENCIA MENSUAL</p><div id="client-attendance"><p class="empty">Calculando cumplimiento…</p></div><p class="eyebrow" style="margin-top:20px">HISTORIAL DE RUTINAS</p><div id="client-routine-history"><p class="empty">Cargando historial de rutinas…</p></div><p class="eyebrow" style="margin-top:20px">LESIONES Y PADECIMIENTOS</p><div id="client-conditions"><p class="empty">Cargando expediente clínico…</p></div><p class="eyebrow" style="margin-top:20px">FOTOS DE PROGRESO</p><div id="client-photos"><p class="empty">Cargando fotos…</p></div><p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="client-report">Informe de cumplimiento</button><button class="secondary" id="portal-link">${client.portalActive ? 'Enviar enlace de acceso' : 'Activar portal con enlace'}</button><button class="secondary" id="portal-access">${client.portalActive ? 'Poner contraseña a mano' : 'Activar con contraseña'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
   openModal(box); const pauseButton = document.createElement('button'); pauseButton.className = 'secondary wide-button'; pauseButton.textContent = client.pauseId ? 'Reanudar paquete' : 'Pausar paquete'; box.querySelector('.detail-actions').appendChild(pauseButton); pauseButton.onclick = async () => { try { if (client.pauseId) { await api(`/api/client-pauses/${client.pauseId}/resume`, { method: 'POST' }); toast('Paquete reactivado y vencimiento extendido'); await loadData(); renderAll(); modal.close(); clientDetail(client.id); } else pausePackageDialog(client); } catch (error) { toast(error.message, true); } }; document.getElementById('open-scan').onclick = () => inbodyImport(client); document.getElementById('edit-client-contact').onclick = () => editClient(client); document.getElementById('edit-client-plan').onclick = () => clientPlanEditor(client); document.getElementById('portal-access').onclick = () => portalAccessEditor(client); document.getElementById('portal-link').onclick = () => portalAccessLink(client); document.getElementById('client-report').onclick = () => complianceReport(client); document.getElementById('delete-client').onclick = () => deleteResource(`/api/clients/${client.id}`, `¿Eliminar a ${client.name}? También se eliminarán sus documentos, sesiones y cobros asociados.`, 'Cliente eliminado');
   if (inbody) {
     const summary = box.querySelector('.metrics');
@@ -4639,6 +4767,7 @@ function clientDetail(id) {
   }
   balancesSection(document.getElementById('client-balances'), client);
   attendanceSection(document.getElementById('client-attendance'), client.id);
+  routineHistorySection(document.getElementById('client-routine-history'), client);
   clientWeightLogsSection(document.getElementById('client-weight-logs'), client.id);
   conditionsSection(document.getElementById('client-conditions'), client);
   photosSection(document.getElementById('client-photos'), client);
@@ -6296,8 +6425,7 @@ function renderPortal() {
     return `<div class="chart-column" title="${completed} de ${measured} sesiones medibles · ${percent === null ? 'sin datos' : `${percent}% promedio`}"><span>${label}</span><i style="height:${Math.max(4, percent || 0)}%"></i><small>${monthLabel(bucket.date)}</small></div>`;
   }).join('');
   document.getElementById('portal-inbody').innerHTML = portalData.assessments.length ? `<div class="portal-inbody-grid">${portalData.assessments.slice(-4).reverse().map(item => `<article><span>${String(item.tested_at).slice(0, 10)}</span><b>${Number(item.values.weightKg || 0).toFixed(1)} kg</b><small>${Number(item.values.percentBodyFat || 0).toFixed(1)}% grasa · ${Number(item.values.skeletalMuscleMassKg || 0).toFixed(1)} kg músculo</small></article>`).join('')}</div>` : '<p class="empty">Todavía no hay evaluaciones confirmadas.</p>';
-  document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(routine => { const todayCompletion = portalData.routineCompletions.find(item => item.routine_id === routine.id && item.completed_on === dateKey(today)); return `<article class="card portal-routine-card"><div class="card-head"><div><h3>${escapeHtml(routine.title)}</h3><p>${escapeHtml(routine.description || '')} · ${routine.sessions_per_week} veces por semana</p>${routine.due_on ? `<p class="routine-due${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">${dateOnly(routine.due_on) < new Date().toISOString().slice(0, 10) ? 'Venció el' : 'Para cumplirla antes del'} ${fechaCorta(routine.due_on)}</p>` : ''}</div></div>${ofertaDeRutina(routine.id) ? `<p class="portal-offer-inline">Rutina de hoy en lugar de tu clase: si la cumples hoy, cuenta como clase${ofertaDeRutina(routine.id).origin === 'client' ? '; si no, la clase se da por perdida' : ''}.</p>` : ''}<div class="routine-timer" data-routine-timer="${routine.id}"><span class="routine-timer-display" data-timer-display>00:00</span><button type="button" class="primary routine-timer-button" data-timer-toggle>▶ Iniciar rutina</button></div><div class="exercise-preview">${portalExerciseRows(routine.exercises || [])}</div><form data-portal-routine="${routine.id}" class="portal-completion-form"><label class="completion-check"><input name="completed" type="checkbox" ${todayCompletion && Number(todayCompletion.completion_percent) > 0 ? 'checked' : ''} /><span>Entrenamiento realizado hoy</span></label><label class="completion-percent"><input name="completionPercent" type="number" min="0" max="100" value="${Number(todayCompletion?.completion_percent || 100)}" /><span>% completado</span></label><button class="primary">Guardar cumplimiento</button></form></article>`; }).join('') : '<p class="empty">La entrenadora todavía no te ha asignado una rutina.</p>';
-  pintarCronometros();
+  document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(portalRoutineCard).join('') : '<p class="empty">La entrenadora todavía no te ha asignado una rutina.</p>';
   const ownSessions = new Map(portalData.sessions.map(item => [item.id, portalSession(item)]));
   renderPortalCalendar(ownSessions);
   document.getElementById('portal-plan').innerHTML = `<span class="commercial-label ${client.billing_model === 'package' ? 'package-label' : ''}">${client.payment_mode === 'no_anticipado' ? 'Crédito por sesión' : client.billing_model === 'package' ? 'Paquete' : 'Mensualidad'}</span><div><h3>${escapeHtml(client.plan_name || 'Plan personalizado')}</h3><p>${client.payment_mode === 'no_anticipado' ? `${money.format(Number(client.credit_session_price || 25))} por sesión · corte día ${client.billing_cutoff_day}` : `${money.format(Number(client.standard_price))}${client.billing_model === 'monthly' ? ` · corte día ${client.billing_cutoff_day}` : ` · ${client.sessions_included || 0} sesiones`}`}</p></div>`;
@@ -6347,7 +6475,78 @@ document.querySelectorAll('[data-portal-view-go]').forEach(link => link.addEvent
 document.getElementById('portal-notification-button').addEventListener('click', () => notificationCenter(true));
 document.getElementById('portal-add-weight').addEventListener('click', portalWeightModal);
 bindPortalPeriodControls('portal-period');
+async function savePortalRoutineExercise(card, routineId, exerciseIndex, completed, completeAll = false) {
+  const completion = portalRoutineCompletion(routineId);
+  const elapsedBase = Number(completion?.elapsed_seconds || 0);
+  const boxes = [...card.querySelectorAll('[data-portal-routine-exercise]')];
+  const willComplete = completeAll || (completed && boxes.length > 0 && boxes.every(box => box.checked));
+  const timerStarted = Boolean(routineTimerState(routineId, elapsedBase)) || elapsedBase > 0;
+  if (willComplete && !timerStarted) {
+    toast('Inicia el cronómetro antes de completar esta rutina', true);
+    return;
+  }
+  const elapsedSeconds = routineElapsed(routineId, elapsedBase);
+  card.classList.add('loading-state');
+  try {
+    const resultado = await api('/api/portal/routine-exercise-completions', { method: 'POST', body: {
+      routineId, completedOn: dateKey(today), exerciseIndex, completed, completeAll, elapsedSeconds
+    } });
+    if (resultado.routineCompleted) stopRoutineTimer(routineId, elapsedSeconds);
+    await loadPortalData();
+    if (resultado.routineCompleted) showRoutineCelebration(card.querySelector('h3')?.textContent || 'Rutina', resultado.completedCount, resultado.totalExercises, elapsedSeconds);
+    toast(resultado.routineCompleted ? `Ronda completada · ${formatRoutineElapsed(elapsedSeconds)}` : 'Ejercicio guardado');
+  } catch (error) {
+    card.classList.remove('loading-state');
+    toast(error.message, true);
+  }
+}
+document.addEventListener('click', event => {
+  const start = event.target.closest('[data-start-routine-timer]');
+  if (start) {
+    const card = start.closest('[data-portal-routine-card]');
+    if (card) void runRoutineCountdown(card, start.dataset.startRoutineTimer, Number(start.dataset.elapsedSeconds || 0)).then(started => {
+      if (started) { start.disabled = true; start.textContent = 'Cronómetro activo'; card.querySelector('.routine-timer-row')?.classList.add('is-running'); }
+    });
+    return;
+  }
+  const pause = event.target.closest('[data-pause-routine-timer]');
+  if (pause) {
+    const routineId = pause.dataset.pauseRoutineTimer; pause.disabled = true;
+    pauseRoutineTimer(routineId, Number(portalRoutineCompletion(routineId)?.elapsed_seconds || 0));
+    void loadPortalData();
+    return;
+  }
+  const complete = event.target.closest('[data-complete-routine]');
+  if (complete && !complete.disabled) {
+    const card = complete.closest('[data-portal-routine-card]');
+    if (card) void savePortalRoutineExercise(card, complete.dataset.completeRoutine, undefined, true, true);
+  }
+});
+document.addEventListener('change', event => {
+  const checkbox = event.target.closest('[data-portal-routine-exercise]');
+  if (!checkbox) return;
+  const card = checkbox.closest('[data-portal-routine-card]');
+  if (!card) return;
+  const routineId = checkbox.dataset.portalRoutineExercise;
+  const completion = portalRoutineCompletion(routineId);
+  if (checkbox.checked && !routineTimerState(routineId, completion?.elapsed_seconds || 0) && !(Number(completion?.elapsed_seconds) > 0)) {
+    checkbox.checked = false;
+    toast('Inicia el cronómetro antes de marcar ejercicios', true);
+    return;
+  }
+  void savePortalRoutineExercise(card, routineId, Number(checkbox.dataset.exerciseIndex), checkbox.checked);
+});
 document.addEventListener('submit', async event => {
+  const feedbackForm = event.target.closest('[data-portal-routine-feedback]');
+  if (feedbackForm) {
+    event.preventDefault(); const form = new FormData(feedbackForm);
+    try {
+      feedbackForm.classList.add('loading-state');
+      await api('/api/portal/routine-feedback', { method: 'POST', body: { routineId: feedbackForm.dataset.portalRoutineFeedback, completedOn: dateKey(today), feeling: form.get('feeling') || undefined, difficulty: form.get('difficulty') || undefined, feedback: form.get('feedback') || undefined } });
+      await loadPortalData(); toast('Feedback enviado a Eileen');
+    } catch (error) { toast(error.message, true); feedbackForm.classList.remove('loading-state'); }
+    return;
+  }
   const routineForm = event.target.closest('[data-portal-routine]'); const sessionForm = event.target.closest('[data-portal-session]'); if (!routineForm && !sessionForm) return;
   event.preventDefault(); const form = routineForm || sessionForm; const completed = form.elements.completed.checked; const completionPercent = completed ? Number(form.elements.completionPercent.value) : 0;
   try {
