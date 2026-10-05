@@ -1,0 +1,26 @@
+name: Producción
+
+# Revisa la aplicación PUBLICADA: baja lo que sirve Cloudflare, le pasa la misma guardia que antes de construir
+# (identificadores sin definir, scripts duplicados, versiones desparejadas) y comprueba que el API esté sano.
+# Si algo se publica roto —como la v286, que dejó sin portal a todos los clientes— esto lo marca en minutos.
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  comprobar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --no-audit --no-fund
+      # Tras un push se espera a que Railway y Cloudflare terminen de publicar.
+      - name: Esperar la publicación
+        if: github.event_name == 'push'
+        run: sleep 420
+      - run: node scripts/check-live.mjs
