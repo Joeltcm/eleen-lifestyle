@@ -6943,6 +6943,12 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
     WHERE c.owner_id = ${auth.sub} AND rc.completion_percent > 0 AND (rc.marked_by_user_id = c.portal_user_id OR rc.via_link)
       AND rc.updated_at >= now() - interval '24 hours'
     ORDER BY rc.updated_at DESC LIMIT 20`;
+  const routineActivityRows = await sql`
+    SELECT id, title, body, created_at
+    FROM routine_activity_notifications
+    WHERE owner_id = ${auth.sub} AND read_at IS NULL
+    ORDER BY created_at DESC
+    LIMIT 50`;
   return [
     ...viajesSinRutina.map(viaje => {
       const [a, m, d] = String(viaje.starts_on).split('-'); const [a2, m2, d2] = viaje.ends_on ? String(viaje.ends_on).split('-') : [];
@@ -6958,6 +6964,7 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
       body: `«${item.title}»${duracionTexto(item.duration_seconds === null ? null : Number(item.duration_seconds))} · ${item.completion_percent}%`,
       scheduledFor: item.updated_at
     })),
+    ...routineActivityRows.map(item => ({ notificationId: item.id, type: 'routine', title: item.title, body: item.body, scheduledFor: item.created_at })),
     ...pendientes.map(session => ({
       type: 'pending', sessionId: session.id,
       title: `Falta marcar: ${session.full_name}`,
@@ -6972,6 +6979,14 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
       ? ({ type: 'overdue', title: `Pago atrasado: ${invoice.full_name}`, body: `${invoice.concept}: $${Number(invoice.balance).toFixed(2)} pendientes de $${Number(invoice.amount).toFixed(2)} · venció ${invoice.due_on}${Number(invoice.dias_atraso) > 0 ? ` (${invoice.dias_atraso} día${Number(invoice.dias_atraso) === 1 ? '' : 's'})` : ''}. Las clases siguen; sólo falta el pago.`, scheduledFor: invoice.due_on })
       : ({ type: 'payment', title: `Pago de ${invoice.full_name}`, body: `${invoice.concept}: $${Number(invoice.balance).toFixed(2)} pendientes de $${Number(invoice.amount).toFixed(2)} · vence ${invoice.due_on}.`, scheduledFor: invoice.due_on }))
   ];
+});
+
+app.post('/api/notifications/:id/read', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [notification] = await sql`UPDATE routine_activity_notifications SET read_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING id`;
+  if (!notification) return reply.code(404).send({ error: 'Notificación no encontrada' });
+  return { read: true };
 });
 
 type ReminderCandidate = {
@@ -7213,7 +7228,7 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
     SELECT id, starts_on::text AS starts_on, ends_on::text AS ends_on, destination
     FROM client_travel WHERE client_id = ${client.id} AND COALESCE(ends_on, DATE '9999-12-31') >= (now() AT TIME ZONE 'America/Panama')::date - 60
     ORDER BY starts_on`;
-  const [invoices, routines, sessions, complianceSessions, busySlots, assessments, completions, exercises, packages, credits, weightLogs] = await Promise.all([
+  const [invoices, routines, sessions, complianceSessions, busySlots, assessments, completions, exerciseCompletions, exercises, packages, credits, weightLogs] = await Promise.all([
     sql`
       SELECT id, concept, amount, currency, due_on, status, payment_method, invoice_number, issued_on, line_items,
         -- Lo que de verdad falta por pagar. La columna balance sólo la mantiene
@@ -7242,6 +7257,7 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
     sql`SELECT s.id, s.starts_at, s.duration_minutes, (s.client_id = ${client.id}) AS is_mine FROM sessions s JOIN clients c ON c.id = s.client_id WHERE c.owner_id = ${client.owner_id} AND s.status <> 'cancelled' AND s.starts_at BETWEEN now() - interval '60 days' AND now() + interval '90 days' ORDER BY s.starts_at`,
     sql`SELECT tested_at, values FROM inbody_assessments WHERE client_id = ${client.id} AND extraction_status = 'ready' ORDER BY tested_at`,
     sql`SELECT routine_id, completed_on, completion_percent, duration_seconds FROM routine_completions WHERE client_id = ${client.id} AND completed_on >= current_date - interval '1 year' ORDER BY completed_on`,
+    sql`SELECT routine_id, completed_on, exercise_index, completed FROM routine_exercise_completions WHERE client_id = ${client.id} AND completed_on >= current_date - interval '1 year' ORDER BY completed_on, exercise_index`,
     // El catálogo entero, no sólo lo asignado: la rutina guarda los ejercicios
     // como copia en JSON, y es por catalogId que el portal sabe cuáles tienen
     // video que mostrar. La URL firmada se pide aparte, al darle reproducir.
@@ -7287,9 +7303,9 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   // Tras el corte (estado `new`) el portal lee la facturación nueva y ya no muestra saldos de clases (D-14).
   if (billingEngine.state === 'new') {
     const fromNew = await portalBillingFromNewSource(client.id as string, client.owner_id as string);
-    return { client: profile, travel: viajes, invoices: fromNew.invoices, billingNotice: fromNew.notice, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, exercises, packages: [], credits: [], weightLogs };
+    return { client: profile, travel: viajes, invoices: fromNew.invoices, billingNotice: fromNew.notice, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, routineExerciseCompletions: exerciseCompletions, exercises, packages: [], credits: [], weightLogs };
   }
-  return { client: profile, travel: viajes, invoices, billingNotice: null, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, exercises, packages, credits, weightLogs };
+  return { client: profile, travel: viajes, invoices, billingNotice: null, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, routineExerciseCompletions: exerciseCompletions, exercises, packages, credits, weightLogs };
 });
 
 const clientWeightLogSchema = z.object({
@@ -7378,6 +7394,94 @@ app.get('/api/portal/reports/account-statement.pdf', { preHandler: requireAuth }
   return sendPdf(reply, await accountStatementPdf(report.client, report.rows, rango.from, rango.to), `estado-de-cuenta-${rango.from}-${rango.to}.pdf`);
 });
 
+const routineHistoryQuerySchema = z.object({
+  from: z.string().date().optional(), to: z.string().date().optional(), month: z.string().regex(/^\d{4}-\d{2}$/).optional(),
+  cutOffset: z.coerce.number().int().min(-24).max(0).optional()
+});
+
+function routineHistoryRange(clientCutoffDay: number, query: z.infer<typeof routineHistoryQuerySchema>) {
+  if (query.cutOffset !== undefined) return cicloDelCorteDesplazado(new Date(), clientCutoffDay, Math.abs(query.cutOffset));
+  if (query.month) {
+    const [year, month] = query.month.split('-').map(Number);
+    const last = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    return { inicio: `${query.month}-01`, vence: `${query.month}-${String(last).padStart(2, '0')}` };
+  }
+  return { inicio: query.from || fechaPanamaDiasAtras(365), vence: query.to || fechaDeNegocioPanama() };
+}
+
+app.get('/api/clients/:clientId/routine-history', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const clientId = z.string().uuid().parse((request.params as { clientId: string }).clientId);
+  const query = routineHistoryQuerySchema.parse(request.query);
+  const [client] = await sql`SELECT id, full_name, billing_cutoff_day FROM clients WHERE id = ${clientId} AND owner_id = ${auth.sub}`;
+  if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  const range = routineHistoryRange(Number(client.billing_cutoff_day) || 1, query);
+  const records = await sql`
+    SELECT rc.id::text AS id, rc.routine_id::text AS routine_id, rc.completed_on::text AS completed_on,
+      rc.completion_percent, rc.elapsed_seconds, rc.feeling, rc.difficulty, rc.feedback,
+      r.title, r.exercises
+    FROM routine_completions rc JOIN routines r ON r.id = rc.routine_id
+    WHERE rc.client_id = ${clientId} AND rc.completed_on >= ${range.inicio}::date AND rc.completed_on <= ${range.vence}::date
+    ORDER BY rc.completed_on DESC, r.title
+  ` as unknown as Record<string, any>[];
+  const details = records.length ? await sql`
+    SELECT routine_id::text AS routine_id, completed_on::text AS completed_on, exercise_index, completed
+    FROM routine_exercise_completions
+    WHERE client_id = ${clientId} AND completed_on >= ${range.inicio}::date AND completed_on <= ${range.vence}::date
+    ORDER BY completed_on DESC, exercise_index
+  ` as unknown as Record<string, any>[] : [];
+  const detailByKey = new Map<string, Record<string, any>[]>();
+  for (const row of details) {
+    const key = `${row.routine_id}:${String(row.completed_on).slice(0, 10)}`;
+    if (!detailByKey.has(key)) detailByKey.set(key, []);
+    detailByKey.get(key)!.push(row);
+  }
+  const history = records.map(row => {
+    const exercises = Array.isArray(row.exercises) ? row.exercises : [];
+    const detail = detailByKey.get(`${row.routine_id}:${String(row.completed_on).slice(0, 10)}`) || [];
+    const detailByIndex = new Map(detail.map(item => [Number(item.exercise_index), Boolean(item.completed)]));
+    return {
+      id: row.id, routine_id: row.routine_id, completed_on: String(row.completed_on).slice(0, 10), title: row.title,
+      completion_percent: Number(row.completion_percent || 0), elapsed_seconds: Number(row.elapsed_seconds || 0),
+      feeling: row.feeling || null, difficulty: row.difficulty || null, feedback: row.feedback || null,
+      exercises: exercises.map((exercise: any, index: number) => ({
+        index, name: typeof exercise === 'string' ? exercise : exercise?.name || 'Ejercicio',
+        completed: detailByIndex.has(index) ? detailByIndex.get(index) : Number(row.completion_percent || 0) >= 100
+      }))
+    };
+  });
+  const omitted = new Map<string, number>();
+  history.forEach(item => item.exercises.filter(exercise => !exercise.completed).forEach(exercise => omitted.set(exercise.name, (omitted.get(exercise.name) || 0) + 1)));
+  const timed = history.filter(item => item.elapsed_seconds > 0);
+  return {
+    client: { id: client.id, full_name: client.full_name, billing_cutoff_day: Number(client.billing_cutoff_day) || 1 },
+    period: { from: range.inicio, to: range.vence, cutOffset: query.cutOffset ?? null }, history,
+    summary: { routines: history.length, completed: history.filter(item => item.completion_percent >= 100).length,
+      averageElapsedSeconds: timed.length ? Math.round(timed.reduce((sum, item) => sum + item.elapsed_seconds, 0) / timed.length) : 0,
+      omittedExercises: [...omitted.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([name, count]) => ({ name, count })) }
+  };
+});
+
+const routineDurationCorrectionSchema = z.object({ elapsedSeconds: z.coerce.number().int().min(0).max(86400) });
+app.patch('/api/clients/:clientId/routine-history/:completionId', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const clientId = z.string().uuid().parse((request.params as { clientId: string }).clientId);
+  const completionId = z.string().uuid().parse((request.params as { completionId: string }).completionId);
+  const input = routineDurationCorrectionSchema.parse(request.body);
+  const result = await sql.begin(async transaction => {
+    const [current] = await transaction`
+      SELECT rc.id, rc.elapsed_seconds, rc.completed_on, rc.routine_id, r.title, c.full_name
+      FROM routine_completions rc JOIN routines r ON r.id = rc.routine_id JOIN clients c ON c.id = rc.client_id
+      WHERE rc.id = ${completionId} AND rc.client_id = ${clientId} AND c.owner_id = ${auth.sub} FOR UPDATE`;
+    if (!current) return null;
+    const [updated] = await transaction`UPDATE routine_completions SET elapsed_seconds = ${input.elapsedSeconds}, duration_seconds = NULLIF(${input.elapsedSeconds}, 0), updated_at = now() WHERE id = ${completionId} RETURNING id, elapsed_seconds`;
+    await transaction`INSERT INTO audit_log (user_id, user_email, action, route, target_id, detail, ip) VALUES (${auth.sub}, ${auth.email || null}, 'CORRECT_ROUTINE_DURATION', ${request.routeOptions?.url || request.url}, ${completionId}, ${transaction.json({ clientId, routineId: current.routine_id, completedOn: String(current.completed_on).slice(0, 10), routineTitle: current.title, previousSeconds: Number(current.elapsed_seconds || 0), newSeconds: input.elapsedSeconds })}, ${request.ip || null})`;
+    return { ...updated, previous_elapsed_seconds: Number(current.elapsed_seconds || 0), routine_title: current.title, client_name: current.full_name };
+  });
+  if (!result) return reply.code(404).send({ error: 'Registro de rutina no encontrado' });
+  return result;
+});
+
 app.get('/api/portal/reports/compliance.pdf', { preHandler: requireAuth }, async (request, reply) => {
   const auth = request.user as AuthUser;
   if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
@@ -7413,6 +7517,89 @@ app.post('/api/portal/routine-completions', { preHandler: requireAuth }, async (
     await avisarRutinaCumplida(client, String(rutina?.title ?? 'su rutina'), input.completionPercent, input.durationSeconds ?? null, false);
   }
   return reply.code(201).send(completion);
+});
+
+const routineExerciseCompletionSchema = z.object({
+  routineId: z.string().uuid(), completedOn: z.string().date(), exerciseIndex: z.coerce.number().int().min(0).max(79).optional(),
+  completed: z.boolean().default(true), completeAll: z.boolean().default(false), elapsedSeconds: z.coerce.number().int().min(0).max(86400).default(0),
+  feeling: z.enum(['muy_dificil', 'dificil', 'bien', 'excelente']).optional(),
+  difficulty: z.enum(['facil', 'bien', 'dificil']).optional(), feedback: z.string().trim().max(500).optional()
+});
+const routineActivitySchema = z.object({ routineId: z.string().uuid(), completedOn: z.string().date(), kind: z.enum(['started', 'paused', 'resumed']), elapsedSeconds: z.coerce.number().int().min(0).max(86400).default(0) });
+const routineFeedbackSchema = z.object({ routineId: z.string().uuid(), completedOn: z.string().date(), feeling: z.enum(['muy_dificil', 'dificil', 'bien', 'excelente']).optional(), difficulty: z.enum(['facil', 'bien', 'dificil']).optional(), feedback: z.string().trim().max(500).optional() });
+
+async function notifyRoutineActivity(input: {
+  ownerId: string; clientId: string; routineId: string; completedOn: string; kind: 'started' | 'completed' | 'feedback'; clientName: string; routineTitle: string;
+  elapsedSeconds?: number; completedCount?: number; totalExercises?: number; feeling?: string | null; difficulty?: string | null; feedback?: string | null;
+}) {
+  const feelingLabels: Record<string, string> = { muy_dificil: 'Muy difícil', dificil: 'Difícil', bien: 'Bien', excelente: 'Excelente' };
+  const difficultyLabels: Record<string, string> = { facil: 'Fácil', bien: 'Bien', dificil: 'Difícil' };
+  const feedbackText = [input.feeling ? `Sensación: ${feelingLabels[input.feeling] || input.feeling}` : '', input.difficulty ? `Dificultad: ${difficultyLabels[input.difficulty] || input.difficulty}` : '', input.feedback ? `Comentario: ${input.feedback}` : ''].filter(Boolean).join(' · ');
+  const title = input.kind === 'started' ? `Entrenamiento iniciado · ${input.clientName}` : input.kind === 'completed' ? `Rutina completada · ${input.clientName}` : `Feedback recibido · ${input.clientName}`;
+  const body = input.kind === 'started'
+    ? `${input.clientName} inició «${input.routineTitle}».`
+    : input.kind === 'completed'
+      ? `${input.clientName} completó «${input.routineTitle}» · ${input.completedCount || 0}/${input.totalExercises || 0} ejercicios · ${Math.floor(Number(input.elapsedSeconds || 0) / 60)}:${String(Number(input.elapsedSeconds || 0) % 60).padStart(2, '0')}${feedbackText ? ` · ${feedbackText}` : ''}.`
+      : `${input.clientName} dejó feedback sobre «${input.routineTitle}»: ${feedbackText || 'sin comentario.'}`;
+  const [notification] = input.kind === 'feedback'
+    ? await sql`INSERT INTO routine_activity_notifications (owner_id, client_id, routine_id, completed_on, kind, title, body) VALUES (${input.ownerId}, ${input.clientId}, ${input.routineId}, ${input.completedOn}, ${input.kind}, ${title}, ${body}) ON CONFLICT (owner_id, routine_id, client_id, completed_on, kind) DO UPDATE SET title = EXCLUDED.title, body = EXCLUDED.body, read_at = null RETURNING id`
+    : await sql`INSERT INTO routine_activity_notifications (owner_id, client_id, routine_id, completed_on, kind, title, body) VALUES (${input.ownerId}, ${input.clientId}, ${input.routineId}, ${input.completedOn}, ${input.kind}, ${title}, ${body}) ON CONFLICT (owner_id, routine_id, client_id, completed_on, kind) DO NOTHING RETURNING id`;
+  if (notification) await sendPushToUser(input.ownerId, { title, body, url: new URL('/#clients', config.APP_URL).toString() });
+  return notification;
+}
+
+app.post('/api/portal/routine-activity', { preHandler: requireAuth }, async (request, reply) => {
+  const auth = request.user as AuthUser; if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
+  const input = routineActivitySchema.parse(request.body); const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+  const [routine] = await sql`SELECT r.title, c.id AS client_id, c.full_name, c.owner_id FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id JOIN clients c ON c.id = ra.client_id WHERE ra.routine_id = ${input.routineId} AND ra.client_id = ${client.id} AND ra.active = true AND (ra.ends_on IS NULL OR ra.ends_on >= current_date)`;
+  if (!routine) return reply.code(404).send({ error: 'La rutina no está asignada a este cliente' });
+  await sql.begin(async transaction => {
+    if (input.kind === 'started') await transaction`INSERT INTO routine_timer_sessions (routine_id, client_id, completed_on, started_at, elapsed_seconds, active) VALUES (${input.routineId}, ${client.id}, ${input.completedOn}, now(), ${input.elapsedSeconds}, true) ON CONFLICT (routine_id, client_id, completed_on) DO UPDATE SET active = true, paused_at = null, elapsed_seconds = GREATEST(routine_timer_sessions.elapsed_seconds, EXCLUDED.elapsed_seconds), updated_at = now()`;
+    else if (input.kind === 'paused') await transaction`UPDATE routine_timer_sessions SET active = false, paused_at = now(), elapsed_seconds = GREATEST(elapsed_seconds, ${input.elapsedSeconds}), updated_at = now() WHERE routine_id = ${input.routineId} AND client_id = ${client.id} AND completed_on = ${input.completedOn}`;
+    else await transaction`UPDATE routine_timer_sessions SET active = true, paused_at = null, elapsed_seconds = GREATEST(elapsed_seconds, ${input.elapsedSeconds}), updated_at = now() WHERE routine_id = ${input.routineId} AND client_id = ${client.id} AND completed_on = ${input.completedOn}`;
+  });
+  if (input.kind === 'started') await notifyRoutineActivity({ ownerId: routine.owner_id, clientId: routine.client_id, routineId: input.routineId, completedOn: input.completedOn, kind: 'started', clientName: routine.full_name, routineTitle: routine.title });
+  return reply.code(201).send({ recorded: true });
+});
+
+app.post('/api/portal/routine-exercise-completions', { preHandler: requireAuth }, async (request, reply) => {
+  const auth = request.user as AuthUser; if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
+  const input = routineExerciseCompletionSchema.parse(request.body); const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+  if (input.completed || input.completeAll) { const [timer] = await sql`SELECT id FROM routine_timer_sessions WHERE routine_id = ${input.routineId} AND client_id = ${client.id} AND completed_on = ${input.completedOn}`; if (!timer) return reply.code(409).send({ error: 'Inicia el cronómetro antes de marcar o completar ejercicios' }); }
+  const result = await sql.begin(async transaction => {
+    const [routine] = await transaction`SELECT r.exercises FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id WHERE ra.routine_id = ${input.routineId} AND ra.client_id = ${client.id} AND ra.active = true AND (ra.ends_on IS NULL OR ra.ends_on >= current_date) FOR UPDATE OF ra`;
+    if (!routine) return null;
+    const ejercicios = Array.isArray(routine.exercises) ? routine.exercises : [];
+    if (!ejercicios.length) throw new Error('Esta rutina no tiene ejercicios para marcar');
+    if (!input.completeAll && input.exerciseIndex == null) throw new Error('Indica el ejercicio que se está marcando');
+    if (input.exerciseIndex != null && input.exerciseIndex >= ejercicios.length) throw new Error('Ese ejercicio ya no pertenece a la rutina');
+    const [legacy] = await transaction`SELECT rc.completion_percent, (SELECT count(*)::int FROM routine_exercise_completions rec WHERE rec.routine_id = ${input.routineId} AND rec.client_id = ${client.id} AND rec.completed_on = ${input.completedOn}) AS detail_count FROM routine_completions rc WHERE rc.routine_id = ${input.routineId} AND rc.client_id = ${client.id} AND rc.completed_on = ${input.completedOn}`;
+    if (!input.completeAll && Number(legacy?.completion_percent || 0) >= 100 && Number(legacy?.detail_count || 0) === 0) await transaction`INSERT INTO routine_exercise_completions (routine_id, client_id, completed_on, exercise_index, completed, completed_at) SELECT ${input.routineId}, ${client.id}, ${input.completedOn}, indexes, true, now() FROM generate_series(0, ${ejercicios.length - 1}) AS indexes ON CONFLICT (routine_id, client_id, completed_on, exercise_index) DO NOTHING`;
+    if (input.completeAll) await transaction`INSERT INTO routine_exercise_completions (routine_id, client_id, completed_on, exercise_index, completed, completed_at) SELECT ${input.routineId}, ${client.id}, ${input.completedOn}, indexes, true, now() FROM generate_series(0, ${ejercicios.length - 1}) AS indexes ON CONFLICT (routine_id, client_id, completed_on, exercise_index) DO UPDATE SET completed = true, completed_at = now(), updated_at = now()`;
+    else if (input.completed) await transaction`INSERT INTO routine_exercise_completions (routine_id, client_id, completed_on, exercise_index, completed, completed_at) VALUES (${input.routineId}, ${client.id}, ${input.completedOn}, ${input.exerciseIndex ?? null}, true, now()) ON CONFLICT (routine_id, client_id, completed_on, exercise_index) DO UPDATE SET completed = true, completed_at = EXCLUDED.completed_at, updated_at = now()`;
+    else await transaction`INSERT INTO routine_exercise_completions (routine_id, client_id, completed_on, exercise_index, completed, completed_at) VALUES (${input.routineId}, ${client.id}, ${input.completedOn}, ${input.exerciseIndex ?? null}, false, null) ON CONFLICT (routine_id, client_id, completed_on, exercise_index) DO UPDATE SET completed = false, completed_at = null, updated_at = now()`;
+    const [count] = await transaction`SELECT count(*) FILTER (WHERE completed)::int AS completed_count FROM routine_exercise_completions WHERE routine_id = ${input.routineId} AND client_id = ${client.id} AND completed_on = ${input.completedOn} AND exercise_index BETWEEN 0 AND ${ejercicios.length - 1}`;
+    const completedCount = Number(count.completed_count || 0); const completionPercent = Math.round(completedCount * 100 / ejercicios.length);
+    if (completedCount === ejercicios.length) await transaction`UPDATE routine_timer_sessions SET active = false, completed_at = now(), elapsed_seconds = GREATEST(elapsed_seconds, ${input.elapsedSeconds}), updated_at = now() WHERE routine_id = ${input.routineId} AND client_id = ${client.id} AND completed_on = ${input.completedOn}`;
+    const [completion] = await transaction`INSERT INTO routine_completions (routine_id, client_id, completed_on, completion_percent, elapsed_seconds, feeling, difficulty, feedback, marked_by_user_id, duration_seconds) VALUES (${input.routineId}, ${client.id}, ${input.completedOn}, ${completionPercent}, ${input.elapsedSeconds}, ${input.feeling || null}, ${input.difficulty || null}, ${input.feedback || null}, ${auth.sub}, NULLIF(${input.elapsedSeconds}, 0)) ON CONFLICT (routine_id, client_id, completed_on) DO UPDATE SET completion_percent = EXCLUDED.completion_percent, elapsed_seconds = EXCLUDED.elapsed_seconds, duration_seconds = COALESCE(EXCLUDED.duration_seconds, routine_completions.duration_seconds), feeling = COALESCE(EXCLUDED.feeling, routine_completions.feeling), difficulty = COALESCE(EXCLUDED.difficulty, routine_completions.difficulty), feedback = COALESCE(EXCLUDED.feedback, routine_completions.feedback), marked_by_user_id = EXCLUDED.marked_by_user_id, updated_at = now() RETURNING *`;
+    return { completion, completedCount, totalExercises: ejercicios.length, routineCompleted: completedCount === ejercicios.length };
+  });
+  if (!result) return reply.code(404).send({ error: 'La rutina no está asignada a este cliente' });
+  if (result.routineCompleted) {
+    const [routine] = await sql`SELECT r.title, c.full_name, c.owner_id FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id JOIN clients c ON c.id = ra.client_id WHERE ra.routine_id = ${input.routineId} AND ra.client_id = ${client.id} AND ra.active = true`;
+    if (routine) await notifyRoutineActivity({ ownerId: routine.owner_id, clientId: client.id, routineId: input.routineId, completedOn: input.completedOn, kind: 'completed', clientName: routine.full_name, routineTitle: routine.title, elapsedSeconds: input.elapsedSeconds, completedCount: result.completedCount, totalExercises: result.totalExercises, feeling: result.completion.feeling, difficulty: result.completion.difficulty, feedback: result.completion.feedback });
+  }
+  return reply.code(201).send(result);
+});
+
+app.post('/api/portal/routine-feedback', { preHandler: requireAuth }, async (request, reply) => {
+  const auth = request.user as AuthUser; if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
+  const input = routineFeedbackSchema.parse(request.body); const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+  const [completion] = await sql`UPDATE routine_completions rc SET feeling = ${input.feeling || null}, difficulty = ${input.difficulty || null}, feedback = ${input.feedback || null}, updated_at = now() WHERE rc.routine_id = ${input.routineId} AND rc.client_id = ${client.id} AND rc.completed_on = ${input.completedOn} AND rc.completion_percent = 100 RETURNING rc.*`;
+  if (!completion) return reply.code(404).send({ error: 'Completa la rutina antes de dejar feedback' });
+  const [routine] = await sql`SELECT r.title, c.full_name, c.owner_id FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id JOIN clients c ON c.id = ra.client_id WHERE ra.routine_id = ${input.routineId} AND ra.client_id = ${client.id} AND ra.active = true`;
+  if (routine) await notifyRoutineActivity({ ownerId: routine.owner_id, clientId: client.id, routineId: input.routineId, completedOn: input.completedOn, kind: 'feedback', clientName: routine.full_name, routineTitle: routine.title, feeling: completion.feeling, difficulty: completion.difficulty, feedback: completion.feedback });
+  return reply.code(200).send(completion);
 });
 
 // ── Rutina ofrecida en lugar de la clase ───────────────────────────────────
