@@ -1,4 +1,4 @@
-const APP_VERSION = '285';
+const APP_VERSION = '286';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -2949,6 +2949,12 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
     content.querySelector('[name="description"]').value = routine.description;
     content.querySelector('[name="sessions"]').value = routine.sessions;
     content.querySelector('button.primary').textContent = editing ? 'Guardar cambios' : 'Guardar rutina completa';
+    if (editing) {
+      const aviso = document.createElement('p');
+      aviso.className = 'section-note';
+      aviso.textContent = 'Puedes agregar o quitar ejercicios. Las asignaciones actuales de esta rutina se conservarán.';
+      content.querySelector('#routine-form').prepend(aviso);
+    }
   }
   const clientSelect = document.getElementById('routine-client');
   data.clients.forEach(client => clientSelect.add(new Option(`${client.name}${client.status === 'Activo' ? '' : ` · ${client.status}`}`, client.id)));
@@ -2956,8 +2962,13 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
   // porque va para otra persona, y heredar al cliente original invitaría a
   // pisarle la rutina sin darse cuenta.
   if (editing && routine?.assignedClientIds?.[0]) clientSelect.value = routine.assignedClientIds[0];
+  if (editing) {
+    clientSelect.disabled = true;
+    clientSelect.closest('label')?.insertAdjacentHTML('beforeend', '<small>La asignación de la rutina no cambia al editar sus ejercicios.</small>');
+  }
   // La copia tampoco hereda la fecha: se cumple en otro momento para otra persona.
   if (editing && routine?.dueOn) document.getElementById('routine-due').value = dateOnly(routine.dueOn);
+  if (editing) document.getElementById('routine-due').disabled = true;
   const categorySelect = document.getElementById('exercise-category');
   const levelSelect = document.getElementById('exercise-level');
   const exerciseSelect = document.getElementById('exercise-choice');
@@ -3230,7 +3241,7 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
     if (!selectedExercises.length) { toast('Agrega al menos un ejercicio a la rutina', true); return; }
     try {
       event.target.classList.add('loading-state');
-      const guardada = await api(editing ? `/api/routines/${routine.id}` : '/api/routines', { method: editing ? 'PATCH' : 'POST', body: { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: assigned || undefined, dueOn: form.get('dueOn') || null, exercises: selectedExercises } });
+      const guardada = await api(editing ? `/api/routines/${routine.id}` : '/api/routines', { method: editing ? 'PATCH' : 'POST', body: { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: editing ? undefined : (assigned || undefined), dueOn: editing ? undefined : (form.get('dueOn') || null), exercises: selectedExercises } });
       if (propuesta?.enlaceViajeId) {
         if (assigned !== propuesta.clientId) throw new Error('La rutina de viaje debe quedar asignada al mismo cliente.');
         await loadData(); renderAll(); modal.close();
