@@ -286,6 +286,14 @@ test('bloques de la rutina (J-113): el editor los arma y edita, y el cliente los
   assert.match(css, /\.bloque-cabecera/); assert.match(css, /\.routine-block-title/);
 });
 
+test('editar una rutina conserva la asignación y permite modificar ejercicios sin reordenar los bloques', async () => {
+  const app = await leer('app.js'); const server = await leer('backend/src/server.ts');
+  assert.match(app, /La propuesta es editable: puedes agregar o quitar ejercicios del catálogo/);
+  assert.match(app, /sólo se compactan los números de bloque y se conserva el orden/);
+  assert.doesNotMatch(app, /const ordenados = lista\.map\(\(item, posicion\)/);
+  assert.match(server, /if \(input\.clientId !== undefined\)/);
+});
+
 test('días de viaje visibles para el cliente en su portal (J-114): aviso, calendario con ✈ y leyenda; el expediente dice cuántos días', async () => {
   const app = await leer('app.js'); const css = await leer('styles.css');
   assert.match(app, /function renderViajePortal/); assert.match(app, /const viajeDeFecha = /);

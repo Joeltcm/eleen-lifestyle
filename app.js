@@ -1,4 +1,4 @@
-const APP_VERSION = '286';
+const APP_VERSION = '287';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1950,17 +1950,15 @@ function proponerRutinaDesdeAgenda(sesion) {
 
 // ── Bloques o circuitos (J-113) ────────────────────────────────────────────────────────────────
 // Cada ejercicio puede llevar `block` (1, 2, 3…) y `rounds` (rondas del bloque, iguales para todo el bloque). En un bloque se hacen sus ejercicios seguidos y se repite el bloque `rounds` veces,
-// así que `sets` = `rounds`. Sin `block`, el ejercicio va suelto con sus series. Deja la lista coherente: bloques contiguos y en orden, sin huecos de numeración, las rondas del primero.
+// así que `sets` = `rounds`. Sin `block`, el ejercicio va suelto con sus series. Al editar, agregar o quitar uno no mueve los demás: sólo se compactan los números de bloque y se conserva el orden que dejó Eileen.
 function normalizarBloques(lista) {
-  if (!lista.some(item => item.block)) { lista.forEach(item => { delete item.block; delete item.rounds; }); return; }
-  const ordenados = lista.map((item, posicion) => ({ item, posicion })).filter(x => x.item.block).sort((x, y) => (x.item.block - y.item.block) || (x.posicion - y.posicion)).map(x => x.item);
-  const sueltos = lista.filter(item => !item.block);
-  lista.splice(0, lista.length, ...ordenados, ...sueltos);
   const numeros = new Map(); const rondas = new Map();
+  if (!lista.some(item => Number(item.block) > 0)) { lista.forEach(item => { delete item.block; delete item.rounds; }); return; }
   for (const item of lista) {
-    if (!item.block) { delete item.rounds; continue; }
-    if (!numeros.has(item.block)) numeros.set(item.block, numeros.size + 1);
-    const nuevo = numeros.get(item.block);
+    const original = Number(item.block) || 0;
+    if (!original) { delete item.block; delete item.rounds; continue; }
+    if (!numeros.has(original)) numeros.set(original, numeros.size + 1);
+    const nuevo = numeros.get(original);
     if (!rondas.has(nuevo)) rondas.set(nuevo, Number(item.rounds) || 3);
     item.block = nuevo; item.rounds = rondas.get(nuevo); item.sets = item.rounds;
   }
@@ -3053,6 +3051,7 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
     if (propuesta.rationale) avisos.push(propuesta.rationale);
     if (propuesta.avoided?.length) avisos.push(`Se evitó repetir: ${propuesta.avoided.join(', ')}.`);
     if (propuesta.descartados?.length) avisos.push(`Se descartaron por no estar en tu catálogo: ${propuesta.descartados.join(', ')}.`);
+    avisos.push('La propuesta es editable: puedes agregar o quitar ejercicios del catálogo y asignarlos a un bloque o dejarlos sueltos.');
     // La IA no inventa cargas: no conoce al cliente. Eileen las fija a su criterio.
     if (selectedExercises.some(item => admitePeso(exerciseCatalog.find(entrada => entrada.id === item.catalogId || entrada.name === item.name)))) avisos.push('Fija el peso de los ejercicios con carga.');
     if (avisos.length) {
