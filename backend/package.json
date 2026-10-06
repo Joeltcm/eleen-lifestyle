@@ -14,6 +14,7 @@
     "start:railway": "npm run migrate && npm start",
     "check": "tsc --noEmit",
     "videos:inventario": "node scripts/normalizar-videos.mjs --inventario",
+    "videos:solo-r2": "node scripts/normalizar-videos.mjs --solo-r2",
     "test": "node --test --test-concurrency=1 test/*.test.mjs"
   },
   "dependencies": {

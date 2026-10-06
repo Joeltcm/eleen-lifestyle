@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import postgres from 'postgres';
-import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
 
 const MAX_VIDEO_SIZE = 40 * 1024 * 1024;
 const ACCEPTED_PROFILES = /baseline|main/i;
@@ -29,7 +29,9 @@ function run(command, args) {
 }
 
 function usage() {
-  console.error('Uso: DATABASE_URL=… R2_ACCOUNT_ID=… R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=… node scripts/normalizar-videos.mjs --inventario');
+  console.error('Uso:');
+  console.error('  DATABASE_URL=… R2_ACCOUNT_ID=… R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=… node scripts/normalizar-videos.mjs --inventario');
+  console.error('  R2_ACCOUNT_ID=… R2_ACCESS_KEY_ID=… R2_SECRET_ACCESS_KEY=… node scripts/normalizar-videos.mjs --solo-r2');
 }
 
 function requiredEnv(name) {
@@ -129,24 +131,80 @@ async function downloadObject(s3, bucket, objectKey, directory, index) {
   const bytes = Buffer.from(await response.Body.transformToByteArray());
   const file = join(directory, `${index}.video`);
   await writeFile(file, bytes);
-  return { file, bytes };
+  return { file, bytes, contentType: response.ContentType || null };
 }
 
-async function inventory() {
-  const databaseUrl = requiredEnv('DATABASE_URL');
+function exerciseIdFromObjectKey(objectKey) {
+  return /^exercises\/([^/]+)\//.exec(objectKey)?.[1] || null;
+}
+
+function createStorageClient() {
   const accountId = requiredEnv('R2_ACCOUNT_ID');
   const accessKeyId = requiredEnv('R2_ACCESS_KEY_ID');
   const secretAccessKey = requiredEnv('R2_SECRET_ACCESS_KEY');
   const bucket = process.env.R2_BUCKET || 'eileen-lifestyle-private';
-  const sql = postgres(databaseUrl, {
-    ssl: process.env.NODE_ENV === 'production' ? 'require' : undefined,
-    max: 1,
-    connection: { TimeZone: 'America/Panama' }
-  });
   const s3 = new S3Client({
     region: 'auto',
     endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
     credentials: { accessKeyId, secretAccessKey }
+  });
+  return { bucket, s3 };
+}
+
+async function inventoryR2() {
+  const { bucket, s3 } = createStorageClient();
+  const prefix = process.env.R2_VIDEO_PREFIX || 'exercises/';
+  const temporary = await mkdtemp(join(tmpdir(), 'eileen-videos-r2-inventory-'));
+  const rows = [];
+  try {
+    let continuationToken;
+    do {
+      const page = await s3.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: continuationToken }));
+      rows.push(...(page.Contents || []).filter(object => object.Key && !object.Key.endsWith('/')));
+      continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (continuationToken);
+
+    const summary = { total: rows.length, sizeBytes: 0, byContentType: new Map(), needsNormalize: 0, failures: 0 };
+    console.log('INVENTARIO DE VIDEOS EN R2 · SOLO LECTURA · SIN BASE DE DATOS');
+    console.log(`Bucket: ${bucket} · prefijo: ${prefix} · objetos: ${rows.length}`);
+    for (const [index, row] of rows.entries()) {
+      const objectKey = row.Key;
+      const exerciseId = exerciseIdFromObjectKey(objectKey);
+      summary.sizeBytes += Number(row.Size) || 0;
+      process.stdout.write(`\n${index + 1}. ejercicio: ${exerciseId || 'ruta no reconocida'} · clave: ${objectKey}\n`);
+      try {
+        const { file, bytes, contentType } = await downloadObject(s3, bucket, objectKey, temporary, index);
+        const metadata = await probe(file);
+        const info = inspect(bytes, metadata);
+        if (info.needsNormalize) summary.needsNormalize += 1;
+        const actualType = contentType || 'desconocido';
+        summary.byContentType.set(actualType, (summary.byContentType.get(actualType) || 0) + 1);
+        console.log(`   content-type R2: ${actualType} · última modificación: ${row.LastModified?.toISOString?.() || '—'}`);
+        console.log(`   formato: ${info.container} · códec: ${info.codec || '—'} · perfil: ${info.profile || '—'} · duración: ${info.duration ?? '—'} s`);
+        console.log(`   video: ${info.width || '—'}x${info.height || '—'} · ${info.fps ? `${info.fps.toFixed(2)} fps` : 'fps —'} · píxel: ${info.pixelFormat || '—'} · audio: ${info.hasAudio ? 'sí' : 'no'}`);
+        console.log(`   mp4: moov antes de mdat=${info.moovBeforeMdat ? 'sí' : 'no'} · fragmentado=${info.fragmented ? 'sí' : 'no'} · normalizar=${info.needsNormalize ? 'sí' : 'no'}`);
+        if (info.reasons.length) console.log(`   motivos: ${info.reasons.join('; ')}`);
+      } catch (error) {
+        summary.failures += 1;
+        console.log(`   ERROR al inspeccionar: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    console.log('\nRESUMEN R2');
+    console.log(`Total: ${summary.total} · tamaño listado: ${(summary.sizeBytes / 1024 / 1024).toFixed(2)} MB · necesitan normalizar: ${summary.needsNormalize} · fallos: ${summary.failures}`);
+    for (const [type, count] of summary.byContentType) console.log(`${type}: ${count}`);
+    console.log('No se abrió PostgreSQL. No se escribió ni se borró ningún objeto de R2.');
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+async function inventory() {
+  const databaseUrl = requiredEnv('DATABASE_URL');
+  const { bucket, s3 } = createStorageClient();
+  const sql = postgres(databaseUrl, {
+    ssl: process.env.NODE_ENV === 'production' ? 'require' : undefined,
+    max: 1,
+    connection: { TimeZone: 'America/Panama' }
   });
   const temporary = await mkdtemp(join(tmpdir(), 'eileen-videos-inventory-'));
   try {
@@ -203,12 +261,20 @@ async function inventory() {
 }
 
 const args = new Set(process.argv.slice(2));
-if (!args.has('--inventario') || args.has('--aplicar') || args.has('--revertir') || args.has('--purgar-originales') || args.has('--dry-run')) {
+const hasDatabaseInventory = args.has('--inventario');
+const hasR2Inventory = args.has('--solo-r2');
+const hasWriteFlag = args.has('--aplicar') || args.has('--revertir') || args.has('--purgar-originales') || args.has('--dry-run');
+if (hasWriteFlag || hasDatabaseInventory === hasR2Inventory || args.size !== 1) {
   usage();
-  if (args.has('--dry-run') || args.has('--aplicar') || args.has('--revertir') || args.has('--purgar-originales')) {
-    console.error('Esta entrega implementa deliberadamente solo --inventario; las operaciones de escritura esperan la revisión del inventario.');
+  if (hasWriteFlag) {
+    console.error('Esta entrega implementa deliberadamente solo --inventario y --solo-r2; las operaciones de escritura esperan la revisión del inventario.');
   }
   process.exitCode = 2;
+} else if (hasR2Inventory) {
+  inventoryR2().catch(error => {
+    console.error(`Inventario R2 detenido: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  });
 } else {
   inventory().catch(error => {
     console.error(`Inventario detenido: ${error instanceof Error ? error.message : String(error)}`);
