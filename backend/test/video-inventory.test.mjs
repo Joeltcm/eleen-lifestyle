@@ -11,6 +11,7 @@ test('el inventario de videos es explícitamente de solo lectura', () => {
   assert.match(script, /--solo-r2/);
   assert.match(script, /exercise_videos/);
   assert.match(script, /GetObjectCommand/);
+  assert.match(script, /HeadObjectCommand/);
   assert.match(script, /ListObjectsV2Command/);
   assert.match(script, /exerciseIdFromObjectKey/);
   assert.match(script, /moof/);

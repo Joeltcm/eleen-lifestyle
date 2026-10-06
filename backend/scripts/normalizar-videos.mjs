@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import postgres from 'postgres';
-import { GetObjectCommand, ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
 
 const MAX_VIDEO_SIZE = 40 * 1024 * 1024;
 const ACCEPTED_PROFILES = /baseline|main/i;
@@ -170,16 +170,17 @@ async function inventoryR2() {
     for (const [index, row] of rows.entries()) {
       const objectKey = row.Key;
       const exerciseId = exerciseIdFromObjectKey(objectKey);
-      summary.sizeBytes += Number(row.Size) || 0;
       process.stdout.write(`\n${index + 1}. ejercicio: ${exerciseId || 'ruta no reconocida'} · clave: ${objectKey}\n`);
       try {
-        const { file, bytes, contentType } = await downloadObject(s3, bucket, objectKey, temporary, index);
+        const head = await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: objectKey }));
+        summary.sizeBytes += Number(head.ContentLength ?? row.Size) || 0;
+        const { file, bytes, contentType: downloadedContentType } = await downloadObject(s3, bucket, objectKey, temporary, index);
         const metadata = await probe(file);
         const info = inspect(bytes, metadata);
         if (info.needsNormalize) summary.needsNormalize += 1;
-        const actualType = contentType || 'desconocido';
+        const actualType = head.ContentType || downloadedContentType || 'desconocido';
         summary.byContentType.set(actualType, (summary.byContentType.get(actualType) || 0) + 1);
-        console.log(`   content-type R2: ${actualType} · última modificación: ${row.LastModified?.toISOString?.() || '—'}`);
+        console.log(`   content-type R2 (HeadObject): ${actualType} · tamaño: ${head.ContentLength ?? row.Size ?? '—'} bytes · última modificación: ${row.LastModified?.toISOString?.() || '—'}`);
         console.log(`   formato: ${info.container} · códec: ${info.codec || '—'} · perfil: ${info.profile || '—'} · duración: ${info.duration ?? '—'} s`);
         console.log(`   video: ${info.width || '—'}x${info.height || '—'} · ${info.fps ? `${info.fps.toFixed(2)} fps` : 'fps —'} · píxel: ${info.pixelFormat || '—'} · audio: ${info.hasAudio ? 'sí' : 'no'}`);
         console.log(`   mp4: moov antes de mdat=${info.moovBeforeMdat ? 'sí' : 'no'} · fragmentado=${info.fragmented ? 'sí' : 'no'} · normalizar=${info.needsNormalize ? 'sí' : 'no'}`);
@@ -264,7 +265,8 @@ const args = new Set(process.argv.slice(2));
 const hasDatabaseInventory = args.has('--inventario');
 const hasR2Inventory = args.has('--solo-r2');
 const hasWriteFlag = args.has('--aplicar') || args.has('--revertir') || args.has('--purgar-originales') || args.has('--dry-run');
-if (hasWriteFlag || hasDatabaseInventory === hasR2Inventory || args.size !== 1) {
+const validMode = hasR2Inventory ? (args.size === 1 || (hasDatabaseInventory && args.size === 2)) : hasDatabaseInventory && args.size === 1;
+if (hasWriteFlag || !validMode) {
   usage();
   if (hasWriteFlag) {
     console.error('Esta entrega implementa deliberadamente solo --inventario y --solo-r2; las operaciones de escritura esperan la revisión del inventario.');
