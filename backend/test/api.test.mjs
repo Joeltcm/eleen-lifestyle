@@ -25,6 +25,11 @@ const desplazarDiasPa = (fecha, dias) => {
   return partesPanama(base).iso;
 };
 const instantePa = (fecha, hora) => new Date(`${fecha}T${hora}:00-05:00`).toISOString();
+// Día de corte (15) más reciente que quede a 20 días o más de hoy. Antes se usaba "hoy − 20" con el corte fijo en 15: un día de cada mes la clase caía justo en la frontera del ciclo y la prueba fallaba sola (06-10-2026).
+const ultimoCorte15 = () => {
+  const base = desplazarDiasPa(hoyPa(), -20);
+  return base.slice(8, 10) >= '15' ? `${base.slice(0, 8)}15` : `${desplazarDiasPa(`${base.slice(0, 8)}01`, -1).slice(0, 8)}15`;
+};
 const mesActualPa = () => partesPanama().ym + '-01';
 const mesDe = fecha => String(fecha).slice(0, 7);
 const desplazarMesInicioPa = (fecha, meses) => {
@@ -918,7 +923,7 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
       fullName: 'Factura de crédito congelada', planId: plan.datos.id, cutoffDay: 15,
       paymentMode: 'no_anticipado', creditSessionPrice: 25
     });
-    const dueOn = desplazarDiasPa(hoyPa(), -20);
+    const dueOn = ultimoCorte15();
     const diaClase = desplazarDiasPa(dueOn, -1);
     const primera = await api.post('/api/sessions/batch', {
       clientId: c.datos.id, startsAt: [instantePa(diaClase, '10:00')], durationMinutes: 60, mode: 'Presencial'
@@ -948,7 +953,7 @@ describe('aplicar un cobro a las mensualidades que cubre', () => {
       fullName: 'Factura recalculable', planId: plan.datos.id, cutoffDay: 15,
       paymentMode: 'no_anticipado', creditSessionPrice: 25
     });
-    const dueOn = desplazarDiasPa(hoyPa(), -20);
+    const dueOn = ultimoCorte15();
     const diaClase = desplazarDiasPa(dueOn, -1);
     const primera = await api.post('/api/sessions', {
       clientId: c.datos.id, startsAt: instantePa(diaClase, '09:00'), durationMinutes: 60, mode: 'Presencial'
