@@ -13,6 +13,7 @@
     "migrate": "tsx src/migrate.ts",
     "start:railway": "npm run migrate && npm start",
     "check": "tsc --noEmit",
+    "videos:inventario": "node scripts/normalizar-videos.mjs --inventario",
     "test": "node --test --test-concurrency=1 test/*.test.mjs"
   },
   "dependencies": {
