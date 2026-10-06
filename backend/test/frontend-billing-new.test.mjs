@@ -268,6 +268,14 @@ test('especificación breve de la rutina (J-111): una línea de la entrenadora a
   assert.doesNotMatch(app, /EQUIPOS_RUTINA/, 'no hay chips ni campos de equipo: es una sola línea');
 });
 
+test('la descripción completa de una rutina se puede leer y editar sin pegar sus secciones', async () => {
+  const html = await leer('index.html');
+  const template = html.slice(html.indexOf('<template id="new-routine-template"'), html.indexOf('<template id="confirm-payment-template"'));
+  assert.match(template, /<label>Descripción<textarea name="description" rows="8"/);
+  assert.doesNotMatch(template, /<label>Descripción<input name="description"/);
+  assert.match(template, /calentamiento, la vuelta a la calma y los estiramientos/);
+});
+
 test('pesos de la rutina generada (J-112): se pueden fijar, se pueden traer los últimos y el cliente ve el peso', async () => {
   const app = await leer('app.js');
   assert.match(app, /const admitePeso = /); assert.match(app, /if \(admitePeso\(enCatalogo\)\) \{/);
