@@ -958,3 +958,4 @@ body:has(#portal-routines.active) .portal-weight-fab{display:none}
 .mover-ejercicio{display:flex;gap:6px;margin-top:6px}
 .mover-ejercicio button{min-width:44px;min-height:36px;padding:2px 10px;font-size:16px;line-height:1}
 .campo-agregar-a{display:grid;gap:4px;margin:8px 0}.campo-agregar-a select{width:100%}
+.routine-descripcion{white-space:pre-line}

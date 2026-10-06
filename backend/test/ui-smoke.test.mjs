@@ -4,8 +4,12 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import postgres from 'postgres';
+import { readFileSync } from 'node:fs';
 import { CREDENCIALES, SETUP_TOKEN, cliente, levantar } from './harness.mjs';
 import { abrirPantalla, esperar } from './ui-harness.mjs';
+
+// La pantalla corre en este proceso y el negocio cuenta los días en hora de Panamá (el teléfono de la clienta está en Panamá): sin esto, de 19:00 a 24:00 de Panamá la prueba vería otro día que el servidor.
+process.env.TZ = 'America/Panama';
 
 let servidor; let api; let db; let tokenStaff; let tokenPortal; let clientId; let rutinaId; let sesionId;
 const panama = (d = 0) => new Date(Date.now() - 5 * 3600_000 + d * 86400_000).toISOString().slice(0, 10);
@@ -181,4 +185,84 @@ test('la página pública de la rutina (enlace) se abre sin sesión, muestra los
     await esperar(() => /Eileen ya sabe/.test(p.q('#public-final').textContent), { mensaje: 'confirmación' });
     sinErrores(p, 'página pública');
   } finally { await p.cerrar(); }
+});
+
+test('PORTAL: rutina ofrecida en lugar de la clase — cuenta regresiva, pausa y reanudación, checklist, completar cierra la clase, celebra y guarda el feedback', async () => {
+  const ejercicios = [{ name: 'Plancha', sets: 3, reps: '30 seg' }, { name: 'Flexiones', sets: 3, reps: '10' }, { name: 'Sentadilla', sets: 3, reps: '12' }];
+  const rid = (await api.post('/api/routines', { title: 'Rutina por oferta', sessionsPerWeek: 3, clientId, exercises: ejercicios })).datos.id;
+  const oferta = await api.post(`/api/sessions/${sesionId}/routine-offer`, { routineId: rid, origin: 'trainer' });
+  assert.ok(oferta.estado < 300, JSON.stringify(oferta.datos));
+  const p = await abrirPantalla({ baseApi: servidor.base, token: tokenPortal, hash: '#portal-routines' });
+  try {
+    await esperar(() => !p.document.getElementById('portal-shell').hidden, { mensaje: 'portal visible' });
+    const tarjeta = () => p.q(`[data-portal-routine-card="${rid}"]`);
+    await esperar(() => tarjeta(), { mensaje: 'tarjeta de la rutina ofrecida' });
+    const boton = sel => p.q(sel, tarjeta());
+    assert.match(boton('[data-start-routine-timer]').textContent, /Iniciar entrenamiento/);
+    assert.ok(boton('[data-complete-routine]').disabled, 'no se puede completar sin iniciar');
+    assert.equal(p.qa('[data-portal-routine-exercise]', tarjeta()).length, 3);
+    // 1) marcar un ejercicio sin iniciar el cronómetro no se guarda
+    const caja0 = p.qa('[data-portal-routine-exercise]', tarjeta())[0]; caja0.checked = true; caja0.dispatchEvent(new p.window.Event('change', { bubbles: true }));
+    await p.quieta(300);
+    assert.equal(p.qa('[data-portal-routine-exercise]', tarjeta())[0].checked, false, 'sin cronómetro el ejercicio no queda marcado');
+    assert.equal((await db`SELECT count(*)::int AS n FROM routine_exercise_completions WHERE routine_id = ${rid}`)[0].n, 0);
+    // 2) iniciar: cuenta regresiva 3-2-1 y luego corre
+    p.clic(boton('[data-start-routine-timer]'));
+    await esperar(() => !p.q('.routine-countdown', tarjeta()).hidden, { mensaje: 'se ve la cuenta regresiva' });
+    await esperar(() => !boton('[data-pause-routine-timer]').hidden, { ms: 6000, mensaje: 'el cronómetro arranca tras la cuenta' });
+    assert.ok(p.q('.routine-countdown', tarjeta()).hidden, 'la cuenta regresiva se oculta');
+    assert.ok(!boton('[data-complete-routine]').disabled, '"Completar rutina" se habilita al iniciar, sin esperar a marcar un ejercicio');
+    assert.equal(p.q('.routine-timer-required', tarjeta()), null, 'desaparece el aviso de iniciar primero');
+    await p.quieta(1600);
+    const relojCorriendo = boton('.routine-timer-clock').textContent;
+    assert.notEqual(relojCorriendo, '00:00', 'el cronómetro avanza');
+    // 3) pausar congela el reloj y deja "Reanudar"
+    p.clic(boton('[data-pause-routine-timer]')); await p.quieta(250);
+    const congelado = boton('.routine-timer-clock').textContent;
+    await p.quieta(1300);
+    assert.equal(boton('.routine-timer-clock').textContent, congelado, 'en pausa el tiempo no avanza');
+    assert.match(boton('[data-start-routine-timer]').textContent, /Reanudar/); assert.ok(!boton('[data-start-routine-timer]').hidden);
+    // 4) reanudar (otra cuenta regresiva) y seguir
+    p.clic(boton('[data-start-routine-timer]'));
+    await esperar(() => !boton('[data-pause-routine-timer]').hidden, { ms: 6000, mensaje: 'reanuda tras la cuenta' });
+    // 5) marcar los ejercicios uno a uno
+    for (let i = 0; i < 3; i += 1) {
+      const caja = p.qa('[data-portal-routine-exercise]', tarjeta())[i]; caja.checked = true; caja.dispatchEvent(new p.window.Event('change', { bubbles: true }));
+      await esperar(async () => (await db`SELECT count(*)::int AS n FROM routine_exercise_completions WHERE routine_id = ${rid} AND completed`)[0].n === i + 1, { ms: 5000, mensaje: `ejercicio ${i + 1} guardado` });
+      await esperar(() => !tarjeta().classList.contains('loading-state'), { ms: 5000, mensaje: 'la tarjeta se vuelve a dibujar' });
+    }
+    // 6) completada: celebración, tarjeta cerrada, clase realizada y oferta cumplida
+    await esperar(() => p.q('.routine-celebration'), { ms: 5000, mensaje: 'celebración' });
+    assert.match(p.q('.routine-celebration').textContent, /3 de 3 ejercicios/);
+    p.clic(p.q('.routine-celebration button')); assert.equal(p.q('.routine-celebration'), null);
+    await esperar(async () => (await db`SELECT status FROM sessions WHERE id = ${sesionId}`)[0].status === 'completed', { ms: 5000, mensaje: 'la clase queda realizada' });
+    assert.equal((await db`SELECT status FROM session_routine_offers WHERE session_id = ${sesionId}`)[0].status, 'completed');
+    const [rc] = await db`SELECT completion_percent, duration_seconds FROM routine_completions WHERE routine_id = ${rid}`;
+    assert.equal(rc.completion_percent, 100); assert.ok(rc.duration_seconds >= 1 && rc.duration_seconds <= 3, `duración = tiempo activo, sin contar la pausa ni la cuenta regresiva (${rc.duration_seconds} s; en la pantalla pasaron más de 6 s)`);
+    await esperar(() => /Rutina completada/.test(boton('[data-complete-routine]').textContent) && boton('[data-complete-routine]').disabled, { mensaje: 'botón en "Rutina completada"' });
+    // 7) feedback opcional
+    const form = await esperar(() => p.q('[data-portal-routine-feedback]', tarjeta()), { mensaje: 'formulario de feedback' });
+    form.elements.feeling.value = 'bien'; form.elements.difficulty.value = 'dificil'; form.elements.feedback.value = 'Me costó la sentadilla';
+    form.dispatchEvent(new p.window.Event('submit', { bubbles: true, cancelable: true }));
+    await esperar(async () => (await db`SELECT feedback FROM routine_completions WHERE routine_id = ${rid}`)[0].feedback === 'Me costó la sentadilla', { ms: 5000, mensaje: 'feedback guardado' });
+    sinErrores(p, 'rutina ofrecida en el portal');
+  } finally { await p.cerrar(); }
+});
+
+test('la descripción de una rutina con secciones (Objetivo, Calentamiento…) se edita completa y se pinta con sus saltos de línea', async () => {
+  const descripcion = 'Objetivo: fuerza de tren inferior.\nCalentamiento: 5 min de movilidad.\nEjercicios principales: ver lista.\nVuelta a la calma: respiración.\nEstiramientos: cadera y espalda.';
+  const rid = (await api.post('/api/routines', { title: 'Rutina con secciones', description: descripcion, sessionsPerWeek: 2, clientId, exercises: [{ name: 'Sentadilla', sets: 3, reps: '12' }] })).datos.id;
+  const p = await abrirPantalla({ baseApi: servidor.base, token: tokenStaff, hash: '#routines' });
+  try {
+    await esperar(() => p.evaluar('data.routines.length') >= 1, { mensaje: 'rutinas cargadas' });
+    p.clic(p.q('[data-view="routines"]')); await p.quieta(200);
+    p.clic(p.q(`[data-edit-routine="${rid}"]`));
+    const f = await esperar(() => p.q('#routine-form'), { mensaje: 'editor' });
+    assert.equal(f.elements.description.tagName, 'TEXTAREA', 'el campo admite varias líneas');
+    assert.equal(f.elements.description.value, descripcion, 'el editor trae el texto completo, con sus saltos');
+    const tarjetaLista = p.qa('.routine-card').find(x => x.textContent.includes('Rutina con secciones'));
+    assert.ok(tarjetaLista && tarjetaLista.querySelector('.routine-descripcion'), 'la lista marca la descripción para respetar los saltos');
+    sinErrores(p, 'descripción con secciones');
+  } finally { await p.cerrar(); }
+  assert.match(readFileSync(new URL('../../styles.css', import.meta.url), 'utf8'), /\.routine-descripcion\{white-space:pre-line\}/, 'la regla que conserva los saltos de línea existe');
 });

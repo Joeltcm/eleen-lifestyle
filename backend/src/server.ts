@@ -7598,15 +7598,19 @@ app.post('/api/portal/routine-exercise-completions', { preHandler: requireAuth }
     if (completedCount === ejercicios.length) {
       await transaction`UPDATE routine_timer_sessions SET active = false, completed_at = now(), elapsed_seconds = GREATEST(elapsed_seconds, ${input.elapsedSeconds}), updated_at = now() WHERE routine_id = ${input.routineId} AND client_id = ${client.id} AND completed_on = ${input.completedOn}`;
       const [offer] = await transaction`
-        SELECT o.id, o.session_id, c.owner_id
+        SELECT o.id, o.session_id, c.owner_id, s.status AS session_status
         FROM session_routine_offers o
         JOIN sessions s ON s.id = o.session_id
         JOIN clients c ON c.id = s.client_id
         WHERE o.routine_id = ${input.routineId} AND o.client_id = ${client.id} AND o.status = 'offered'
-          AND (s.starts_at AT TIME ZONE 'America/Panama')::date = ${input.completedOn}::date
+          AND s.status IN ('scheduled', 'completed')
+          AND (s.starts_at AT TIME ZONE 'America/Panama')::date = (now() AT TIME ZONE 'America/Panama')::date
         FOR UPDATE OF o, s`;
+      // El día de la oferta lo decide el servidor (hora de Panamá), no la fecha que mande el teléfono: la oferta solo vale el día de la clase, y un cliente de viaje tiene otra fecha en su reloj.
+      // Una clase cancelada no se cierra (la rutina queda registrada igual); una ya marcada por Eileen solo cierra la oferta.
       if (offer) {
-        sessionCompleted = await recordSessionComplianceInTransaction(transaction, String(offer.session_id), String(offer.owner_id), auth.sub, 'completed', 100, { permitirAnticipada: true });
+        sessionCompleted = offer.session_status === 'completed' ? { alreadyCompleted: true }
+          : await recordSessionComplianceInTransaction(transaction, String(offer.session_id), String(offer.owner_id), auth.sub, 'completed', 100, { permitirAnticipada: true });
         if (!sessionCompleted) throw new Error('La clase vinculada a la rutina ya no está disponible para cerrarse');
         await transaction`UPDATE session_routine_offers SET status = 'completed', completed_at = now(), completion_percent = 100, duration_seconds = ${input.elapsedSeconds} WHERE id = ${offer.id}`;
         offerCompleted = true;
