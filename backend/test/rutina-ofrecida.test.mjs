@@ -66,6 +66,33 @@ test('cumplir la rutina cierra la clase como realizada (aunque su hora no haya l
   assert.equal((await api.post(`/api/sessions/${sesionId}/routine-offer`, { routineId: rutinaId })).estado, 409, 'ya no se ofrece en una clase realizada');
 });
 
+test('marcar el último ejercicio cierra la oferta y la clase en la misma operación', async () => {
+  const rutinaAtomica = (await api.post('/api/routines', {
+    title: 'Rutina atómica', sessionsPerWeek: 1,
+    exercises: [{ name: 'Puente de glúteos', sets: 2, reps: '12' }], clientId: c
+  })).datos.id;
+  const sesionAtomica = (await api.post('/api/sessions', { clientId: c, startsAt: hoyALas23(), durationMinutes: 45, mode: 'Presencial' })).datos.id;
+  const oferta = await api.post(`/api/sessions/${sesionAtomica}/routine-offer`, { routineId: rutinaAtomica });
+  assert.equal(oferta.estado, 201, JSON.stringify(oferta.datos));
+
+  const hoy = hoyPanama();
+  const inicio = await portal.post('/api/portal/routine-activity', { routineId: rutinaAtomica, completedOn: hoy, kind: 'started', elapsedSeconds: 0 });
+  assert.equal(inicio.estado, 201, JSON.stringify(inicio.datos));
+  const marcado = await portal.post('/api/portal/routine-exercise-completions', {
+    routineId: rutinaAtomica, completedOn: hoy, exerciseIndex: 0, elapsedSeconds: 120
+  });
+  assert.equal(marcado.estado, 201, JSON.stringify(marcado.datos));
+  assert.equal(marcado.datos.routineCompleted, true);
+  assert.equal(marcado.datos.offerCompleted, true);
+  assert.equal(marcado.datos.sessionCompleted, true);
+
+  const sesion = await sesionDe(sesionAtomica);
+  assert.equal(sesion.status, 'completed');
+  assert.equal(sesion.routine_offer_status, 'completed');
+  assert.equal(sesion.routine_offer_duration_seconds, 120);
+  assert.equal((await portal.get('/api/portal/routine-offers')).datos.some(item => item.id === oferta.datos.id), false);
+});
+
 test('la oferta vale SOLO el día de la clase: una clase de otro día no se muestra ni se puede cumplir; una clase pasada no admite oferta; la vencida se marca', async () => {
   const futura = (await api.post('/api/sessions', { clientId: c, startsAt: new Date(Date.now() + 50 * 3600_000).toISOString(), durationMinutes: 45, mode: 'Presencial' })).datos.id;
   const ofrecida = await api.post(`/api/sessions/${futura}/routine-offer`, { routineId: rutinaId });

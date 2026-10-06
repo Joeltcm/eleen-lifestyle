@@ -158,9 +158,10 @@ test('el PORTAL del cliente dibuja todas sus secciones (rutinas con bloques, via
     const tarjeta = await esperar(() => p.q('.portal-routine-card'), { mensaje: 'tarjeta de rutina' });
     assert.match(tarjeta.textContent, /Rutina en bloques/);
     assert.ok(p.qa('.routine-block-title', tarjeta).length >= 2, 'los bloques con sus rondas');
-    assert.ok(p.q('[data-timer-toggle]', tarjeta), 'el cronómetro');
-    p.clic(p.q('[data-timer-toggle]', tarjeta));
-    await esperar(() => p.q('.portal-routine-card [data-timer-display]').textContent !== '00:00', { ms: 4000, mensaje: 'el cronómetro corre' });
+    const iniciar = p.q('[data-start-routine-timer]', tarjeta);
+    assert.ok(iniciar, 'el cronómetro');
+    p.clic(iniciar);
+    await esperar(() => p.q('.portal-routine-card [data-timer-display]').textContent !== '00:00', { ms: 7000, mensaje: 'el cronómetro corre después de la cuenta regresiva' });
     p.window.location.hash = '#portal-calendar'; await p.quieta(300);
     assert.ok(p.q('.portal-col-dia.viaje'), 'los días de viaje en la agenda del cliente');
     sinErrores(p, 'portal del cliente');

@@ -4809,8 +4809,11 @@ function sessionBillingNotice(pack: Record<string, unknown> | null | undefined, 
 }
 
 async function recordSessionCompliance(id: string, ownerId: string, markedBy: string, resultado: ResultadoSesion, completionPercent: number, opciones: { permitirAnticipada?: boolean } = {}) {
+  return sql.begin(async transaction => recordSessionComplianceInTransaction(transaction, id, ownerId, markedBy, resultado, completionPercent, opciones));
+}
+
+async function recordSessionComplianceInTransaction(transaction: TransactionSql, id: string, ownerId: string, markedBy: string, resultado: ResultadoSesion, completionPercent: number, opciones: { permitirAnticipada?: boolean } = {}) {
   const completed = resultado === 'completed';
-  return sql.begin(async transaction => {
     const [current] = await transaction`SELECT s.*, now() AS database_now FROM sessions s JOIN clients c ON c.id = s.client_id WHERE s.id = ${id} AND c.owner_id = ${ownerId} FOR UPDATE`;
     if (!current) return null;
     if (current.status === 'cancelled') {
@@ -4920,7 +4923,6 @@ async function recordSessionCompliance(id: string, ownerId: string, markedBy: st
       WHERE id = ${id} RETURNING *
     `;
     return { ...updated, billing };
-  });
 }
 
 app.post('/api/sessions/:id/complete', { preHandler: requireStaff }, async (request, reply) => {
@@ -6943,9 +6945,14 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
     ORDER BY t.starts_on`;
   // Rutinas que los clientes cumplieron en las últimas 24 horas (con o sin clase de por medio).
   const rutinasCumplidas = await sql`
-    SELECT rc.id, rc.completion_percent, rc.duration_seconds, rc.updated_at, c.full_name, r.title
+    SELECT rc.id, rc.routine_id, rc.client_id, rc.completed_on, rc.completion_percent, rc.duration_seconds, rc.updated_at, c.full_name, r.title
     FROM routine_completions rc JOIN clients c ON c.id = rc.client_id JOIN routines r ON r.id = rc.routine_id
     WHERE c.owner_id = ${auth.sub} AND rc.completion_percent > 0 AND (rc.marked_by_user_id = c.portal_user_id OR rc.via_link)
+      AND NOT EXISTS (
+        SELECT 1 FROM routine_activity_notifications ran
+        WHERE ran.owner_id = ${auth.sub} AND ran.routine_id = rc.routine_id AND ran.client_id = rc.client_id
+          AND ran.completed_on = rc.completed_on AND ran.kind = 'completed'
+      )
       AND rc.updated_at >= now() - interval '24 hours'
     ORDER BY rc.updated_at DESC LIMIT 20`;
   const routineActivityRows = await sql`
@@ -7519,7 +7526,7 @@ app.post('/api/portal/routine-completions', { preHandler: requireAuth }, async (
   `;
   if (input.completionPercent > 0) {
     const [rutina] = await sql`SELECT title FROM routines WHERE id = ${input.routineId}`;
-    await avisarRutinaCumplida(client, String(rutina?.title ?? 'su rutina'), input.completionPercent, input.durationSeconds ?? null, false);
+    await avisarRutinaCumplida(client, String(rutina?.title ?? 'su rutina'), input.completionPercent, input.durationSeconds ?? null, false, input.routineId, input.completedOn);
   }
   return reply.code(201).send(completion);
 });
@@ -7535,21 +7542,22 @@ const routineFeedbackSchema = z.object({ routineId: z.string().uuid(), completed
 
 async function notifyRoutineActivity(input: {
   ownerId: string; clientId: string; routineId: string; completedOn: string; kind: 'started' | 'completed' | 'feedback'; clientName: string; routineTitle: string;
-  elapsedSeconds?: number; completedCount?: number; totalExercises?: number; feeling?: string | null; difficulty?: string | null; feedback?: string | null;
+  elapsedSeconds?: number; completedCount?: number; totalExercises?: number; completionPercent?: number; feeling?: string | null; difficulty?: string | null; feedback?: string | null;
 }) {
   const feelingLabels: Record<string, string> = { muy_dificil: 'Muy difícil', dificil: 'Difícil', bien: 'Bien', excelente: 'Excelente' };
   const difficultyLabels: Record<string, string> = { facil: 'Fácil', bien: 'Bien', dificil: 'Difícil' };
   const feedbackText = [input.feeling ? `Sensación: ${feelingLabels[input.feeling] || input.feeling}` : '', input.difficulty ? `Dificultad: ${difficultyLabels[input.difficulty] || input.difficulty}` : '', input.feedback ? `Comentario: ${input.feedback}` : ''].filter(Boolean).join(' · ');
   const title = input.kind === 'started' ? `Entrenamiento iniciado · ${input.clientName}` : input.kind === 'completed' ? `Rutina completada · ${input.clientName}` : `Feedback recibido · ${input.clientName}`;
+  const durationText = input.elapsedSeconds != null ? duracionTexto(Number(input.elapsedSeconds)) : '';
   const body = input.kind === 'started'
     ? `${input.clientName} inició «${input.routineTitle}».`
     : input.kind === 'completed'
-      ? `${input.clientName} completó «${input.routineTitle}» · ${input.completedCount || 0}/${input.totalExercises || 0} ejercicios · ${Math.floor(Number(input.elapsedSeconds || 0) / 60)}:${String(Number(input.elapsedSeconds || 0) % 60).padStart(2, '0')}${feedbackText ? ` · ${feedbackText}` : ''}.`
+      ? `${input.clientName} completó «${input.routineTitle}»${durationText ? ` ·${durationText}` : ''} · ${input.completedCount != null && input.totalExercises != null ? `${input.completedCount}/${input.totalExercises} ejercicios` : `${input.completionPercent || 0}%`}${feedbackText ? ` · ${feedbackText}` : ''}.`
       : `${input.clientName} dejó feedback sobre «${input.routineTitle}»: ${feedbackText || 'sin comentario.'}`;
   const [notification] = input.kind === 'feedback'
     ? await sql`INSERT INTO routine_activity_notifications (owner_id, client_id, routine_id, completed_on, kind, title, body) VALUES (${input.ownerId}, ${input.clientId}, ${input.routineId}, ${input.completedOn}, ${input.kind}, ${title}, ${body}) ON CONFLICT (owner_id, routine_id, client_id, completed_on, kind) DO UPDATE SET title = EXCLUDED.title, body = EXCLUDED.body, read_at = null RETURNING id`
     : await sql`INSERT INTO routine_activity_notifications (owner_id, client_id, routine_id, completed_on, kind, title, body) VALUES (${input.ownerId}, ${input.clientId}, ${input.routineId}, ${input.completedOn}, ${input.kind}, ${title}, ${body}) ON CONFLICT (owner_id, routine_id, client_id, completed_on, kind) DO NOTHING RETURNING id`;
-  if (notification) await sendPushToUser(input.ownerId, { title, body, url: new URL('/#clients', config.APP_URL).toString() });
+  if (notification) await sendPushToUser(input.ownerId, { title, body, url: new URL('/#clients', config.APP_URL).toString(), ...(input.kind === 'completed' ? { sound: true, tag: `rutina-${input.clientId}` } : {}) });
   return notification;
 }
 
@@ -7585,9 +7593,27 @@ app.post('/api/portal/routine-exercise-completions', { preHandler: requireAuth }
     else await transaction`INSERT INTO routine_exercise_completions (routine_id, client_id, completed_on, exercise_index, completed, completed_at) VALUES (${input.routineId}, ${client.id}, ${input.completedOn}, ${input.exerciseIndex ?? null}, false, null) ON CONFLICT (routine_id, client_id, completed_on, exercise_index) DO UPDATE SET completed = false, completed_at = null, updated_at = now()`;
     const [count] = await transaction`SELECT count(*) FILTER (WHERE completed)::int AS completed_count FROM routine_exercise_completions WHERE routine_id = ${input.routineId} AND client_id = ${client.id} AND completed_on = ${input.completedOn} AND exercise_index BETWEEN 0 AND ${ejercicios.length - 1}`;
     const completedCount = Number(count.completed_count || 0); const completionPercent = Math.round(completedCount * 100 / ejercicios.length);
-    if (completedCount === ejercicios.length) await transaction`UPDATE routine_timer_sessions SET active = false, completed_at = now(), elapsed_seconds = GREATEST(elapsed_seconds, ${input.elapsedSeconds}), updated_at = now() WHERE routine_id = ${input.routineId} AND client_id = ${client.id} AND completed_on = ${input.completedOn}`;
+    let sessionCompleted: Record<string, unknown> | null = null;
+    let offerCompleted = false;
+    if (completedCount === ejercicios.length) {
+      await transaction`UPDATE routine_timer_sessions SET active = false, completed_at = now(), elapsed_seconds = GREATEST(elapsed_seconds, ${input.elapsedSeconds}), updated_at = now() WHERE routine_id = ${input.routineId} AND client_id = ${client.id} AND completed_on = ${input.completedOn}`;
+      const [offer] = await transaction`
+        SELECT o.id, o.session_id, c.owner_id
+        FROM session_routine_offers o
+        JOIN sessions s ON s.id = o.session_id
+        JOIN clients c ON c.id = s.client_id
+        WHERE o.routine_id = ${input.routineId} AND o.client_id = ${client.id} AND o.status = 'offered'
+          AND (s.starts_at AT TIME ZONE 'America/Panama')::date = ${input.completedOn}::date
+        FOR UPDATE OF o, s`;
+      if (offer) {
+        sessionCompleted = await recordSessionComplianceInTransaction(transaction, String(offer.session_id), String(offer.owner_id), auth.sub, 'completed', 100, { permitirAnticipada: true });
+        if (!sessionCompleted) throw new Error('La clase vinculada a la rutina ya no está disponible para cerrarse');
+        await transaction`UPDATE session_routine_offers SET status = 'completed', completed_at = now(), completion_percent = 100, duration_seconds = ${input.elapsedSeconds} WHERE id = ${offer.id}`;
+        offerCompleted = true;
+      }
+    }
     const [completion] = await transaction`INSERT INTO routine_completions (routine_id, client_id, completed_on, completion_percent, elapsed_seconds, feeling, difficulty, feedback, marked_by_user_id, duration_seconds) VALUES (${input.routineId}, ${client.id}, ${input.completedOn}, ${completionPercent}, ${input.elapsedSeconds}, ${input.feeling || null}, ${input.difficulty || null}, ${input.feedback || null}, ${auth.sub}, NULLIF(${input.elapsedSeconds}, 0)) ON CONFLICT (routine_id, client_id, completed_on) DO UPDATE SET completion_percent = EXCLUDED.completion_percent, elapsed_seconds = EXCLUDED.elapsed_seconds, duration_seconds = COALESCE(EXCLUDED.duration_seconds, routine_completions.duration_seconds), feeling = COALESCE(EXCLUDED.feeling, routine_completions.feeling), difficulty = COALESCE(EXCLUDED.difficulty, routine_completions.difficulty), feedback = COALESCE(EXCLUDED.feedback, routine_completions.feedback), marked_by_user_id = EXCLUDED.marked_by_user_id, updated_at = now() RETURNING *`;
-    return { completion, completedCount, totalExercises: ejercicios.length, routineCompleted: completedCount === ejercicios.length };
+    return { completion, completedCount, totalExercises: ejercicios.length, routineCompleted: completedCount === ejercicios.length, offerCompleted, sessionCompleted: Boolean(sessionCompleted) };
   });
   if (!result) return reply.code(404).send({ error: 'La rutina no está asignada a este cliente' });
   if (result.routineCompleted) {
@@ -7619,13 +7645,12 @@ const duracionTexto = (segundos: number | null) => {
   return minutos < 1 ? ` en ${segundos} s` : ` en ${minutos} min`;
 };
 
-async function avisarRutinaCumplida(cliente: Record<string, unknown>, rutina: string, porcentaje: number, duracion: number | null, enLugarDeClase: boolean) {
+async function avisarRutinaCumplida(cliente: Record<string, unknown>, rutina: string, porcentaje: number, duracion: number | null, enLugarDeClase: boolean, routineId: string, completedOn: string) {
   const client = cliente as { id: string; owner_id: string; full_name: string };
-  await sendPushToUser(client.owner_id, {
-    title: `Rutina cumplida · ${client.full_name}`,
-    body: `«${rutina}»${duracionTexto(duracion)} · ${porcentaje}%${enLugarDeClase ? '. Cuenta como su clase de hoy.' : '.'}`,
-    url: new URL('/#calendar', config.APP_URL).toString(),
-    sound: true, tag: `rutina-${client.id}`
+  await notifyRoutineActivity({
+    ownerId: client.owner_id, clientId: client.id, routineId, completedOn, kind: 'completed',
+    clientName: client.full_name, routineTitle: rutina, completionPercent: porcentaje,
+    elapsedSeconds: duracion ?? undefined, feedback: enLugarDeClase ? 'Cuenta como su clase de hoy' : undefined
   });
 }
 
@@ -7732,7 +7757,7 @@ app.post('/api/portal/routine-offers/:id/complete', { preHandler: requireAuth },
   let clase: Record<string, unknown> | null = null;
   try { clase = await recordSessionCompliance(String(oferta.session_id), client.owner_id, auth.sub, 'completed', input.completionPercent, { permitirAnticipada: true }); }
   catch (error) { app.log.warn({ err: error, sessionId: oferta.session_id }, 'La rutina se cumplió pero la clase no pudo marcarse como realizada'); }
-  await avisarRutinaCumplida(client, String(oferta.title), input.completionPercent, input.durationSeconds ?? null, Boolean(clase));
+  await avisarRutinaCumplida(client, String(oferta.title), input.completionPercent, input.durationSeconds ?? null, Boolean(clase), String(oferta.routine_id), fechaDeNegocioPanama());
   return { completed: true, sessionCompleted: Boolean(clase), billing: clase?.billing ?? null };
 });
 
@@ -8524,7 +8549,7 @@ app.post('/api/public/routine/:token/complete', async (request, reply) => {
       catch (error) { app.log.warn({ err: error, sessionId: clase.id }, 'La rutina por enlace se cumplió pero la clase no pudo marcarse como realizada'); }
     }
   }
-  await avisarRutinaCumplida({ id: fila.client_id, owner_id: fila.owner_id, full_name: fila.full_name }, String(fila.title), input.completionPercent, input.durationSeconds ?? null, Boolean(claseCerrada));
+  await avisarRutinaCumplida({ id: fila.client_id, owner_id: fila.owner_id, full_name: fila.full_name }, String(fila.title), input.completionPercent, input.durationSeconds ?? null, Boolean(claseCerrada), String(fila.routine_id), hoy);
   return { completed: true, sessionCompleted: Boolean(claseCerrada) };
 });
 

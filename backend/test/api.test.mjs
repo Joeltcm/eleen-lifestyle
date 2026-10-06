@@ -2959,6 +2959,7 @@ describe('lo que el portal dice que se debe', () => {
     });
     assert.equal(feedback.estado, 200);
     const avisos = (await api.get('/api/notifications')).datos.filter(item => item.notificationId && item.body.includes('Ronda de prueba'));
+    assert.equal(avisos.filter(item => item.title.includes('Rutina completada')).length, 1, 'una rutina debe generar una sola notificación de finalización');
     assert.ok(avisos.some(item => item.title.includes('Rutina completada')));
     assert.ok(avisos.some(item => item.title.includes('Feedback recibido') && item.body.includes('mucha energía')));
 
