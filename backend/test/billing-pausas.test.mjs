@@ -72,7 +72,8 @@ test('A CRÉDITO: Julio en pausa o inactivo igual recibe la factura de lo ya dad
 });
 
 test('RUTA reanudar (estado new): devuelve el nuevo día de corte y la fecha de su próximo ciclo, y mueve el corte del cliente', async () => {
-  const [{ hoy }] = await db`SELECT current_date::text AS hoy`;
+  // El servidor cuenta los días en hora de Panamá; current_date seguiría la zona de la sesión (UTC en CI) y de noche, desde las 19:00 de Panamá, estaría un día adelantado.
+  const [{ hoy }] = await db`SELECT (now() AT TIME ZONE 'America/Panama')::date::text AS hoy`;
   const mas = d => { const x = new Date(`${hoy}T12:00:00Z`); x.setUTCDate(x.getUTCDate() + d); return x.toISOString().slice(0, 10); };
   await nuevo('Berta', 15);
   await linea('Berta', 'Berta', 'monthly', 150, mas(-40));
