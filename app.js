@@ -1,4 +1,15 @@
-const APP_VERSION = '291';
+const APP_VERSION = '292';
+const markPwaVersion = () => document.querySelectorAll('.topbar-actions').forEach(actions => {
+  if (actions.querySelector('[data-pwa-version]')) return;
+  const indicator = document.createElement('span');
+  indicator.className = 'pwa-version';
+  indicator.dataset.pwaVersion = '';
+  indicator.setAttribute('aria-label', 'Versión de la aplicación');
+  indicator.textContent = `PWA v${APP_VERSION}`;
+  indicator.title = `Versión de la PWA: ${APP_VERSION}`;
+  actions.prepend(indicator);
+});
+markPwaVersion();
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const today = new Date();
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;

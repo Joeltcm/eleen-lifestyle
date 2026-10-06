@@ -31,6 +31,13 @@ test('app.js, sw.js, version.json e index.html llevan la misma versión', async 
   assert.ok(marcas.every(v => v === enApp), `index.html tiene ${[...new Set(marcas)]} y app.js ${enApp}`);
 });
 
+test('la versión activa de la PWA queda visible en Eileen y en el portal', async () => {
+  const app = await leer('app.js');
+  assert.match(app, /querySelectorAll\('\.topbar-actions'\)/);
+  assert.match(app, /indicator\.dataset\.pwaVersion/);
+  assert.match(app, /PWA v\$\{APP_VERSION\}/);
+});
+
 test('la pestaña Cobros existe, es distinta de la de facturas y usa el vocabulario cobro = dinero recibido', async () => {
   const html = await leer('index.html');
   assert.match(html, /data-subtab="cobros-nuevo">Cobros</);
