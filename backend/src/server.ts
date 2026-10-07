@@ -21,6 +21,7 @@ import { fechaDeNegocioPanama, fechaPanamaDiasAtras } from './panama-date.js';
 import { resolveBillingEngine } from './billing-engine.js';
 import { planBillingGeneration, runBillingGeneration, shiftCutAfterPause } from './billing-generator.js';
 import { DEFAULT_IMPORT_MANIFEST, applyBatch, approveBatch, createPreviewBatch, getBatch, listBatches, reverseBatch, type ImportManifest } from './billing-import.js';
+import { exercisesHash, routineSummaryText, type RoutineExerciseForSummary } from './routine-utils.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
 const app = Fastify({ logger: true, trustProxy: true });
@@ -3199,6 +3200,55 @@ const routineExerciseSchema = z.object({
   block: z.coerce.number().int().min(1).max(20).optional(), rounds: z.coerce.number().int().min(1).max(10).optional()
 });
 const routineSchema = z.object({ title: z.string().min(2), description: z.string().optional(), sessionsPerWeek: z.coerce.number().int().min(1).max(7), exercises: z.array(routineExerciseSchema).max(80).default([]), clientId: z.string().uuid().optional(), dueOn: z.string().date().nullable().optional() });
+
+type RoutineDeliveryKind = 'assignment' | 'link' | 'offer' | 'travel_link' | 'new_version';
+type RoutineDeliveryRoutine = {
+  id: string;
+  owner_id: string;
+  title: string;
+  version?: number | null;
+  due_on?: string | null;
+  sessions_per_week?: number | null;
+  exercises?: RoutineExerciseForSummary[] | null;
+};
+
+async function recordRoutineDelivery(transaction: TransactionSql, input: {
+  routine: RoutineDeliveryRoutine;
+  clientId: string;
+  kind: RoutineDeliveryKind;
+  sentByUserId: string;
+  sentAt?: Date | string | null;
+  dueOn?: string | null;
+  shareLinkId?: string | null;
+  offerId?: string | null;
+  assignmentId?: string | null;
+}) {
+  const [client] = await transaction`SELECT id, full_name FROM clients WHERE id = ${input.clientId} AND owner_id = ${input.routine.owner_id}`;
+  if (!client) throw new Error('Cliente no encontrado para registrar el envío de la rutina');
+  const exercises = Array.isArray(input.routine.exercises) ? input.routine.exercises : [];
+  const summary = routineSummaryText({
+    title: input.routine.title,
+    version: input.routine.version,
+    sessionsPerWeek: input.routine.sessions_per_week,
+    dueOn: input.dueOn === undefined ? input.routine.due_on : input.dueOn,
+    exercises
+  });
+  const [delivery] = await transaction`
+    INSERT INTO routine_deliveries (
+      owner_id, routine_id, client_id, kind, sent_at, sent_by_user_id, due_on,
+      share_link_id, offer_id, assignment_id, routine_title, routine_version,
+      client_name, summary_text, exercises_snapshot
+    ) VALUES (
+      ${input.routine.owner_id}, ${input.routine.id}, ${input.clientId}, ${input.kind}, COALESCE(${input.sentAt ?? null}::timestamptz, now()), ${input.sentByUserId},
+      ${input.dueOn === undefined ? input.routine.due_on ?? null : input.dueOn ?? null}::date,
+      ${input.shareLinkId ?? null}, ${input.offerId ?? null}, ${input.assignmentId ?? null},
+      ${input.routine.title}, ${input.routine.version || 1}, ${client.full_name},
+      ${summary}, ${transaction.json(exercises)}
+    ) RETURNING *
+  `;
+  return delivery;
+}
+
 app.get('/api/routines', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`
@@ -3206,6 +3256,50 @@ app.get('/api/routines', { preHandler: requireStaff }, async request => {
       max(ra.due_on) FILTER (WHERE ra.active) AS due_on
     FROM routines r LEFT JOIN routine_assignments ra ON ra.routine_id = r.id
     WHERE r.owner_id = ${auth.sub} GROUP BY r.id ORDER BY r.created_at DESC
+  `;
+});
+
+// Registro de uso de una rutina. La instantánea y el resumen vienen de la
+// entrega, no se vuelven a construir con la rutina actual.
+app.get('/api/routines/:id/deliveries', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [routine] = await sql`SELECT id FROM routines WHERE id = ${id} AND owner_id = ${auth.sub}`;
+  if (!routine) return reply.code(404).send({ error: 'Rutina no encontrada' });
+  return sql`
+    SELECT d.*, completed.completed_on, completed.completion_percent,
+      (completed.completed_on IS NOT NULL) AS completed
+    FROM routine_deliveries d
+    LEFT JOIN LATERAL (
+      SELECT rc.completed_on, rc.completion_percent
+      FROM routine_completions rc
+      WHERE rc.routine_id = d.routine_id AND rc.client_id = d.client_id
+        AND (rc.created_at >= d.sent_at OR rc.completed_on >= (d.sent_at AT TIME ZONE 'America/Panama')::date)
+      ORDER BY rc.created_at DESC LIMIT 1
+    ) completed ON true
+    WHERE d.owner_id = ${auth.sub} AND d.routine_id = ${id}
+    ORDER BY d.sent_at DESC
+  `;
+});
+
+app.get('/api/clients/:id/routine-deliveries', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [client] = await sql`SELECT id FROM clients WHERE id = ${id} AND owner_id = ${auth.sub}`;
+  if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  return sql`
+    SELECT d.*, completed.completed_on, completed.completion_percent,
+      (completed.completed_on IS NOT NULL) AS completed
+    FROM routine_deliveries d
+    LEFT JOIN LATERAL (
+      SELECT rc.completed_on, rc.completion_percent
+      FROM routine_completions rc
+      WHERE rc.routine_id = d.routine_id AND rc.client_id = d.client_id
+        AND (rc.created_at >= d.sent_at OR rc.completed_on >= (d.sent_at AT TIME ZONE 'America/Panama')::date)
+      ORDER BY rc.created_at DESC LIMIT 1
+    ) completed ON true
+    WHERE d.owner_id = ${auth.sub} AND d.client_id = ${id}
+    ORDER BY d.sent_at DESC
   `;
 });
 // Propuesta de rutina con IA. Devuelve un borrador para que la entrenadora lo
@@ -3323,8 +3417,12 @@ app.post('/api/routines/suggest', { preHandler: requireStaff }, async (request, 
 app.post('/api/routines', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = routineSchema.parse(request.body);
   const routine = await sql.begin(async transaction => {
-    const [created] = await transaction`INSERT INTO routines (owner_id, title, description, sessions_per_week, exercises) VALUES (${auth.sub}, ${input.title}, ${input.description || null}, ${input.sessionsPerWeek}, ${transaction.json(input.exercises)}) RETURNING *`;
-    if (input.clientId) await transaction`INSERT INTO routine_assignments (routine_id, client_id, due_on) SELECT ${created.id}, id, ${input.dueOn ?? null}::date FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub}`;
+    const routineId = randomUUID();
+    const [created] = await transaction`INSERT INTO routines (id, owner_id, root_routine_id, title, description, sessions_per_week, exercises, exercises_hash) VALUES (${routineId}, ${auth.sub}, ${routineId}, ${input.title}, ${input.description || null}, ${input.sessionsPerWeek}, ${transaction.json(input.exercises)}, ${exercisesHash(input.exercises)}) RETURNING *`;
+    if (input.clientId) {
+      const [assignment] = await transaction`INSERT INTO routine_assignments (routine_id, client_id, due_on) SELECT ${created.id}, id, ${input.dueOn ?? null}::date FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub} RETURNING *`;
+      if (assignment) await recordRoutineDelivery(transaction, { routine: created as unknown as RoutineDeliveryRoutine, clientId: assignment.client_id, kind: 'assignment', sentByUserId: auth.sub, dueOn: assignment.due_on, assignmentId: assignment.id });
+    }
     return created;
   });
   return reply.code(201).send(routine);
@@ -3339,7 +3437,7 @@ app.patch('/api/routines/:id', { preHandler: requireStaff }, async (request, rep
   let routine;
   try {
     routine = await sql.begin(async transaction => {
-      const [updated] = await transaction`UPDATE routines SET title = ${input.title}, description = ${input.description || null}, sessions_per_week = ${input.sessionsPerWeek}, exercises = ${transaction.json(input.exercises)}, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
+      const [updated] = await transaction`UPDATE routines SET title = ${input.title}, description = ${input.description || null}, sessions_per_week = ${input.sessionsPerWeek}, exercises = ${transaction.json(input.exercises)}, exercises_hash = ${exercisesHash(input.exercises)}, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
       if (!updated) return null;
       // Si sólo se editan los ejercicios, clientId viene omitido y la asignación
       // actual debe permanecer intacta. La fecha sí puede cambiarse, pero sólo
@@ -3353,7 +3451,10 @@ app.patch('/api/routines/:id', { preHandler: requireStaff }, async (request, rep
       // otra. En ese flujo la fecha sigue viajando con la asignación nueva.
       if (input.clientId !== undefined) {
         await transaction`UPDATE routine_assignments SET active = false, ends_on = current_date WHERE routine_id = ${id} AND active = true`;
-        if (input.clientId) await transaction`INSERT INTO routine_assignments (routine_id, client_id, due_on) SELECT ${id}, c.id, ${input.dueOn ?? null}::date FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} ON CONFLICT (routine_id, client_id, starts_on) DO UPDATE SET active = true, ends_on = null, due_on = EXCLUDED.due_on`;
+        if (input.clientId) {
+          const [assignment] = await transaction`INSERT INTO routine_assignments (routine_id, client_id, due_on) SELECT ${id}, c.id, ${input.dueOn ?? null}::date FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} ON CONFLICT (routine_id, client_id, starts_on) DO UPDATE SET active = true, ends_on = null, due_on = EXCLUDED.due_on RETURNING *`;
+          if (assignment) await recordRoutineDelivery(transaction, { routine: updated as unknown as RoutineDeliveryRoutine, clientId: assignment.client_id, kind: 'assignment', sentByUserId: auth.sub, dueOn: assignment.due_on, assignmentId: assignment.id });
+        }
       }
       return updated;
     });
@@ -7720,7 +7821,7 @@ app.post('/api/sessions/:id/routine-offer', { preHandler: requireStaff }, async 
   if (sesion.status !== 'scheduled') return reply.code(409).send({ error: 'Solo se puede ofrecer una rutina en lugar de una clase programada.' });
   if (!sesion.dia_vigente) return reply.code(409).send({ error: `La rutina solo vale el día de la clase (${sesion.dia_texto}) y ese día ya pasó.` });
   const [rutina] = await sql`
-    SELECT r.id, r.title FROM routines r JOIN routine_assignments ra ON ra.routine_id = r.id AND ra.active = true AND ra.client_id = ${sesion.client_id}
+    SELECT r.id, r.owner_id, r.title, r.version, ra.due_on, r.sessions_per_week, r.exercises FROM routines r JOIN routine_assignments ra ON ra.routine_id = r.id AND ra.active = true AND ra.client_id = ${sesion.client_id}
     WHERE r.id = ${input.routineId} AND r.owner_id = ${auth.sub}`;
   if (!rutina) return reply.code(409).send({ error: 'La rutina debe estar asignada a este cliente.' });
   const [previa] = await sql`SELECT status FROM session_routine_offers WHERE session_id = ${id}`;
@@ -7733,6 +7834,14 @@ app.post('/api/sessions/:id/routine-offer', { preHandler: requireStaff }, async 
       ON CONFLICT (session_id) DO UPDATE SET routine_id = EXCLUDED.routine_id, status = 'offered', offered_at = now(), offered_by_user_id = EXCLUDED.offered_by_user_id,
         origin = EXCLUDED.origin, completed_at = NULL, completion_percent = NULL, duration_seconds = NULL
       RETURNING *`;
+    await recordRoutineDelivery(transaction, {
+      routine: rutina as unknown as RoutineDeliveryRoutine,
+      clientId: sesion.client_id,
+      kind: 'offer',
+      sentByUserId: auth.sub,
+      sentAt: filas[0].offered_at,
+      offerId: filas[0].id
+    });
     const nota = input.origin === 'client'
       ? 'Rutina ofrecida en lugar de la clase (cancelación del cliente). Solo vale el día de la clase; si no la cumple, la clase se da por perdida.'
       : 'Rutina ofrecida en lugar de la clase (Eileen no pudo atenderla). Solo vale el día de la clase.';
@@ -8447,7 +8556,7 @@ app.post('/api/routines/:id/share-links', { preHandler: requireStaff }, async (r
   const id = z.string().uuid().parse((request.params as { id: string }).id);
   const input = enlaceSchema.parse(request.body);
   const [rutina] = await sql`
-    SELECT r.id, r.title FROM routines r JOIN routine_assignments ra ON ra.routine_id = r.id AND ra.active = true AND ra.client_id = ${input.clientId}
+    SELECT r.id, r.owner_id, r.title, r.version, ra.due_on, r.sessions_per_week, r.exercises FROM routines r JOIN routine_assignments ra ON ra.routine_id = r.id AND ra.active = true AND ra.client_id = ${input.clientId}
     WHERE r.id = ${id} AND r.owner_id = ${auth.sub}`;
   if (!rutina) return reply.code(409).send({ error: 'La rutina debe estar asignada a ese cliente.' });
   if (input.travelId) {
@@ -8462,10 +8571,22 @@ app.post('/api/routines/:id/share-links', { preHandler: requireStaff }, async (r
   if (expiresAt.getTime() < Date.now() + 3600_000) return reply.code(400).send({ error: 'La vigencia debe ser de al menos una hora.' });
   if (expiresAt.getTime() > Date.now() + 90 * 86400_000) return reply.code(400).send({ error: 'La vigencia no puede pasar de 90 días.' });
   const token = randomBytes(32).toString('base64url');
-  const [enlace] = await sql`
-    INSERT INTO routine_share_links (owner_id, client_id, routine_id, travel_id, token_hash, expires_at, created_by)
-    VALUES (${auth.sub}, ${input.clientId}, ${id}, ${input.travelId ?? null}, ${hashToken(token)}, ${expiresAt}, ${auth.sub})
-    RETURNING id, expires_at`;
+  const enlace = await sql.begin(async transaction => {
+    const [created] = await transaction`
+      INSERT INTO routine_share_links (owner_id, client_id, routine_id, travel_id, token_hash, expires_at, created_by)
+      VALUES (${auth.sub}, ${input.clientId}, ${id}, ${input.travelId ?? null}, ${hashToken(token)}, ${expiresAt}, ${auth.sub})
+      RETURNING id, expires_at, created_at`;
+    await recordRoutineDelivery(transaction, {
+      routine: rutina as unknown as RoutineDeliveryRoutine,
+      clientId: input.clientId,
+      kind: input.travelId ? 'travel_link' : 'link',
+      sentByUserId: auth.sub,
+      sentAt: created.created_at,
+      dueOn: rutina.due_on,
+      shareLinkId: created.id
+    });
+    return created;
+  });
   return reply.code(201).send({ id: enlace.id, url: new URL(`/#rutina=${token}`, config.APP_URL).toString(), expiresAt: enlace.expires_at, routineTitle: rutina.title });
 });
 app.get('/api/clients/:id/share-links', { preHandler: requireStaff }, async (request, reply) => {

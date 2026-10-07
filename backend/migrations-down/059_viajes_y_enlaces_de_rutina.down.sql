@@ -10,6 +10,9 @@ BEGIN
     RAISE EXCEPTION 'hay viajes o enlaces de rutina guardados: respalde y active billing.allow_destructive_down = on para continuar';
   END IF;
 END $$;
+-- La 063 conserva una bitácora que apunta a esta tabla. Esta reversa antigua
+-- puede ejecutarse aislada en las pruebas, así que solo se suelta la FK.
+ALTER TABLE IF EXISTS routine_deliveries DROP CONSTRAINT IF EXISTS routine_deliveries_share_link_id_fkey;
 DROP TABLE IF EXISTS routine_share_links;
 -- CASCADE: si la 060 sigue aplicada, sessions.cancelled_travel_id depende de esta tabla; se suelta solo la restricción (la 060 quita la columna).
 DROP TABLE IF EXISTS client_travel CASCADE;
