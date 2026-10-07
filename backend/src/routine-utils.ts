@@ -22,7 +22,8 @@ export type RoutineForSummary = {
 
 /**
  * Identidad de ejercicio para comparar rutinas sin confundir parámetros de
- * trabajo con el ejercicio elegido. Se conserva el orden y los repetidos.
+ * trabajo con el ejercicio elegido. Devuelve una por ejercicio, en el orden de la rutina
+ * (para comparar conjuntos usa exerciseSetKey / sameExerciseSet, que ignoran el orden).
  */
 export function exerciseIdentities(exercises: RoutineExerciseForSummary[] = []): string[] {
   return exercises.map(exercise => {
@@ -32,8 +33,21 @@ export function exerciseIdentities(exercises: RoutineExerciseForSummary[] = []):
   });
 }
 
+/**
+ * Clave del CONJUNTO de ejercicios: las identidades ordenadas (un repetido cuenta tantas veces como aparece). Reordenar no la cambia;
+ * agregar, quitar o cambiar un ejercicio sí. Es el criterio de Joel para "modificar" una rutina y para el aviso de envíos repetidos.
+ */
+export function exerciseSetKey(exercises: RoutineExerciseForSummary[] = []): string[] {
+  return [...exerciseIdentities(exercises)].sort();
+}
+
+export function sameExerciseSet(a: RoutineExerciseForSummary[] = [], b: RoutineExerciseForSummary[] = []): boolean {
+  const left = exerciseSetKey(a); const right = exerciseSetKey(b);
+  return left.length === right.length && left.every((identity, index) => identity === right[index]);
+}
+
 export function exercisesHash(exercises: RoutineExerciseForSummary[] = []): string {
-  return createHash('sha256').update(JSON.stringify(exerciseIdentities(exercises))).digest('hex');
+  return createHash('sha256').update(JSON.stringify(exerciseSetKey(exercises))).digest('hex');
 }
 
 function fechaPanama(value: string): string {
@@ -45,8 +59,9 @@ function textoNumero(value: unknown): string {
   return String(value ?? '').trim();
 }
 
-function detalleEjercicio(exercise: RoutineExerciseForSummary): string {
-  const sets = Number.isFinite(Number(exercise.sets)) && Number(exercise.sets) > 0 ? `${Number(exercise.sets)} series` : '';
+function detalleEjercicio(exercise: RoutineExerciseForSummary, enBloque = false): string {
+  // Dentro de un bloque `sets` es el número de rondas del bloque (ya va en su encabezado): repetirlo como "3 series" se leería como 9.
+  const sets = !enBloque && Number.isFinite(Number(exercise.sets)) && Number(exercise.sets) > 0 ? `${Number(exercise.sets)} series` : '';
   const reps = textoNumero(exercise.reps);
   const cantidad = sets && reps ? `${sets} × ${reps}` : sets || reps;
   const peso = textoNumero(exercise.weight);
@@ -57,10 +72,6 @@ function tituloEjercicio(exercise: RoutineExerciseForSummary): string {
   return textoNumero(exercise.name) || 'Ejercicio sin nombre';
 }
 
-function fechaLimite(routine: RoutineForSummary): string {
-  return routine.dueOn ? `Fecha límite: ${fechaPanama(routine.dueOn)}\n\n` : '';
-}
-
 /** Genera una foto textual, legible y copiable de la rutina en el momento del envío. */
 export function routineSummaryText(routine: RoutineForSummary): string {
   const exercises = Array.isArray(routine.exercises) ? routine.exercises : [];
@@ -68,8 +79,8 @@ export function routineSummaryText(routine: RoutineForSummary): string {
   const sesiones = Number(routine.sessionsPerWeek || 0);
   const sesionesTexto = sesiones === 1 ? '1 sesión por semana' : `${sesiones} sesiones por semana`;
   const encabezado = `${textoNumero(routine.title) || 'Rutina'} (v${version}) · ${exercises.length} ejercicio${exercises.length === 1 ? '' : 's'} · ${sesionesTexto}`;
-  const lineas: string[] = [encabezado, '', fechaLimite(routine).trimEnd()];
-  if (routine.dueOn) lineas.push('');
+  const lineas: string[] = [encabezado, ''];
+  if (routine.dueOn) lineas.push(`Fecha límite: ${fechaPanama(routine.dueOn)}`, '');
 
   const bloques = [...new Set(exercises.map(exercise => Number(exercise.block)).filter(block => Number.isInteger(block) && block > 0))] as number[];
   if (!bloques.length) {
@@ -87,7 +98,7 @@ export function routineSummaryText(routine: RoutineForSummary): string {
       lineas.push(`Bloque ${bloque}${rondas ? ` · ${rondas} rondas` : ''}`);
       delBloque.forEach(exercise => {
         numero += 1;
-        lineas.push(`  ${numero}. ${tituloEjercicio(exercise)}${detalleEjercicio(exercise) ? ` — ${detalleEjercicio(exercise)}` : ''}`);
+        lineas.push(`  ${numero}. ${tituloEjercicio(exercise)}${detalleEjercicio(exercise, true) ? ` — ${detalleEjercicio(exercise, true)}` : ''}`);
         if (textoNumero(exercise.notes)) lineas.push(`     Nota: ${textoNumero(exercise.notes)}`);
       });
     }

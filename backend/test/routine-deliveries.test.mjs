@@ -36,7 +36,8 @@ test('routineSummaryText conserva bloques, rondas, texto libre, peso y notas', (
   assert.match(texto, /Piernas intensas \(v2\) · 3 ejercicios · 1 sesión por semana/);
   assert.match(texto, /Fecha límite: 11-10-2026/);
   assert.match(texto, /Bloque 1 · 3 rondas/);
-  assert.match(texto, /3 series × 15/);
+  assert.doesNotMatch(texto.split('Bloque 2')[0], /series/, 'dentro de un bloque no se repiten las series: son las rondas del encabezado');
+  assert.match(texto, /Sentadilla Goblet — 15/);
   assert.match(texto, /12 por pierna · peso 10 lbs por mano/);
   assert.match(texto, /Nota: Rodilla alineada/);
   assert.match(texto, /Puente — 20 · peso liga heavy/);
