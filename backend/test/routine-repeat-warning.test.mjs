@@ -75,12 +75,18 @@ test('las vías de enlace, viaje, oferta y reasignación devuelven el mismo avis
   const rutina = await api.post('/api/routines', { title: 'Rutina de todas las vías', description: 'Vías', sessionsPerWeek: 1, clientId: clienteId, exercises: [{ name: 'Puente', reps: '12' }] });
   assert.equal(rutina.estado, 201);
 
+  // El flujo normal: se guarda la rutina para la clienta y a continuación se le manda el enlace. Es UN envío por dos vías, no un repetido.
+  const primerEnlace = await api.post(`/api/routines/${rutina.datos.id}/share-links`, { clientId: clienteId, hours: 24 });
+  assert.equal(primerEnlace.estado, 201, `asignar y luego mandar el enlace no debe avisar: ${JSON.stringify(primerEnlace.datos)}`);
+  assert.equal((await db`SELECT repeat_confirmed FROM routine_deliveries WHERE routine_id = ${rutina.datos.id} AND kind = 'link'`)[0].repeat_confirmed, false);
+  // Un SEGUNDO enlace de la misma rutina a la misma clienta sí es repetir.
   const enlaceRechazado = await api.post(`/api/routines/${rutina.datos.id}/share-links`, { clientId: clienteId, hours: 24 });
   assert.equal(enlaceRechazado.estado, 409, JSON.stringify(enlaceRechazado.datos));
   assert.equal(enlaceRechazado.datos.code, 'repeat_recent');
-  assert.equal((await db`SELECT count(*)::int AS n FROM routine_share_links WHERE routine_id = ${rutina.datos.id}`)[0].n, 0);
+  assert.equal((await db`SELECT count(*)::int AS n FROM routine_share_links WHERE routine_id = ${rutina.datos.id}`)[0].n, 1, 'el rechazado no creó otro enlace');
   const enlace = await api.post(`/api/routines/${rutina.datos.id}/share-links`, { clientId: clienteId, hours: 24, confirmRepeat: true });
   assert.equal(enlace.estado, 201, JSON.stringify(enlace.datos));
+  assert.equal((await db`SELECT count(*)::int AS n FROM routine_deliveries WHERE routine_id = ${rutina.datos.id} AND repeat_confirmed`)[0].n, 1, 'solo el envío hecho a pesar del aviso queda marcado');
 
   const viaje = (await api.post(`/api/clients/${clienteId}/travel`, { startsOn: await diaPanama(), endsOn: await diaPanama(2), destination: 'Madrid' })).datos.id;
   const viajeRechazado = await api.post(`/api/routines/${rutina.datos.id}/share-links`, { clientId: clienteId, hours: 24, travelId: viaje });
@@ -107,4 +113,34 @@ test('las vías de enlace, viaje, oferta y reasignación devuelven el mismo avis
     clientId: clienteId, confirmRepeat: true, exercises: rutina.datos.exercises
   });
   assert.equal(confirmada.estado, 200, JSON.stringify(confirmada.datos));
+});
+
+test('guardar la rutina para la clienta y luego ofrecerla o mandarle el enlace no avisa; confirmRepeat sin repetido no marca nada', async () => {
+  const c = (await api.post('/api/clients', { fullName: 'Cliente flujo normal', cutoffDay: 1 })).datos.id;
+  // confirmRepeat: true sin que haya ningún repetido NO debe marcar el envío como "hecho a pesar del aviso"
+  const rutina = await api.post('/api/routines', { title: 'Flujo normal', sessionsPerWeek: 1, clientId: c, confirmRepeat: true, exercises: [{ name: 'Remo', sets: 3, reps: '10' }] });
+  assert.equal(rutina.estado, 201, JSON.stringify(rutina.datos));
+  assert.equal((await db`SELECT repeat_confirmed FROM routine_deliveries WHERE routine_id = ${rutina.datos.id}`)[0].repeat_confirmed, false);
+  const sesion = (await api.post('/api/sessions', { clientId: c, startsAt: aHora(await diaPanama(1)), durationMinutes: 45, mode: 'Presencial' })).datos.id;
+  const oferta = await api.post(`/api/sessions/${sesion}/routine-offer`, { routineId: rutina.datos.id });
+  assert.equal(oferta.estado, 201, `asignar y luego ofrecer no debe avisar: ${JSON.stringify(oferta.datos)}`);
+  // otra rutina (otros ejercicios) para el flujo de viaje: asignar y luego enviar el enlace de viaje tampoco avisa
+  const rutinaViaje = await api.post('/api/routines', { title: 'Flujo de viaje', sessionsPerWeek: 1, clientId: c, exercises: [{ name: 'Flexiones', sets: 3, reps: '8' }] });
+  assert.equal(rutinaViaje.estado, 201, JSON.stringify(rutinaViaje.datos));
+  const viaje = (await api.post(`/api/clients/${c}/travel`, { startsOn: await diaPanama(), endsOn: await diaPanama(2), destination: 'Lima' })).datos.id;
+  const enlaceViaje = await api.post(`/api/routines/${rutinaViaje.datos.id}/share-links`, { clientId: c, hours: 24, travelId: viaje });
+  assert.equal(enlaceViaje.estado, 201, `asignar y luego enviar el enlace de viaje no debe avisar: ${JSON.stringify(enlaceViaje.datos)}`);
+  assert.equal((await db`SELECT count(*)::int AS n FROM routine_deliveries WHERE repeat_confirmed`)[0].n >= 0, true);
+  assert.equal((await db`SELECT count(*)::int AS n FROM routine_deliveries WHERE client_id = ${c} AND repeat_confirmed`)[0].n, 0, 'ningún envío de un flujo normal queda marcado como repetido');
+  // ofrecer la MISMA rutina otra vez por otra vía sí es repetir, y el aviso dice que es la misma rutina
+  const viajeDos = (await api.post(`/api/clients/${c}/travel`, { startsOn: await diaPanama(5), endsOn: await diaPanama(6), destination: 'Quito' })).datos.id;
+  const repetido = await api.post(`/api/routines/${rutina.datos.id}/share-links`, { clientId: c, hours: 24, travelId: viajeDos });
+  assert.equal(repetido.estado, 409, JSON.stringify(repetido.datos));
+  assert.equal(repetido.datos.repeats[0].sameRoutine, true, 'es LA MISMA rutina (antes decía "otra con los mismos ejercicios")');
+  assert.equal(repetido.datos.repeats[0].kind, 'offer');
+  // la consulta de solo lectura distingue la vía de entrada
+  const comoEnlace = (await api.get(`/api/routines/${rutinaViaje.datos.id}/recent-sends?clientId=${c}&kind=link`)).datos.repeats;
+  const comoAsignacion = (await api.get(`/api/routines/${rutinaViaje.datos.id}/recent-sends?clientId=${c}&kind=assignment`)).datos.repeats;
+  assert.ok(comoAsignacion.length >= 1, 'reasignarla sí es repetir');
+  assert.ok(comoEnlace.every(r => r.kind !== 'assignment'), 'como enlace, la asignación vigente de la propia rutina no cuenta');
 });

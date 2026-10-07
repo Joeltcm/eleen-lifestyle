@@ -3233,7 +3233,11 @@ class RoutineRepeatError extends Error {
   }
 }
 
-async function recentRoutineRepeats(transaction: TransactionSql, routine: RoutineDeliveryRoutine, clientId: string): Promise<RoutineRepeat[]> {
+// Un enlace, una oferta o un enlace de viaje de una rutina que ESA clienta ya tiene asignada y vigente no es "repetir" la rutina: es otra vía para entregarle la que ya tiene
+// (el flujo normal es guardar la rutina para la clienta y a continuación ofrecerla o mandarle el enlace). Por eso, al entrar por esas vías, la asignación vigente de la propia rutina no cuenta.
+// Sí cuentan: otro enlace u oferta reciente, una asignación de otra rutina (o de una igual en ejercicios), y toda reasignación.
+async function recentRoutineRepeats(transaction: TransactionSql, routine: RoutineDeliveryRoutine, clientId: string, incomingKind: RoutineDeliveryKind = 'assignment'): Promise<RoutineRepeat[]> {
+  const ignoraAsignacionVigente = incomingKind !== 'assignment';
   const currentExercises = Array.isArray(routine.exercises) ? routine.exercises : [];
   const currentHash = routine.exercises_hash || exercisesHash(currentExercises);
   const rows = await transaction`
@@ -3244,6 +3248,8 @@ async function recentRoutineRepeats(transaction: TransactionSql, routine: Routin
     LEFT JOIN routines r ON r.id = d.routine_id
     WHERE d.owner_id = ${routine.owner_id} AND d.client_id = ${clientId}
       AND d.kind <> 'new_version'
+      AND NOT (${ignoraAsignacionVigente}::boolean AND d.kind = 'assignment' AND d.routine_id = ${routine.id}
+        AND EXISTS (SELECT 1 FROM routine_assignments ra WHERE ra.routine_id = d.routine_id AND ra.client_id = d.client_id AND ra.active = true))
       AND d.sent_at >= (((now() AT TIME ZONE 'America/Panama')::date - 30)::timestamp AT TIME ZONE 'America/Panama')
       AND ((now() AT TIME ZONE 'America/Panama')::date - (d.sent_at AT TIME ZONE 'America/Panama')::date)::int BETWEEN 0 AND 29
     ORDER BY d.sent_at DESC
@@ -3256,15 +3262,17 @@ async function recentRoutineRepeats(transaction: TransactionSql, routine: Routin
     if (!sameRoutine) return [];
     return [{
       routineId: String(row.routine_id), routineTitle: String(row.routine_title), version: Number(row.routine_version || 1),
-      kind: row.kind as RoutineDeliveryKind, sentAt: new Date(row.sent_at as string).toISOString(), daysAgo: Number(row.days_ago), sameRoutine: Boolean(routine.root_routine_id && row.root_routine_id && routine.root_routine_id === row.root_routine_id)
+      kind: row.kind as RoutineDeliveryKind, sentAt: new Date(row.sent_at as string).toISOString(), daysAgo: Number(row.days_ago), sameRoutine: String(row.routine_id) === String(routine.id) || Boolean(routine.root_routine_id && row.root_routine_id && routine.root_routine_id === row.root_routine_id)
     }];
   });
 }
 
-async function rejectRecentRoutineRepeat(transaction: TransactionSql, routine: RoutineDeliveryRoutine, clientId: string, confirmRepeat: boolean | undefined) {
-  if (confirmRepeat) return;
-  const repeats = await recentRoutineRepeats(transaction, routine, clientId);
-  if (repeats.length) throw new RoutineRepeatError(repeats);
+// Devuelve `true` solo si HABÍA repetidos y Eileen los confirmó: es lo que se guarda en routine_deliveries.repeat_confirmed (cuántos envíos se hicieron a pesar del aviso).
+async function rejectRecentRoutineRepeat(transaction: TransactionSql, routine: RoutineDeliveryRoutine, clientId: string, confirmRepeat: boolean | undefined, incomingKind: RoutineDeliveryKind = 'assignment'): Promise<boolean> {
+  const repeats = await recentRoutineRepeats(transaction, routine, clientId, incomingKind);
+  if (!repeats.length) return false;
+  if (!confirmRepeat) throw new RoutineRepeatError(repeats);
+  return true;
 }
 
 async function recordRoutineDelivery(transaction: TransactionSql, input: {
@@ -3374,7 +3382,8 @@ app.get('/api/clients/:id/routine-deliveries', { preHandler: requireStaff }, asy
 app.get('/api/routines/:id/recent-sends', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const clientId = z.string().uuid().parse((request.query as { clientId?: string }).clientId);
+  const consulta = z.object({ clientId: z.string().uuid(), kind: z.enum(['assignment', 'link', 'offer', 'travel_link']).default('assignment') }).parse(request.query);
+  const clientId = consulta.clientId;
   const [routine] = await sql`
     SELECT id, owner_id, title, version, root_routine_id, exercises_hash, exercises
     FROM routines WHERE id = ${id} AND owner_id = ${auth.sub}
@@ -3382,7 +3391,7 @@ app.get('/api/routines/:id/recent-sends', { preHandler: requireStaff }, async (r
   if (!routine) return reply.code(404).send({ error: 'Rutina no encontrada' });
   const [client] = await sql`SELECT id FROM clients WHERE id = ${clientId} AND owner_id = ${auth.sub}`;
   if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
-  const repeats = await recentRoutineRepeats(sql as unknown as TransactionSql, routine as unknown as RoutineDeliveryRoutine, clientId);
+  const repeats = await recentRoutineRepeats(sql as unknown as TransactionSql, routine as unknown as RoutineDeliveryRoutine, clientId, consulta.kind);
   return { repeats };
 });
 // Propuesta de rutina con IA. Devuelve un borrador para que la entrenadora lo
@@ -3505,9 +3514,9 @@ app.post('/api/routines', { preHandler: requireStaff }, async (request, reply) =
       const routineId = randomUUID();
       const [created] = await transaction`INSERT INTO routines (id, owner_id, root_routine_id, title, description, sessions_per_week, exercises, exercises_hash) VALUES (${routineId}, ${auth.sub}, ${routineId}, ${input.title}, ${input.description || null}, ${input.sessionsPerWeek}, ${transaction.json(input.exercises)}, ${exercisesHash(input.exercises)}) RETURNING *`;
       if (input.clientId) {
-        await rejectRecentRoutineRepeat(transaction, created as unknown as RoutineDeliveryRoutine, input.clientId, input.confirmRepeat);
+        const repeticionConfirmada = await rejectRecentRoutineRepeat(transaction, created as unknown as RoutineDeliveryRoutine, input.clientId, input.confirmRepeat, 'assignment');
         const [assignment] = await transaction`INSERT INTO routine_assignments (routine_id, client_id, due_on) SELECT ${created.id}, id, ${input.dueOn ?? null}::date FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub} RETURNING *`;
-        if (assignment) await recordRoutineDelivery(transaction, { routine: created as unknown as RoutineDeliveryRoutine, clientId: assignment.client_id, kind: 'assignment', sentByUserId: auth.sub, dueOn: assignment.due_on, assignmentId: assignment.id, repeatConfirmed: input.confirmRepeat });
+        if (assignment) await recordRoutineDelivery(transaction, { routine: created as unknown as RoutineDeliveryRoutine, clientId: assignment.client_id, kind: 'assignment', sentByUserId: auth.sub, dueOn: assignment.due_on, assignmentId: assignment.id, repeatConfirmed: repeticionConfirmada });
       }
       return created;
     });
@@ -3541,10 +3550,10 @@ app.patch('/api/routines/:id', { preHandler: requireStaff }, async (request, rep
       // otra. En ese flujo la fecha sigue viajando con la asignación nueva.
       if (input.clientId !== undefined) {
         if (input.clientId) {
-          await rejectRecentRoutineRepeat(transaction, updated as unknown as RoutineDeliveryRoutine, input.clientId, input.confirmRepeat);
+          const repeticionConfirmada = await rejectRecentRoutineRepeat(transaction, updated as unknown as RoutineDeliveryRoutine, input.clientId, input.confirmRepeat, 'assignment');
           await transaction`UPDATE routine_assignments SET active = false, ends_on = current_date WHERE routine_id = ${id} AND active = true`;
           const [assignment] = await transaction`INSERT INTO routine_assignments (routine_id, client_id, due_on) SELECT ${id}, c.id, ${input.dueOn ?? null}::date FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} ON CONFLICT (routine_id, client_id, starts_on) DO UPDATE SET active = true, ends_on = null, due_on = EXCLUDED.due_on RETURNING *`;
-          if (assignment) await recordRoutineDelivery(transaction, { routine: updated as unknown as RoutineDeliveryRoutine, clientId: assignment.client_id, kind: 'assignment', sentByUserId: auth.sub, dueOn: assignment.due_on, assignmentId: assignment.id, repeatConfirmed: input.confirmRepeat });
+          if (assignment) await recordRoutineDelivery(transaction, { routine: updated as unknown as RoutineDeliveryRoutine, clientId: assignment.client_id, kind: 'assignment', sentByUserId: auth.sub, dueOn: assignment.due_on, assignmentId: assignment.id, repeatConfirmed: repeticionConfirmada });
         } else {
           await transaction`UPDATE routine_assignments SET active = false, ends_on = current_date WHERE routine_id = ${id} AND active = true`;
         }
@@ -7915,7 +7924,7 @@ app.post('/api/sessions/:id/routine-offer', { preHandler: requireStaff }, async 
   if (sesion.status !== 'scheduled') return reply.code(409).send({ error: 'Solo se puede ofrecer una rutina en lugar de una clase programada.' });
   if (!sesion.dia_vigente) return reply.code(409).send({ error: `La rutina solo vale el día de la clase (${sesion.dia_texto}) y ese día ya pasó.` });
   const [rutina] = await sql`
-    SELECT r.id, r.owner_id, r.title, r.version, ra.due_on, r.sessions_per_week, r.exercises FROM routines r JOIN routine_assignments ra ON ra.routine_id = r.id AND ra.active = true AND ra.client_id = ${sesion.client_id}
+    SELECT r.id, r.owner_id, r.title, r.version, r.root_routine_id, r.exercises_hash, ra.due_on, r.sessions_per_week, r.exercises FROM routines r JOIN routine_assignments ra ON ra.routine_id = r.id AND ra.active = true AND ra.client_id = ${sesion.client_id}
     WHERE r.id = ${input.routineId} AND r.owner_id = ${auth.sub}`;
   if (!rutina) return reply.code(409).send({ error: 'La rutina debe estar asignada a este cliente.' });
   const [previa] = await sql`SELECT status FROM session_routine_offers WHERE session_id = ${id}`;
@@ -7924,7 +7933,7 @@ app.post('/api/sessions/:id/routine-offer', { preHandler: requireStaff }, async 
   let oferta;
   try {
     [oferta] = await sql.begin(async transaction => {
-      await rejectRecentRoutineRepeat(transaction, rutina as unknown as RoutineDeliveryRoutine, sesion.client_id, input.confirmRepeat);
+      const repeticionConfirmada = await rejectRecentRoutineRepeat(transaction, rutina as unknown as RoutineDeliveryRoutine, sesion.client_id, input.confirmRepeat, 'offer');
       const filas = await transaction`
         INSERT INTO session_routine_offers (session_id, routine_id, client_id, offered_by_user_id, origin)
         VALUES (${id}, ${rutina.id}, ${sesion.client_id}, ${auth.sub}, ${input.origin})
@@ -7938,7 +7947,7 @@ app.post('/api/sessions/:id/routine-offer', { preHandler: requireStaff }, async 
         sentByUserId: auth.sub,
         sentAt: filas[0].offered_at,
         offerId: filas[0].id,
-        repeatConfirmed: input.confirmRepeat
+        repeatConfirmed: repeticionConfirmada
       });
       const nota = input.origin === 'client'
         ? 'Rutina ofrecida en lugar de la clase (cancelación del cliente). Solo vale el día de la clase; si no la cumple, la clase se da por perdida.'
@@ -8659,7 +8668,7 @@ app.post('/api/routines/:id/share-links', { preHandler: requireStaff }, async (r
   const id = z.string().uuid().parse((request.params as { id: string }).id);
   const input = enlaceSchema.parse(request.body);
   const [rutina] = await sql`
-    SELECT r.id, r.owner_id, r.title, r.version, ra.due_on, r.sessions_per_week, r.exercises FROM routines r JOIN routine_assignments ra ON ra.routine_id = r.id AND ra.active = true AND ra.client_id = ${input.clientId}
+    SELECT r.id, r.owner_id, r.title, r.version, r.root_routine_id, r.exercises_hash, ra.due_on, r.sessions_per_week, r.exercises FROM routines r JOIN routine_assignments ra ON ra.routine_id = r.id AND ra.active = true AND ra.client_id = ${input.clientId}
     WHERE r.id = ${id} AND r.owner_id = ${auth.sub}`;
   if (!rutina) return reply.code(409).send({ error: 'La rutina debe estar asignada a ese cliente.' });
   if (input.travelId) {
@@ -8677,7 +8686,7 @@ app.post('/api/routines/:id/share-links', { preHandler: requireStaff }, async (r
   let enlace;
   try {
     enlace = await sql.begin(async transaction => {
-      await rejectRecentRoutineRepeat(transaction, rutina as unknown as RoutineDeliveryRoutine, input.clientId, input.confirmRepeat);
+      const repeticionConfirmada = await rejectRecentRoutineRepeat(transaction, rutina as unknown as RoutineDeliveryRoutine, input.clientId, input.confirmRepeat, input.travelId ? 'travel_link' : 'link');
       const [created] = await transaction`
         INSERT INTO routine_share_links (owner_id, client_id, routine_id, travel_id, token_hash, expires_at, created_by)
         VALUES (${auth.sub}, ${input.clientId}, ${id}, ${input.travelId ?? null}, ${hashToken(token)}, ${expiresAt}, ${auth.sub})
@@ -8690,7 +8699,7 @@ app.post('/api/routines/:id/share-links', { preHandler: requireStaff }, async (r
         sentAt: created.created_at,
         dueOn: rutina.due_on,
         shareLinkId: created.id,
-        repeatConfirmed: input.confirmRepeat
+        repeatConfirmed: repeticionConfirmada
       });
       return created;
     });

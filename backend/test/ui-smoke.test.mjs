@@ -280,3 +280,35 @@ test('la descripción de una rutina con secciones (Objetivo, Calentamiento…) s
   } finally { await p.cerrar(); }
   assert.match(readFileSync(new URL('../../styles.css', import.meta.url), 'utf8'), /\.routine-descripcion\{white-space:pre-line\}/, 'la regla que conserva los saltos de línea existe');
 });
+
+test('AVISO DE REPETIDO en pantalla: reutilizar para la misma clienta pregunta; Cancelar no envía nada, Enviar de todos modos sí y queda registrado', async () => {
+  const p = await abrirPantalla({ baseApi: servidor.base, token: tokenStaff, hash: '#routines' });
+  try {
+    await esperar(() => p.evaluar('data.routines.length') >= 1, { mensaje: 'rutinas cargadas' });
+    p.clic(p.q('[data-view="routines"]')); await p.quieta(200);
+    const mensajes = []; let respuesta = false;
+    p.window.confirm = texto => { mensajes.push(String(texto)); return respuesta; };
+    const antes = (await db`SELECT count(*)::int AS n FROM routines`)[0].n; const entregasAntes = (await db`SELECT count(*)::int AS n FROM routine_deliveries`)[0].n;
+    // Reutilizar la rutina ya enviada a Sara y volver a asignársela a Sara: mismos ejercicios, hace 0 días
+    p.clic(p.q(`[data-duplicate-routine="${rutinaId}"]`));
+    const f = await esperar(() => p.q('#routine-form'), { mensaje: 'editor de la reutilización' });
+    assert.equal(f.elements.title.value, 'Rutina en bloques', 'sin "(copia)"');
+    f.elements.client.value = clientId;
+    f.requestSubmit();
+    await esperar(() => mensajes.length === 1, { mensaje: 'aparece el aviso' });
+    assert.match(mensajes[0], /recibió recientemente una rutina igual/); assert.match(mensajes[0], /hace 0 días/); assert.match(mensajes[0], /enviarla de todos modos/i);
+    await p.quieta(400);
+    assert.equal((await db`SELECT count(*)::int AS n FROM routines`)[0].n, antes, 'Cancelar: no se creó ninguna rutina');
+    assert.equal((await db`SELECT count(*)::int AS n FROM routine_deliveries`)[0].n, entregasAntes, 'Cancelar: no se registró ningún envío');
+    assert.ok(p.q('#routine-form'), 'el editor sigue abierto para corregir');
+    assert.ok(!p.q('#routine-form').classList.contains('loading-state'), 'el formulario vuelve a estar disponible');
+    // Enviar de todos modos
+    respuesta = true;
+    f.requestSubmit();
+    await esperar(async () => (await db`SELECT count(*)::int AS n FROM routines`)[0].n === antes + 1, { ms: 6000, mensaje: 'se crea al confirmar' });
+    const [entrega] = await db`SELECT repeat_confirmed, kind FROM routine_deliveries ORDER BY sent_at DESC LIMIT 1`;
+    assert.equal(entrega.kind, 'assignment'); assert.equal(entrega.repeat_confirmed, true, 'queda registrado que se envió a pesar del aviso');
+    assert.equal(mensajes.length, 2, 'al confirmar se volvió a preguntar una sola vez más');
+    sinErrores(p, 'aviso de repetido');
+  } finally { await p.cerrar(); }
+});
