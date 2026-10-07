@@ -1,4 +1,4 @@
-const APP_VERSION = '294';
+const APP_VERSION = '295';
 const markPwaVersion = () => document.querySelectorAll('.topbar-actions').forEach(actions => {
   if (actions.querySelector('[data-pwa-version]')) return;
   const indicator = document.createElement('span');
@@ -300,7 +300,11 @@ async function api(path, options = {}) {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       if (response.status === 401 && options.auth !== false) { localStorage.removeItem(authKey); authToken = null; }
-      throw new Error(payload.error || 'No fue posible completar la solicitud');
+      const error = new Error(payload.error || payload.message || 'No fue posible completar la solicitud');
+      error.status = response.status;
+      error.code = payload.code;
+      error.repeats = payload.repeats;
+      throw error;
     }
     return payload;
   })();
@@ -310,6 +314,27 @@ async function api(path, options = {}) {
     enCurso.catch(() => {}).finally(() => peticionesEnVuelo.delete(clave));
   }
   return enCurso;
+}
+
+const repeatKindLabel = { assignment: 'asignación', link: 'enlace', offer: 'rutina ofrecida en lugar de una clase', travel_link: 'enlace de viaje', new_version: 'nueva versión' };
+function mensajeEnvioRepetido(error) {
+  const repeats = Array.isArray(error?.repeats) ? error.repeats : [];
+  const primeras = repeats.slice(0, 3).map(item => {
+    const fecha = item.sentAt ? fechaHoraPanama(item.sentAt) : 'recientemente';
+    const tipo = item.sameRoutine ? 'la misma rutina' : 'otra rutina con los mismos ejercicios';
+    return `• ${tipo} · ${fecha} · ${repeatKindLabel[item.kind] || 'envío'} (hace ${item.daysAgo} día${item.daysAgo === 1 ? '' : 's'})`;
+  });
+  const mas = repeats.length > 3 ? `\n• y ${repeats.length - 3} envío${repeats.length - 3 === 1 ? '' : 's'} más` : '';
+  return `Esta clienta recibió recientemente una rutina igual o con los mismos ejercicios.\n\n${primeras.join('\n')}${mas}\n\n¿Quieres enviarla de todos modos?`;
+}
+async function apiConAvisoDeRepetido(path, options = {}) {
+  try {
+    return await api(path, options);
+  } catch (error) {
+    if (error.code !== 'repeat_recent') throw error;
+    if (!window.confirm(mensajeEnvioRepetido(error))) return null;
+    return api(path, { ...options, body: { ...(options.body || {}), confirmRepeat: true } });
+  }
 }
 
 // Cualquier formulario queda bloqueado mientras se guarda, sin depender de que
@@ -3349,7 +3374,8 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
       const cuerpo = { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: editing ? undefined : (assigned || undefined), exercises: selectedExercises };
       const dueOn = String(form.get('dueOn') || '');
       if (!editing || dueOn !== initialDueOn) cuerpo.dueOn = dueOn || null;
-      const guardada = await api(editing ? `/api/routines/${routine.id}` : '/api/routines', { method: editing ? 'PATCH' : 'POST', body: cuerpo });
+      const guardada = await apiConAvisoDeRepetido(editing ? `/api/routines/${routine.id}` : '/api/routines', { method: editing ? 'PATCH' : 'POST', body: cuerpo });
+      if (!guardada) { event.target.classList.remove('loading-state'); return; }
       if (propuesta?.enlaceViajeId) {
         if (assigned !== propuesta.clientId) throw new Error('La rutina de viaje debe quedar asignada al mismo cliente.');
         await loadData(); renderAll(); modal.close();
@@ -3360,7 +3386,8 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
       }
       if (propuesta?.ofertaSesionId) {
         if (assigned !== propuesta.clientId) throw new Error('La rutina ofrecida debe quedar asignada al mismo cliente de la clase.');
-        await api(`/api/sessions/${propuesta.ofertaSesionId}/routine-offer`, { method: 'POST', body: { routineId: guardada.id, origin: propuesta.ofertaOrigen || 'trainer' } });
+        const oferta = await apiConAvisoDeRepetido(`/api/sessions/${propuesta.ofertaSesionId}/routine-offer`, { method: 'POST', body: { routineId: guardada.id, origin: propuesta.ofertaOrigen || 'trainer' } });
+        if (!oferta) { event.target.classList.remove('loading-state'); return; }
         await loadData(); renderAll(); modal.close(); toast(`Rutina ofrecida a ${propuesta.ofertaCliente || 'el cliente'} · la clase sigue pendiente`);
         return;
       }
@@ -4832,7 +4859,8 @@ function enviarEnlaceRutina(rutina, client, viaje = null) {
     else cuerpo.hours = Number(vigencia);
     try {
       evento.target.classList.add('loading-state');
-      const enlace = await api(`/api/routines/${rutina.id}/share-links`, { method: 'POST', body: cuerpo });
+      const enlace = await apiConAvisoDeRepetido(`/api/routines/${rutina.id}/share-links`, { method: 'POST', body: cuerpo });
+      if (!enlace) { evento.target.classList.remove('loading-state'); return; }
       const mensaje = `Hola ${nombre}, te dejé tu rutina${viaje ? ' para el viaje' : ''}: ${enlace.url}\n\nÁbrela, mira los videos y confirma al terminar${viaje ? ' (confírmala el día de tu clase para que cuente)' : ''}. El enlace vale hasta el ${venceTexto(enlace.expiresAt)}`;
       box.innerHTML = `<p class="eyebrow">RUTINA POR ENLACE</p><h2>Enlace listo</h2>
         <p class="form-summary">Vale hasta el <b>${venceTexto(enlace.expiresAt)}</b> (hora de Panamá).</p>

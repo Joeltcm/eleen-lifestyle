@@ -67,14 +67,14 @@ test('las cinco vías de entrega registran instantáneas y el resumen no cambia 
   assert.equal(reasignada.estado, 200, JSON.stringify(reasignada.datos));
   assert.equal((await db`SELECT count(*)::int AS n FROM routine_deliveries WHERE kind = 'assignment'`)[0].n, 2);
 
-  const enlace = await api.post(`/api/routines/${rutina.datos.id}/share-links`, { clientId: clienteB, hours: 24 });
+  const enlace = await api.post(`/api/routines/${rutina.datos.id}/share-links`, { clientId: clienteB, hours: 24, confirmRepeat: true });
   assert.equal(enlace.estado, 201, JSON.stringify(enlace.datos));
   const viaje = (await api.post(`/api/clients/${clienteB}/travel`, { startsOn: panama(), endsOn: panama(2), destination: 'Madrid' })).datos.id;
-  const enlaceViaje = await api.post(`/api/routines/${rutina.datos.id}/share-links`, { clientId: clienteB, hours: 48, travelId: viaje });
+  const enlaceViaje = await api.post(`/api/routines/${rutina.datos.id}/share-links`, { clientId: clienteB, hours: 48, travelId: viaje, confirmRepeat: true });
   assert.equal(enlaceViaje.estado, 201, JSON.stringify(enlaceViaje.datos));
 
   const sesion = (await api.post('/api/sessions', { clientId: clienteB, startsAt: aHora(panama(1), '09:00'), durationMinutes: 45, mode: 'Presencial' })).datos.id;
-  const oferta = await api.post(`/api/sessions/${sesion}/routine-offer`, { routineId: rutina.datos.id });
+  const oferta = await api.post(`/api/sessions/${sesion}/routine-offer`, { routineId: rutina.datos.id, confirmRepeat: true });
   assert.equal(oferta.estado, 201, JSON.stringify(oferta.datos));
 
   entregas = (await api.get(`/api/routines/${rutina.datos.id}/deliveries`)).datos;

@@ -49,7 +49,7 @@ test('enlace temporal: vigencia configurable, solo rutinas asignadas, sin datos 
   assert.equal((await api.post(`/api/routines/${rutina}/share-links`, { clientId: c, hours: 24, until: panama(3) })).estado, 400, 'o horas o fecha, no ambas');
   assert.equal((await api.post(`/api/routines/${rutina}/share-links`, { clientId: c, until: panama(-2) })).estado, 400, 'una fecha pasada no sirve');
   assert.equal((await api.post(`/api/routines/${rutina}/share-links`, { clientId: c, hours: 24 * 120 })).estado, 400, 'máximo 90 días');
-  const e = await api.post(`/api/routines/${rutina}/share-links`, { clientId: c, hours: 48 });
+  const e = await api.post(`/api/routines/${rutina}/share-links`, { clientId: c, hours: 48, confirmRepeat: true });
   assert.equal(e.estado, 201, JSON.stringify(e.datos));
   assert.match(e.datos.url, /#rutina=[A-Za-z0-9_-]{40,}$/);
   const token = tokenDe(e.datos.url);
@@ -66,7 +66,7 @@ test('enlace temporal: vigencia configurable, solo rutinas asignadas, sin datos 
   assert.equal((await api.delete(`/api/share-links/${e.datos.id}`)).estado, 200);
   const revocado = await publico.get(`/api/public/routine/${token}`);
   assert.equal(revocado.estado, 410); assert.match(revocado.datos.error, /retiró/);
-  const f = await api.post(`/api/routines/${rutina}/share-links`, { clientId: c, until: panama(2) });
+  const f = await api.post(`/api/routines/${rutina}/share-links`, { clientId: c, until: panama(2), confirmRepeat: true });
   assert.equal(f.estado, 201);
   await db`UPDATE routine_share_links SET expires_at = now() - interval '1 minute' WHERE id = ${f.datos.id}`;
   const vencido = await publico.get(`/api/public/routine/${tokenDe(f.datos.url)}`);
@@ -79,7 +79,7 @@ test('confirmar la rutina por enlace el día de la clase en viaje la cuenta como
   const clase = (await api.post('/api/sessions', { clientId: c, startsAt: aHora(hoy, '23:00'), durationMinutes: 45, mode: 'Presencial' })).datos.id;
   const avisosViaje = (await api.get('/api/notifications')).datos.filter(a => a.type === 'travel');
   assert.ok(avisosViaje.some(a => a.travelId === viaje), 'sin rutina enviada, Eileen recibe el aviso de viaje');
-  const e = await api.post(`/api/routines/${rutina}/share-links`, { clientId: c, until: panama(10), travelId: viaje });
+  const e = await api.post(`/api/routines/${rutina}/share-links`, { clientId: c, until: panama(10), travelId: viaje, confirmRepeat: true });
   assert.equal((await api.get('/api/notifications')).datos.filter(a => a.type === 'travel').length, 0, 'con una rutina enviada el aviso desaparece');
   const token = tokenDe(e.datos.url);
   const vista = await publico.get(`/api/public/routine/${token}`);
@@ -110,7 +110,7 @@ test('clase de un día de viaje sin rutina confirmada se CANCELA sola (cancelaci
   // clases: hace 4 días (sin ningún enlace aún), hace 3 (sin confirmar), hace 2 (CONFIRMÓ por enlace), ayer (sin confirmar) y mañana (aún no)
   const crear = async dia => (await api.post('/api/sessions', { clientId: cc, startsAt: aHora(dia, '09:00'), durationMinutes: 45, mode: 'Presencial' })).datos.id;
   const s4 = await crear(hace4); const s3 = await crear(hace3); const s2 = await crear(hace2); const s1 = await crear(hace1); const manana = await crear(panama(1));
-  const enlace = (await api.post(`/api/routines/${rr}/share-links`, { clientId: cc, until: panama(5), travelId: viaje })).datos.id;
+  const enlace = (await api.post(`/api/routines/${rr}/share-links`, { clientId: cc, until: panama(5), travelId: viaje, confirmRepeat: true })).datos.id;
   // El viaje se registró hace 4 días (sin esto, "nunca hacia atrás" protegería todas las clases).
   await db`UPDATE client_travel SET created_at = now() - interval '4 days' WHERE id = ${viaje}`;
   await db`UPDATE routine_share_links SET created_at = now() - interval '3 days' WHERE id = ${enlace}`;
@@ -152,7 +152,7 @@ test('los bloques de una rutina (bloque y rondas por ejercicio) se guardan, se d
   assert.equal(r.estado, 201, JSON.stringify(r.datos));
   const guardada = (await api.get('/api/routines')).datos.find(x => x.id === r.datos.id);
   assert.deepEqual(guardada.exercises.map(e => [e.block, e.rounds]), [[1, 3], [1, 3], [1, 3], [2, 3], [2, 3], [2, 3]]);
-  const e = await api.post(`/api/routines/${r.datos.id}/share-links`, { clientId: c, hours: 24 });
+  const e = await api.post(`/api/routines/${r.datos.id}/share-links`, { clientId: c, hours: 24, confirmRepeat: true });
   const vista = await publico.get(`/api/public/routine/${tokenDe(e.datos.url)}`);
   assert.deepEqual(vista.datos.routine.exercises.map(x => x.block), [1, 1, 1, 2, 2, 2]);
   assert.equal((await api.post('/api/routines', { title: 'Mal', sessionsPerWeek: 3, exercises: [{ name: 'X', block: 0 }] })).estado, 400, 'el bloque 0 no existe');

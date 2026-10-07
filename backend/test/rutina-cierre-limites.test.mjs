@@ -23,7 +23,7 @@ before(async () => {
 }, { timeout: 90_000 });
 after(async () => { await db?.end({ timeout: 1 }).catch(() => {}); await servidor?.parar(); });
 
-const rutina = async titulo => (await api.post('/api/routines', { title: titulo, sessionsPerWeek: 1, exercises: [{ name: 'Puente de glúteos', sets: 2, reps: '12' }], clientId: c })).datos.id;
+const rutina = async titulo => (await api.post('/api/routines', { title: titulo, sessionsPerWeek: 1, exercises: [{ name: 'Puente de glúteos', sets: 2, reps: '12' }], clientId: c, confirmRepeat: true })).datos.id;
 const hacerRutina = async (routineId, completedOn) => {
   await portal.post('/api/portal/routine-activity', { routineId, completedOn, kind: 'started', elapsedSeconds: 0 });
   return portal.post('/api/portal/routine-exercise-completions', { routineId, completedOn, exerciseIndex: 0, elapsedSeconds: 60 });
@@ -33,7 +33,8 @@ test('una oferta de una clase de OTRO día no se cierra aunque el teléfono mand
   const rid = await rutina('Rutina de pasado mañana');
   const dia = panama(2);
   const sid = (await api.post('/api/sessions', { clientId: c, startsAt: alas(dia, '09:00:00'), durationMinutes: 45, mode: 'Presencial' })).datos.id;
-  assert.equal((await api.post(`/api/sessions/${sid}/routine-offer`, { routineId: rid })).estado, 201);
+  const oferta = await api.post(`/api/sessions/${sid}/routine-offer`, { routineId: rid, confirmRepeat: true });
+  assert.equal(oferta.estado, 201, JSON.stringify(oferta.datos));
   const r = await hacerRutina(rid, dia);
   assert.ok(r.estado < 500, JSON.stringify(r.datos));
   const [s] = await db`SELECT status FROM sessions WHERE id = ${sid}`;
@@ -45,7 +46,8 @@ test('una oferta de una clase de OTRO día no se cierra aunque el teléfono mand
 test('si Eileen ya marcó la clase como realizada, el cliente igual puede terminar su rutina (no se cae con un error)', async () => {
   const rid = await rutina('Rutina con clase ya marcada');
   const sid = (await api.post('/api/sessions', { clientId: c, startsAt: alas(panama(0), '23:00:00'), durationMinutes: 45, mode: 'Presencial' })).datos.id;
-  assert.equal((await api.post(`/api/sessions/${sid}/routine-offer`, { routineId: rid })).estado, 201);
+  const oferta = await api.post(`/api/sessions/${sid}/routine-offer`, { routineId: rid, confirmRepeat: true });
+  assert.equal(oferta.estado, 201, JSON.stringify(oferta.datos));
   await db`UPDATE sessions SET status = 'completed', completion_percent = 100 WHERE id = ${sid}`;   // Eileen la marcó a mano
   const r = await hacerRutina(rid, panama(0));
   assert.equal(r.estado, 201, `la rutina debe quedar registrada: ${JSON.stringify(r.datos)}`);
@@ -57,7 +59,8 @@ test('si Eileen ya marcó la clase como realizada, el cliente igual puede termin
 test('si Eileen cancela la clase, la rutina del cliente se registra igual y la clase sigue cancelada', async () => {
   const rid = await rutina('Rutina con clase cancelada');
   const sid = (await api.post('/api/sessions', { clientId: c, startsAt: alas(panama(0), '23:30:00'), durationMinutes: 45, mode: 'Presencial' })).datos.id;
-  assert.equal((await api.post(`/api/sessions/${sid}/routine-offer`, { routineId: rid })).estado, 201);
+  const oferta = await api.post(`/api/sessions/${sid}/routine-offer`, { routineId: rid, confirmRepeat: true });
+  assert.equal(oferta.estado, 201, JSON.stringify(oferta.datos));
   await db`UPDATE sessions SET status = 'cancelled' WHERE id = ${sid}`;
   const r = await hacerRutina(rid, panama(0));
   assert.equal(r.estado, 201, `la rutina debe quedar registrada: ${JSON.stringify(r.datos)}`);

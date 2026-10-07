@@ -187,7 +187,7 @@ test('el PORTAL del cliente dibuja todas sus secciones (rutinas con bloques, via
 
 test('la página pública de la rutina (enlace) se abre sin sesión, muestra los bloques y permite confirmar', async () => {
   const rutinaViaje = (await api.post('/api/routines', { title: 'Rutina del enlace', description: 'Objetivo: movilidad.\nCalentamiento: 5 minutos.', sessionsPerWeek: 3, clientId, exercises: [{ name: 'Plancha', sets: 3, reps: '30 seg', block: 1, rounds: 3 }, { name: 'Flexiones', sets: 3, reps: '10', block: 1, rounds: 3 }] })).datos.id;
-  const enlace = await api.post(`/api/routines/${rutinaViaje}/share-links`, { clientId, hours: 24 });
+  const enlace = await api.post(`/api/routines/${rutinaViaje}/share-links`, { clientId, hours: 24, confirmRepeat: true });
   const token = String(enlace.datos.url).split('#rutina=')[1];
   const p = await abrirPantalla({ baseApi: servidor.base, hash: `#rutina=${token}` });
   try {
@@ -204,7 +204,7 @@ test('la página pública de la rutina (enlace) se abre sin sesión, muestra los
 test('PORTAL: rutina ofrecida en lugar de la clase — cuenta regresiva, pausa y reanudación, checklist, completar cierra la clase, celebra y guarda el feedback', async () => {
   const ejercicios = [{ name: 'Plancha', sets: 3, reps: '30 seg' }, { name: 'Flexiones', sets: 3, reps: '10' }, { name: 'Sentadilla', sets: 3, reps: '12' }];
   const rid = (await api.post('/api/routines', { title: 'Rutina por oferta', sessionsPerWeek: 3, clientId, exercises: ejercicios })).datos.id;
-  const oferta = await api.post(`/api/sessions/${sesionId}/routine-offer`, { routineId: rid, origin: 'trainer' });
+  const oferta = await api.post(`/api/sessions/${sesionId}/routine-offer`, { routineId: rid, origin: 'trainer', confirmRepeat: true });
   assert.ok(oferta.estado < 300, JSON.stringify(oferta.datos));
   const p = await abrirPantalla({ baseApi: servidor.base, token: tokenPortal, hash: '#portal-routines' });
   try {

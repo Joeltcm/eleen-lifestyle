@@ -34,7 +34,7 @@ const sesionDe = async id => (await api.get('/api/sessions')).datos.find(x => x.
 
 test('ofrecer una rutina no cancela la clase: queda programada con la rutina ligada y la oferta visible', async () => {
   assert.equal((await api.post(`/api/sessions/${sesionId}/routine-offer`, { routineId: otraRutinaId })).estado, 409, 'una rutina no asignada al cliente no se ofrece');
-  const r = await api.post(`/api/sessions/${sesionId}/routine-offer`, { routineId: rutinaId });
+  const r = await api.post(`/api/sessions/${sesionId}/routine-offer`, { routineId: rutinaId, confirmRepeat: true });
   assert.equal(r.estado, 201, JSON.stringify(r.datos));
   const s = await sesionDe(sesionId);
   assert.equal(s.status, 'scheduled');
@@ -63,7 +63,7 @@ test('cumplir la rutina cierra la clase como realizada (aunque su hora no haya l
   assert.match(avisos[0].body, /Rutina en casa.*25 min.*100%/);
   const otra = await portal.post(`/api/portal/routine-offers/${oferta.id}/complete`, { completionPercent: 100 });
   assert.equal(otra.datos.alreadyCompleted, true, 'completarla dos veces no descuenta dos veces');
-  assert.equal((await api.post(`/api/sessions/${sesionId}/routine-offer`, { routineId: rutinaId })).estado, 409, 'ya no se ofrece en una clase realizada');
+  assert.equal((await api.post(`/api/sessions/${sesionId}/routine-offer`, { routineId: rutinaId, confirmRepeat: true })).estado, 409, 'ya no se ofrece en una clase realizada');
 });
 
 test('marcar el último ejercicio cierra la oferta y la clase en la misma operación', async () => {
@@ -72,7 +72,7 @@ test('marcar el último ejercicio cierra la oferta y la clase en la misma operac
     exercises: [{ name: 'Puente de glúteos', sets: 2, reps: '12' }], clientId: c
   })).datos.id;
   const sesionAtomica = (await api.post('/api/sessions', { clientId: c, startsAt: hoyALas23(), durationMinutes: 45, mode: 'Presencial' })).datos.id;
-  const oferta = await api.post(`/api/sessions/${sesionAtomica}/routine-offer`, { routineId: rutinaAtomica });
+  const oferta = await api.post(`/api/sessions/${sesionAtomica}/routine-offer`, { routineId: rutinaAtomica, confirmRepeat: true });
   assert.equal(oferta.estado, 201, JSON.stringify(oferta.datos));
 
   const hoy = hoyPanama();
@@ -95,7 +95,7 @@ test('marcar el último ejercicio cierra la oferta y la clase en la misma operac
 
 test('la oferta vale SOLO el día de la clase: una clase de otro día no se muestra ni se puede cumplir; una clase pasada no admite oferta; la vencida se marca', async () => {
   const futura = (await api.post('/api/sessions', { clientId: c, startsAt: new Date(Date.now() + 50 * 3600_000).toISOString(), durationMinutes: 45, mode: 'Presencial' })).datos.id;
-  const ofrecida = await api.post(`/api/sessions/${futura}/routine-offer`, { routineId: rutinaId });
+  const ofrecida = await api.post(`/api/sessions/${futura}/routine-offer`, { routineId: rutinaId, confirmRepeat: true });
   assert.equal(ofrecida.estado, 201, 'se puede ofrecer con anticipación para el día de esa clase');
   assert.equal((await portal.get('/api/portal/routine-offers')).datos.length, 0, 'pero el portal no la muestra hasta ese día');
   const antes = await portal.post(`/api/portal/routine-offers/${ofrecida.datos.id}/complete`, { completionPercent: 100 });
@@ -104,7 +104,7 @@ test('la oferta vale SOLO el día de la clase: una clase de otro día no se mues
   assert.equal((await sesionDe(futura)).status, 'scheduled', 'la clase no se tocó');
   // Clase de ayer: ya no admite oferta.
   const ayer = (await api.post('/api/sessions', { clientId: c, startsAt: new Date(Date.now() - 30 * 3600_000).toISOString(), durationMinutes: 45, mode: 'Presencial' })).datos.id;
-  const tarde = await api.post(`/api/sessions/${ayer}/routine-offer`, { routineId: rutinaId });
+  const tarde = await api.post(`/api/sessions/${ayer}/routine-offer`, { routineId: rutinaId, confirmRepeat: true });
   assert.equal(tarde.estado, 409); assert.match(tarde.datos.error, /solo vale el día de la clase/);
   // Una oferta cuyo día ya pasó queda marcada como vencida (la clase sigue programada para que Eileen decida).
   const db = postgres(servidor.databaseUrl, { onnotice: () => {}, max: 2 });
@@ -116,7 +116,7 @@ test('la oferta vale SOLO el día de la clase: una clase de otro día no se mues
 
 test('retirar la oferta la quita; el portal no acepta ofertas ajenas ni sesiones sin ella', async () => {
   const s2 = (await api.post('/api/sessions', { clientId: c, startsAt: hoyALas23(), durationMinutes: 45, mode: 'Presencial' })).datos.id;
-  assert.equal((await api.post(`/api/sessions/${s2}/routine-offer`, { routineId: rutinaId })).estado, 201);
+  assert.equal((await api.post(`/api/sessions/${s2}/routine-offer`, { routineId: rutinaId, confirmRepeat: true })).estado, 201);
   assert.equal((await portal.get('/api/portal/routine-offers')).datos.length, 1, 'hoy sí se muestra');
   assert.equal((await api.delete(`/api/sessions/${s2}/routine-offer`)).estado, 200);
   assert.equal((await portal.get('/api/portal/routine-offers')).datos.length, 0);
@@ -142,11 +142,11 @@ test('oferta por cancelación DEL CLIENTE: cumplida cierra la clase; sin cumplir
   const sClienteIncumple = await mk(hoyALas23());
   const sEileen = await mk(hoyALas23());
   const sClienteCumple = await mk(hoyALas23());
-  const oc = await api.post(`/api/sessions/${sClienteIncumple}/routine-offer`, { routineId: rutinaId, origin: 'client' });
+  const oc = await api.post(`/api/sessions/${sClienteIncumple}/routine-offer`, { routineId: rutinaId, origin: 'client', confirmRepeat: true });
   assert.equal(oc.estado, 201); assert.equal(oc.datos.origin, 'client');
   assert.match((await sesionDe(sClienteIncumple)).notes, /cancelación del cliente.*se da por perdida/);
-  assert.equal((await api.post(`/api/sessions/${sEileen}/routine-offer`, { routineId: rutinaId })).datos.origin, 'trainer', 'por omisión es de Eileen');
-  const oCumple = await api.post(`/api/sessions/${sClienteCumple}/routine-offer`, { routineId: rutinaId, origin: 'client' });
+  assert.equal((await api.post(`/api/sessions/${sEileen}/routine-offer`, { routineId: rutinaId, confirmRepeat: true })).datos.origin, 'trainer', 'por omisión es de Eileen');
+  const oCumple = await api.post(`/api/sessions/${sClienteCumple}/routine-offer`, { routineId: rutinaId, origin: 'client', confirmRepeat: true });
   const ofertas = (await portal.get('/api/portal/routine-offers')).datos;
   assert.deepEqual(ofertas.map(o => o.origin).sort(), ['client', 'client', 'trainer']);
   // El cliente cumple una; las otras dos "se quedan sin hacer" y su día pasa.
