@@ -82,13 +82,17 @@ async function main() {
         ORDER BY rtc.cleaned_at, rtc.routine_id
       `;
       if (!saved.length) { console.log('No hay títulos limpiados para revertir.'); return; }
+      let restauradas = 0; let respetadas = 0;
       await sql.begin(async transaction => {
         for (const row of saved) {
-          await transaction`UPDATE routines SET title = ${row.old_title}, updated_at = now() WHERE id = ${row.id}::uuid`;
+          // Solo se restaura si el título sigue siendo el que dejó la limpieza: si alguien la renombró después, ese título nuevo se respeta.
+          const esperado = cleanTitle(row.old_title);
+          const actualizadas = esperado ? await transaction`UPDATE routines SET title = ${row.old_title}, updated_at = now() WHERE id = ${row.id}::uuid AND title = ${esperado} RETURNING id` : [];
+          if (actualizadas.length) restauradas += 1; else { respetadas += 1; console.log(`RESPETADA · ${row.id} · el título ya no es el de la limpieza; no se toca`); }
           await transaction`DELETE FROM routine_title_cleanups WHERE routine_id = ${row.id}::uuid`;
         }
       });
-      console.log(`REVERSIÓN · ${saved.length} rutina(s) restauradas`);
+      console.log(`REVERSIÓN · ${restauradas} rutina(s) restauradas · ${respetadas} respetadas porque su título cambió después`);
       return;
     }
 
@@ -109,7 +113,9 @@ async function main() {
           RETURNING routine_id
         `;
         if (!saved.length) continue;
-        await transaction`UPDATE routines SET title = ${cleaned}, updated_at = now() WHERE id = ${row.id}::uuid AND title = ${row.title}`;
+        const cambiadas = await transaction`UPDATE routines SET title = ${cleaned}, updated_at = now() WHERE id = ${row.id}::uuid AND title = ${row.title} RETURNING id`;
+        // Si el título cambió entre la lectura y la escritura no se limpia, y no debe quedar un registro que luego "restaure" algo que nunca se limpió.
+        if (!cambiadas.length) await transaction`DELETE FROM routine_title_cleanups WHERE routine_id = ${row.id}::uuid`;
       }
     });
     console.log(`APLICAR · ${candidates.length} rutina(s) procesadas; la operación es idempotente.`);
