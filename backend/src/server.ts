@@ -3361,6 +3361,18 @@ app.delete('/api/routines/:id', { preHandler: requireStaff }, async (request, re
 // ── Catálogo de ejercicios ────────────────────────────────────────────────
 const exerciseSections = ['tren_inferior', 'tren_superior', 'core', 'cardio', 'hit'] as const;
 const videoContentTypes = ['video/mp4', 'video/webm'] as const;
+
+// Una clave de R2 solo se borra si NADA la referencia: ni un video en uso (variante o columna heredada) ni un original guardado por una conversión
+// (que permite revertir). El servidor borra la clave que manda el navegador tras convertirla, y esa clave podría ser la de un video que ya está en uso.
+async function deleteObjectIfUnreferenced(objectKey: string, contexto: string) {
+  const [uso] = await sql`
+    SELECT 1 AS usado WHERE EXISTS (SELECT 1 FROM exercise_videos WHERE object_key = ${objectKey})
+      OR EXISTS (SELECT 1 FROM exercises WHERE video_object_key = ${objectKey})
+      OR EXISTS (SELECT 1 FROM exercise_video_conversion_items WHERE old_object_key = ${objectKey} OR new_object_key = ${objectKey})`;
+  if (uso) { app.log.warn({ objectKey, contexto }, 'No se borra el objeto: todavía está referenciado'); return false; }
+  await deleteObject(objectKey).catch(error => app.log.warn({ err: error, objectKey, contexto }, 'No se pudo borrar el objeto'));
+  return true;
+}
 const maxVideoSize = 40 * 1024 * 1024;
 
 const exerciseSchema = z.object({
@@ -3508,6 +3520,7 @@ app.post('/api/exercises/:id/video', { preHandler: requireStaff }, async (reques
     prepared = await normalizeRegisteredVideo(input.objectKey, id);
   } catch (error) {
     request.log.warn({ err: error, exerciseId: id }, 'No se pudo normalizar el video subido');
+    await deleteObjectIfUnreferenced(input.objectKey, 'subida rechazada');
     return reply.code(422).send({ error: 'No se pudo convertir el video a un formato compatible con móviles' });
   }
   const objectKey = prepared.objectKey;
@@ -3536,10 +3549,8 @@ app.post('/api/exercises/:id/video', { preHandler: requireStaff }, async (reques
         ON CONFLICT (owner_id, object_key) DO NOTHING
       `;
     }
-    await deleteObject(input.objectKey).catch(error => app.log.warn({ err: error, exerciseId: id }, 'No se pudo borrar la subida original'));
-    if (previousKey && previousKey !== input.objectKey && previousKey !== objectKey) {
-      await deleteObject(previousKey).catch(error => app.log.warn({ err: error, exerciseId: id }, 'No se pudo borrar el video anterior'));
-    }
+    await deleteObjectIfUnreferenced(input.objectKey, 'subida original');
+    if (previousKey && previousKey !== input.objectKey && previousKey !== objectKey) await deleteObjectIfUnreferenced(previousKey, 'video anterior');
     return updated;
   } catch (error) {
     await deleteObject(objectKey).catch(() => {});
@@ -3572,6 +3583,7 @@ app.post('/api/exercises/:id/videos', { preHandler: requireStaff }, async (reque
     prepared = await normalizeRegisteredVideo(input.objectKey, id);
   } catch (error) {
     request.log.warn({ err: error, exerciseId: id }, 'No se pudo normalizar el video subido');
+    await deleteObjectIfUnreferenced(input.objectKey, 'subida rechazada');
     return reply.code(422).send({ error: 'No se pudo convertir el video a un formato compatible con móviles' });
   }
   const objectKey = prepared.objectKey;
@@ -3590,7 +3602,7 @@ app.post('/api/exercises/:id/videos', { preHandler: requireStaff }, async (reque
         WHERE id = ${id} AND owner_id = ${auth.sub}
       `;
     }
-    await deleteObject(input.objectKey).catch(error => app.log.warn({ err: error, exerciseId: id }, 'No se pudo borrar la subida original'));
+    await deleteObjectIfUnreferenced(input.objectKey, 'subida original');
     return reply.code(201).send(video);
   } catch (error) {
     await deleteObject(objectKey).catch(() => {});
