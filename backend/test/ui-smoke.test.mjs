@@ -286,8 +286,6 @@ test('AVISO DE REPETIDO en pantalla: reutilizar para la misma clienta pregunta; 
   try {
     await esperar(() => p.evaluar('data.routines.length') >= 1, { mensaje: 'rutinas cargadas' });
     p.clic(p.q('[data-view="routines"]')); await p.quieta(200);
-    const mensajes = []; let respuesta = false;
-    p.window.confirm = texto => { mensajes.push(String(texto)); return respuesta; };
     const antes = (await db`SELECT count(*)::int AS n FROM routines`)[0].n; const entregasAntes = (await db`SELECT count(*)::int AS n FROM routine_deliveries`)[0].n;
     // Reutilizar la rutina ya enviada a Sara y volver a asignársela a Sara: mismos ejercicios, hace 0 días
     p.clic(p.q(`[data-duplicate-routine="${rutinaId}"]`));
@@ -295,20 +293,54 @@ test('AVISO DE REPETIDO en pantalla: reutilizar para la misma clienta pregunta; 
     assert.equal(f.elements.title.value, 'Rutina en bloques', 'sin "(copia)"');
     f.elements.client.value = clientId;
     f.requestSubmit();
-    await esperar(() => mensajes.length === 1, { mensaje: 'aparece el aviso' });
-    assert.match(mensajes[0], /recibió recientemente una rutina igual/); assert.match(mensajes[0], /hace 0 días/); assert.match(mensajes[0], /enviarla de todos modos/i);
+    const aviso = await esperar(() => p.q('.routine-repeat-dialog'), { mensaje: 'aparece el aviso' });
+    assert.match(aviso.textContent, /rutina enviada recientemente/i); assert.match(aviso.textContent, /rutina con los mismos ejercicios/i); assert.match(aviso.textContent, /hoy/i);
+    assert.ok(p.q('[data-repeat-cancel]', aviso), 'Cancelar es la acción segura y está disponible');
+    p.clic(p.q('[data-repeat-cancel]', aviso));
     await p.quieta(400);
     assert.equal((await db`SELECT count(*)::int AS n FROM routines`)[0].n, antes, 'Cancelar: no se creó ninguna rutina');
     assert.equal((await db`SELECT count(*)::int AS n FROM routine_deliveries`)[0].n, entregasAntes, 'Cancelar: no se registró ningún envío');
     assert.ok(p.q('#routine-form'), 'el editor sigue abierto para corregir');
     assert.ok(!p.q('#routine-form').classList.contains('loading-state'), 'el formulario vuelve a estar disponible');
     // Enviar de todos modos
-    respuesta = true;
     f.requestSubmit();
+    const avisoConfirmacion = await esperar(() => p.q('.routine-repeat-dialog'), { mensaje: 'vuelve a aparecer el aviso' });
+    p.clic(p.q('[data-repeat-confirm]', avisoConfirmacion));
     await esperar(async () => (await db`SELECT count(*)::int AS n FROM routines`)[0].n === antes + 1, { ms: 6000, mensaje: 'se crea al confirmar' });
     const [entrega] = await db`SELECT repeat_confirmed, kind FROM routine_deliveries ORDER BY sent_at DESC LIMIT 1`;
     assert.equal(entrega.kind, 'assignment'); assert.equal(entrega.repeat_confirmed, true, 'queda registrado que se envió a pesar del aviso');
-    assert.equal(mensajes.length, 2, 'al confirmar se volvió a preguntar una sola vez más');
     sinErrores(p, 'aviso de repetido');
+  } finally { await p.cerrar(); }
+});
+
+test('historial de envíos: la tarjeta permite enviar enlace y el detalle muestra resumen y fecha de Panamá', async () => {
+  const p = await abrirPantalla({ baseApi: servidor.base, token: tokenStaff, hash: '#routines' });
+  try {
+    await esperar(() => p.evaluar('data.routines.length') >= 1, { mensaje: 'rutinas cargadas' });
+    p.clic(p.q('[data-view="routines"]')); await p.quieta(200);
+    const tarjeta = p.qa('.routine-card').find(item => item.querySelector(`[data-share-routine="${rutinaId}"]`));
+    assert.ok(tarjeta, 'la rutina asignada ofrece enviar enlace desde su tarjeta');
+    assert.match(tarjeta.textContent, /Enviada a \d+ cliente/);
+    p.clic(p.q(`[data-share-routine="${rutinaId}"]`, tarjeta));
+    const formulario = await esperar(() => p.q('#enlace-form'), { mensaje: 'formulario de enlace' });
+    p.evaluar("document.getElementById('enlace-form').requestSubmit()");
+    const resultadoEnlace = await esperar(() => p.q('#enlace-url') || p.q('.routine-repeat-dialog'), { mensaje: 'respuesta del envío de enlace' });
+    if (resultadoEnlace.matches?.('.routine-repeat-dialog')) p.clic(p.q('[data-repeat-confirm]', resultadoEnlace));
+    await p.quieta(1000);
+    const enviosTrasEnlace = (await api.get(`/api/routines/${rutinaId}/deliveries`)).datos;
+    assert.ok(enviosTrasEnlace.some(item => ['link', 'travel_link'].includes(item.kind)), 'el enlace quedó registrado');
+    p.evaluar('modal.close()');
+    p.clic(p.q(`[data-open-routine="${rutinaId}"]`, tarjeta));
+    const historial = await esperar(() => p.q('#routine-delivery-history'), { mensaje: 'historial de uso' });
+    await esperar(() => p.qa('.routine-delivery-item', historial).length >= 1, { mensaje: 'envíos en el detalle' });
+    assert.match(historial.textContent, /Enlace/); assert.match(historial.textContent, /\d{2}-\d{2}-2026/);
+    p.clic(p.q('[data-show-delivery-summary]', historial));
+    assert.ok(!p.q('[data-delivery-summary]', historial).hidden, 'Ver resumen muestra la instantánea enviada');
+    p.evaluar('modal.close()');
+    p.evaluar(`clientDetail('${clientId}')`);
+    const enviosCliente = await esperar(() => p.q('#client-routine-deliveries'), { mensaje: 'rutinas enviadas en el expediente' });
+    await esperar(() => p.qa('.routine-delivery-item', enviosCliente).length >= 1, { mensaje: 'envíos del expediente' });
+    assert.match(enviosCliente.textContent, /Rutina en bloques|Cliente/);
+    sinErrores(p, 'historial de envíos');
   } finally { await p.cerrar(); }
 });

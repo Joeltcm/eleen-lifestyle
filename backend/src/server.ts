@@ -3256,7 +3256,10 @@ async function recentRoutineRepeats(transaction: TransactionSql, routine: Routin
   `;
   return rows.flatMap(row => {
     const snapshot = Array.isArray(row.exercises_snapshot) ? row.exercises_snapshot as RoutineExerciseForSummary[] : [];
-    const previousExercises = Array.isArray(row.exercises) ? row.exercises as RoutineExerciseForSummary[] : snapshot;
+    // La comparación representa lo que recibió la clienta, no la rutina actual.
+    const previousExercises = Array.isArray(row.exercises_snapshot)
+      ? row.exercises_snapshot as RoutineExerciseForSummary[]
+      : Array.isArray(row.exercises) ? row.exercises as RoutineExerciseForSummary[] : [];
     const sameRoutine = Boolean(routine.root_routine_id && row.root_routine_id && routine.root_routine_id === row.root_routine_id)
       || (row.exercises_hash ? row.exercises_hash === currentHash : sameExerciseSet(currentExercises, previousExercises));
     if (!sameRoutine) return [];
@@ -3317,7 +3320,10 @@ app.get('/api/routines', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`
     SELECT r.*, COALESCE(array_agg(ra.client_id) FILTER (WHERE ra.active), '{}') AS assigned_client_ids,
-      max(ra.due_on) FILTER (WHERE ra.active) AS due_on
+      max(ra.due_on) FILTER (WHERE ra.active) AS due_on,
+      (SELECT count(*)::int FROM routine_deliveries d WHERE d.owner_id = r.owner_id AND d.routine_id = r.id) AS deliveries_count,
+      (SELECT count(DISTINCT d.client_id)::int FROM routine_deliveries d WHERE d.owner_id = r.owner_id AND d.routine_id = r.id) AS delivery_clients_count,
+      (SELECT max(d.sent_at) FROM routine_deliveries d WHERE d.owner_id = r.owner_id AND d.routine_id = r.id) AS last_sent_at
     FROM routines r LEFT JOIN routine_assignments ra ON ra.routine_id = r.id
     WHERE r.owner_id = ${auth.sub} GROUP BY r.id ORDER BY r.created_at DESC
   `;
