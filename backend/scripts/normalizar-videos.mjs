@@ -1,32 +1,14 @@
 #!/usr/bin/env node
 
-// Inventario y, en entregas posteriores, migración de las demostraciones de
-// ejercicios. Esta primera entrega implementa deliberadamente solo
-// --inventario: no escribe en PostgreSQL ni en R2.
+// Inventario compatible con la primera entrega. La normalización con escritura
+// vive en src/scripts/normalizar-videos.ts y se ejecuta compilada dentro de
+// Railway como dist/scripts/normalizar-videos.js.
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
 import postgres from 'postgres';
 import { GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
-
-const MAX_VIDEO_SIZE = 40 * 1024 * 1024;
-const ACCEPTED_PROFILES = /baseline|main/i;
-
-function run(command, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', chunk => { stdout += chunk; });
-    child.stderr.on('data', chunk => { stderr += chunk; });
-    child.on('error', reject);
-    child.on('close', code => {
-      if (code === 0) return resolve({ stdout, stderr });
-      reject(new Error(`${command} terminó con código ${code}: ${stderr.trim()}`));
-    });
-  });
-}
+import { inspectVideo, probeVideo } from '../dist/video-normalizer.js';
 
 function usage() {
   console.error('Uso:');
@@ -40,90 +22,6 @@ function requiredEnv(name) {
   return value;
 }
 
-function fraction(value) {
-  if (!value || value === '0/0') return null;
-  const [numerator, denominator] = String(value).split('/').map(Number);
-  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator === 0) return null;
-  return numerator / denominator;
-}
-
-function topLevelMp4Boxes(bytes) {
-  const boxes = [];
-  let offset = 0;
-  while (offset + 8 <= bytes.length) {
-    const start = offset;
-    let size = bytes.readUInt32BE(offset);
-    const type = bytes.toString('ascii', offset + 4, offset + 8);
-    offset += 8;
-    if (size === 1) {
-      if (offset + 8 > bytes.length) break;
-      const high = bytes.readUInt32BE(offset);
-      const low = bytes.readUInt32BE(offset + 4);
-      size = high * 2 ** 32 + low;
-      offset += 8;
-    } else if (size === 0) {
-      size = bytes.length - start;
-    }
-    if (!Number.isSafeInteger(size) || size < offset - start || start + size > bytes.length) break;
-    boxes.push({ type, start, end: start + size });
-    offset = start + size;
-  }
-  return boxes;
-}
-
-async function probe(file) {
-  const { stdout } = await run('ffprobe', [
-    '-v', 'error', '-print_format', 'json',
-    '-show_entries', 'format=format_name,duration:stream=index,codec_type,codec_name,profile,level,pix_fmt,width,height,avg_frame_rate,r_frame_rate',
-    file
-  ]);
-  return JSON.parse(stdout);
-}
-
-function inspect(bytes, metadata) {
-  const formatName = String(metadata.format?.format_name || '');
-  const video = (metadata.streams || []).find(stream => stream.codec_type === 'video') || {};
-  const audio = (metadata.streams || []).some(stream => stream.codec_type === 'audio');
-  const isMp4 = formatName.split(',').some(name => ['mp4', 'mov', '3gp', '3g2', 'mj2'].includes(name));
-  const boxes = isMp4 ? topLevelMp4Boxes(bytes) : [];
-  const moov = boxes.find(box => box.type === 'moov');
-  const mdat = boxes.find(box => box.type === 'mdat');
-  const fragmented = boxes.some(box => box.type === 'moof');
-  const duration = Number(metadata.format?.duration);
-  const fps = fraction(video.avg_frame_rate) ?? fraction(video.r_frame_rate);
-  const maxSide = Math.max(Number(video.width) || 0, Number(video.height) || 0);
-  const reasons = [];
-  if (!isMp4) reasons.push('contenedor no es MP4');
-  if (video.codec_name !== 'h264') reasons.push(`códec ${video.codec_name || 'desconocido'}`);
-  if (!ACCEPTED_PROFILES.test(String(video.profile || ''))) reasons.push(`perfil ${video.profile || 'desconocido'}`);
-  if (Number(video.level) > 40) reasons.push(`nivel ${video.level}`);
-  if (video.pix_fmt !== 'yuv420p') reasons.push(`píxel ${video.pix_fmt || 'desconocido'}`);
-  if (!Number.isFinite(duration) || duration <= 0) reasons.push('duración ausente o inválida');
-  if (fragmented) reasons.push('MP4 fragmentado (moof)');
-  if (!moov || !mdat || moov.start > mdat.start) reasons.push('moov no está antes de mdat');
-  if (audio) reasons.push('contiene audio');
-  if ((Number(video.width) || 0) % 2 || (Number(video.height) || 0) % 2) reasons.push('dimensiones impares');
-  if (maxSide > 1280) reasons.push(`lado mayor ${maxSide}px`);
-  if (fps && fps > 30.01) reasons.push(`frecuencia ${fps.toFixed(2)} fps`);
-  if (bytes.length > MAX_VIDEO_SIZE) reasons.push(`supera 40 MB (${bytes.length} bytes)`);
-  return {
-    container: isMp4 ? 'mp4' : formatName || 'desconocido',
-    codec: video.codec_name || null,
-    profile: video.profile || null,
-    level: video.level ?? null,
-    duration: Number.isFinite(duration) ? duration : null,
-    width: Number(video.width) || null,
-    height: Number(video.height) || null,
-    fps,
-    pixelFormat: video.pix_fmt || null,
-    hasAudio: audio,
-    fragmented,
-    moovBeforeMdat: Boolean(moov && mdat && moov.start < mdat.start),
-    sizeBytes: bytes.length,
-    needsNormalize: reasons.length > 0,
-    reasons
-  };
-}
 
 async function downloadObject(s3, bucket, objectKey, directory, index) {
   const response = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: objectKey }));
@@ -175,8 +73,8 @@ async function inventoryR2() {
         const head = await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: objectKey }));
         summary.sizeBytes += Number(head.ContentLength ?? row.Size) || 0;
         const { file, bytes, contentType: downloadedContentType } = await downloadObject(s3, bucket, objectKey, temporary, index);
-        const metadata = await probe(file);
-        const info = inspect(bytes, metadata);
+        const metadata = await probeVideo(file);
+        const info = inspectVideo(bytes, metadata);
         if (info.needsNormalize) summary.needsNormalize += 1;
         const actualType = head.ContentType || downloadedContentType || 'desconocido';
         summary.byContentType.set(actualType, (summary.byContentType.get(actualType) || 0) + 1);
@@ -239,8 +137,8 @@ async function inventory() {
       process.stdout.write(`\n${index + 1}. ${row.exercise_name} · ${row.source} · ${contentType}\n   clave: ${row.object_key}\n`);
       try {
         const { file, bytes } = await downloadObject(s3, bucket, row.object_key, temporary, index);
-        const metadata = await probe(file);
-        const info = inspect(bytes, metadata);
+        const metadata = await probeVideo(file);
+        const info = inspectVideo(bytes, metadata);
         if (info.needsNormalize) summary.needsNormalize += 1;
         console.log(`   formato: ${info.container} · códec: ${info.codec || '—'} · perfil: ${info.profile || '—'} · duración: ${info.duration ?? '—'} s`);
         console.log(`   video: ${info.width || '—'}x${info.height || '—'} · ${info.fps ? `${info.fps.toFixed(2)} fps` : 'fps —'} · píxel: ${info.pixelFormat || '—'} · audio: ${info.hasAudio ? 'sí' : 'no'}`);
