@@ -16,6 +16,7 @@
     "videos:inventario": "node scripts/normalizar-videos.mjs --inventario",
     "videos:solo-r2": "node scripts/normalizar-videos.mjs --solo-r2",
     "videos:normalizar": "node dist/scripts/normalizar-videos.js",
+    "rutinas:rellenar": "node dist/scripts/rellenar-envios-rutinas.js",
     "test": "node --test --test-concurrency=1 test/*.test.mjs"
   },
   "dependencies": {

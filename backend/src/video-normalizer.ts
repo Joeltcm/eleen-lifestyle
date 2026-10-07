@@ -48,22 +48,36 @@ export type CommandRunner = (command: string, args: string[]) => Promise<{ stdou
 export function runCommand(command: string, args: string[], timeoutMs = COMMAND_TIMEOUT_MS): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     // Un ffmpeg colgado no debe dejar el script (ni, más adelante, una petición de subida) esperando para siempre.
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGKILL' });
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+    let settled = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, timeoutMs);
+    timeout.unref();
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback();
+    };
     child.stdout.on('data', chunk => { stdout += chunk; });
     child.stderr.on('data', chunk => { stderr += chunk; });
     child.on('error', error => {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        reject(new Error(`${command} no está instalado o no está disponible en PATH`));
-      } else {
-        reject(error);
-      }
+      finish(() => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') reject(new Error(`${command} no está instalado o no está disponible en PATH`));
+        else reject(error);
+      });
     });
     child.on('close', (code, signal) => {
-      if (signal === 'SIGKILL') return reject(new Error(`${command} superó el tiempo máximo de ${Math.round(timeoutMs / 1000)} s y se canceló`));
-      if (code === 0) return resolve({ stdout, stderr });
-      reject(new Error(`${command} terminó con código ${code}: ${stderr.trim()}`));
+      finish(() => {
+        if (timedOut || signal === 'SIGKILL') return reject(new Error(`${command} superó el tiempo máximo de ${Math.round(timeoutMs / 1000)} s y se canceló`));
+        if (code === 0) return resolve({ stdout, stderr });
+        reject(new Error(`${command} terminó con código ${code}: ${stderr.trim()}`));
+      });
     });
   });
 }

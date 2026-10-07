@@ -16,6 +16,7 @@ test('el runner de normalización tiene los modos seguros y la reversa registrad
   assert.match(migration, /exercise_video_conversion_items/);
   assert.match(down, /DROP TABLE IF EXISTS exercise_video_conversion_items/);
   assert.match(down, /DROP TABLE IF EXISTS exercise_video_conversions/);
+  assert.match(down, /billing\.allow_destructive_down/);
 });
 
 test('el runner deja el dry-run como modo por defecto y no imprime credenciales', () => {

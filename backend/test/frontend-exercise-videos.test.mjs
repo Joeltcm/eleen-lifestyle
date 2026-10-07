@@ -19,5 +19,9 @@ test('las demostraciones de ejercicios admiten variantes etiquetadas', async () 
   assert.match(app, /video-urls/);
   assert.match(server, /normalizeRegisteredVideo\(input\.objectKey, id\)/);
   assert.match(server, /formato compatible con móviles/);
+  assert.match(server, /videoUploadFailure/);
+  assert.match(server, /supera el máximo permitido de 90 segundos/);
+  assert.match(server, /archivo no es un video válido/);
+  assert.match(server, /fallo del servidor/);
   assert.match(compressor, /uploadType/);
 });

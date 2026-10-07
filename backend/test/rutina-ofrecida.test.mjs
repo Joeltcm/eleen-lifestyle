@@ -61,6 +61,14 @@ test('cumplir la rutina cierra la clase como realizada (aunque su hora no haya l
   assert.equal(avisos.length, 1);
   assert.match(avisos[0].title, /Cliente Rutina/);
   assert.match(avisos[0].body, /Rutina en casa.*25 min.*100%/);
+  const feedback = await portal.post('/api/portal/routine-feedback', {
+    routineId: rutinaId, completedOn: hoyPanama(), feeling: 'excelente', difficulty: 'bien',
+    feedback: 'Muy buena rutina'
+  });
+  assert.equal(feedback.estado, 200, JSON.stringify(feedback.datos));
+  const feedbackAviso = (await api.get('/api/notifications')).datos.find(item => item.type === 'routine' && item.title.startsWith('Feedback recibido'));
+  assert.ok(feedbackAviso, 'el feedback genera un aviso para Eileen');
+  assert.match(feedbackAviso.body, /\nSensación: Excelente\nDificultad: Bien\nComentario: Muy buena rutina/);
   const otra = await portal.post(`/api/portal/routine-offers/${oferta.id}/complete`, { completionPercent: 100 });
   assert.equal(otra.datos.alreadyCompleted, true, 'completarla dos veces no descuenta dos veces');
   assert.equal((await api.post(`/api/sessions/${sesionId}/routine-offer`, { routineId: rutinaId, confirmRepeat: true })).estado, 409, 'ya no se ofrece en una clase realizada');

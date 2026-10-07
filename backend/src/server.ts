@@ -3713,6 +3713,17 @@ async function deleteObjectIfUnreferenced(objectKey: string, contexto: string) {
 }
 const maxVideoSize = 40 * 1024 * 1024;
 
+function videoUploadFailure(error: unknown) {
+  const detail = error instanceof Error ? error.message : String(error);
+  if (/supera el máximo de 90\s*s|supera el máximo de 90 segundos/i.test(detail)) {
+    return { status: 422, message: 'El video supera el máximo permitido de 90 segundos.' };
+  }
+  if (/invalid data|no cumple el formato|no es un video|contenedor no es|códec|duración ausente|no llegó completo|supera el máximo de 40 mb/i.test(detail)) {
+    return { status: 422, message: 'El archivo no es un video válido o no cumple el formato compatible con móviles.' };
+  }
+  return { status: 500, message: 'No se pudo procesar el video por un fallo del servidor. Inténtalo de nuevo.' };
+}
+
 const exerciseSchema = z.object({
   name: z.string().trim().min(2).max(120),
   english: z.string().trim().max(120).optional().nullable(),
@@ -3859,7 +3870,8 @@ app.post('/api/exercises/:id/video', { preHandler: requireStaff }, async (reques
   } catch (error) {
     request.log.warn({ err: error, exerciseId: id }, 'No se pudo normalizar el video subido');
     await deleteObjectIfUnreferenced(input.objectKey, 'subida rechazada');
-    return reply.code(422).send({ error: 'No se pudo convertir el video a un formato compatible con móviles' });
+    const failure = videoUploadFailure(error);
+    return reply.code(failure.status).send({ error: failure.message });
   }
   const objectKey = prepared.objectKey;
   const previousKey = exercise.video_object_key as string | null;
@@ -3922,7 +3934,8 @@ app.post('/api/exercises/:id/videos', { preHandler: requireStaff }, async (reque
   } catch (error) {
     request.log.warn({ err: error, exerciseId: id }, 'No se pudo normalizar el video subido');
     await deleteObjectIfUnreferenced(input.objectKey, 'subida rechazada');
-    return reply.code(422).send({ error: 'No se pudo convertir el video a un formato compatible con móviles' });
+    const failure = videoUploadFailure(error);
+    return reply.code(failure.status).send({ error: failure.message });
   }
   const objectKey = prepared.objectKey;
   try {
@@ -7917,14 +7930,15 @@ async function notifyRoutineActivity(input: {
 }) {
   const feelingLabels: Record<string, string> = { muy_dificil: 'Muy difícil', dificil: 'Difícil', bien: 'Bien', excelente: 'Excelente' };
   const difficultyLabels: Record<string, string> = { facil: 'Fácil', bien: 'Bien', dificil: 'Difícil' };
-  const feedbackText = [input.feeling ? `Sensación: ${feelingLabels[input.feeling] || input.feeling}` : '', input.difficulty ? `Dificultad: ${difficultyLabels[input.difficulty] || input.difficulty}` : '', input.feedback ? `Comentario: ${input.feedback}` : ''].filter(Boolean).join(' · ');
+  const feedbackText = [input.feeling ? `Sensación: ${feelingLabels[input.feeling] || input.feeling}` : '', input.difficulty ? `Dificultad: ${difficultyLabels[input.difficulty] || input.difficulty}` : '', input.feedback ? `Comentario: ${input.feedback}` : ''].filter(Boolean).join('\n');
+  const feedbackLine = feedbackText ? `\n${feedbackText}` : '';
   const title = input.kind === 'started' ? `Entrenamiento iniciado · ${input.clientName}` : input.kind === 'completed' ? `Rutina completada · ${input.clientName}` : `Feedback recibido · ${input.clientName}`;
   const durationText = input.elapsedSeconds != null ? duracionTexto(Number(input.elapsedSeconds)) : '';
   const body = input.kind === 'started'
     ? `${input.clientName} inició «${input.routineTitle}».`
     : input.kind === 'completed'
-      ? `${input.clientName} completó «${input.routineTitle}»${durationText ? ` ·${durationText}` : ''} · ${input.completedCount != null && input.totalExercises != null ? `${input.completedCount}/${input.totalExercises} ejercicios` : `${input.completionPercent || 0}%`}${feedbackText ? ` · ${feedbackText}` : ''}.`
-      : `${input.clientName} dejó feedback sobre «${input.routineTitle}»: ${feedbackText || 'sin comentario.'}`;
+      ? `${input.clientName} completó «${input.routineTitle}»${durationText ? ` ·${durationText}` : ''} · ${input.completedCount != null && input.totalExercises != null ? `${input.completedCount}/${input.totalExercises} ejercicios` : `${input.completionPercent || 0}%`}${feedbackLine}.`
+      : `${input.clientName} dejó feedback sobre «${input.routineTitle}»:${feedbackLine || ' sin comentario.'}`;
   const [notification] = input.kind === 'feedback'
     ? await sql`INSERT INTO routine_activity_notifications (owner_id, client_id, routine_id, completed_on, kind, title, body) VALUES (${input.ownerId}, ${input.clientId}, ${input.routineId}, ${input.completedOn}, ${input.kind}, ${title}, ${body}) ON CONFLICT (owner_id, routine_id, client_id, completed_on, kind) DO UPDATE SET title = EXCLUDED.title, body = EXCLUDED.body, read_at = null RETURNING id`
     : await sql`INSERT INTO routine_activity_notifications (owner_id, client_id, routine_id, completed_on, kind, title, body) VALUES (${input.ownerId}, ${input.clientId}, ${input.routineId}, ${input.completedOn}, ${input.kind}, ${title}, ${body}) ON CONFLICT (owner_id, routine_id, client_id, completed_on, kind) DO NOTHING RETURNING id`;
