@@ -34,6 +34,7 @@ test('editar ejercicios conserva la asignación y permite dejar nuevos ejercicio
 
   const editada = await api.patch(`/api/routines/${rutina.datos.id}`, {
     title: 'Rutina editable', description: 'Prueba de edición', sessionsPerWeek: 3,
+    confirmVersion: true,
     exercises: [
       { name: 'Sentadilla', sets: 3, reps: '10', block: 1, rounds: 3 },
       { name: 'Puente de glúteo', sets: 3, reps: '12' }
@@ -42,7 +43,9 @@ test('editar ejercicios conserva la asignación y permite dejar nuevos ejercicio
   assert.equal(editada.estado, 200);
 
   const rutinas = await api.get('/api/routines');
-  const guardada = rutinas.datos.find(item => item.id === rutina.datos.id);
+  const guardada = rutinas.datos.find(item => item.id === editada.datos.id);
+  assert.notEqual(editada.datos.id, rutina.datos.id, 'cambiar ejercicios de una rutina usada crea una versión nueva');
+  assert.equal(editada.datos.version, 2);
   assert.deepEqual(guardada.assigned_client_ids, [clienteCreado.datos.id]);
   assert.equal(guardada.exercises[1].name, 'Puente de glúteo');
   assert.equal(guardada.exercises[1].block, undefined);

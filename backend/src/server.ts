@@ -3199,7 +3199,7 @@ const routineExerciseSchema = z.object({
   // Bloques o circuitos (J-113): el número de bloque y cuántas rondas se repite; sin ellos, el ejercicio va suelto con sus series.
   block: z.coerce.number().int().min(1).max(20).optional(), rounds: z.coerce.number().int().min(1).max(10).optional()
 });
-const routineSchema = z.object({ title: z.string().min(2), description: z.string().optional(), sessionsPerWeek: z.coerce.number().int().min(1).max(7), exercises: z.array(routineExerciseSchema).max(80).default([]), clientId: z.string().uuid().optional(), dueOn: z.string().date().nullable().optional(), confirmRepeat: z.boolean().optional().default(false) });
+const routineSchema = z.object({ title: z.string().min(2), description: z.string().optional(), sessionsPerWeek: z.coerce.number().int().min(1).max(7), exercises: z.array(routineExerciseSchema).max(80).default([]), clientId: z.string().uuid().optional(), dueOn: z.string().date().nullable().optional(), confirmRepeat: z.boolean().optional().default(false), confirmVersion: z.boolean().optional().default(false) });
 
 type RoutineDeliveryKind = 'assignment' | 'link' | 'offer' | 'travel_link' | 'new_version';
 type RoutineDeliveryRoutine = {
@@ -3318,14 +3318,20 @@ async function recordRoutineDelivery(transaction: TransactionSql, input: {
 
 app.get('/api/routines', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
+  const consulta = z.object({ root: z.string().uuid().optional(), archived: z.enum(['true', 'false']).optional() }).parse(request.query);
+  const incluirArchivadas = consulta.archived === 'true' || Boolean(consulta.root);
   return sql`
     SELECT r.*, COALESCE(array_agg(ra.client_id) FILTER (WHERE ra.active), '{}') AS assigned_client_ids,
-      max(ra.due_on) FILTER (WHERE ra.active) AS due_on,
+      COALESCE(max(ra.due_on) FILTER (WHERE ra.active), max(ra.due_on)) AS due_on,
       (SELECT count(*)::int FROM routine_deliveries d WHERE d.owner_id = r.owner_id AND d.routine_id = r.id) AS deliveries_count,
       (SELECT count(DISTINCT d.client_id)::int FROM routine_deliveries d WHERE d.owner_id = r.owner_id AND d.routine_id = r.id) AS delivery_clients_count,
-      (SELECT max(d.sent_at) FROM routine_deliveries d WHERE d.owner_id = r.owner_id AND d.routine_id = r.id) AS last_sent_at
+      (SELECT max(d.sent_at) FROM routine_deliveries d WHERE d.owner_id = r.owner_id AND d.routine_id = r.id) AS last_sent_at,
+      (SELECT max(rc.created_at) FROM routine_completions rc WHERE rc.routine_id = r.id) AS last_completed_at
     FROM routines r LEFT JOIN routine_assignments ra ON ra.routine_id = r.id
-    WHERE r.owner_id = ${auth.sub} GROUP BY r.id ORDER BY r.created_at DESC
+    WHERE r.owner_id = ${auth.sub}
+      AND (${incluirArchivadas}::boolean OR r.archived_at IS NULL)
+      AND (${consulta.root ?? null}::uuid IS NULL OR r.root_routine_id = ${consulta.root ?? null}::uuid OR r.id = ${consulta.root ?? null}::uuid)
+    GROUP BY r.id ORDER BY r.created_at DESC
   `;
 });
 
@@ -3534,6 +3540,60 @@ app.post('/api/routines', { preHandler: requireStaff }, async (request, reply) =
 });
 
 class RoutineDueDateError extends Error {}
+class RoutineVersionRequiredError extends Error {
+  code = 'routine_version_required';
+  clientCount: number;
+  constructor(clientCount: number) {
+    super('Esta rutina ya fue enviada. Al guardar se creará una nueva versión para las clientas que la recibieron.');
+    this.clientCount = clientCount;
+  }
+}
+class RoutineVersionStartedError extends Error {
+  code = 'routine_version_started';
+  constructor() { super('No se puede crear una versión porque una clienta ya empezó esta rutina hoy.'); }
+}
+
+async function routineVersionHasStarted(transaction: TransactionSql, routineId: string) {
+  const [started] = await transaction`
+    SELECT EXISTS (
+      SELECT 1 FROM routine_timer_sessions
+      WHERE routine_id = ${routineId} AND active = true
+        AND completed_on = (now() AT TIME ZONE 'America/Panama')::date
+    ) OR EXISTS (
+      SELECT 1
+      FROM routine_exercise_completions rec
+      WHERE rec.routine_id = ${routineId}
+        AND rec.completed_on = (now() AT TIME ZONE 'America/Panama')::date
+        AND rec.completed = true
+        AND NOT EXISTS (
+          SELECT 1 FROM routine_completions rc
+          WHERE rc.routine_id = rec.routine_id AND rc.client_id = rec.client_id AND rc.completed_on = rec.completed_on
+        )
+    ) AS started
+  `;
+  return Boolean(started?.started);
+}
+
+async function routineHasUsage(transaction: TransactionSql, routineId: string) {
+  const [usage] = await transaction`
+    SELECT (
+      EXISTS (SELECT 1 FROM routine_deliveries WHERE routine_id = ${routineId})
+      OR EXISTS (SELECT 1 FROM routine_assignments WHERE routine_id = ${routineId})
+      OR EXISTS (SELECT 1 FROM routine_share_links WHERE routine_id = ${routineId})
+      OR EXISTS (SELECT 1 FROM session_routine_offers WHERE routine_id = ${routineId})
+      OR EXISTS (SELECT 1 FROM routine_completions WHERE routine_id = ${routineId})
+      OR EXISTS (SELECT 1 FROM routine_timer_sessions WHERE routine_id = ${routineId})
+    ) AS used,
+    (SELECT count(DISTINCT client_id)::int FROM (
+      SELECT client_id FROM routine_deliveries WHERE routine_id = ${routineId} AND client_id IS NOT NULL
+      UNION
+      SELECT client_id FROM routine_assignments WHERE routine_id = ${routineId} AND client_id IS NOT NULL
+      UNION
+      SELECT client_id FROM session_routine_offers WHERE routine_id = ${routineId} AND client_id IS NOT NULL
+    ) AS clientes) AS client_count
+  `;
+  return { used: Boolean(usage?.used), clientCount: Number(usage?.client_count || 0) };
+}
 
 app.patch('/api/routines/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
@@ -3542,6 +3602,42 @@ app.patch('/api/routines/:id', { preHandler: requireStaff }, async (request, rep
   let routine;
   try {
     routine = await sql.begin(async transaction => {
+      const [original] = await transaction`SELECT * FROM routines WHERE id = ${id} AND owner_id = ${auth.sub} FOR UPDATE`;
+      if (!original || original.archived_at) return null;
+      const conjuntoCambio = !sameExerciseSet(Array.isArray(original.exercises) ? original.exercises as RoutineExerciseForSummary[] : [], input.exercises);
+      const uso = await routineHasUsage(transaction, id);
+
+      if (conjuntoCambio && uso.used) {
+        if (await routineVersionHasStarted(transaction, id)) throw new RoutineVersionStartedError();
+        if (!input.confirmVersion) throw new RoutineVersionRequiredError(uso.clientCount);
+
+        const asignaciones = await transaction`SELECT * FROM routine_assignments WHERE routine_id = ${id} AND active = true FOR UPDATE`;
+        if (input.dueOn !== undefined && !asignaciones.length) throw new RoutineDueDateError('Asigna la rutina a un cliente antes de ponerle fecha');
+        const newId = randomUUID();
+        const rootId = original.root_routine_id || original.id;
+        const nextVersion = Number(original.version || 1) + 1;
+        const [versionada] = await transaction`
+          INSERT INTO routines (id, owner_id, root_routine_id, version, supersedes_routine_id, title, description, sessions_per_week, exercises, exercises_hash)
+          VALUES (${newId}, ${auth.sub}, ${rootId}, ${nextVersion}, ${id}, ${input.title}, ${input.description || null}, ${input.sessionsPerWeek}, ${transaction.json(input.exercises)}, ${exercisesHash(input.exercises)})
+          RETURNING *
+        `;
+        await transaction`UPDATE routine_assignments SET active = false, ends_on = (now() AT TIME ZONE 'America/Panama')::date WHERE routine_id = ${id} AND active = true`;
+        for (const asignacion of asignaciones) {
+          const dueOn = input.dueOn === undefined
+            ? (asignacion.due_on ? new Date(asignacion.due_on).toISOString().slice(0, 10) : null)
+            : input.dueOn;
+          const [nuevaAsignacion] = await transaction`
+            INSERT INTO routine_assignments (routine_id, client_id, starts_on, due_on, active)
+            VALUES (${newId}, ${asignacion.client_id}, ${asignacion.starts_on}, ${dueOn}::date, true)
+            RETURNING *
+          `;
+          await recordRoutineDelivery(transaction, { routine: versionada as unknown as RoutineDeliveryRoutine, clientId: nuevaAsignacion.client_id, kind: 'new_version', sentByUserId: auth.sub, dueOn: nuevaAsignacion.due_on, assignmentId: nuevaAsignacion.id });
+          await transaction`UPDATE session_routine_offers SET routine_id = ${newId} WHERE routine_id = ${id} AND client_id = ${nuevaAsignacion.client_id} AND status = 'offered'`;
+        }
+        await transaction`UPDATE routines SET archived_at = now(), updated_at = now() WHERE id = ${id}`;
+        return versionada;
+      }
+
       const [updated] = await transaction`UPDATE routines SET title = ${input.title}, description = ${input.description || null}, sessions_per_week = ${input.sessionsPerWeek}, exercises = ${transaction.json(input.exercises)}, exercises_hash = ${exercisesHash(input.exercises)}, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
       if (!updated) return null;
       // Si sólo se editan los ejercicios, clientId viene omitido y la asignación
@@ -3568,6 +3664,8 @@ app.patch('/api/routines/:id', { preHandler: requireStaff }, async (request, rep
     });
   } catch (error) {
     if (error instanceof RoutineDueDateError) return reply.code(409).send({ error: error.message });
+    if (error instanceof RoutineVersionRequiredError) return reply.code(409).send({ code: error.code, message: error.message, clientCount: error.clientCount });
+    if (error instanceof RoutineVersionStartedError) return reply.code(409).send({ code: error.code, message: error.message });
     if (error instanceof RoutineRepeatError) return reply.code(409).send({ code: error.code, message: error.message, repeats: error.repeats });
     throw error;
   }
@@ -3578,9 +3676,20 @@ app.patch('/api/routines/:id', { preHandler: requireStaff }, async (request, rep
 app.delete('/api/routines/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const [routine] = await sql`DELETE FROM routines WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING id, title`;
-  if (!routine) return reply.code(404).send({ error: 'Rutina no encontrada' });
-  return { deleted: true, routine };
+  const result = await sql.begin(async transaction => {
+    const [routine] = await transaction`SELECT id, title, archived_at FROM routines WHERE id = ${id} AND owner_id = ${auth.sub} FOR UPDATE`;
+    if (!routine) return null;
+    const uso = await routineHasUsage(transaction, id);
+    if (uso.used) {
+      await transaction`UPDATE routines SET archived_at = COALESCE(archived_at, now()), updated_at = now() WHERE id = ${id}`;
+      await transaction`UPDATE routine_assignments SET active = false, ends_on = COALESCE(ends_on, (now() AT TIME ZONE 'America/Panama')::date) WHERE routine_id = ${id} AND active = true`;
+      return { archived: true, routine: { id: routine.id, title: routine.title } };
+    }
+    await transaction`DELETE FROM routines WHERE id = ${id}`;
+    return { deleted: true, routine: { id: routine.id, title: routine.title } };
+  });
+  if (!result) return reply.code(404).send({ error: 'Rutina no encontrada' });
+  return result;
 });
 
 // ── Catálogo de ejercicios ────────────────────────────────────────────────
@@ -7511,7 +7620,7 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
         END::numeric(12,2) AS balance
       FROM invoices WHERE client_id = ${client.id} ORDER BY COALESCE(issued_on, due_on) DESC
     `,
-    sql`SELECT ra.id AS assignment_id, ra.due_on, r.id, r.title, r.description, r.sessions_per_week, r.exercises FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id WHERE ra.client_id = ${client.id} AND ra.active = true AND (ra.ends_on IS NULL OR ra.ends_on >= current_date) ORDER BY ra.starts_on DESC`,
+    sql`SELECT ra.id AS assignment_id, ra.due_on, r.id, r.title, r.description, r.version, r.root_routine_id, r.sessions_per_week, r.exercises FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id WHERE ra.client_id = ${client.id} AND ra.active = true AND r.archived_at IS NULL AND (ra.ends_on IS NULL OR ra.ends_on >= current_date) ORDER BY ra.starts_on DESC`,
     sql`SELECT s.id, s.routine_id, s.starts_at, s.duration_minutes, s.mode, s.status, s.cancellation_kind, s.cancelled_by, s.credit_charge, s.completion_percent,
       r.title AS routine_title,
       (EXISTS (SELECT 1 FROM session_reschedules sr WHERE sr.session_id = s.id AND sr.origin = 'moved')

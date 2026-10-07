@@ -7,6 +7,7 @@ import postgres from 'postgres';
 import { readFileSync } from 'node:fs';
 import { CREDENCIALES, SETUP_TOKEN, cliente, levantar } from './harness.mjs';
 import { abrirPantalla, esperar } from './ui-harness.mjs';
+import { exerciseIdentities } from '../dist/routine-utils.js';
 
 // La pantalla corre en este proceso y el negocio cuenta los días en hora de Panamá (el teléfono de la clienta está en Panamá): sin esto, de 19:00 a 24:00 de Panamá la prueba vería otro día que el servidor.
 process.env.TZ = 'America/Panama';
@@ -45,6 +46,19 @@ test('sin sesión se ve la pantalla de acceso y no hay errores', async () => {
     await esperar(() => !p.document.getElementById('auth-screen').hidden, { mensaje: 'pantalla de acceso' });
     assert.ok(p.q('#login-form') && !p.q('#login-form').hidden);
     sinErrores(p, 'acceso');
+  } finally { await p.cerrar(); }
+});
+
+test('la pantalla usa la misma identidad de ejercicios que el servidor para versionar', async () => {
+  const p = await abrirPantalla({ baseApi: servidor.base });
+  try {
+    await esperar(() => p.evaluar('typeof window.exerciseIdentitiesForVersion === "function"'), { mensaje: 'funciones de versionado en pantalla' });
+    const ejercicios = [{ catalogId: 'cat-1', name: 'Sentadilla' }, { name: 'Puente  Glúteo' }, { name: 'Área' }];
+    const delServidor = exerciseIdentities(ejercicios);
+    const delCliente = p.evaluar(`window.exerciseIdentitiesForVersion(${JSON.stringify(ejercicios)})`);
+    assert.equal(JSON.stringify(delCliente), JSON.stringify(delServidor), 'la copia de pantalla conserva las mismas identidades y normalización');
+    assert.equal(p.evaluar(`window.sameExerciseSetForVersion(${JSON.stringify(ejercicios)}, ${JSON.stringify([ejercicios[2], ejercicios[0], ejercicios[1]])})`), true, 'el orden no crea una versión');
+    sinErrores(p, 'paridad de versionado');
   } finally { await p.cerrar(); }
 });
 
@@ -91,11 +105,12 @@ test('EDITAR una rutina guardada abre el editor completo y TODAS sus acciones fu
     p.cambiar(p.q('[data-exercise-block="0"]', f), '2');
     assert.equal(nombres().length, 6); assert.deepEqual(bloques().slice(0, 2), ['[Bloque 1]', 'Puente de glúteo'], 'el primero salió del bloque 1');
     // 3) Agregar un ejercicio nuevo directo a un bloque
-    p.cambiar(p.q('#exercise-choice'), p.evaluar("exerciseCatalog.find(e => e.name === 'Plancha').id"));
+    p.cambiar(p.q('#exercise-choice'), p.evaluar("exerciseCatalog.find(e => e.name === 'Puente de glúteo').id"));
     p.cambiar(p.q('#agregar-a'), '1'); p.clic(p.q('#add-exercise'));
     assert.equal(nombres().length, 7, 'se agregó');
     // 4) Quitar uno
-    p.clic(p.q('[data-remove-exercise="0"]', f));
+    const quitarCurl = p.qa('[data-remove-exercise]', f).find(button => p.q('b', button.closest('.selected-exercise'))?.textContent === 'Curl de bíceps');
+    p.clic(quitarCurl);
     assert.equal(nombres().length, 6, 'se quitó');
     // 5) Cambiar las rondas de un bloque
     const rondas = p.q('[data-bloque-rondas="2"]', f); rondas.value = '4'; rondas.dispatchEvent(new p.window.Event('input', { bubbles: true }));
