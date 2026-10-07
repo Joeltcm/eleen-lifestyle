@@ -328,21 +328,26 @@ function detalleEnvioRepetido(error) {
 }
 function confirmarEnvioRepetido(error) {
   return new Promise(resolve => {
-    const overlay = document.createElement('div');
-    overlay.className = 'routine-repeat-overlay';
-    overlay.innerHTML = `<div class="routine-repeat-dialog" role="dialog" aria-modal="true" aria-labelledby="routine-repeat-title">
+    // Tiene que ser un <dialog> abierto con showModal(): el aviso sale mientras el editor de la rutina (otro <dialog> modal) está abierto, y un <div> añadido al body queda DETRÁS
+    // de ese diálogo en la capa superior del navegador (los clics los recibe el editor, no el aviso, aunque el z-index sea enorme). Un segundo showModal() se apila encima.
+    const dialogo = document.createElement('dialog');
+    dialogo.className = 'routine-repeat-host';
+    dialogo.setAttribute('aria-labelledby', 'routine-repeat-title');
+    dialogo.innerHTML = `<div class="routine-repeat-dialog">
       <p class="eyebrow">REVISAR ENVÍO</p><h2 id="routine-repeat-title">Rutina enviada recientemente</h2>
       <p>Esta clienta recibió recientemente una rutina igual o con los mismos ejercicios.</p>
       <ul class="routine-repeat-list">${detalleEnvioRepetido(error)}</ul>
       <p class="section-note">Puedes cancelar para revisar la rutina o enviarla de todos modos.</p>
       <div class="routine-repeat-actions"><button type="button" class="secondary" data-repeat-cancel autofocus>Cancelar</button><button type="button" class="primary" data-repeat-confirm>Enviar de todos modos</button></div>
     </div>`;
-    document.body.append(overlay);
-    const finish = value => { overlay.remove(); resolve(value); };
-    overlay.querySelector('[data-repeat-cancel]').onclick = () => finish(false);
-    overlay.querySelector('[data-repeat-confirm]').onclick = () => finish(true);
-    overlay.addEventListener('keydown', event => { if (event.key === 'Escape') finish(false); });
-    overlay.querySelector('[data-repeat-cancel]').focus();
+    document.body.append(dialogo);
+    let respuesta = false;
+    // Escape, el botón y cualquier otra forma de cerrar terminan en 'close': sin confirmar explícitamente la respuesta es siempre "no".
+    dialogo.addEventListener('close', () => { dialogo.remove(); resolve(respuesta); });
+    dialogo.querySelector('[data-repeat-cancel]').onclick = () => dialogo.close();
+    dialogo.querySelector('[data-repeat-confirm]').onclick = () => { respuesta = true; dialogo.close(); };
+    dialogo.showModal();
+    dialogo.querySelector('[data-repeat-cancel]').focus();
   });
 }
 async function apiConAvisoDeRepetido(path, options = {}) {

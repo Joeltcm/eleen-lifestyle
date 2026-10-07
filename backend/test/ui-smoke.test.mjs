@@ -294,6 +294,7 @@ test('AVISO DE REPETIDO en pantalla: reutilizar para la misma clienta pregunta; 
     f.elements.client.value = clientId;
     f.requestSubmit();
     const aviso = await esperar(() => p.q('.routine-repeat-dialog'), { mensaje: 'aparece el aviso' });
+    assert.ok(aviso.closest('dialog.routine-repeat-host[open]'), 'el aviso es un <dialog> modal propio: un <div> en el body quedaría DETRÁS del editor (otro <dialog> modal) y no se podría pulsar');
     assert.match(aviso.textContent, /rutina enviada recientemente/i); assert.match(aviso.textContent, /rutina con los mismos ejercicios/i); assert.match(aviso.textContent, /hoy/i);
     assert.ok(p.q('[data-repeat-cancel]', aviso), 'Cancelar es la acción segura y está disponible');
     p.clic(p.q('[data-repeat-cancel]', aviso));
@@ -343,4 +344,15 @@ test('historial de envíos: la tarjeta permite enviar enlace y el detalle muestr
     assert.match(enviosCliente.textContent, /Rutina en bloques|Cliente/);
     sinErrores(p, 'historial de envíos');
   } finally { await p.cerrar(); }
+});
+
+test('el aviso de repetidos se abre como <dialog> con showModal(), nunca como un <div> pegado al body', () => {
+  // jsdom no tiene capa superior (top layer), así que esta prueba no puede ver el fallo real; se comprueba el código. Verificado a mano en Chromium: un <div> fixed con z-index enorme
+  // queda detrás de un <dialog> modal abierto (los clics los recibe el editor), mientras que un segundo <dialog> con showModal() se apila encima y es pulsable.
+  const fuente = readFileSync(new URL('../../app.js', import.meta.url), 'utf8');
+  const i = fuente.indexOf('function confirmarEnvioRepetido'); assert.ok(i > 0, 'existe la función');
+  const cuerpo = fuente.slice(i, fuente.indexOf('async function apiConAvisoDeRepetido', i));
+  assert.match(cuerpo, /createElement\('dialog'\)/); assert.match(cuerpo, /\.showModal\(\)/);
+  assert.doesNotMatch(cuerpo, /createElement\('div'\)/, 'no se arma con un div');
+  assert.match(cuerpo, /addEventListener\('close'/, 'Escape y cualquier cierre terminan en "no" salvo la confirmación explícita');
 });
