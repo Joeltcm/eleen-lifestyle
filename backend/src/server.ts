@@ -15,6 +15,7 @@ import { cancelSessionInGoogle, registerGoogleCalendarRoutes, removeSessionFromG
 import { moveSessionInTransaction } from './session-reschedule.js';
 import { complianceCompletionExpression, complianceSessionCondition } from './compliance.js';
 import { routineSuggestionsReady, suggestRoutine } from './routine-suggestions.js';
+import { normalizeRegisteredVideo } from './video-upload-normalizer.js';
 import { accountStatementPdf, accountsReceivablePdf, billingInvoicePdf, compliancePdf, invoicePdf, monthlyFinancePdf } from './billing-reports.js';
 import { fechaDeNegocioPanama, fechaPanamaDiasAtras } from './panama-date.js';
 import { resolveBillingEngine } from './billing-engine.js';
@@ -3502,39 +3503,48 @@ app.post('/api/exercises/:id/video', { preHandler: requireStaff }, async (reques
   const [exercise] = await sql`SELECT id, video_object_key FROM exercises WHERE id = ${id} AND owner_id = ${auth.sub}`;
   if (!exercise) return reply.code(404).send({ error: 'Ejercicio no encontrado' });
 
-  // Se confirma contra R2 antes de guardar: si la subida firmada falló a medias
-  // no debe quedar un ejercicio anunciando un video que no se puede reproducir.
-  const uploaded = await verifyUpload(input.objectKey).catch(() => null);
-  if (!uploaded?.sizeBytes) return reply.code(409).send({ error: 'El video no llegó completo al almacenamiento' });
-
+  let prepared;
+  try {
+    prepared = await normalizeRegisteredVideo(input.objectKey, id);
+  } catch (error) {
+    request.log.warn({ err: error, exerciseId: id }, 'No se pudo normalizar el video subido');
+    return reply.code(422).send({ error: 'No se pudo convertir el video a un formato compatible con móviles' });
+  }
+  const objectKey = prepared.objectKey;
   const previousKey = exercise.video_object_key as string | null;
-  const [updated] = await sql`
-    UPDATE exercises SET video_object_key = ${input.objectKey}, video_content_type = ${uploaded.contentType || 'video/mp4'},
-      video_size_bytes = ${uploaded.sizeBytes}, video_duration_seconds = ${input.durationSeconds ?? null},
-      video_uploaded_at = now(), updated_at = now()
-    WHERE id = ${id} AND owner_id = ${auth.sub}
-    RETURNING ${exerciseColumns}
-  `;
-  if (previousKey && previousKey !== input.objectKey) {
-    await deleteObject(previousKey).catch(error => app.log.warn({ err: error, exerciseId: id }, 'No se pudo borrar el video anterior'));
-  }
-  // Compatibilidad con el endpoint antiguo: reemplazar el video predeterminado
-  // también actualiza su fila de variantes, sin borrar las demás opciones.
-  const [previousVariant] = previousKey ? await sql`SELECT id FROM exercise_videos WHERE exercise_id = ${id} AND object_key = ${previousKey}` : [];
-  if (previousVariant) {
-    await sql`
-      UPDATE exercise_videos SET object_key = ${input.objectKey}, content_type = ${uploaded.contentType || 'video/mp4'},
-        size_bytes = ${uploaded.sizeBytes}, duration_seconds = ${input.durationSeconds ?? null}, uploaded_at = now(), updated_at = now()
-      WHERE id = ${previousVariant.id}
+  try {
+    const [updated] = await sql`
+      UPDATE exercises SET video_object_key = ${objectKey}, video_content_type = ${prepared.contentType},
+        video_size_bytes = ${prepared.sizeBytes}, video_duration_seconds = ${prepared.durationSeconds ?? input.durationSeconds ?? null},
+        video_uploaded_at = now(), updated_at = now()
+      WHERE id = ${id} AND owner_id = ${auth.sub}
+      RETURNING ${exerciseColumns}
     `;
-  } else {
-    await sql`
-      INSERT INTO exercise_videos (exercise_id, owner_id, label, object_key, content_type, size_bytes, duration_seconds, sort_order)
-      VALUES (${id}, ${auth.sub}, 'Demostración', ${input.objectKey}, ${uploaded.contentType || 'video/mp4'}, ${uploaded.sizeBytes}, ${input.durationSeconds ?? null}, 0)
-      ON CONFLICT (owner_id, object_key) DO NOTHING
-    `;
+    // Compatibilidad con el endpoint antiguo: reemplazar el video predeterminado
+    // también actualiza su fila de variantes, sin borrar las demás opciones.
+    const [previousVariant] = previousKey ? await sql`SELECT id FROM exercise_videos WHERE exercise_id = ${id} AND object_key = ${previousKey}` : [];
+    if (previousVariant) {
+      await sql`
+        UPDATE exercise_videos SET object_key = ${objectKey}, content_type = ${prepared.contentType},
+          size_bytes = ${prepared.sizeBytes}, duration_seconds = ${prepared.durationSeconds ?? input.durationSeconds ?? null}, uploaded_at = now(), updated_at = now()
+        WHERE id = ${previousVariant.id}
+      `;
+    } else {
+      await sql`
+        INSERT INTO exercise_videos (exercise_id, owner_id, label, object_key, content_type, size_bytes, duration_seconds, sort_order)
+        VALUES (${id}, ${auth.sub}, 'Demostración', ${objectKey}, ${prepared.contentType}, ${prepared.sizeBytes}, ${prepared.durationSeconds ?? input.durationSeconds ?? null}, 0)
+        ON CONFLICT (owner_id, object_key) DO NOTHING
+      `;
+    }
+    await deleteObject(input.objectKey).catch(error => app.log.warn({ err: error, exerciseId: id }, 'No se pudo borrar la subida original'));
+    if (previousKey && previousKey !== input.objectKey && previousKey !== objectKey) {
+      await deleteObject(previousKey).catch(error => app.log.warn({ err: error, exerciseId: id }, 'No se pudo borrar el video anterior'));
+    }
+    return updated;
+  } catch (error) {
+    await deleteObject(objectKey).catch(() => {});
+    throw error;
   }
-  return updated;
 });
 
 // Variante nueva: sube una demostración sin reemplazar las anteriores.
@@ -3557,24 +3567,35 @@ app.post('/api/exercises/:id/videos', { preHandler: requireStaff }, async (reque
   if (!input.objectKey.startsWith(`exercises/${id}/`)) return reply.code(400).send({ error: 'La ruta del video no corresponde a este ejercicio' });
   const [exercise] = await sql`SELECT id, video_object_key FROM exercises WHERE id = ${id} AND owner_id = ${auth.sub}`;
   if (!exercise) return reply.code(404).send({ error: 'Ejercicio no encontrado' });
-  const uploaded = await verifyUpload(input.objectKey).catch(() => null);
-  if (!uploaded?.sizeBytes) return reply.code(409).send({ error: 'El video no llegó completo al almacenamiento' });
-
-  const [video] = await sql`
-    INSERT INTO exercise_videos (exercise_id, owner_id, label, object_key, content_type, size_bytes, duration_seconds, sort_order)
-    VALUES (${id}, ${auth.sub}, ${input.label}, ${input.objectKey}, ${uploaded.contentType || 'video/mp4'}, ${uploaded.sizeBytes}, ${input.durationSeconds ?? null}, ${input.sortOrder ?? 100})
-    RETURNING id, label, content_type, size_bytes, duration_seconds, uploaded_at, sort_order
-  `;
-  // La primera variante mantiene funcionando a clientes y enlaces antiguos
-  // que todavía consultan video_object_key.
-  if (!exercise.video_object_key) {
-    await sql`
-      UPDATE exercises SET video_object_key = ${input.objectKey}, video_content_type = ${uploaded.contentType || 'video/mp4'},
-        video_size_bytes = ${uploaded.sizeBytes}, video_duration_seconds = ${input.durationSeconds ?? null}, video_uploaded_at = now(), updated_at = now()
-      WHERE id = ${id} AND owner_id = ${auth.sub}
-    `;
+  let prepared;
+  try {
+    prepared = await normalizeRegisteredVideo(input.objectKey, id);
+  } catch (error) {
+    request.log.warn({ err: error, exerciseId: id }, 'No se pudo normalizar el video subido');
+    return reply.code(422).send({ error: 'No se pudo convertir el video a un formato compatible con móviles' });
   }
-  return reply.code(201).send(video);
+  const objectKey = prepared.objectKey;
+  try {
+    const [video] = await sql`
+      INSERT INTO exercise_videos (exercise_id, owner_id, label, object_key, content_type, size_bytes, duration_seconds, sort_order)
+      VALUES (${id}, ${auth.sub}, ${input.label}, ${objectKey}, ${prepared.contentType}, ${prepared.sizeBytes}, ${prepared.durationSeconds ?? input.durationSeconds ?? null}, ${input.sortOrder ?? 100})
+      RETURNING id, label, content_type, size_bytes, duration_seconds, uploaded_at, sort_order
+    `;
+    // La primera variante mantiene funcionando a clientes y enlaces antiguos
+    // que todavía consultan video_object_key.
+    if (!exercise.video_object_key) {
+      await sql`
+        UPDATE exercises SET video_object_key = ${objectKey}, video_content_type = ${prepared.contentType},
+          video_size_bytes = ${prepared.sizeBytes}, video_duration_seconds = ${prepared.durationSeconds ?? input.durationSeconds ?? null}, video_uploaded_at = now(), updated_at = now()
+        WHERE id = ${id} AND owner_id = ${auth.sub}
+      `;
+    }
+    await deleteObject(input.objectKey).catch(error => app.log.warn({ err: error, exerciseId: id }, 'No se pudo borrar la subida original'));
+    return reply.code(201).send(video);
+  } catch (error) {
+    await deleteObject(objectKey).catch(() => {});
+    throw error;
+  }
 });
 
 app.delete('/api/exercises/:id/videos/:videoId', { preHandler: requireStaff }, async (request, reply) => {

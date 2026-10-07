@@ -30,6 +30,9 @@
 
   const pickType = () => preferredTypes.find(type => MediaRecorder.isTypeSupported(type)) || '';
   const baseType = type => (type.startsWith('video/mp4') ? 'video/mp4' : 'video/webm');
+  // Si el navegador no puede comprimir, el servidor inspecciona los bytes y
+  // los convierte. Aquí solo necesitamos un tipo aceptado por la URL firmada.
+  const uploadType = type => type === 'video/webm' ? 'video/webm' : 'video/mp4';
 
   function loadVideo(file) {
     return new Promise((resolve, reject) => {
@@ -54,7 +57,7 @@
 
   async function compress(file, options = {}) {
     const { maxSide = 720, videoBitsPerSecond = 1_200_000, fps = 30, maxSeconds = 90, onProgress } = options;
-    if (!supported()) return { skipped: 'unsupported', blob: file, contentType: file.type, durationSeconds: null };
+    if (!supported()) return { skipped: 'unsupported', blob: file, contentType: uploadType(file.type), durationSeconds: null };
 
     const { video, url } = await loadVideo(file);
     try {
@@ -102,7 +105,7 @@
       // Si el original ya venía liviano, comprimir puede engordarlo. En ese
       // caso se sube tal cual: el objetivo es que pese menos, no re-codificar.
       if (blob.size >= file.size) {
-        return { skipped: 'larger', blob: file, contentType: file.type, durationSeconds: duration, width: video.videoWidth, height: video.videoHeight, originalSize: file.size, finalSize: file.size };
+        return { skipped: 'larger', blob: file, contentType: uploadType(file.type), durationSeconds: duration, width: video.videoWidth, height: video.videoHeight, originalSize: file.size, finalSize: file.size };
       }
       return { blob, contentType: baseType(mimeType), durationSeconds: duration, width, height, originalSize: file.size, finalSize: blob.size };
     } finally {

@@ -86,6 +86,8 @@ test('normaliza MP4 fragmentado y WebM a MP4 H.264 sin audio', skipWithoutFfmpeg
     assert.equal(webmResult.normalized.fragmented, false);
     assert.equal(fragmentedResult.normalized.moovBeforeMdat, true);
     assert.equal(webmResult.normalized.moovBeforeMdat, true);
+    assert.ok(Math.abs(fragmentedResult.normalized.fps - 24) < 0.2, `conserva los 24 fps de origen: ${fragmentedResult.normalized.fps}`);
+    assert.ok(Math.abs(webmResult.normalized.fps - 24) < 0.2, `conserva los 24 fps de origen: ${webmResult.normalized.fps}`);
     assert.equal(fragmentedResult.normalized.width % 2, 0);
     assert.equal(fragmentedResult.normalized.height % 2, 0);
   } finally {

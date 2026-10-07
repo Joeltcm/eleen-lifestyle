@@ -192,7 +192,7 @@ async function convertOnce(input: string, output: string, info: VideoInfo, runne
     ? ['-y', '-i', input, '-map', '0:v:0', '-c:v', 'copy', '-an', '-movflags', '+faststart', output]
     : [
       '-y', '-i', input, '-map', '0:v:0', '-vf', `scale=${outputDimensions(info).width}:${outputDimensions(info).height}`,
-      '-c:v', 'libx264', '-profile:v', 'baseline', '-level:v', '3.1', '-pix_fmt', 'yuv420p', '-r', '30',
+      '-c:v', 'libx264', '-profile:v', 'baseline', '-level:v', '3.1', '-pix_fmt', 'yuv420p', '-fpsmax', '30',
       '-preset', 'medium', '-crf', String(crf), '-an', '-movflags', '+faststart', output
     ];
   await runner('ffmpeg', args);

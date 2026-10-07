@@ -12,6 +12,20 @@ Railpack instala ese paquete en la imagen final. La aplicación no depende de
 esa variable para arrancar: si el binario falta, el comando de normalización
 termina con un mensaje explícito y no modifica la base ni R2.
 
+## Videos nuevos
+
+Las rutas de alta (`/api/exercises/:id/videos` y la ruta heredada
+`/api/exercises/:id/video`) también normalizan el archivo antes de guardarlo.
+La URL firmada recibe la subida temporal, el servicio la inspecciona y crea
+una nueva referencia MP4/H.264 sin audio, con `faststart` y hasta 30 fps. La
+base solo apunta al resultado validado; si la conversión falla, se rechaza el
+alta y la subida temporal no se registra como demostración. El archivo
+original de una migración existente nunca se purga automáticamente.
+
+El compresor del navegador sigue siendo una optimización, no una garantía de
+compatibilidad. Si el navegador no puede comprimir o entrega un `.mov`, lo
+envía con un tipo aceptado para que el servidor convierta los bytes reales.
+
 ## Orden seguro en Railway
 
 Estos comandos se ejecutan dentro del servicio `api`, nunca contra una URL
