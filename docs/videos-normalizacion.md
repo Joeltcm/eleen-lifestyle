@@ -45,3 +45,13 @@ mismo `node dist/scripts/normalizar-videos.js ...`.
 La prueba de Safari/iPhone y la de Chrome Android real no se ejecutan en CI;
 deben informarse por separado después de la conversión. `jsdom` solo valida la
 lógica y no prueba la decodificación de video.
+
+## Salvaguardas verificadas (prueba de punta a punta con base real y R2 simulado)
+
+- Sin argumentos el script hace `--dry-run`: nunca escribe por omisión.
+- `--aplicar` repetido no reconvierte ni crea un lote vacío (un lote vacío sería el "último" y estorbaría a `--revertir ultimo`).
+- `--revertir` se niega, sin tocar la base, si ya falta algún original en R2 (por ejemplo tras una purga parcial).
+- `--purgar-originales` exige indicar el lote (un id, `ultimo` o `todos`); sin argumento se niega.
+- Un video que no se puede inspeccionar o convertir queda como estaba y se informa; los demás siguen.
+- Duración máxima 90 s (igual que el compresor del navegador) y 180 s de tiempo máximo por orden de `ffmpeg`/`ffprobe`.
+- La prueba `backend/test/video-migration-e2e.test.mjs` ejecuta todo el ciclo; se omite si no hay `ffmpeg`.

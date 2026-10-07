@@ -2,7 +2,9 @@ import { copyFile, readFile, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 
 export const MAX_VIDEO_SIZE = 40 * 1024 * 1024;
-export const MAX_VIDEO_DURATION_SECONDS = 60;
+// Igual que el compresor del navegador (maxSeconds = 90): un clip válido allí no puede ser rechazado aquí.
+export const MAX_VIDEO_DURATION_SECONDS = 90;
+export const COMMAND_TIMEOUT_MS = 180_000;
 export const MAX_VIDEO_SIDE = 1280;
 export const MAX_VIDEO_FPS = 30.5;
 const ACCEPTED_PROFILES = /baseline|main/i;
@@ -43,9 +45,10 @@ export type VideoInfo = {
 
 export type CommandRunner = (command: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
 
-export function runCommand(command: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+export function runCommand(command: string, args: string[], timeoutMs = COMMAND_TIMEOUT_MS): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    // Un ffmpeg colgado no debe dejar el script (ni, más adelante, una petición de subida) esperando para siempre.
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, killSignal: 'SIGKILL' });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', chunk => { stdout += chunk; });
@@ -57,7 +60,8 @@ export function runCommand(command: string, args: string[]): Promise<{ stdout: s
         reject(error);
       }
     });
-    child.on('close', code => {
+    child.on('close', (code, signal) => {
+      if (signal === 'SIGKILL') return reject(new Error(`${command} superó el tiempo máximo de ${Math.round(timeoutMs / 1000)} s y se canceló`));
       if (code === 0) return resolve({ stdout, stderr });
       reject(new Error(`${command} terminó con código ${code}: ${stderr.trim()}`));
     });

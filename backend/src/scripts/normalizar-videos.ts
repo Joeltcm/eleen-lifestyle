@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import postgres from 'postgres';
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { config } from '../config.js';
 import { inspectVideoFile, normalizeVideo, runCommand, type VideoInfo } from '../video-normalizer.js';
 
@@ -185,6 +185,8 @@ async function applyConversion(dryRun: boolean) {
     const candidates = groups.filter(group => group.info?.needsNormalize);
     console.log(`\nPlan: ${candidates.length} objetos para normalizar · ${groups.length - candidates.length} ya cumplen`);
     if (dryRun) return;
+    // Sin nada que convertir no se crea un lote: uno vacío sería el "último" y `--revertir ultimo` / `--purgar-originales ultimo` lo elegirían en lugar del lote real.
+    if (!candidates.length) { console.log('Nada que convertir: no se creó ningún lote.'); return; }
     batchId = await createBatch(sql);
     const items: ConversionItem[] = [];
     for (const group of candidates) {
@@ -252,8 +254,8 @@ async function batches(sql: postgres.Sql, requested: string | null, forPurge: bo
     return sql`SELECT id::text AS id, status FROM exercise_video_conversions WHERE id = ${requested}::uuid`;
   }
   const statuses = forPurge ? ['applied', 'failed'] : ['applying', 'applied', 'failed'];
-  if (requested === 'todos') return sql`SELECT id::text AS id, status FROM exercise_video_conversions WHERE status = ANY(${sql.array(statuses)}) ORDER BY created_at DESC`;
-  return sql`SELECT id::text AS id, status FROM exercise_video_conversions WHERE status = ANY(${sql.array(statuses)}) ORDER BY created_at DESC LIMIT 1`;
+  if (requested === 'todos') return sql`SELECT id::text AS id, status FROM exercise_video_conversions WHERE status IN ${sql(statuses)} ORDER BY created_at DESC`;
+  return sql`SELECT id::text AS id, status FROM exercise_video_conversions WHERE status IN ${sql(statuses)} ORDER BY created_at DESC LIMIT 1`;
 }
 
 async function revertBatch(sql: postgres.Sql, s3: S3Client, bucket: string, batchId: string) {
@@ -261,6 +263,13 @@ async function revertBatch(sql: postgres.Sql, s3: S3Client, bucket: string, batc
   if (!batch) throw new Error(`No existe la conversión ${batchId}`);
   if (batch.status === 'purged' || batch.status === 'reverted') return console.log(`OMITIDO · ${batchId} ya está ${batch.status}`);
   const items = await sql`SELECT * FROM exercise_video_conversion_items WHERE conversion_id = ${batchId}::uuid ORDER BY converted_at DESC`;
+  // Revertir apunta la base otra vez a los originales: si alguno ya no existe (purga parcial, borrado manual) la demostración quedaría rota. Se comprueba ANTES de tocar nada.
+  const faltantes: string[] = [];
+  for (const item of items) {
+    try { await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: String(item.old_object_key) })); }
+    catch { faltantes.push(String(item.old_object_key)); }
+  }
+  if (faltantes.length) throw new Error(`No se puede revertir ${batchId}: faltan ${faltantes.length} original(es) en R2 (${faltantes.slice(0, 3).join(', ')}${faltantes.length > 3 ? '…' : ''}). La base no se tocó.`);
   await sql.begin(async transaction => {
     for (const item of items) {
       const refs = conversionReferences(item.references_json);
@@ -316,6 +325,11 @@ async function purgeBatch(sql: postgres.Sql, s3: S3Client, bucket: string, batch
 
 async function main() {
   if (!action || args.filter(value => value.startsWith('--')).length > 1) {
+    usage(); process.exitCode = 2; return;
+  }
+  // Borrar originales es irreversible: nunca por omisión. Hay que escribir el id del lote, "ultimo" o "todos".
+  if (action === '--purgar-originales' && !(args[args.indexOf(action) + 1] && !args[args.indexOf(action) + 1].startsWith('--'))) {
+    console.error('--purgar-originales borra los originales de forma irreversible: indica el lote (un id, "ultimo" o "todos").');
     usage(); process.exitCode = 2; return;
   }
   if (action === '--inventario') return inventory();
