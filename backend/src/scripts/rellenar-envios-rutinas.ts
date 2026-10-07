@@ -129,17 +129,21 @@ function sourceReference(row: SourceRow) {
 }
 
 async function pendingSources(sql: postgres.Sql, rows: SourceRow[]) {
+  // Un envío ya tiene registro si EXISTE cualquier entrega que apunte a esa asignación, enlace u oferta: la reconstruida por un relleno anterior
+  // Y la registrada en tiempo real desde que existe la bitácora (entrega 1). Antes solo se miraban las reconstruidas y se duplicaba todo lo ya registrado.
   const pending: SourceRow[] = [];
   for (const row of rows) {
     const existing = row.kind === 'assignment'
-      ? await sql`SELECT 1 FROM routine_deliveries WHERE backfilled = true AND assignment_id = ${row.source_id}::uuid LIMIT 1`
+      ? await sql`SELECT 1 FROM routine_deliveries WHERE assignment_id = ${row.source_id}::uuid LIMIT 1`
       : row.kind === 'offer'
-        ? await sql`SELECT 1 FROM routine_deliveries WHERE backfilled = true AND offer_id = ${row.source_id}::uuid LIMIT 1`
-        : await sql`SELECT 1 FROM routine_deliveries WHERE backfilled = true AND share_link_id = ${row.source_id}::uuid LIMIT 1`;
+        ? await sql`SELECT 1 FROM routine_deliveries WHERE offer_id = ${row.source_id}::uuid LIMIT 1`
+        : await sql`SELECT 1 FROM routine_deliveries WHERE share_link_id = ${row.source_id}::uuid LIMIT 1`;
     if (!existing.length) pending.push(row);
   }
   return pending;
 }
+
+const fechaPanama = (value: Date | string) => new Intl.DateTimeFormat('es-PA', { timeZone: 'America/Panama', day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date(value)).replace(/\//g, '-');
 
 async function printPlan(sql: postgres.Sql) {
   const allRoutines = await routines(sql);
@@ -152,6 +156,7 @@ async function printPlan(sql: postgres.Sql) {
   console.log('RELLENO DE ENVÍOS DE RUTINAS · America/Panama');
   console.log(`Rutinas: ${allRoutines.length} · exercises_hash por rellenar: ${missingHashes.length} · root_routine_id por verificar: ${missingRoots.length}`);
   console.log(`Envíos reconstruibles pendientes: ${pending.length} · asignaciones: ${byKind.get('assignment') || 0} · enlaces: ${byKind.get('link') || 0} · enlaces de viaje: ${byKind.get('travel_link') || 0} · ofertas: ${byKind.get('offer') || 0}`);
+  if (mode === '--dry-run') for (const row of pending) console.log(`PENDIENTE · ${sourceLabel(row.kind)} · ${row.client_name} · ${row.title} · ${fechaPanama(row.sent_at)}${row.kind === 'assignment' ? ' (aprox.)' : ''}`);
   console.log('Cada asignación histórica usa 12:00 de Panamá y queda marcada como fecha/hora aproximada.');
   console.log('No reconstruible: enlaces copiados o enviados por WhatsApp sin fila, y envíos anteriores a la existencia de estas tablas.');
   return { allRoutines, allSources, pending, missingHashes, missingRoots };

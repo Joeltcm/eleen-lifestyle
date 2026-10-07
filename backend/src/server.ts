@@ -7927,11 +7927,13 @@ const routineFeedbackSchema = z.object({ routineId: z.string().uuid(), completed
 async function notifyRoutineActivity(input: {
   ownerId: string; clientId: string; routineId: string; completedOn: string; kind: 'started' | 'completed' | 'feedback'; clientName: string; routineTitle: string;
   elapsedSeconds?: number; completedCount?: number; totalExercises?: number; completionPercent?: number; feeling?: string | null; difficulty?: string | null; feedback?: string | null;
+  countsAsClass?: boolean;
 }) {
   const feelingLabels: Record<string, string> = { muy_dificil: 'Muy difícil', dificil: 'Difícil', bien: 'Bien', excelente: 'Excelente' };
   const difficultyLabels: Record<string, string> = { facil: 'Fácil', bien: 'Bien', dificil: 'Difícil' };
   const feedbackText = [input.feeling ? `Sensación: ${feelingLabels[input.feeling] || input.feeling}` : '', input.difficulty ? `Dificultad: ${difficultyLabels[input.difficulty] || input.difficulty}` : '', input.feedback ? `Comentario: ${input.feedback}` : ''].filter(Boolean).join('\n');
-  const feedbackLine = feedbackText ? `\n${feedbackText}` : '';
+  // "Cuenta como su clase de hoy" es información del sistema, no un comentario de la clienta: va en su propia línea.
+  const feedbackLine = `${input.kind === 'completed' && input.countsAsClass ? '\nCuenta como su clase de hoy' : ''}${feedbackText ? `\n${feedbackText}` : ''}`;
   const title = input.kind === 'started' ? `Entrenamiento iniciado · ${input.clientName}` : input.kind === 'completed' ? `Rutina completada · ${input.clientName}` : `Feedback recibido · ${input.clientName}`;
   const durationText = input.elapsedSeconds != null ? duracionTexto(Number(input.elapsedSeconds)) : '';
   const body = input.kind === 'started'
@@ -8007,7 +8009,7 @@ app.post('/api/portal/routine-exercise-completions', { preHandler: requireAuth }
   if (!result) return reply.code(404).send({ error: 'La rutina no está asignada a este cliente' });
   if (result.routineCompleted) {
     const [routine] = await sql`SELECT r.title, c.full_name, c.owner_id FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id JOIN clients c ON c.id = ra.client_id WHERE ra.routine_id = ${input.routineId} AND ra.client_id = ${client.id} AND ra.active = true`;
-    if (routine) await notifyRoutineActivity({ ownerId: routine.owner_id, clientId: client.id, routineId: input.routineId, completedOn: input.completedOn, kind: 'completed', clientName: routine.full_name, routineTitle: routine.title, elapsedSeconds: input.elapsedSeconds, completedCount: result.completedCount, totalExercises: result.totalExercises, feeling: result.completion.feeling, difficulty: result.completion.difficulty, feedback: result.completion.feedback });
+    if (routine) await notifyRoutineActivity({ ownerId: routine.owner_id, clientId: client.id, routineId: input.routineId, completedOn: input.completedOn, kind: 'completed', clientName: routine.full_name, routineTitle: routine.title, elapsedSeconds: input.elapsedSeconds, completedCount: result.completedCount, totalExercises: result.totalExercises, feeling: result.completion.feeling, difficulty: result.completion.difficulty, feedback: result.completion.feedback, countsAsClass: Boolean(result.sessionCompleted) });
   }
   return reply.code(201).send(result);
 });
@@ -8039,7 +8041,7 @@ async function avisarRutinaCumplida(cliente: Record<string, unknown>, rutina: st
   await notifyRoutineActivity({
     ownerId: client.owner_id, clientId: client.id, routineId, completedOn, kind: 'completed',
     clientName: client.full_name, routineTitle: rutina, completionPercent: porcentaje,
-    elapsedSeconds: duracion ?? undefined, feedback: enLugarDeClase ? 'Cuenta como su clase de hoy' : undefined
+    elapsedSeconds: duracion ?? undefined, countsAsClass: enLugarDeClase
   });
 }
 
