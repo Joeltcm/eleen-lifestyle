@@ -1,4 +1,4 @@
-const APP_VERSION = '292';
+const APP_VERSION = '293';
 const markPwaVersion = () => document.querySelectorAll('.topbar-actions').forEach(actions => {
   if (actions.querySelector('[data-pwa-version]')) return;
   const indicator = document.createElement('span');
@@ -905,7 +905,10 @@ const routineVideoCount = routine => (routine.exercises || []).filter(exercise =
 }).length;
 
 function renderRoutines() {
-  document.getElementById('routine-grid').innerHTML = data.routines.map(routine => `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${escapeHtml(routine.title)}</h3><p class="routine-descripcion">${escapeHtml(routine.description)}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''} · ${routine.sessions} sesiones / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''} · ${routineVideoCount(routine)} con video${routine.dueOn ? `<br><span class="routine-due${dateOnly(routine.dueOn) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">Fecha límite: ${fechaCorta(routine.dueOn)}</span>` : ''}</footer><div class="client-actions">${routine.assignedClientIds?.[0] ? `<button class="secondary" data-share-routine="${routine.id}">Enviar enlace</button>` : ''}<button class="secondary" data-open-routine="${routine.id}">Ver rutina</button><button class="secondary" data-edit-routine="${routine.id}">Editar</button><button class="secondary" data-duplicate-routine="${routine.id}">Reutilizar</button><button class="secondary" data-delete-routine="${routine.id}">Eliminar</button></div></article>`).join('');
+  document.getElementById('routine-grid').innerHTML = data.routines.map(routine => {
+    const asignados = (routine.assignedClientIds || []).map(id => data.clients.find(client => client.id === id)?.name).filter(Boolean);
+    return `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${escapeHtml(routine.title)}</h3><p class="routine-descripcion">${escapeHtml(routine.description)}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''}${asignados.length ? `<br><span>Para: ${escapeHtml(asignados.join(', '))}</span>` : ''} · ${routine.sessions} sesiones / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''} · ${routineVideoCount(routine)} con video${routine.dueOn ? `<br><span class="routine-due${dateOnly(routine.dueOn) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">Fecha límite: ${fechaCorta(routine.dueOn)}</span>` : ''}</footer><div class="client-actions">${routine.assignedClientIds?.[0] ? `<button class="secondary" data-share-routine="${routine.id}">Enviar enlace</button>` : ''}<button class="secondary" data-open-routine="${routine.id}">Ver rutina</button><button class="secondary" data-edit-routine="${routine.id}">Editar</button><button class="secondary" data-duplicate-routine="${routine.id}">Reutilizar</button><button class="secondary" data-delete-routine="${routine.id}">Eliminar</button></div></article>`;
+  }).join('');
 }
 function renderBillingInsights() {
   const chart = document.getElementById('billing-line-chart');
@@ -2987,6 +2990,7 @@ function observarDemos(contenedor) {
 
 function newRoutine(routine = null, duplicate = false, propuesta = null) {
   const editing = Boolean(routine) && !duplicate;
+  const initialDueOn = editing ? dateOnly(routine?.dueOn || '') : '';
   // Si la propuesta viene de una clase (oferta en lugar de la clase) o de un viaje, ese contexto se conserva al regenerarla con IA: sin esto, el segundo "Proponer con IA" tiraba el vínculo con la clase o el viaje.
   const contextoPropuesta = propuesta ? Object.fromEntries(['ofertaSesionId', 'ofertaCliente', 'ofertaOrigen', 'ofertaDuracion', 'enlaceViajeId', 'enlaceCliente'].filter(clave => propuesta[clave] !== undefined).map(clave => [clave, propuesta[clave]])) : {};
   const content = formFromTemplate('new-routine-template'); openModal(content, true);
@@ -2995,14 +2999,14 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
   const formularioRutina = document.getElementById('routine-form');
   if (routine) {
     formularioRutina.querySelector('h2').textContent = editing ? 'Editar rutina' : 'Reutilizar rutina';
-    formularioRutina.querySelector('[name="title"]').value = editing ? routine.title : `${routine.title} (copia)`;
+    formularioRutina.querySelector('[name="title"]').value = routine.title;
     formularioRutina.querySelector('[name="description"]').value = routine.description;
     formularioRutina.querySelector('[name="sessions"]').value = routine.sessions;
     formularioRutina.querySelector('button.primary').textContent = editing ? 'Guardar cambios' : 'Guardar rutina completa';
     if (editing) {
       const aviso = document.createElement('p');
       aviso.className = 'section-note';
-      aviso.textContent = 'Puedes agregar, quitar, cambiar y mover ejercicios entre bloques. Las asignaciones actuales de esta rutina se conservarán.';
+      aviso.textContent = 'Puedes agregar, quitar, cambiar y mover ejercicios entre bloques. El cliente asignado se conserva; la fecha límite sí puede cambiarse.';
       formularioRutina.prepend(aviso);
     }
   }
@@ -3014,11 +3018,13 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
   if (editing && routine?.assignedClientIds?.[0]) clientSelect.value = routine.assignedClientIds[0];
   if (editing) {
     clientSelect.disabled = true;
-    clientSelect.closest('label')?.insertAdjacentHTML('beforeend', '<small>La asignación de la rutina no cambia al editar sus ejercicios.</small>');
+    clientSelect.closest('label')?.insertAdjacentHTML('beforeend', '<small>El cliente asignado se conserva al editar; puedes cambiar la fecha límite.</small>');
   }
-  // La copia tampoco hereda la fecha: se cumple en otro momento para otra persona.
   if (editing && routine?.dueOn) document.getElementById('routine-due').value = dateOnly(routine.dueOn);
-  if (editing) document.getElementById('routine-due').disabled = true;
+  if (editing && !routine?.assignedClientIds?.length) {
+    const due = document.getElementById('routine-due'); due.disabled = true;
+    due.closest('label')?.insertAdjacentHTML('beforeend', '<small>Asigna la rutina a un cliente para ponerle fecha.</small>');
+  }
   const categorySelect = document.getElementById('exercise-category');
   const levelSelect = document.getElementById('exercise-level');
   const exerciseSelect = document.getElementById('exercise-choice');
@@ -3340,7 +3346,10 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
     if (!selectedExercises.length) { toast('Agrega al menos un ejercicio a la rutina', true); return; }
     try {
       event.target.classList.add('loading-state');
-      const guardada = await api(editing ? `/api/routines/${routine.id}` : '/api/routines', { method: editing ? 'PATCH' : 'POST', body: { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: editing ? undefined : (assigned || undefined), dueOn: editing ? undefined : (form.get('dueOn') || null), exercises: selectedExercises } });
+      const cuerpo = { title: form.get('title'), description: form.get('description'), sessionsPerWeek: Number(form.get('sessions')), clientId: editing ? undefined : (assigned || undefined), exercises: selectedExercises };
+      const dueOn = String(form.get('dueOn') || '');
+      if (!editing || dueOn !== initialDueOn) cuerpo.dueOn = dueOn || null;
+      const guardada = await api(editing ? `/api/routines/${routine.id}` : '/api/routines', { method: editing ? 'PATCH' : 'POST', body: cuerpo });
       if (propuesta?.enlaceViajeId) {
         if (assigned !== propuesta.clientId) throw new Error('La rutina de viaje debe quedar asignada al mismo cliente.');
         await loadData(); renderAll(); modal.close();
@@ -6800,7 +6809,7 @@ async function mostrarRutinaPublica(token) {
     const proximas = (vista.classes || []).filter(item => item.status === 'scheduled' && item.dia !== vista.today);
     raiz.innerHTML = `${marca}
       <article class="public-card"><p class="eyebrow">TU RUTINA</p><h1>Hola, ${escapeHtml(vista.clientFirstName)}</h1><h2>${escapeHtml(rutina.title)}</h2>
-        ${rutina.description ? `<p class="public-instrucciones">${escapeHtml(rutina.description)}</p>` : ''}
+        ${rutina.description ? `<p class="public-instrucciones routine-descripcion">${escapeHtml(rutina.description)}</p>` : ''}
         ${hoyClase ? `<p class="portal-offer-inline">Hoy tienes clase a las ${escapeHtml(hoyClase.hora)}: <b>si confirmas esta rutina hoy, cuenta como tu clase</b>.</p>`
           : proximas.length ? `<p class="portal-offer-inline">Tus próximas clases durante el viaje: ${proximas.slice(0, 4).map(item => `${fechaCorta(`${item.dia}T12:00:00-05:00`)} ${escapeHtml(item.hora)}`).join(' · ')}. Confirma tu rutina <b>el día de cada clase</b> para que cuente.</p>` : ''}
         <div class="routine-timer" id="public-timer"><span class="routine-timer-display" id="public-reloj">00:00</span><button type="button" class="primary routine-timer-button" id="public-toggle">▶ Iniciar rutina</button></div>

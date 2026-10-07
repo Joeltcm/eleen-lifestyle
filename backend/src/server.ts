@@ -3198,7 +3198,7 @@ const routineExerciseSchema = z.object({
   // Bloques o circuitos (J-113): el número de bloque y cuántas rondas se repite; sin ellos, el ejercicio va suelto con sus series.
   block: z.coerce.number().int().min(1).max(20).optional(), rounds: z.coerce.number().int().min(1).max(10).optional()
 });
-const routineSchema = z.object({ title: z.string().min(2), description: z.string().optional(), sessionsPerWeek: z.coerce.number().int().min(1).max(7), exercises: z.array(routineExerciseSchema).max(80).default([]), clientId: z.string().uuid().optional(), dueOn: z.union([z.literal(''), z.null(), z.string().date()]).optional().transform(value => (value === '' || value === undefined ? null : value)) });
+const routineSchema = z.object({ title: z.string().min(2), description: z.string().optional(), sessionsPerWeek: z.coerce.number().int().min(1).max(7), exercises: z.array(routineExerciseSchema).max(80).default([]), clientId: z.string().uuid().optional(), dueOn: z.string().date().nullable().optional() });
 app.get('/api/routines', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`
@@ -3330,22 +3330,37 @@ app.post('/api/routines', { preHandler: requireStaff }, async (request, reply) =
   return reply.code(201).send(routine);
 });
 
+class RoutineDueDateError extends Error {}
+
 app.patch('/api/routines/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
   const input = routineSchema.parse(request.body);
-  const routine = await sql.begin(async transaction => {
-    const [updated] = await transaction`UPDATE routines SET title = ${input.title}, description = ${input.description || null}, sessions_per_week = ${input.sessionsPerWeek}, exercises = ${transaction.json(input.exercises)}, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
-    if (!updated) return null;
-    // Si sólo se editan los ejercicios, clientId viene omitido y la asignación
-    // actual debe permanecer intacta. Sólo se reemplaza cuando la petición
-    // declara explícitamente otra asignación.
-    if (input.clientId !== undefined) {
-      await transaction`UPDATE routine_assignments SET active = false, ends_on = current_date WHERE routine_id = ${id} AND active = true`;
-      if (input.clientId) await transaction`INSERT INTO routine_assignments (routine_id, client_id, due_on) SELECT ${id}, c.id, ${input.dueOn ?? null}::date FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} ON CONFLICT (routine_id, client_id, starts_on) DO UPDATE SET active = true, ends_on = null, due_on = EXCLUDED.due_on`;
-    }
-    return updated;
-  });
+  let routine;
+  try {
+    routine = await sql.begin(async transaction => {
+      const [updated] = await transaction`UPDATE routines SET title = ${input.title}, description = ${input.description || null}, sessions_per_week = ${input.sessionsPerWeek}, exercises = ${transaction.json(input.exercises)}, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
+      if (!updated) return null;
+      // Si sólo se editan los ejercicios, clientId viene omitido y la asignación
+      // actual debe permanecer intacta. La fecha sí puede cambiarse, pero sólo
+      // en asignaciones activas de esta rutina y dentro de la transacción.
+      if (input.clientId === undefined && input.dueOn !== undefined) {
+        const activas = await transaction`SELECT ra.id FROM routine_assignments ra WHERE ra.routine_id = ${id} AND ra.active = true FOR UPDATE`;
+        if (!activas.length) throw new RoutineDueDateError('Asigna la rutina a un cliente antes de ponerle fecha');
+        await transaction`UPDATE routine_assignments SET due_on = ${input.dueOn}::date WHERE routine_id = ${id} AND active = true`;
+      }
+      // Sólo se reemplaza la asignación cuando la petición declara explícitamente
+      // otra. En ese flujo la fecha sigue viajando con la asignación nueva.
+      if (input.clientId !== undefined) {
+        await transaction`UPDATE routine_assignments SET active = false, ends_on = current_date WHERE routine_id = ${id} AND active = true`;
+        if (input.clientId) await transaction`INSERT INTO routine_assignments (routine_id, client_id, due_on) SELECT ${id}, c.id, ${input.dueOn ?? null}::date FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} ON CONFLICT (routine_id, client_id, starts_on) DO UPDATE SET active = true, ends_on = null, due_on = EXCLUDED.due_on`;
+      }
+      return updated;
+    });
+  } catch (error) {
+    if (error instanceof RoutineDueDateError) return reply.code(409).send({ error: error.message });
+    throw error;
+  }
   if (!routine) return reply.code(404).send({ error: 'Rutina no encontrada' });
   return routine;
 });

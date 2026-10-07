@@ -27,7 +27,7 @@ before(async () => {
   clientId = (await api.post('/api/clients', { fullName: 'Sara Prueba', cutoffDay: 15, email: 'sara.ui@prueba.test' })).datos.id;
   await api.post('/api/clients', { fullName: 'Eduardo Prueba', cutoffDay: 28 });
   const ejercicios = [plancha, puente, curl, plancha, puente, curl].map((id, i) => ({ catalogId: id, name: ['Plancha', 'Puente de glúteo', 'Curl de bíceps'][i % 3], sets: 3, reps: String(10 + i), block: i < 3 ? 1 : 2, rounds: 3 }));
-  rutinaId = (await api.post('/api/routines', { title: 'Rutina en bloques', description: 'Calienta 5 minutos.', sessionsPerWeek: 3, exercises: ejercicios, clientId })).datos.id;
+  rutinaId = (await api.post('/api/routines', { title: 'Rutina en bloques', description: 'Calienta 5 minutos.', sessionsPerWeek: 3, exercises: ejercicios, clientId, dueOn: '2026-09-15' })).datos.id;
   sesionId = (await api.post('/api/sessions', { clientId, startsAt: new Date(`${panama(0)}T23:00:00-05:00`).toISOString(), durationMinutes: 45, mode: 'Presencial' })).datos.id;
   await api.post('/api/sessions', { clientId, startsAt: new Date(`${panama(3)}T09:00:00-05:00`).toISOString(), durationMinutes: 45, mode: 'Presencial' });
   await api.post(`/api/clients/${clientId}/travel`, { startsOn: panama(1), endsOn: panama(8), destination: 'Roma' });
@@ -78,6 +78,8 @@ test('EDITAR una rutina guardada abre el editor completo y TODAS sus acciones fu
     assert.equal(p.qa('.selected-exercise', f).length, 6);
     assert.deepEqual(p.qa('.bloque-cabecera b', f).map(x => x.textContent), ['Bloque 1', 'Bloque 2']);
     assert.equal(f.elements.client.value, clientId, 'conserva el cliente asignado');
+    assert.equal(f.elements.dueOn.disabled, false, 'la fecha límite se puede editar si hay asignación');
+    assert.equal(f.elements.dueOn.value, '2026-09-15');
     const nombres = () => p.qa('.selected-exercise b', f).map(x => x.textContent);
     const bloques = () => p.qa('.bloque-cabecera, .selected-exercise', f).map(x => x.classList.contains('bloque-cabecera') ? `[${p.q('b', x).textContent}]` : p.q('b', x).textContent);
 
@@ -97,13 +99,24 @@ test('EDITAR una rutina guardada abre el editor completo y TODAS sus acciones fu
     assert.equal(nombres().length, 6, 'se quitó');
     // 5) Cambiar las rondas de un bloque
     const rondas = p.q('[data-bloque-rondas="2"]', f); rondas.value = '4'; rondas.dispatchEvent(new p.window.Event('input', { bubbles: true }));
-    // 6) Guardar
+    // 6) Cambiar la fecha y guardar
+    f.elements.dueOn.value = '2026-10-20';
     f.requestSubmit();
     await esperar(() => p.evaluar('modal.open') === false, { mensaje: 'el editor se cierra al guardar' });
     const guardada = (await api.get('/api/routines')).datos.find(r => r.id === rutinaId);
     assert.ok(guardada.exercises.every(e => e.block >= 1 && e.rounds >= 1), 'siguen en bloques');
     assert.ok(guardada.exercises.filter(e => e.block === 2).every(e => e.rounds === 4), 'las rondas editadas se guardaron');
     assert.equal(guardada.assigned_client_ids.length, 1, 'la asignación del cliente se conserva');
+    assert.equal(String(guardada.due_on).slice(0, 10), '2026-10-20', 'la fecha límite nueva se guardó');
+    p.clic(p.q(`[data-open-routine="${rutinaId}"]`));
+    await esperar(() => /Fecha límite: 20-10-2026/.test(p.q('#modal-content')?.textContent || ''), { mensaje: 'fecha límite nueva en el detalle' });
+    p.evaluar('modal.close()');
+    p.clic(p.q(`[data-edit-routine="${rutinaId}"]`));
+    const f2 = await esperar(() => p.q('#routine-form'), { mensaje: 'editor para borrar fecha' });
+    f2.elements.dueOn.value = '';
+    f2.requestSubmit();
+    await esperar(() => p.evaluar('modal.open') === false, { mensaje: 'se borra la fecha límite' });
+    assert.equal((await api.get('/api/routines')).datos.find(r => r.id === rutinaId).due_on, null);
     sinErrores(p, 'editar rutina');
   } finally { await p.cerrar(); }
 });
@@ -114,7 +127,7 @@ test('Reutilizar una rutina y crear una nueva con IA (propuesta) también abren 
     await esperar(() => p.evaluar('data.routines.length') >= 1, { mensaje: 'rutinas cargadas' });
     p.clic(p.q(`[data-duplicate-routine="${rutinaId}"]`));
     const f = await esperar(() => p.q('#routine-form'), { mensaje: 'editor de la copia' });
-    assert.match(p.q('h2', f).textContent, /Reutilizar/); assert.match(f.elements.title.value, /\(copia\)/);
+    assert.match(p.q('h2', f).textContent, /Reutilizar/); assert.equal(f.elements.title.value, 'Rutina en bloques', 'reutilizar conserva el título sin añadir copia');
     assert.equal(p.qa('.selected-exercise', f).length, 6);
     p.evaluar("modal.close()");
     // propuesta con IA
@@ -173,7 +186,7 @@ test('el PORTAL del cliente dibuja todas sus secciones (rutinas con bloques, via
 });
 
 test('la página pública de la rutina (enlace) se abre sin sesión, muestra los bloques y permite confirmar', async () => {
-  const rutinaViaje = (await api.post('/api/routines', { title: 'Rutina del enlace', sessionsPerWeek: 3, clientId, exercises: [{ name: 'Plancha', sets: 3, reps: '30 seg', block: 1, rounds: 3 }, { name: 'Flexiones', sets: 3, reps: '10', block: 1, rounds: 3 }] })).datos.id;
+  const rutinaViaje = (await api.post('/api/routines', { title: 'Rutina del enlace', description: 'Objetivo: movilidad.\nCalentamiento: 5 minutos.', sessionsPerWeek: 3, clientId, exercises: [{ name: 'Plancha', sets: 3, reps: '30 seg', block: 1, rounds: 3 }, { name: 'Flexiones', sets: 3, reps: '10', block: 1, rounds: 3 }] })).datos.id;
   const enlace = await api.post(`/api/routines/${rutinaViaje}/share-links`, { clientId, hours: 24 });
   const token = String(enlace.datos.url).split('#rutina=')[1];
   const p = await abrirPantalla({ baseApi: servidor.base, hash: `#rutina=${token}` });
@@ -181,6 +194,7 @@ test('la página pública de la rutina (enlace) se abre sin sesión, muestra los
     await esperar(() => p.q('#public-routine .public-card h2') && !p.document.getElementById('public-routine').hidden, { mensaje: 'página pública' });
     assert.match(p.q('#public-routine').textContent, /Rutina del enlace/);
     assert.match(p.q('#public-routine').textContent, /Bloque 1 · 3 rondas/);
+    assert.ok(p.q('.public-instrucciones.routine-descripcion'), 'la página pública conserva los saltos de la descripción');
     p.clic(p.q('#public-terminar'));
     await esperar(() => /Eileen ya sabe/.test(p.q('#public-final').textContent), { mensaje: 'confirmación' });
     sinErrores(p, 'página pública');
