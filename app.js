@@ -319,6 +319,7 @@ async function api(path, options = {}) {
       error.status = response.status;
       error.code = payload.code;
       error.repeats = payload.repeats;
+      error.clientCount = payload.clientCount;
       throw error;
     }
     return payload;
@@ -3478,7 +3479,15 @@ function newRoutine(routine = null, duplicate = false, propuesta = null) {
       if (confirmVersion) cuerpo.confirmVersion = true;
       const dueOn = String(form.get('dueOn') || '');
       if (!editing || dueOn !== initialDueOn) cuerpo.dueOn = dueOn || null;
-      const guardada = await apiConAvisoDeRepetido(editing ? `/api/routines/${routine.id}` : '/api/routines', { method: editing ? 'PATCH' : 'POST', body: cuerpo });
+      const rutaGuardado = editing ? `/api/routines/${routine.id}` : '/api/routines';
+      let guardada;
+      try { guardada = await apiConAvisoDeRepetido(rutaGuardado, { method: editing ? 'PATCH' : 'POST', body: cuerpo }); }
+      catch (error) {
+        // El servidor decide con más criterios que la pantalla si la rutina está en uso (cumplimientos, cronómetros, enlaces...). Si exige confirmar la versión y la pantalla no la había pedido, se pide ahora y se reintenta: sin esto Eileen quedaba con un error y sin forma de confirmar.
+        if (error.code !== 'routine_version_required') throw error;
+        if (!await confirmarNuevaVersion(error.clientCount || 1)) { event.target.classList.remove('loading-state'); return; }
+        guardada = await apiConAvisoDeRepetido(rutaGuardado, { method: 'PATCH', body: { ...cuerpo, confirmVersion: true } });
+      }
       if (!guardada) { event.target.classList.remove('loading-state'); return; }
       if (propuesta?.enlaceViajeId) {
         if (assigned !== propuesta.clientId) throw new Error('La rutina de viaje debe quedar asignada al mismo cliente.');

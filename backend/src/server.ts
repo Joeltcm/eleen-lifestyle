@@ -3248,8 +3248,10 @@ async function recentRoutineRepeats(transaction: TransactionSql, routine: Routin
     LEFT JOIN routines r ON r.id = d.routine_id
     WHERE d.owner_id = ${routine.owner_id} AND d.client_id = ${clientId}
       AND d.kind <> 'new_version'
-      AND NOT (${ignoraAsignacionVigente}::boolean AND d.kind = 'assignment' AND d.routine_id = ${routine.id}
-        AND EXISTS (SELECT 1 FROM routine_assignments ra WHERE ra.routine_id = d.routine_id AND ra.client_id = d.client_id AND ra.active = true))
+      AND NOT (${ignoraAsignacionVigente}::boolean AND d.kind = 'assignment'
+        AND (d.routine_id = ${routine.id} OR d.routine_id IN (SELECT rr.id FROM routines rr WHERE rr.root_routine_id = COALESCE(${routine.root_routine_id ?? null}::uuid, ${routine.id}::uuid)))
+        AND EXISTS (SELECT 1 FROM routine_assignments ra WHERE ra.client_id = d.client_id AND ra.active = true
+          AND (ra.routine_id = ${routine.id} OR ra.routine_id IN (SELECT rr.id FROM routines rr WHERE rr.root_routine_id = COALESCE(${routine.root_routine_id ?? null}::uuid, ${routine.id}::uuid)))))
       AND d.sent_at >= (((now() AT TIME ZONE 'America/Panama')::date - 30)::timestamp AT TIME ZONE 'America/Panama')
       AND ((now() AT TIME ZONE 'America/Panama')::date - (d.sent_at AT TIME ZONE 'America/Panama')::date)::int BETWEEN 0 AND 29
     ORDER BY d.sent_at DESC
@@ -3554,20 +3556,18 @@ class RoutineVersionStartedError extends Error {
 }
 
 async function routineVersionHasStarted(transaction: TransactionSql, routineId: string) {
+  // "Empezada hoy" = alguna clienta tiene hoy un cronómetro de esta rutina SIN terminar (corriendo O EN PAUSA), o ejercicios marcados hoy sin haber completado la rutina.
+  // Antes solo se miraba el cronómetro activo: si la clienta pausaba con ejercicios marcados, se podía bifurcar y perdía su avance.
   const [started] = await transaction`
     SELECT EXISTS (
-      SELECT 1 FROM routine_timer_sessions
-      WHERE routine_id = ${routineId} AND active = true
-        AND completed_on = (now() AT TIME ZONE 'America/Panama')::date
+      SELECT 1 FROM routine_timer_sessions ts
+      WHERE ts.routine_id = ${routineId} AND ts.completed_on = (now() AT TIME ZONE 'America/Panama')::date AND ts.completed_at IS NULL
     ) OR EXISTS (
-      SELECT 1
-      FROM routine_exercise_completions rec
-      WHERE rec.routine_id = ${routineId}
-        AND rec.completed_on = (now() AT TIME ZONE 'America/Panama')::date
-        AND rec.completed = true
+      SELECT 1 FROM routine_exercise_completions rec
+      WHERE rec.routine_id = ${routineId} AND rec.completed_on = (now() AT TIME ZONE 'America/Panama')::date AND rec.completed = true
         AND NOT EXISTS (
           SELECT 1 FROM routine_completions rc
-          WHERE rc.routine_id = rec.routine_id AND rc.client_id = rec.client_id AND rc.completed_on = rec.completed_on
+          WHERE rc.routine_id = rec.routine_id AND rc.client_id = rec.client_id AND rc.completed_on = rec.completed_on AND rc.completion_percent >= 100
         )
     ) AS started
   `;
@@ -3632,7 +3632,9 @@ app.patch('/api/routines/:id', { preHandler: requireStaff }, async (request, rep
             RETURNING *
           `;
           await recordRoutineDelivery(transaction, { routine: versionada as unknown as RoutineDeliveryRoutine, clientId: nuevaAsignacion.client_id, kind: 'new_version', sentByUserId: auth.sub, dueOn: nuevaAsignacion.due_on, assignmentId: nuevaAsignacion.id });
-          await transaction`UPDATE session_routine_offers SET routine_id = ${newId} WHERE routine_id = ${id} AND client_id = ${nuevaAsignacion.client_id} AND status = 'offered'`;
+          // La oferta pendiente y la CLASE ligada (sessions.routine_id) siguen la versión vigente: si no, la agenda enseñaría la rutina archivada.
+          const ofertasRepuntadas = await transaction`UPDATE session_routine_offers SET routine_id = ${newId} WHERE routine_id = ${id} AND client_id = ${nuevaAsignacion.client_id} AND status = 'offered' RETURNING session_id`;
+          for (const oferta of ofertasRepuntadas) await transaction`UPDATE sessions SET routine_id = ${newId}, updated_at = now() WHERE id = ${oferta.session_id} AND routine_id = ${id}`;
         }
         await transaction`UPDATE routines SET archived_at = now(), updated_at = now() WHERE id = ${id}`;
         return versionada;
@@ -3683,6 +3685,8 @@ app.delete('/api/routines/:id', { preHandler: requireStaff }, async (request, re
     if (uso.used) {
       await transaction`UPDATE routines SET archived_at = COALESCE(archived_at, now()), updated_at = now() WHERE id = ${id}`;
       await transaction`UPDATE routine_assignments SET active = false, ends_on = COALESCE(ends_on, (now() AT TIME ZONE 'America/Panama')::date) WHERE routine_id = ${id} AND active = true`;
+      // Una oferta pendiente de una rutina archivada no se podría completar (el cierre exige asignación activa): se retira, como al retirarla a mano.
+      await transaction`UPDATE session_routine_offers SET status = 'withdrawn' WHERE routine_id = ${id} AND status = 'offered'`;
       return { archived: true, routine: { id: routine.id, title: routine.title } };
     }
     await transaction`DELETE FROM routines WHERE id = ${id}`;

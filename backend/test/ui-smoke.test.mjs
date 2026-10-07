@@ -371,3 +371,42 @@ test('el aviso de repetidos se abre como <dialog> con showModal(), nunca como un
   assert.doesNotMatch(cuerpo, /createElement\('div'\)/, 'no se arma con un div');
   assert.match(cuerpo, /addEventListener\('close'/, 'Escape y cualquier cierre terminan en "no" salvo la confirmación explícita');
 });
+
+test('VERSIONES en pantalla: si el servidor exige confirmar la versión y la pantalla no lo había previsto, se pide y se reintenta (Cancelar no crea nada)', async () => {
+  // Una rutina "en uso" solo por un cumplimiento (sin envíos ni clientas asignadas): la pantalla NO la ve en uso, el servidor SÍ.
+  const [dueno] = await db`SELECT id FROM users LIMIT 1`;
+  const id = (await db`INSERT INTO routines (id, owner_id, title, description, sessions_per_week, exercises) VALUES (gen_random_uuid(), ${dueno.id}, 'Rutina solo con cumplimiento', 'Descripción de prueba de la rutina.', 2, ${db.json([{ name: 'Remo con mancuerna', sets: 3, reps: '10' }, { name: 'Press militar', sets: 3, reps: '10' }])}) RETURNING id::text AS id`)[0].id;
+  await db`UPDATE routines SET root_routine_id = id WHERE id = ${id}::uuid`;
+  await db`INSERT INTO routine_completions (routine_id, client_id, completed_on, completion_percent, marked_by_user_id) VALUES (${id}::uuid, ${clientId}::uuid, current_date, 100, ${dueno.id})`;
+  const p = await abrirPantalla({ baseApi: servidor.base, token: tokenStaff, hash: '#routines' });
+  try {
+    await esperar(() => p.evaluar('data.routines.length') >= 1, { mensaje: 'rutinas cargadas' });
+    p.clic(p.q('[data-view="routines"]')); await p.quieta(200);
+    const antes = (await db`SELECT count(*)::int AS n FROM routines`)[0].n;
+    p.clic(p.q(`[data-edit-routine="${id}"]`));
+    const f = await esperar(() => p.q('#routine-form'), { mensaje: 'editor' });
+    const quitar = p.qa('[data-remove-exercise]', f).find(b => p.q('b', b.closest('.selected-exercise'))?.textContent.includes('Press militar'));
+    p.clic(quitar);
+    f.requestSubmit();
+    const aviso = await esperar(() => p.q('dialog.routine-version-host[open]'), { mensaje: 'aparece la confirmación de versión (reintento tras el 409)' });
+    assert.match(aviso.textContent, /nueva versión/i);
+    p.clic(p.q('[data-version-cancel]', aviso));
+    await p.quieta(400);
+    assert.equal((await db`SELECT count(*)::int AS n FROM routines`)[0].n, antes, 'Cancelar: no se creó ninguna versión');
+    assert.ok(p.q('#routine-form'), 'el editor sigue abierto'); assert.ok(!p.q('#routine-form').classList.contains('loading-state'), 'el formulario vuelve a estar disponible');
+    f.requestSubmit();
+    const aviso2 = await esperar(() => p.q('dialog.routine-version-host[open]'), { mensaje: 'vuelve a preguntar' });
+    p.clic(p.q('[data-version-confirm]', aviso2));
+    await esperar(async () => (await db`SELECT count(*)::int AS n FROM routines`)[0].n === antes + 1, { ms: 6000, mensaje: 'se crea la versión al confirmar' });
+    const [v1] = await db`SELECT archived_at FROM routines WHERE id = ${id}::uuid`; const [v2] = await db`SELECT version, supersedes_routine_id::text AS s FROM routines WHERE root_routine_id = ${id}::uuid AND version = 2`;
+    assert.ok(v1.archived_at, 'la versión 1 queda archivada'); assert.equal(v2.s, id);
+    sinErrores(p, 'versión tras 409');
+  } finally { await p.cerrar(); }
+});
+
+test('la confirmación de nueva versión es un <dialog> con showModal(), igual que el aviso de repetidos', () => {
+  const fuente = readFileSync(new URL('../../app.js', import.meta.url), 'utf8');
+  const i = fuente.indexOf('function confirmarNuevaVersion'); assert.ok(i > 0);
+  const cuerpo = fuente.slice(i, fuente.indexOf('\n}\n', i));
+  assert.match(cuerpo, /createElement\('dialog'\)/); assert.match(cuerpo, /\.showModal\(\)/); assert.doesNotMatch(cuerpo, /createElement\('div'\)/);
+});
