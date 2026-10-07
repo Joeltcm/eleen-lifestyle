@@ -29,6 +29,16 @@ const CLAVE = process.env.PGPASSWORD ? `:${encodeURIComponent(process.env.PGPASS
 export const CREDENCIALES = { email: 'entrenadora@prueba.test', password: 'contrasena-de-prueba-larga', fullName: 'Eileen de Prueba' };
 export const SETUP_TOKEN = 'token-de-configuracion-para-pruebas';
 
+// `fetch` de Node (undici) rechaza ciertos puertos aunque haya un servidor escuchando ("bad port": la lista de la especificación Fetch, p. ej. 5060 y 5061 de SIP, 6000 de X11, 6665-6669 de IRC).
+// El harness elegía el puerto al azar entre 4000 y 8000 sin excluirlos: ~0,3 % de las veces el servidor arrancaba bien pero la espera de /health fallaba 30 s y la prueba caía (CI del 07-10-2026, puerto 5060).
+export const PUERTOS_PROHIBIDOS_POR_FETCH = new Set([1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080]);
+export function puertoAleatorio() {
+  for (;;) {
+    const puerto = 4000 + Math.floor(Math.random() * 4000);
+    if (!PUERTOS_PROHIBIDOS_POR_FETCH.has(puerto)) return puerto;
+  }
+}
+
 export async function levantar() {
   const nombreBase = `eileen_test_${randomUUID().slice(0, 8)}`;
   const url = `postgres://${USUARIO}${CLAVE}@${HOST}:${PUERTO}/${nombreBase}`;
@@ -65,7 +75,7 @@ export async function levantar() {
   // El puerto se elige al azar; si otro proceso (otra prueba, un servidor de demostración) ya lo ocupa, el servidor sale con EADDRINUSE y se reintenta con otro.
   let proceso; let salida = ''; let puerto; let base; let arrancado = false;
   for (let intento = 0; intento < 8 && !arrancado; intento += 1) {
-    puerto = 4000 + Math.floor(Math.random() * 4000);
+    puerto = puertoAleatorio();
     salida = '';
     let salio = false;
     proceso = spawn('node', ['dist/server.js'], {
