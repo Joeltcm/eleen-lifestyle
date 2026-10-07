@@ -46,6 +46,8 @@ test('envíos YA registrados en tiempo real (asignación, enlace, oferta, nueva 
   const base = await entregas();
   const ensayo = await relleno('--dry-run'); assert.equal(ensayo.codigo, 0, ensayo.salida);
   assert.equal(await entregas(), base, 'el ensayo no escribe');
+  const [aa, mm, dd] = hoy().split('-');
+  assert.ok(ensayo.salida.includes(`PENDIENTE · asignación · Cliente relleno · Rutina antigua · ${dd}-${mm}-${aa} (aprox.)`), `la fecha va en dd-mm-aaaa (hoy = ${dd}-${mm}-${aa}), nunca mes-día-año:\n${ensayo.salida}`);
   assert.match(ensayo.salida, /PENDIENTE · asignación · Cliente relleno · Rutina antigua · \d{2}-\d{2}-\d{4} \(aprox\.\)/, 'el ensayo lista cada envío que reconstruiría, para poder revisarlo antes de aplicar');
   assert.equal((ensayo.salida.match(/PENDIENTE ·/g) || []).length, 1, 'solo lo que no tiene registro');
   assert.equal((await relleno('--aplicar')).codigo, 0);

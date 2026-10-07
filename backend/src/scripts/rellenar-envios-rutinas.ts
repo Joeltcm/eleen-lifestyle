@@ -143,7 +143,11 @@ async function pendingSources(sql: postgres.Sql, rows: SourceRow[]) {
   return pending;
 }
 
-const fechaPanama = (value: Date | string) => new Intl.DateTimeFormat('es-PA', { timeZone: 'America/Panama', day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date(value)).replace(/\//g, '-');
+// dd-mm-aaaa (formato del proyecto). OJO: la configuración regional es-PA escribe mes-día-año ("10-07-2026" para el 7 de octubre), por eso se arma con las partes.
+const fechaPanama = (value: Date | string) => {
+  const partes = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Panama', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(value)).map(parte => [parte.type, parte.value]));
+  return `${partes.day}-${partes.month}-${partes.year}`;
+};
 
 async function printPlan(sql: postgres.Sql) {
   const allRoutines = await routines(sql);
