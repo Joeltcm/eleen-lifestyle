@@ -7264,6 +7264,9 @@ async function openNewInvoiceNotices(ownerId: string, paymentDays: number, clien
 
 app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply) => {
   const auth = request.user as AuthUser;
+  // La expiración se resuelve antes de leer la campanita para que el aviso no
+  // dependa de que haya corrido el intervalo de mantenimiento justo antes.
+  if (auth.role !== 'client') await darPorPerdidasClasesConRutinaVencida(auth.sub);
   const [preference] = await sql`SELECT * FROM notification_preferences WHERE user_id = ${auth.sub}`;
   const sessionHours = Number(preference?.session_reminder_hours || 1); const paymentDays = Number(preference?.payment_reminder_days || 3);
   if (auth.role === 'client') {
@@ -7619,12 +7622,16 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   const auth = request.user as AuthUser;
   if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
   const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+  // También se ejecuta al entrar al portal: una clienta debe ver la rutina
+  // expirada y el efecto de su clase aunque el proceso no haya pasado por el
+  // intervalo de mantenimiento entre el vencimiento y esta visita.
+  await darPorPerdidasClasesConRutinaVencida(String(client.owner_id));
   // Sus días de viaje (J-114): el cliente los ve marcados en su agenda y sabe que debe confirmar su rutina el día de cada clase.
   const viajes = await sql`
     SELECT id, starts_on::text AS starts_on, ends_on::text AS ends_on, destination
     FROM client_travel WHERE client_id = ${client.id} AND COALESCE(ends_on, DATE '9999-12-31') >= (now() AT TIME ZONE 'America/Panama')::date - 60
     ORDER BY starts_on`;
-  const [invoices, routines, sessions, complianceSessions, busySlots, assessments, completions, exerciseCompletions, exercises, packages, credits, weightLogs] = await Promise.all([
+  const [invoices, routines, sessions, complianceSessions, busySlots, assessments, completions, exerciseCompletions, exercises, packages, credits, weightLogs, routineHistory] = await Promise.all([
     sql`
       SELECT id, concept, amount, currency, due_on, status, payment_method, invoice_number, issued_on, line_items,
         -- Lo que de verdad falta por pagar. La columna balance sólo la mantiene
@@ -7681,6 +7688,52 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
     sql`
       SELECT id, weight_kg, weight_value, unit, measured_at, note
       FROM client_weight_logs WHERE client_id = ${client.id} ORDER BY measured_at DESC LIMIT 500
+    `,
+    sql`
+      WITH deliveries AS (
+        SELECT d.*, lead(d.sent_at) OVER (PARTITION BY d.client_id, d.routine_id ORDER BY d.sent_at) AS next_sent_at,
+          o.status AS offer_status, o.origin AS offer_origin, o.session_id,
+          s.starts_at AS class_starts_at, s.credit_charge, s.package_debited,
+          CASE WHEN d.offer_id IS NOT NULL THEN (s.starts_at AT TIME ZONE 'America/Panama')::date ELSE d.due_on END AS effective_due_on
+        FROM routine_deliveries d
+        LEFT JOIN session_routine_offers o ON o.id = d.offer_id
+        LEFT JOIN sessions s ON s.id = o.session_id
+        WHERE d.client_id = ${client.id}
+      )
+      SELECT d.id, d.routine_id, d.routine_title, d.routine_version, d.kind, d.sent_at,
+        d.effective_due_on AS due_on, d.session_id, d.offer_origin,
+        completed.completed_on, completed.completion_percent,
+        (completed.completed_on IS NOT NULL AND completed.completion_percent >= 100) AS completed,
+        CASE
+          WHEN completed.completed_on IS NOT NULL AND completed.completion_percent >= 100 THEN 'completed'
+          -- Una oferta de Eileen no se penaliza automáticamente: queda
+          -- pendiente para que ella decida. Solo la oferta por cancelación de
+          -- la clienta puede expirar y cerrar la clase sola.
+          WHEN d.offer_status = 'offered' AND d.offer_origin = 'trainer' THEN 'active'
+          WHEN d.offer_status = 'expired' OR (d.effective_due_on IS NOT NULL AND d.effective_due_on < (now() AT TIME ZONE 'America/Panama')::date) THEN 'expired'
+          ELSE 'active'
+        END AS delivery_status,
+        CASE
+          WHEN d.effective_due_on IS NULL THEN NULL
+          ELSE GREATEST(0, d.effective_due_on - (now() AT TIME ZONE 'America/Panama')::date)
+        END::int AS days_remaining,
+        CASE
+          WHEN d.offer_status = 'expired' AND d.credit_charge THEN 'credit'
+          WHEN d.offer_status = 'expired' AND d.package_debited THEN 'monthly'
+          ELSE NULL
+        END AS expiration_billing
+      FROM deliveries d
+      LEFT JOIN LATERAL (
+        SELECT rc.completed_on, rc.completion_percent
+        FROM routine_completions rc
+        WHERE rc.routine_id = d.routine_id AND rc.client_id = d.client_id
+          AND (rc.created_at >= d.sent_at OR rc.completed_on >= (d.sent_at AT TIME ZONE 'America/Panama')::date)
+          AND (d.next_sent_at IS NULL OR rc.created_at < d.next_sent_at)
+          AND (d.next_sent_at IS NULL OR rc.completed_on < (d.next_sent_at AT TIME ZONE 'America/Panama')::date)
+        ORDER BY rc.created_at DESC LIMIT 1
+      ) completed ON true
+      ORDER BY d.sent_at DESC
+      LIMIT 200
     `
   ]);
   const profile = {
@@ -7699,9 +7752,9 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   // Tras el corte (estado `new`) el portal lee la facturación nueva y ya no muestra saldos de clases (D-14).
   if (billingEngine.state === 'new') {
     const fromNew = await portalBillingFromNewSource(client.id as string, client.owner_id as string);
-    return { client: profile, travel: viajes, invoices: fromNew.invoices, billingNotice: fromNew.notice, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, routineExerciseCompletions: exerciseCompletions, exercises, packages: [], credits: [], weightLogs };
+    return { client: profile, travel: viajes, invoices: fromNew.invoices, billingNotice: fromNew.notice, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, routineExerciseCompletions: exerciseCompletions, routineHistory, exercises, packages: [], credits: [], weightLogs };
   }
-  return { client: profile, travel: viajes, invoices, billingNotice: null, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, routineExerciseCompletions: exerciseCompletions, exercises, packages, credits, weightLogs };
+  return { client: profile, travel: viajes, invoices, billingNotice: null, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, routineExerciseCompletions: exerciseCompletions, routineHistory, exercises, packages, credits, weightLogs };
 });
 
 const clientWeightLogSchema = z.object({
@@ -7925,26 +7978,28 @@ const routineActivitySchema = z.object({ routineId: z.string().uuid(), completed
 const routineFeedbackSchema = z.object({ routineId: z.string().uuid(), completedOn: z.string().date(), feeling: z.enum(['muy_dificil', 'dificil', 'bien', 'excelente']).optional(), difficulty: z.enum(['facil', 'bien', 'dificil']).optional(), feedback: z.string().trim().max(500).optional() });
 
 async function notifyRoutineActivity(input: {
-  ownerId: string; clientId: string; routineId: string; completedOn: string; kind: 'started' | 'completed' | 'feedback'; clientName: string; routineTitle: string;
+  ownerId: string; clientId: string; routineId: string; completedOn: string; kind: 'started' | 'completed' | 'feedback' | 'expired'; clientName: string; routineTitle: string;
   elapsedSeconds?: number; completedCount?: number; totalExercises?: number; completionPercent?: number; feeling?: string | null; difficulty?: string | null; feedback?: string | null;
-  countsAsClass?: boolean;
+  countsAsClass?: boolean; expirationMessage?: string;
 }) {
   const feelingLabels: Record<string, string> = { muy_dificil: 'Muy difícil', dificil: 'Difícil', bien: 'Bien', excelente: 'Excelente' };
   const difficultyLabels: Record<string, string> = { facil: 'Fácil', bien: 'Bien', dificil: 'Difícil' };
   const feedbackText = [input.feeling ? `Sensación: ${feelingLabels[input.feeling] || input.feeling}` : '', input.difficulty ? `Dificultad: ${difficultyLabels[input.difficulty] || input.difficulty}` : '', input.feedback ? `Comentario: ${input.feedback}` : ''].filter(Boolean).join('\n');
   // "Cuenta como su clase de hoy" es información del sistema, no un comentario de la clienta: va en su propia línea.
   const feedbackLine = `${input.kind === 'completed' && input.countsAsClass ? '\nCuenta como su clase de hoy' : ''}${feedbackText ? `\n${feedbackText}` : ''}`;
-  const title = input.kind === 'started' ? `Entrenamiento iniciado · ${input.clientName}` : input.kind === 'completed' ? `Rutina completada · ${input.clientName}` : `Feedback recibido · ${input.clientName}`;
+  const title = input.kind === 'started' ? `Entrenamiento iniciado · ${input.clientName}` : input.kind === 'completed' ? `Rutina completada · ${input.clientName}` : input.kind === 'expired' ? `Rutina expirada · ${input.clientName}` : `Feedback recibido · ${input.clientName}`;
   const durationText = input.elapsedSeconds != null ? duracionTexto(Number(input.elapsedSeconds)) : '';
   const body = input.kind === 'started'
     ? `${input.clientName} inició «${input.routineTitle}».`
     : input.kind === 'completed'
       ? `${input.clientName} completó «${input.routineTitle}»${durationText ? ` ·${durationText}` : ''} · ${input.completedCount != null && input.totalExercises != null ? `${input.completedCount}/${input.totalExercises} ejercicios` : `${input.completionPercent || 0}%`}${feedbackLine}.`
+      : input.kind === 'expired'
+        ? `${input.clientName} dejó expirar «${input.routineTitle}». La clase cuenta como no cumplida${input.expirationMessage ? ` · ${input.expirationMessage}` : ''}.`
       : `${input.clientName} dejó feedback sobre «${input.routineTitle}»:${feedbackLine || ' sin comentario.'}`;
   const [notification] = input.kind === 'feedback'
     ? await sql`INSERT INTO routine_activity_notifications (owner_id, client_id, routine_id, completed_on, kind, title, body) VALUES (${input.ownerId}, ${input.clientId}, ${input.routineId}, ${input.completedOn}, ${input.kind}, ${title}, ${body}) ON CONFLICT (owner_id, routine_id, client_id, completed_on, kind) DO UPDATE SET title = EXCLUDED.title, body = EXCLUDED.body, read_at = null RETURNING id`
     : await sql`INSERT INTO routine_activity_notifications (owner_id, client_id, routine_id, completed_on, kind, title, body) VALUES (${input.ownerId}, ${input.clientId}, ${input.routineId}, ${input.completedOn}, ${input.kind}, ${title}, ${body}) ON CONFLICT (owner_id, routine_id, client_id, completed_on, kind) DO NOTHING RETURNING id`;
-  if (notification) await sendPushToUser(input.ownerId, { title, body, url: new URL('/#clients', config.APP_URL).toString(), ...(input.kind === 'completed' ? { sound: true, tag: `rutina-${input.clientId}` } : {}) });
+  if (notification) await sendPushToUser(input.ownerId, { title, body, url: new URL('/#clients', config.APP_URL).toString(), ...(['completed', 'expired'].includes(input.kind) ? { sound: true, tag: `rutina-${input.clientId}` } : {}) });
   return notification;
 }
 
@@ -8053,7 +8108,8 @@ app.post('/api/sessions/:id/routine-offer', { preHandler: requireStaff }, async 
     SELECT s.id, s.status, s.client_id, s.starts_at, s.duration_minutes, s.notes, c.full_name, c.portal_user_id,
       ((s.starts_at AT TIME ZONE 'America/Panama')::date >= (now() AT TIME ZONE 'America/Panama')::date) AS dia_vigente,
       ((s.starts_at AT TIME ZONE 'America/Panama')::date = (now() AT TIME ZONE 'America/Panama')::date) AS es_hoy,
-      to_char(s.starts_at AT TIME ZONE 'America/Panama', 'DD-MM-YYYY') AS dia_texto
+      to_char(s.starts_at AT TIME ZONE 'America/Panama', 'DD-MM-YYYY') AS dia_texto,
+      to_char(s.starts_at AT TIME ZONE 'America/Panama', 'YYYY-MM-DD') AS dia_iso
     FROM sessions s JOIN clients c ON c.id = s.client_id WHERE s.id = ${id} AND c.owner_id = ${auth.sub}`;
   if (!sesion) return reply.code(404).send({ error: 'Sesión no encontrada' });
   if (sesion.status !== 'scheduled') return reply.code(409).send({ error: 'Solo se puede ofrecer una rutina en lugar de una clase programada.' });
@@ -8081,6 +8137,7 @@ app.post('/api/sessions/:id/routine-offer', { preHandler: requireStaff }, async 
         kind: 'offer',
         sentByUserId: auth.sub,
         sentAt: filas[0].offered_at,
+        dueOn: sesion.dia_iso,
         offerId: filas[0].id,
         repeatConfirmed: repeticionConfirmada
       });
@@ -9008,23 +9065,89 @@ async function cancelarComoPerdidaPorElCliente(sessionId: string, despues?: (tra
   });
 }
 
-// Ofertas de rutina por cancelación DEL CLIENTE cuyo día ya pasó sin cumplirse: la clase se da por perdida. Las ofertas por cancelación de Eileen NO vencen así: el cliente no tiene
-// la culpa y la clase queda pendiente para que ella decida.
+// Una rutina ofrecida en lugar de una clase solo está disponible hasta el día
+// de esa clase. Cuando vence sin completarse, el servidor cierra la oferta y
+// la clase en una sola operación: anticipados consumen su saldo mensual y a
+// crédito queda registrada como sesión cobrable para la factura del ciclo.
 async function darPorPerdidasClasesConRutinaVencida(ownerId?: string) {
   const vencidas = await sql`
-    SELECT o.id AS offer_id, o.session_id
-    FROM session_routine_offers o JOIN sessions s ON s.id = o.session_id JOIN clients c ON c.id = s.client_id
+    SELECT o.id AS offer_id, o.session_id, o.routine_id, o.client_id,
+      c.owner_id, c.full_name, c.payment_mode, COALESCE(c.credit_session_price, 25) AS credit_session_price,
+      r.title AS routine_title,
+      (s.starts_at AT TIME ZONE 'America/Panama')::date::text AS class_day
+    FROM session_routine_offers o
+    JOIN sessions s ON s.id = o.session_id
+    JOIN clients c ON c.id = s.client_id
+    JOIN routines r ON r.id = o.routine_id
     WHERE o.origin = 'client' AND o.status = 'offered' AND s.status = 'scheduled'
       AND (s.starts_at AT TIME ZONE 'America/Panama')::date < (now() AT TIME ZONE 'America/Panama')::date
       AND (${ownerId ?? null}::uuid IS NULL OR c.owner_id = ${ownerId ?? null}::uuid)`;
   let perdidas = 0;
   for (const fila of vencidas) {
     try {
-      const cerrada = await cancelarComoPerdidaPorElCliente(String(fila.session_id), async transaction => {
-        await transaction`UPDATE session_routine_offers SET status = 'expired' WHERE id = ${fila.offer_id}`;
-        await transaction`UPDATE sessions SET cancellation_reason = 'Cancelación del cliente: no cumplió la rutina que se le ofreció en lugar de la clase.' WHERE id = ${fila.session_id}`;
+      const resultado = await sql.begin(async transaction => {
+        const [actual] = await transaction`
+          SELECT o.id AS offer_id, o.routine_id, o.client_id, s.id AS session_id, s.starts_at,
+            s.package_debited, s.status AS session_status, c.owner_id, c.full_name, c.payment_mode,
+            COALESCE(c.credit_session_price, 25) AS credit_session_price, r.title AS routine_title
+          FROM session_routine_offers o
+          JOIN sessions s ON s.id = o.session_id
+          JOIN clients c ON c.id = s.client_id
+          JOIN routines r ON r.id = o.routine_id
+          WHERE o.id = ${fila.offer_id} AND o.status = 'offered' AND s.status = 'scheduled'
+          FOR UPDATE OF o, s
+        `;
+        if (!actual) return null;
+        const esCredito = actual.payment_mode === 'no_anticipado';
+        let packageDebited = Boolean(actual.package_debited);
+        let packageLabel: string | null = null;
+        if (!esCredito && !packageDebited) {
+          const pack = await seleccionarSaldoParaSesion(transaction, String(actual.client_id), actual.starts_at as Date | string);
+          if (pack) {
+            const siguiente = Number(pack.used_sessions) + 1;
+            await transaction`
+              UPDATE session_packages
+              SET used_sessions = ${siguiente}, status = CASE WHEN ${siguiente} >= total_sessions THEN 'exhausted' ELSE 'active' END
+              WHERE id = ${pack.id}
+            `;
+            await transaction`
+              UPDATE sessions SET package_id = ${pack.id}, package_debited = true,
+                debited_group_id = ${actual.client_id}, updated_at = now()
+              WHERE id = ${actual.session_id}
+            `;
+            packageDebited = true;
+            packageLabel = String(pack.label || 'plan mensual');
+          }
+        }
+        await transaction`
+          UPDATE sessions SET status = 'cancelled', cancellation_kind = 'not_rescheduled', cancelled_by = 'client',
+            cancellation_resolution = ${esCredito ? 'none' : 'debit'}, credit_charge = ${esCredito},
+            cancellation_reason = 'La rutina ofrecida venció sin completarse.', updated_at = now()
+          WHERE id = ${actual.session_id}
+        `;
+        await transaction`
+          UPDATE session_routine_offers SET status = 'expired', completed_at = NULL
+          WHERE id = ${actual.offer_id}
+        `;
+        return {
+          ownerId: String(actual.owner_id), clientId: String(actual.client_id), routineId: String(actual.routine_id),
+          clientName: String(actual.full_name), routineTitle: String(actual.routine_title), completedOn: String(fila.class_day),
+          esCredito, packageDebited, packageLabel, creditPrice: Number(actual.credit_session_price || 25)
+        };
       });
-      if (cerrada) perdidas += 1;
+      if (!resultado) continue;
+      const expirationMessage = resultado.esCredito
+        ? `se sumó a la factura a crédito por $${resultado.creditPrice.toFixed(2)}`
+        : resultado.packageDebited
+          ? `se descontó de tu plan mensual${resultado.packageLabel ? ` (${resultado.packageLabel})` : ''}`
+          : 'no había un saldo mensual vigente para descontar';
+      await notifyRoutineActivity({
+        ownerId: resultado.ownerId, clientId: resultado.clientId, routineId: resultado.routineId,
+        completedOn: resultado.completedOn, kind: 'expired', clientName: resultado.clientName,
+        routineTitle: resultado.routineTitle, expirationMessage
+      });
+      if (resultado.esCredito) await recalcularFacturasNoAnticipadas(resultado.ownerId);
+      perdidas += 1;
     } catch (error) { app.log.warn({ err: error, sessionId: fila.session_id }, 'No se pudo dar por perdida una clase con rutina vencida'); }
   }
   return perdidas;

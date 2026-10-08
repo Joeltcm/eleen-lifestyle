@@ -147,6 +147,10 @@ test('la rutina cumplida suelta también guarda la duración del cronómetro y a
 
 test('oferta por cancelación DEL CLIENTE: cumplida cierra la clase; sin cumplir, pasado el día la clase se da por perdida (cuenta como incumplida). La de Eileen no se pierde sola', async () => {
   const mk = async hora => (await api.post('/api/sessions', { clientId: c, startsAt: hora, durationMinutes: 45, mode: 'Presencial' })).datos.id;
+  const saldo = await api.post('/api/packages', { clientId: c, totalSessions: 12, amount: 300, dueOn: hoyPanama(), kind: 'monthly' });
+  assert.equal(saldo.estado, 201, JSON.stringify(saldo.datos));
+  const dbSaldo = postgres(servidor.databaseUrl, { onnotice: () => {}, max: 2 });
+  try { await dbSaldo`UPDATE session_packages SET status = 'active' WHERE id = ${saldo.datos.id}`; } finally { await dbSaldo.end({ timeout: 1 }).catch(() => {}); }
   const sClienteIncumple = await mk(hoyALas23());
   const sEileen = await mk(hoyALas23());
   const sClienteCumple = await mk(hoyALas23());
@@ -164,6 +168,14 @@ test('oferta por cancelación DEL CLIENTE: cumplida cierra la clase; sin cumplir
   const antes = (await api.get('/api/compliance/summary?period=week')).datos.clients.find(x => x.clientId === c)?.missed ?? 0;
   const r = await api.post('/api/maintenance/vencer-ofertas-rutina', {});
   assert.equal(r.datos.perdidas, 1, 'solo la del cliente se da por perdida');
+  const avisoExpirada = (await api.get('/api/notifications')).datos.find(item => item.type === 'routine' && item.title.startsWith('Rutina expirada'));
+  assert.ok(avisoExpirada, 'la expiración aparece en la campanita de Eileen');
+  assert.match(avisoExpirada.body, /no cumplida/);
+  assert.match(avisoExpirada.body, /plan mensual/);
+  const historialPortal = (await portal.get('/api/portal/summary')).datos.routineHistory;
+  const historialExpirado = historialPortal.find(item => item.session_id === sClienteIncumple);
+  assert.equal(historialExpirado?.delivery_status, 'expired', 'el portal muestra la rutina como expirada');
+  assert.equal(historialExpirado?.expiration_billing, 'monthly', 'el portal informa el descuento del plan mensual');
   const perdida = await sesionDe(sClienteIncumple);
   assert.equal(perdida.status, 'cancelled'); assert.equal(perdida.cancelled_by, 'client'); assert.equal(perdida.cancellation_kind, 'not_rescheduled');
   assert.equal(perdida.routine_offer_status, 'expired');

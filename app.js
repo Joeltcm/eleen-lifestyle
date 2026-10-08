@@ -1,4 +1,4 @@
-const APP_VERSION = '297';
+const APP_VERSION = '298';
 const markPwaVersion = () => document.querySelectorAll('.topbar-actions').forEach(actions => {
   if (actions.querySelector('[data-pwa-version]')) return;
   const indicator = document.createElement('span');
@@ -6547,6 +6547,34 @@ function renderViajePortal() {
 // Tarjeta de cada rutina en el portal del cliente. Volvió a ser una función propia porque la versión 286 llamaba a `portalRoutineCard` sin que existiera: renderPortal se caía y a todos los clientes
 // les salía "La sesión venció". Lleva el cronómetro con su aviso de rutina ofrecida, los bloques con sus rondas, los pesos y las demostraciones.
 const portalRoutineCompletion = routineId => (portalData?.routineCompletions || []).find(item => item.routine_id === routineId && String(item.completed_on).slice(0, 10) === dateKey(today));
+function portalRoutineHistoryMarkup() {
+  const target = document.getElementById('portal-routine-history'); if (!target) return;
+  const history = Array.isArray(portalData?.routineHistory) ? portalData.routineHistory : [];
+  const statusText = { active: 'Activa', completed: 'Cumplida', expired: 'Expirada' };
+  const cards = history.map(item => {
+    const status = item.delivery_status || 'active';
+    const sentAt = fechaHoraPanama(item.sent_at, true);
+    const due = item.due_on ? fechaCorta(item.due_on) : null;
+    let detail = '';
+    if (status === 'active') {
+      detail = item.days_remaining === 0
+        ? `Último día para completarla${due ? ` · vence el ${due}` : ''}.`
+        : item.days_remaining == null
+          ? 'Disponible mientras esté asignada.'
+          : `Te quedan ${item.days_remaining} días para completarla${due ? ` · vence el ${due}` : ''}.`;
+    } else if (status === 'completed') {
+      detail = `Cumplida${item.completed_on ? ` el ${fechaCorta(item.completed_on)}` : ''}.`;
+    } else {
+      detail = item.expiration_billing === 'credit'
+        ? `Esta clase expiró${due ? ` el ${due}` : ''}. Cuenta como no cumplida y se sumó a tu factura a crédito.`
+        : item.expiration_billing === 'monthly'
+          ? `Esta clase expiró${due ? ` el ${due}` : ''}. Cuenta como no cumplida y fue descontada de tu plan mensual.`
+          : `Esta rutina expiró${due ? ` el ${due}` : ''} y quedó registrada como no cumplida.`;
+    }
+    return `<article class="portal-routine-history-item ${status}"><div class="portal-routine-history-main"><div class="portal-routine-history-title"><strong>${escapeHtml(item.routine_title || 'Rutina')}</strong><span class="routine-history-status ${status}">${statusText[status] || status}</span></div><small>Enviada ${escapeHtml(sentAt)}${item.routine_version ? ` · versión ${escapeHtml(String(item.routine_version))}` : ''}</small><p>${detail}</p></div></article>`;
+  }).join('');
+  target.innerHTML = `<section class="portal-routine-history card"><div class="card-head"><div><h3>Historial de rutinas enviadas</h3><p>Consulta cuándo recibiste cada rutina y qué pasó con ella.</p></div></div>${cards || '<p class="empty">Todavía no tienes rutinas enviadas.</p>'}</section>`;
+}
 function portalRoutineCard(routine) {
   const todayCompletion = portalRoutineCompletion(routine.id);
   const oferta = ofertaDeRutina(routine.id);
@@ -6685,6 +6713,7 @@ function renderPortal() {
   }).join('');
   document.getElementById('portal-inbody').innerHTML = portalData.assessments.length ? `<div class="portal-inbody-grid">${portalData.assessments.slice(-4).reverse().map(item => `<article><span>${String(item.tested_at).slice(0, 10)}</span><b>${Number(item.values.weightKg || 0).toFixed(1)} kg</b><small>${Number(item.values.percentBodyFat || 0).toFixed(1)}% grasa · ${Number(item.values.skeletalMuscleMassKg || 0).toFixed(1)} kg músculo</small></article>`).join('')}</div>` : '<p class="empty">Todavía no hay evaluaciones confirmadas.</p>';
   document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(portalRoutineCard).join('') : '<p class="empty">La entrenadora todavía no te ha asignado una rutina.</p>';
+  portalRoutineHistoryMarkup();
   const ownSessions = new Map(portalData.sessions.map(item => [item.id, portalSession(item)]));
   renderPortalCalendar(ownSessions);
   document.getElementById('portal-plan').innerHTML = `<span class="commercial-label ${client.billing_model === 'package' ? 'package-label' : ''}">${client.payment_mode === 'no_anticipado' ? 'Crédito por sesión' : client.billing_model === 'package' ? 'Paquete' : 'Mensualidad'}</span><div><h3>${escapeHtml(client.plan_name || 'Plan personalizado')}</h3><p>${client.payment_mode === 'no_anticipado' ? `${money.format(Number(client.credit_session_price || 25))} por sesión · corte día ${client.billing_cutoff_day}` : `${money.format(Number(client.standard_price))}${client.billing_model === 'monthly' ? ` · corte día ${client.billing_cutoff_day}` : ` · ${client.sessions_included || 0} sesiones`}`}</p></div>`;
