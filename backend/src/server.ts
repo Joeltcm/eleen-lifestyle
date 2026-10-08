@@ -3656,15 +3656,16 @@ app.get('/api/clients/:id/routine-deliveries', { preHandler: requireStaff }, asy
           THEN concat(COALESCE(r.root_routine_id, r.id)::text, '|', (d.sent_at AT TIME ZONE 'America/Panama')::date::text, '|', COALESCE(d.due_on::text, ''))
           ELSE d.id::text END AS group_key
       FROM routine_deliveries d JOIN routines r ON r.id = d.routine_id
-      WHERE d.owner_id = ${auth.sub} AND d.client_id = ${id} AND d.kind <> 'new_version'
+      WHERE d.owner_id = ${auth.sub} AND d.client_id = ${id}
     ), grouped AS (
       SELECT group_key, client_id, root_id, min(sent_at) AS group_start,
         max(sent_at) FILTER (WHERE NOT (backfilled AND kind = 'assignment')) AS real_sent_at,
         bool_and(backfilled AND kind = 'assignment') AS sent_approx,
-        bool_or(kind = 'assignment') AS has_assignment, bool_or(kind = 'link') AS has_link
+        bool_or(kind = 'assignment') AS has_assignment, bool_or(kind = 'link') AS has_link,
+        bool_and(kind = 'new_version') AS is_version
       FROM raw GROUP BY group_key, client_id, root_id
     ), ordered_groups AS (
-      SELECT g.*, lead(g.group_start) OVER (PARTITION BY g.client_id, g.root_id ORDER BY g.group_start, g.group_key) AS next_group_start
+      SELECT g.*, lead(g.group_start) OVER (PARTITION BY g.client_id, g.root_id, g.is_version ORDER BY g.group_start, g.group_key) AS next_group_start
       FROM grouped g
     ), representatives AS (
       SELECT DISTINCT ON (group_key) * FROM raw ORDER BY group_key, sent_at DESC, id DESC
