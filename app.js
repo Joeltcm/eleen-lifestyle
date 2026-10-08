@@ -5127,7 +5127,7 @@ function demoConvert(client) {
     try {
       await api(`/api/clients/${client.id}/demo/convert`, { method: 'POST', body: {} });
       await loadData(); renderAll(); modal.close(); toast('Demo convertida. Completa ahora su plan comercial.');
-      const updated = data.clients.find(item => item.id === client.id); if (updated) editClient(updated);
+      const updated = data.clients.find(item => item.id === client.id); if (updated) clientPlanEditor(updated);
     } catch (error) { toast(error.message, true); }
   })();
 }
@@ -6702,7 +6702,7 @@ function renderPortalDemo() {
   document.querySelectorAll('.portal-view').forEach(view => { view.hidden = !['portal-routines'].includes(view.id); view.classList.toggle('active', view.id === 'portal-routines'); });
   document.getElementById('portal-title').textContent = 'Mis rutinas';
   document.getElementById('portal-demo-banner')?.remove();
-  document.getElementById('portal-routines-list').insertAdjacentHTML('beforebegin', `<div class="portal-demo-banner${client.demo_ended ? ' ended' : ''}" id="portal-demo-banner">${client.demo_ended ? '<strong>Tu demostración terminó</strong><span>Tus rutinas quedan disponibles para que consultes tu historial.</span>' : `<strong>Tu demostración termina el ${fechaCorta(client.demo_ends_on)}</strong><span>Te quedan ${client.demo_days_remaining ?? 0} días para entrenar.</span>`}<a class="secondary demo-whatsapp-link" ${client.whatsapp_url ? `href="${escapeHtml(client.whatsapp_url)}" target="_blank" rel="noopener"` : 'hidden'}>Hablar con Eileen</a></div>`);
+  document.getElementById('portal-routines-list').insertAdjacentHTML('beforebegin', `<div class="portal-demo-banner${client.demo_ended ? ' ended' : ''}" id="portal-demo-banner">${client.demo_ended ? '<strong>Tu demostración terminó</strong><span>Tus rutinas quedan disponibles para que consultes tu historial.</span>' : `<strong>Tu demostración termina el ${fechaCorta(client.demo_ends_on)}</strong><span>${({ 0: 'Hoy es tu último día para entrenar.', 1: 'Te queda 1 día para entrenar.' })[client.demo_days_remaining ?? 0] || `Te quedan ${client.demo_days_remaining} días para entrenar.`}</span>`}<a class="secondary demo-whatsapp-link" ${client.whatsapp_url ? `href="${escapeHtml(client.whatsapp_url)}" target="_blank" rel="noopener"` : 'hidden'}>Hablar con Eileen</a></div>`);
   document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(portalRoutineCard).join('') : '<p class="empty">Todavía no tienes rutinas de demostración.</p>';
   portalRoutineHistoryMarkup();
   document.querySelectorAll('#portal-dashboard, #portal-calendar, #portal-billing, #portal-reports').forEach(view => { view.hidden = true; });

@@ -83,7 +83,7 @@ test('la entrenadora entra y recorre todas las secciones sin errores', async () 
 test('Eileen puede crear, filtrar y convertir un cliente demo desde la pantalla', async () => {
   const demo = (await api.post('/api/clients', {
     fullName: 'Demo de Pantalla', email: 'demo.pantalla@prueba.test', demo: true,
-    demoEndsOn: '2026-10-22', demoRoutineLimit: 2, demoNote: 'Referido'
+    demoEndsOn: panama(14), demoRoutineLimit: 2, demoNote: 'Referido'
   })).datos;
   const p = await abrirPantalla({ baseApi: servidor.base, token: tokenStaff, hash: '#clients', ancho: 375 });
   try {
@@ -230,7 +230,7 @@ test('el PORTAL del cliente dibuja todas sus secciones (rutinas con bloques, via
 test('PORTAL demo: muestra el aviso y solo permite ver rutinas gratuitas', async () => {
   const demo = (await api.post('/api/clients', {
     fullName: 'Prospecto Demo UI', email: 'prospecto.demo.ui@prueba.test',
-    demo: true, demoEndsOn: '2026-10-22', demoRoutineLimit: 2, demoNote: 'Prueba de pantalla'
+    demo: true, demoEndsOn: panama(14), demoRoutineLimit: 2, demoNote: 'Prueba de pantalla'
   })).datos;
   const rutinaDemo = (await api.post('/api/routines', {
     title: 'Rutina demo UI', description: 'Calentamiento\nEjercicios principales\nEstiramientos',
@@ -244,10 +244,10 @@ test('PORTAL demo: muestra el aviso y solo permite ver rutinas gratuitas', async
   try {
     await esperar(() => !p.document.getElementById('portal-shell').hidden, { mensaje: 'portal demo visible' });
     await esperar(() => p.q('#portal-demo-banner'), { mensaje: 'aviso de demo' });
-    assert.match(p.q('#portal-demo-banner').textContent, /Tu demostración termina el 22-10-2026/);
+    const [fy, fm, fd] = panama(14).split('-'); assert.ok(p.q('#portal-demo-banner').textContent.includes(`Tu demostración termina el ${fd}-${fm}-${fy}`), 'el aviso muestra la fecha de fin (dd-mm-aaaa)');
     assert.ok(p.q('#portal-demo-banner').textContent.includes('días'));
     await esperar(() => p.q(`[data-portal-routine-card="${rutinaDemo.id}"]`), { mensaje: 'rutina demo' });
-    assert.match(p.q(`[data-portal-routine-card="${rutinaDemo.id}"]`).textContent, /Rutina 1 de 1/);
+    assert.match(p.q(`[data-portal-routine-card="${rutinaDemo.id}"]`).textContent, /Rutina 1 de 2/, "la numeración usa el tope fijado por Eileen (2)");
     for (const id of ['portal-billing', 'portal-calendar', 'portal-reports']) {
       assert.equal(p.q(`#${id}`).hidden, true, `${id} queda oculto para demo`);
     }

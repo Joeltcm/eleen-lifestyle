@@ -4,6 +4,8 @@ import postgres from 'postgres';
 import { CREDENCIALES, SETUP_TOKEN, cliente, levantar } from './harness.mjs';
 
 let servidor; let api; let db; let demoId;
+// Fechas de fin de demo siempre en el futuro (una fecha fija se vuelve pasado y rompe la prueba sola): hoy de Panamá + n días.
+const dia = n => new Date(Date.now() - 5 * 3600_000 + n * 86400_000).toISOString().slice(0, 10);
 
 before(async () => {
   servidor = await levantar();
@@ -17,11 +19,11 @@ before(async () => {
 after(async () => { await db?.end({ timeout: 1 }).catch(() => {}); await servidor?.parar(); });
 
 test('alta demo, duplicado confirmado y tope de rutinas', async () => {
-  const primera = await api.post('/api/clients', { fullName: 'Prospecto Demo', email: 'demo@prueba.test', phone: '+507 6000-0001', demo: true, demoEndsOn: '2026-10-22', demoRoutineLimit: 2, demoNote: 'Instagram' });
+  const primera = await api.post('/api/clients', { fullName: 'Prospecto Demo', email: 'demo@prueba.test', phone: '+507 6000-0001', demo: true, demoEndsOn: dia(14), demoRoutineLimit: 2, demoNote: 'Instagram' });
   assert.equal(primera.estado, 201, JSON.stringify(primera.datos));
   demoId = primera.datos.id;
   assert.equal(primera.datos.service_mode, 'demo');
-  assert.equal(String(primera.datos.demo_ends_on).slice(0, 10), '2026-10-22');
+  assert.equal(String(primera.datos.demo_ends_on).slice(0, 10), dia(14));
   assert.equal(Number(primera.datos.demo_routine_limit), 2);
   assert.equal((await db`SELECT count(*)::int AS n FROM memberships WHERE client_id = ${demoId}`)[0].n, 0);
 
@@ -54,7 +56,7 @@ test('alta demo, duplicado confirmado y tope de rutinas', async () => {
 });
 
 test('una demo vencida bloquea nuevos envíos y conserva un portal consultable con WhatsApp', async () => {
-  const demo = (await api.post('/api/clients', { fullName: 'Demo vencida', email: 'demo.vencida@prueba.test', demo: true, demoEndsOn: '2026-10-22' })).datos;
+  const demo = (await api.post('/api/clients', { fullName: 'Demo vencida', email: 'demo.vencida@prueba.test', demo: true, demoEndsOn: dia(14) })).datos;
   const rutina = (await api.post('/api/routines', {
     title: 'Rutina histórica demo', clientId: demo.id, sessionsPerWeek: 1, dueOn: '2026-10-07', exercises: [{ name: 'Plancha', reps: '10' }]
   })).datos;
@@ -83,7 +85,7 @@ test('demo no admite facturas, pagos, paquetes ni sesiones y puede convertirse s
   const session = await api.post('/api/sessions', { clientId: demoId, startsAt: '2026-10-12T14:00:00.000Z', durationMinutes: 45, mode: 'Virtual' });
   assert.equal(session.estado, 409);
 
-  const adjust = await api.patch(`/api/clients/${demoId}/demo`, { demoEndsOn: '2026-10-30' });
+  const adjust = await api.patch(`/api/clients/${demoId}/demo`, { demoEndsOn: dia(20) });
   assert.equal(adjust.estado, 200, JSON.stringify(adjust.datos));
   const converted = await api.post(`/api/clients/${demoId}/demo/convert`, {});
   assert.equal(converted.estado, 200, JSON.stringify(converted.datos));

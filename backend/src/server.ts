@@ -2224,10 +2224,11 @@ app.post('/api/clients/:id/demo', { preHandler: requireStaff }, async (request, 
       if (!client) return null;
       if (client.service_mode === 'demo') sessionStateConflict('Este cliente ya está en modo demo.');
       const [blocked] = await transaction`
-        SELECT EXISTS (SELECT 1 FROM memberships WHERE client_id = ${clientId})
-          OR EXISTS (SELECT 1 FROM billing_subscriptions WHERE beneficiary_client_id = ${clientId} OR payer_client_id = ${clientId})
+        SELECT EXISTS (SELECT 1 FROM billing_subscriptions WHERE beneficiary_client_id = ${clientId} OR payer_client_id = ${clientId})
           OR EXISTS (SELECT 1 FROM invoices WHERE client_id = ${clientId} OR billed_for_client_id = ${clientId})
-          OR EXISTS (SELECT 1 FROM received_payments WHERE client_id = ${clientId})
+          OR EXISTS (SELECT 1 FROM invoice_payments WHERE client_id = ${clientId})
+          OR EXISTS (SELECT 1 FROM billing_invoices WHERE payer_client_id = ${clientId})
+          OR EXISTS (SELECT 1 FROM billing_payments WHERE payer_client_id = ${clientId})
           OR EXISTS (SELECT 1 FROM payment_allocations pa JOIN invoices i ON i.id = pa.invoice_id WHERE i.client_id = ${clientId} OR i.billed_for_client_id = ${clientId})
           OR EXISTS (SELECT 1 FROM session_packages WHERE client_id = ${clientId} AND status IN ('pending', 'active') AND used_sessions < total_sessions)
           OR EXISTS (SELECT 1 FROM sessions WHERE client_id = ${clientId} AND status = 'scheduled') AS blocked
@@ -2238,12 +2239,17 @@ app.post('/api/clients/:id/demo', { preHandler: requireStaff }, async (request, 
       if (ends < hoy) sessionStateConflict('La fecha final de la demo no puede estar en el pasado.');
       const used = await demoRoutineUsage(transaction, clientId);
       if (input.demoRoutineLimit != null && input.demoRoutineLimit < used) sessionStateConflict(`El tope no puede ser menor que las ${used} rutinas ya enviadas.`);
+      // Un expediente normal siempre trae su configuración comercial (plan, precio, mensualidad). Sin cobros reales no estorba el paso a demo, pero se NEUTRALIZA para que,
+      // al convertir, no reviva un cobro viejo: la conversión exige elegir el plan de nuevo. Lo anterior queda en la nota del evento.
+      const previa = `plan_id=${client.plan_id ?? ''}; precio=${client.standard_price ?? ''}; modelo=${client.billing_model ?? ''}; corte=${client.billing_cutoff_day ?? ''}`;
       const [updated] = await transaction`
         UPDATE clients SET service_mode = 'demo', demo_started_on = ${hoy}::date, demo_ends_on = ${ends}::date,
-          demo_routine_limit = ${input.demoRoutineLimit}, demo_note = ${input.demoNote || null}, demo_converted_at = NULL, updated_at = now()
+          demo_routine_limit = ${input.demoRoutineLimit}, demo_note = ${input.demoNote || null}, demo_converted_at = NULL,
+          plan_id = NULL, standard_price = 0, billing_model = 'single', monthly_session_target = NULL, updated_at = now()
         WHERE id = ${clientId} RETURNING *
       `;
-      await registrarCambioModalidad(transaction, { clientId, ownerId: auth.sub, fromMode: 'standard', toMode: 'demo', userId: auth.sub, note: input.demoNote || 'Cliente existente pasado a modo demo' });
+      await transaction`UPDATE memberships SET amount = 0 WHERE client_id = ${clientId}`;
+      await registrarCambioModalidad(transaction, { clientId, ownerId: auth.sub, fromMode: 'standard', toMode: 'demo', userId: auth.sub, note: `${input.demoNote || 'Cliente existente pasado a modo demo'} · configuración comercial anterior: ${previa}` });
       return { ...updated, demo_routines_used: used };
     });
     if (!result) return reply.code(404).send({ error: 'Cliente no encontrado' });
@@ -7907,8 +7913,16 @@ async function portalDemoSummary(client: Record<string, any>) {
         ORDER BY x.starts_on DESC LIMIT 1
       ) ra ON true
       WHERE d.client_id = ${client.id} AND d.kind <> 'new_version'
+        -- Igual que en el portal normal: asignación y enlace de la MISMA rutina el mismo día y con la misma fecha límite son un solo envío (se muestra el último).
+        AND NOT EXISTS (
+          SELECT 1 FROM routine_deliveries d2 JOIN routines r2 ON r2.id = d2.routine_id
+          WHERE d2.client_id = d.client_id AND d2.kind <> 'new_version' AND d2.offer_id IS NULL AND d.offer_id IS NULL AND d2.id <> d.id
+            AND COALESCE(r2.root_routine_id, r2.id) = COALESCE(r.root_routine_id, r.id)
+            AND (d2.sent_at AT TIME ZONE 'America/Panama')::date = (d.sent_at AT TIME ZONE 'America/Panama')::date
+            AND d2.due_on IS NOT DISTINCT FROM d.due_on
+            AND (d2.sent_at, d2.id) > (d.sent_at, d.id))
     )
-    SELECT d.id, d.routine_id, d.routine_title, d.kind, d.sent_at, d.backfilled AS sent_approx,
+    SELECT d.id, d.routine_id, d.routine_title, d.kind, d.sent_at, (d.backfilled AND d.kind = 'assignment') AS sent_approx,
       d.effective_due_on AS due_on, completed.completed_on, completed.completion_percent,
       CASE WHEN completed.completed_on IS NOT NULL AND completed.completion_percent >= 100 THEN 'completed'
         WHEN d.offer_status = 'expired' OR (d.effective_due_on IS NOT NULL AND d.effective_due_on < ${hoy}::date) THEN 'expired' ELSE 'active' END AS delivery_status,
@@ -7940,9 +7954,18 @@ async function portalDemoSummary(client: Record<string, any>) {
   const firstName = String(client.full_name || '').trim().split(/\s+/)[0] || 'cliente';
   const contact = String(settings?.contact_whatsapp || '').replace(/\D/g, '');
   const whatsappUrl = contact
-    ? `https://wa.me/${contact}?text=${encodeURIComponent(`Hola Eileen, soy ${firstName}. Terminó mi demostración y quiero seguir entrenando.`)}`
+    ? `https://wa.me/${contact}?text=${encodeURIComponent((ended ? `Hola Eileen, soy ${firstName}. Terminó mi demostración y quiero seguir entrenando.` : `Hola Eileen, soy ${firstName}. Estoy en mi demostración y quiero información para seguir entrenando.`))}`
     : null;
-  const numbered = routines.map((routine, index) => ({ ...routine, demo_routine_index: index + 1, demo_routine_total: routines.length }));
+  // "Rutina 2 de 3": el número es el ORDEN EN QUE SE LE ENVIARON (primer envío de cada rutina, no el orden por id) y el total es el tope que fijó Eileen
+  // (sin tope, las que lleva usadas). Una rutina ya terminada o reasignada sigue ocupando su lugar.
+  const primeros = await sql`
+    SELECT COALESCE(r.root_routine_id, r.id)::text AS root_id, min(d.sent_at) AS primero
+    FROM routine_deliveries d JOIN routines r ON r.id = d.routine_id
+    WHERE d.client_id = ${client.id} AND d.kind <> 'new_version' GROUP BY 1 ORDER BY min(d.sent_at), 1`;
+  const lugar = new Map(primeros.map((fila, index) => [String(fila.root_id), index + 1]));
+  const totalDemo = client.demo_routine_limit == null ? Math.max(primeros.length, routines.length) : Number(client.demo_routine_limit);
+  const numbered = routines.map(routine => ({ ...routine, demo_routine_index: lugar.get(String(routine.root_routine_id || routine.id)) ?? null, demo_routine_total: totalDemo }))
+    .sort((p, q) => (p.demo_routine_index ?? 1e9) - (q.demo_routine_index ?? 1e9));
   return {
     client: {
       id: client.id, full_name: client.full_name, email: client.email, goal: client.goal, status: client.status,
