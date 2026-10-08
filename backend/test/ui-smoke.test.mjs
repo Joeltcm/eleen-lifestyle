@@ -107,6 +107,26 @@ test('Eileen puede crear, filtrar y convertir un cliente demo desde la pantalla'
   } finally { await p.cerrar(); }
 });
 
+test('la pantalla muestra el motivo concreto al rechazar pasar un cliente a demo y libera el formulario', async () => {
+  await api.post('/api/sessions', {
+    clientId: clientId, startsAt: new Date(`${panama(2)}T12:00:00-05:00`).toISOString(), durationMinutes: 45, mode: 'Virtual'
+  });
+  const p = await abrirPantalla({ baseApi: servidor.base, token: tokenStaff, hash: '#clients', ancho: 375 });
+  try {
+    await esperar(() => p.evaluar(`data.clients.some(client => client.id === '${clientId}')`), { mensaje: 'cliente con guardia cargado' });
+    p.clic(p.q(`[data-client="${clientId}"]`));
+    const botonDemo = await esperar(() => p.qa('.detail-actions button').find(button => button.textContent.includes('Pasar a modo demo')), { mensaje: 'acción pasar a demo' });
+    p.clic(botonDemo);
+    const form = await esperar(() => p.q('#demo-adjust-form'), { mensaje: 'formulario para pasar a demo' });
+    form.requestSubmit();
+    const aviso = await esperar(() => p.q('.toast.error'), { mensaje: 'aviso del motivo del rechazo' });
+    assert.match(aviso.textContent, /\d+ clases? programadas/);
+    assert.ok(p.q('#demo-adjust-form'), 'el formulario permanece visible para corregir el expediente');
+    assert.ok(!p.q('#demo-adjust-form').classList.contains('loading-state'), 'el formulario no queda bloqueado después del 409');
+    sinErrores(p, 'guardia de pasar a demo');
+  } finally { await p.cerrar(); }
+});
+
 test('EDITAR una rutina guardada abre el editor completo y TODAS sus acciones funcionan (cambiar, mover entre bloques, agregar a un bloque, quitar) y se guarda', async () => {
   const p = await abrirPantalla({ baseApi: servidor.base, token: tokenStaff, hash: '#routines' });
   try {

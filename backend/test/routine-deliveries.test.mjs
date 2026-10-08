@@ -89,7 +89,47 @@ test('las cinco vías de entrega registran instantáneas y el resumen no cambia 
   entregas = (await api.get(`/api/routines/${rutina.datos.id}/deliveries`)).datos;
   assert.equal(entregas.find(item => item.client_name === 'Cliente de envíos').summary_text, resumenOriginal, 'el primer resumen es una foto del envío');
   assert.ok(entregas.every(item => item.summary_text.includes('20 lb') && !item.summary_text.includes('35 lb')), 'los resúmenes no se recalculan con la edición');
-  assert.ok((await api.get(`/api/clients/${clienteB}/routine-deliveries`)).datos.length >= 4);
+  assert.ok((await api.get(`/api/clients/${clienteB}/routine-deliveries`)).datos.length >= 3, 'asignación y enlace del mismo día forman una sola tarjeta; oferta y viaje permanecen separados');
+});
+
+test('el expediente agrupa asignación y enlace del mismo día y atribuye la cumplida al grupo', async () => {
+  const clienteC = (await api.post('/api/clients', { fullName: 'Cliente de grupo', cutoffDay: 1 })).datos.id;
+  const rutina = (await api.post('/api/routines', {
+    title: 'Rutina agrupada', description: 'Prueba de historial', sessionsPerWeek: 1,
+    exercises: [{ name: 'Sentadilla', sets: 3, reps: '10' }]
+  })).datos;
+  const [owner] = await db`SELECT id FROM users LIMIT 1`;
+  const primerDia = panama(-3); const segundoDia = panama(-2);
+  const vencePrimero = panama(1); const venceSegundo = panama(2);
+  const insertar = async ({ kind, sentAt, dueOn, backfilled = false }) => db`
+    INSERT INTO routine_deliveries (
+      owner_id, routine_id, client_id, kind, sent_at, due_on, routine_title, routine_version,
+      client_name, summary_text, exercises_snapshot, backfilled
+    ) VALUES (
+      ${owner.id}, ${rutina.id}, ${clienteC}, ${kind}, ${sentAt}::timestamptz, ${dueOn}::date,
+      'Rutina agrupada', 1, 'Cliente de grupo', 'Rutina agrupada\\nSentadilla — 10',
+      ${db.json([{ name: 'Sentadilla', reps: '10' }])}, ${backfilled}
+    ) RETURNING id
+  `;
+  await insertar({ kind: 'link', sentAt: aHora(primerDia, '09:00'), dueOn: vencePrimero });
+  await insertar({ kind: 'assignment', sentAt: aHora(primerDia, '12:00'), dueOn: vencePrimero, backfilled: true });
+  await insertar({ kind: 'assignment', sentAt: aHora(segundoDia, '10:00'), dueOn: venceSegundo, backfilled: true });
+  await insertar({ kind: 'offer', sentAt: aHora(primerDia, '08:00'), dueOn: vencePrimero });
+  await db`
+    INSERT INTO routine_completions (routine_id, client_id, completed_on, completion_percent, marked_by_user_id, created_at)
+    VALUES (${rutina.id}, ${clienteC}, ${primerDia}::date, 100, ${owner.id}, ${aHora(primerDia, '10:30')}::timestamptz)
+  `;
+
+  const historial = (await api.get(`/api/clients/${clienteC}/routine-deliveries`)).datos;
+  assert.equal(historial.length, 3, 'la asignación y el enlace se presentan como una sola tarjeta');
+  const unido = historial.find(item => item.kind === 'assignment_link');
+  assert.ok(unido, 'la etiqueta de la tarjeta unida existe');
+  assert.equal(unido.sent_approx, false, 'un envío real evita mostrar la hora inventada del relleno');
+  assert.equal(new Date(unido.sent_at).toISOString(), new Date(aHora(primerDia, '09:00')).toISOString(), 'se conserva la hora real del enlace');
+  assert.equal(unido.completed, true, 'la cumplida se atribuye al grupo del primer envío');
+  assert.equal(historial.filter(item => item.kind === 'assignment').length, 1, 'otro día queda separado');
+  assert.equal(historial.filter(item => item.kind === 'offer').length, 1, 'las ofertas nunca se unen');
+  assert.equal(historial.find(item => item.kind === 'assignment')?.completed, false, 'la tarjeta posterior no hereda la cumplida anterior');
 });
 
 test('la reversa de 063 se niega a destruir el registro sin orden expresa', async () => {

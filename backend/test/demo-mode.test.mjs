@@ -95,6 +95,26 @@ test('demo no admite facturas, pagos, paquetes ni sesiones y puede convertirse s
   assert.equal((await db`SELECT count(*)::int AS n FROM client_mode_events WHERE client_id = ${demoId} AND to_mode = 'standard'`)[0].n, 1);
 });
 
+test('pasar un cliente existente a demo explica cada bloqueo con su cantidad y conserva el formulario reintentable', async () => {
+  const standard = (await api.post('/api/clients', { fullName: 'Cliente con historial', email: 'demo.guardia@prueba.test', cutoffDay: 15 })).datos;
+  const [owner] = await db`SELECT id FROM users LIMIT 1`;
+  await db`INSERT INTO invoices (client_id, concept, amount, due_on) VALUES (${standard.id}, 'Historial', 100, ${dia(1)}::date)`;
+  await db`INSERT INTO invoice_payments (client_id, amount, paid_on, method) VALUES (${standard.id}, 100, ${dia(0)}::date, 'Yappy')`;
+  await db`INSERT INTO session_packages (client_id, label, total_sessions, used_sessions, amount, status) VALUES (${standard.id}, 'Saldo pendiente', 4, 1, 100, 'active')`;
+  await db`INSERT INTO sessions (client_id, starts_at, duration_minutes, mode, status) VALUES (${standard.id}, ${new Date(`${dia(2)}T12:00:00-05:00`).toISOString()}, 45, 'Virtual', 'scheduled')`;
+  await db`INSERT INTO billing_subscriptions (owner_id, beneficiary_client_id, payer_client_id, kind, starts_on, price) VALUES (${owner.id}, ${standard.id}, ${standard.id}, 'monthly', ${dia(0)}::date, 100)`;
+
+  const blocked = await api.post(`/api/clients/${standard.id}/demo`, { demoEndsOn: dia(14), demoRoutineLimit: 1 });
+  assert.equal(blocked.estado, 409, JSON.stringify(blocked.datos));
+  const mensaje = String(blocked.datos.error || blocked.datos.message);
+  assert.match(mensaje, /1 clase programada/);
+  assert.match(mensaje, /1 factura/);
+  assert.match(mensaje, /1 pago registrado/);
+  assert.match(mensaje, /1 suscripción activa/);
+  assert.match(mensaje, /1 saldo con clases disponibles/);
+  assert.equal((await db`SELECT service_mode FROM clients WHERE id = ${standard.id}`)[0].service_mode, 'standard');
+});
+
 test('la reversa 069 queda protegida si hay datos demo', async () => {
   const archivo = new URL('../migrations-down/069_demo_client_mode.down.sql', import.meta.url).pathname;
   const { execFile } = await import('node:child_process');

@@ -2224,16 +2224,32 @@ app.post('/api/clients/:id/demo', { preHandler: requireStaff }, async (request, 
       if (!client) return null;
       if (client.service_mode === 'demo') sessionStateConflict('Este cliente ya está en modo demo.');
       const [blocked] = await transaction`
-        SELECT EXISTS (SELECT 1 FROM billing_subscriptions WHERE beneficiary_client_id = ${clientId} OR payer_client_id = ${clientId})
-          OR EXISTS (SELECT 1 FROM invoices WHERE client_id = ${clientId} OR billed_for_client_id = ${clientId})
-          OR EXISTS (SELECT 1 FROM invoice_payments WHERE client_id = ${clientId})
-          OR EXISTS (SELECT 1 FROM billing_invoices WHERE payer_client_id = ${clientId})
-          OR EXISTS (SELECT 1 FROM billing_payments WHERE payer_client_id = ${clientId})
-          OR EXISTS (SELECT 1 FROM payment_allocations pa JOIN invoices i ON i.id = pa.invoice_id WHERE i.client_id = ${clientId} OR i.billed_for_client_id = ${clientId})
-          OR EXISTS (SELECT 1 FROM session_packages WHERE client_id = ${clientId} AND status IN ('pending', 'active') AND used_sessions < total_sessions)
-          OR EXISTS (SELECT 1 FROM sessions WHERE client_id = ${clientId} AND status = 'scheduled') AS blocked
+        SELECT
+          (SELECT count(*)::int FROM sessions WHERE client_id = ${clientId} AND status = 'scheduled') AS scheduled_sessions,
+          (SELECT count(*)::int FROM (
+            SELECT id FROM invoices WHERE client_id = ${clientId} OR billed_for_client_id = ${clientId}
+            UNION ALL
+            SELECT id FROM billing_invoices WHERE payer_client_id = ${clientId}
+          ) invoices_seen) AS invoices,
+          (SELECT count(*)::int FROM (
+            SELECT id FROM invoice_payments WHERE client_id = ${clientId}
+            UNION ALL
+            SELECT id FROM billing_payments WHERE payer_client_id = ${clientId}
+          ) payments_seen) AS payments,
+          (SELECT count(*)::int FROM billing_subscriptions
+            WHERE (beneficiary_client_id = ${clientId} OR payer_client_id = ${clientId})
+              AND (ends_on IS NULL OR ends_on >= (now() AT TIME ZONE 'America/Panama')::date)) AS subscriptions,
+          (SELECT count(*)::int FROM session_packages
+            WHERE client_id = ${clientId} AND status IN ('pending', 'active') AND used_sessions < total_sessions) AS balances
       `;
-      if (blocked?.blocked) sessionStateConflict('No se puede pasar a demo: el cliente tiene facturación, saldo o clases programadas.');
+      const motivos = [
+        Number(blocked?.scheduled_sessions || 0) ? `${blocked.scheduled_sessions} ${Number(blocked.scheduled_sessions) === 1 ? 'clase programada' : 'clases programadas'}` : null,
+        Number(blocked?.invoices || 0) ? `${blocked.invoices} ${Number(blocked.invoices) === 1 ? 'factura' : 'facturas'}` : null,
+        Number(blocked?.payments || 0) ? `${blocked.payments} ${Number(blocked.payments) === 1 ? 'pago registrado' : 'pagos registrados'}` : null,
+        Number(blocked?.subscriptions || 0) ? `${blocked.subscriptions} ${Number(blocked.subscriptions) === 1 ? 'suscripción activa' : 'suscripciones activas'}` : null,
+        Number(blocked?.balances || 0) ? `${blocked.balances} ${Number(blocked.balances) === 1 ? 'saldo con clases disponibles' : 'saldos con clases disponibles'}` : null
+      ].filter(Boolean);
+      if (motivos.length) sessionStateConflict(`No se puede pasar a demo: el cliente tiene ${motivos.join(', ')}.`);
       const hoy = fechaDeNegocioPanama();
       const ends = input.demoEndsOn || fechaPanamaMasDias(hoy, 14);
       if (ends < hoy) sessionStateConflict('La fecha final de la demo no puede estar en el pasado.');
@@ -3633,24 +3649,50 @@ app.get('/api/clients/:id/routine-deliveries', { preHandler: requireStaff }, asy
   const [client] = await sql`SELECT id FROM clients WHERE id = ${id} AND owner_id = ${auth.sub}`;
   if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
   return sql`
-    WITH deliveries AS (
-      SELECT d.*, lead(d.sent_at) OVER (PARTITION BY d.client_id, d.routine_id ORDER BY d.sent_at) AS next_sent_at
-      FROM routine_deliveries d
-      WHERE d.owner_id = ${auth.sub} AND d.client_id = ${id}
+    WITH raw AS (
+      SELECT d.*, COALESCE(r.root_routine_id, r.id) AS root_id,
+        (d.sent_at AT TIME ZONE 'America/Panama')::date AS sent_day,
+        CASE WHEN d.offer_id IS NULL AND d.kind IN ('assignment', 'link')
+          THEN concat(COALESCE(r.root_routine_id, r.id)::text, '|', (d.sent_at AT TIME ZONE 'America/Panama')::date::text, '|', COALESCE(d.due_on::text, ''))
+          ELSE d.id::text END AS group_key
+      FROM routine_deliveries d JOIN routines r ON r.id = d.routine_id
+      WHERE d.owner_id = ${auth.sub} AND d.client_id = ${id} AND d.kind <> 'new_version'
+    ), grouped AS (
+      SELECT group_key, client_id, root_id, min(sent_at) AS group_start,
+        max(sent_at) FILTER (WHERE NOT (backfilled AND kind = 'assignment')) AS real_sent_at,
+        bool_and(backfilled AND kind = 'assignment') AS sent_approx,
+        bool_or(kind = 'assignment') AS has_assignment, bool_or(kind = 'link') AS has_link
+      FROM raw GROUP BY group_key, client_id, root_id
+    ), ordered_groups AS (
+      SELECT g.*, lead(g.group_start) OVER (PARTITION BY g.client_id, g.root_id ORDER BY g.group_start, g.group_key) AS next_group_start
+      FROM grouped g
+    ), representatives AS (
+      SELECT DISTINCT ON (group_key) * FROM raw ORDER BY group_key, sent_at DESC, id DESC
     )
-    SELECT d.*, completed.completed_on, completed.completion_percent,
+    SELECT rep.id, rep.owner_id, rep.routine_id, rep.client_id,
+      CASE WHEN groups.has_assignment AND groups.has_link THEN 'assignment_link' ELSE rep.kind END AS kind,
+      COALESCE(groups.real_sent_at, rep.sent_at) AS sent_at, rep.sent_by_user_id, rep.due_on,
+      rep.share_link_id, rep.offer_id, rep.assignment_id, rep.routine_title, rep.routine_version,
+      rep.client_name, rep.summary_text, rep.exercises_snapshot, rep.summary_reconstructed,
+      rep.repeat_confirmed, rep.backfilled, groups.sent_approx,
+      completed.completed_on, completed.completion_percent,
       (completed.completed_on IS NOT NULL) AS completed
-    FROM deliveries d
+    FROM representatives rep JOIN ordered_groups groups ON groups.group_key = rep.group_key
     LEFT JOIN LATERAL (
       SELECT rc.completed_on, rc.completion_percent
       FROM routine_completions rc
-      WHERE rc.routine_id = d.routine_id AND rc.client_id = d.client_id
-        AND (rc.created_at >= d.sent_at OR rc.completed_on >= (d.sent_at AT TIME ZONE 'America/Panama')::date)
-        AND (d.next_sent_at IS NULL OR rc.created_at < d.next_sent_at)
-        AND (d.next_sent_at IS NULL OR rc.completed_on < (d.next_sent_at AT TIME ZONE 'America/Panama')::date)
+      WHERE (rc.routine_id = rep.routine_id OR rc.routine_id IN (SELECT rr.id FROM routines rr WHERE rr.root_routine_id = rep.root_id))
+        AND rc.client_id = rep.client_id
+        AND (
+          (rc.completed_on >= (groups.group_start AT TIME ZONE 'America/Panama')::date
+            AND (groups.next_group_start IS NULL OR rc.completed_on < (groups.next_group_start AT TIME ZONE 'America/Panama')::date))
+          OR
+          (rc.created_at >= groups.group_start
+            AND (groups.next_group_start IS NULL OR rc.created_at < groups.next_group_start))
+        )
       ORDER BY rc.created_at DESC LIMIT 1
     ) completed ON true
-    ORDER BY d.sent_at DESC
+    ORDER BY sent_at DESC
   `;
 });
 

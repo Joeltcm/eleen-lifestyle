@@ -1,4 +1,4 @@
-const APP_VERSION = '301';
+const APP_VERSION = '302';
 const markPwaVersion = () => document.querySelectorAll('.topbar-actions').forEach(actions => {
   if (actions.querySelector('[data-pwa-version]')) return;
   const indicator = document.createElement('span');
@@ -2880,7 +2880,7 @@ function renderCatalogList() {
   });
 }
 
-const routineDeliveryLabels = { assignment: 'Asignación', link: 'Enlace', offer: 'Oferta por una clase', travel_link: 'Enlace de viaje', new_version: 'Nueva versión' };
+const routineDeliveryLabels = { assignment: 'Asignación', assignment_link: 'Asignación y enlace', link: 'Enlace', offer: 'Oferta por una clase', travel_link: 'Enlace de viaje', new_version: 'Nueva versión' };
 const routineCompletionLabel = item => item.completed
   ? `Cumplida${item.completed_on ? ` · ${fechaHoraPanama(item.completed_on, false)}` : ''}${item.completion_percent != null ? ` · ${Number(item.completion_percent)}%` : ''}`
   : 'Sin confirmar';
@@ -2894,7 +2894,7 @@ function copiarTexto(texto, mensaje = 'Resumen copiado') {
 }
 function renderRoutineDeliveries(target, deliveries) {
   if (!target) return;
-  target.innerHTML = deliveries.length ? `<div class="routine-delivery-list">${deliveries.map((item, index) => `<article class="routine-delivery-item"><header><div><b>${escapeHtml(item.client_name || 'Cliente')}</b><small>${fechaHoraPanama(item.sent_at)} · ${escapeHtml(routineDeliveryLabels[item.kind] || 'Envío')}</small></div><span class="routine-delivery-status ${item.completed ? 'done' : ''}">${routineCompletionLabel(item)}</span></header><div class="routine-delivery-actions"><button type="button" class="secondary" data-show-delivery-summary="${index}">Ver resumen</button><button type="button" class="secondary" data-copy-delivery-summary="${index}">Copiar</button></div><div class="routine-delivery-summary" data-delivery-summary="${index}" hidden>${escapeHtml(item.summary_text || 'No hay resumen guardado.')}</div></article>`).join('')}</div>` : '<p class="empty">Aún no hay envíos registrados.</p>';
+  target.innerHTML = deliveries.length ? `<div class="routine-delivery-list">${deliveries.map((item, index) => `<article class="routine-delivery-item"><header><div><b>${escapeHtml(item.client_name || 'Cliente')}</b><small>${item.sent_approx ? fechaCorta(item.sent_at) : fechaHoraPanama(item.sent_at)} · ${escapeHtml(routineDeliveryLabels[item.kind] || 'Envío')}</small></div><span class="routine-delivery-status ${item.completed ? 'done' : ''}">${routineCompletionLabel(item)}</span></header><div class="routine-delivery-actions"><button type="button" class="secondary" data-show-delivery-summary="${index}">Ver resumen</button><button type="button" class="secondary" data-copy-delivery-summary="${index}">Copiar</button></div><div class="routine-delivery-summary" data-delivery-summary="${index}" hidden>${escapeHtml(item.summary_text || 'No hay resumen guardado.')}</div></article>`).join('')}</div>` : '<p class="empty">Aún no hay envíos registrados.</p>';
   target.querySelectorAll('[data-show-delivery-summary]').forEach(button => button.onclick = () => {
     const summary = target.querySelector(`[data-delivery-summary="${button.dataset.showDeliverySummary}"]`); if (!summary) return;
     summary.hidden = !summary.hidden; button.textContent = summary.hidden ? 'Ver resumen' : 'Ocultar resumen';
@@ -5112,12 +5112,12 @@ function demoAdjustDialog(client, convertExisting = false) {
   box.innerHTML = `<form id="demo-adjust-form"><p class="eyebrow">${convertExisting ? 'PROMOCIÓN' : 'CLIENTE DEMO'}</p><h2>${convertExisting ? 'Pasar a modo demo' : 'Ajustar demostración'}</h2><p class="section-note">${convertExisting ? 'Solo cambia la modalidad y conserva intactos sus rutinas, enlaces, envíos y fechas límite.' : `Ya usó ${client.demoRoutinesUsed || 0}${client.demoRoutineLimit == null ? '' : ` de ${client.demoRoutineLimit}`} rutinas distintas.`}</p><label>Fin de la demostración<input name="demoEndsOn" type="date" min="${dateKey(today)}" value="${currentEnd}" required /></label><label>Rutinas gratis <span class="muted">(vacío = sin tope)</span><input name="demoRoutineLimit" type="number" min="1" value="${client.demoRoutineLimit ?? ''}" placeholder="Sin tope" /></label><label>Nota / origen<textarea name="demoNote" rows="2">${escapeHtml(client.demoNote || '')}</textarea></label><button class="primary wide-button">${convertExisting ? 'Pasar a demo' : 'Guardar cambios'}</button></form>`;
   openModal(box);
   box.querySelector('form').addEventListener('submit', async event => {
-    event.preventDefault(); const values = new FormData(event.currentTarget); const limit = values.get('demoRoutineLimit');
+    event.preventDefault(); const form = event.currentTarget; const values = new FormData(form); const limit = values.get('demoRoutineLimit');
     try {
-      event.currentTarget.classList.add('loading-state');
+      form.classList.add('loading-state');
       await api(`/api/clients/${client.id}/demo`, { method: convertExisting ? 'POST' : 'PATCH', body: { demoEndsOn: values.get('demoEndsOn'), demoRoutineLimit: limit || null, demoNote: values.get('demoNote') || undefined } });
       await loadData(); renderAll(); modal.close(); clientDetail(client.id); toast(convertExisting ? 'Cliente pasado a modo demo' : 'Demostración actualizada');
-    } catch (error) { toast(error.message, true); event.currentTarget.classList.remove('loading-state'); }
+    } catch (error) { toast(error.message, true); form.classList.remove('loading-state'); }
   });
 }
 
@@ -5151,9 +5151,9 @@ function inbodyReview(client, assessments, pageErrors = [], skippedPages = []) {
   box.innerHTML = `<form id="inbody-review-form"><p class="eyebrow">REVISIÓN DE DATOS</p><h2>Confirmar historial InBody</h2><p class="inbody-review-copy">Compara estos datos con el reporte de ${escapeHtml(client.name)}. Solo corrige una cifra si no coincide; el resto ya fue capturado automáticamente.</p>${notes.length ? `<div class="inbody-warnings"><b>Revisar con atención</b>${[...new Set(notes)].map(note => `<span>${escapeHtml(note)}</span>`).join('')}</div>` : ''}${pageErrors.length ? `<div class="inbody-warnings"><b>Archivos con lectura incompleta</b>${pageErrors.map(note => `<span>${escapeHtml(note)}</span>`).join('')}</div>` : ''}${skippedPages.length ? `<div class="inbody-warnings"><b>Ahorro de IA activado</b><span>${skippedPages.length} página${skippedPages.length > 1 ? 's quedaron' : ' quedó'} guardada${skippedPages.length > 1 ? 's' : ''} sin enviarse a IA porque no contiene métricas comparables.</span></div>` : ''}<div class="inbody-review-list">${rows}</div><p class="inbody-review-note">La confirmación guarda el historial y habilita las comparaciones. No genera diagnósticos médicos.</p><button class="primary wide-button">Confirmar resultados</button></form>`;
   openModal(box, true);
   document.getElementById('inbody-review-form').addEventListener('submit', async event => {
-    event.preventDefault(); const button = event.currentTarget.querySelector('button'); button.disabled = true; button.textContent = 'Guardando…';
+    event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); button.disabled = true; button.textContent = 'Guardando…';
     try {
-      for (const row of event.currentTarget.querySelectorAll('[data-assessment]')) {
+      for (const row of form.querySelectorAll('[data-assessment]')) {
         const original = assessments.find(item => item.id === row.dataset.assessment); const values = { ...original.values };
         row.querySelectorAll('[data-inbody-key]').forEach(input => { if (input.value === '') delete values[input.dataset.inbodyKey]; else values[input.dataset.inbodyKey] = Number(input.value); });
         const date = row.querySelector('[data-inbody-date]').value;
