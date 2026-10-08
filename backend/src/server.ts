@@ -7694,13 +7694,21 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
         SELECT d.*, lead(d.sent_at) OVER (PARTITION BY d.client_id, d.routine_id ORDER BY d.sent_at) AS next_sent_at,
           o.status AS offer_status, o.origin AS offer_origin, o.session_id,
           s.starts_at AS class_starts_at, s.credit_charge, s.package_debited,
-          CASE WHEN d.offer_id IS NOT NULL THEN (s.starts_at AT TIME ZONE 'America/Panama')::date ELSE d.due_on END AS effective_due_on
+          CASE WHEN d.offer_id IS NOT NULL THEN (s.starts_at AT TIME ZONE 'America/Panama')::date ELSE COALESCE(actual.due_on, d.due_on) END AS effective_due_on
         FROM routine_deliveries d
         LEFT JOIN session_routine_offers o ON o.id = d.offer_id
         LEFT JOIN sessions s ON s.id = o.session_id
-        WHERE d.client_id = ${client.id}
+        -- La fecha límite que vale es la de la asignación VIGENTE (Eileen puede alargarla después del envío); la de la entrega es solo la foto del momento.
+        LEFT JOIN LATERAL (
+          SELECT ra.due_on FROM routine_assignments ra
+          WHERE ra.client_id = d.client_id AND ra.active = true
+            AND (ra.routine_id = d.routine_id OR ra.routine_id IN (SELECT rr.id FROM routines rr WHERE rr.root_routine_id = (SELECT x.root_routine_id FROM routines x WHERE x.id = d.routine_id)))
+          ORDER BY ra.starts_on DESC LIMIT 1
+        ) actual ON true
+        -- Un traslado automático a una versión nueva no es un envío para la clienta: no se le muestra.
+        WHERE d.client_id = ${client.id} AND d.kind <> 'new_version'
       )
-      SELECT d.id, d.routine_id, d.routine_title, d.routine_version, d.kind, d.sent_at,
+      SELECT d.id, d.routine_id, d.routine_title, NULL::int AS routine_version, d.kind, d.sent_at,
         d.effective_due_on AS due_on, d.session_id, d.offer_origin,
         completed.completed_on, completed.completion_percent,
         (completed.completed_on IS NOT NULL AND completed.completion_percent >= 100) AS completed,
@@ -7726,7 +7734,8 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
       LEFT JOIN LATERAL (
         SELECT rc.completed_on, rc.completion_percent
         FROM routine_completions rc
-        WHERE rc.routine_id = d.routine_id AND rc.client_id = d.client_id
+        WHERE (rc.routine_id = d.routine_id OR rc.routine_id IN (SELECT rr.id FROM routines rr WHERE rr.root_routine_id = (SELECT x.root_routine_id FROM routines x WHERE x.id = d.routine_id)))
+          AND rc.client_id = d.client_id
           AND (rc.created_at >= d.sent_at OR rc.completed_on >= (d.sent_at AT TIME ZONE 'America/Panama')::date)
           AND (d.next_sent_at IS NULL OR rc.created_at < d.next_sent_at)
           AND (d.next_sent_at IS NULL OR rc.completed_on < (d.next_sent_at AT TIME ZONE 'America/Panama')::date)

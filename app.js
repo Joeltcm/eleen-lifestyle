@@ -6571,7 +6571,7 @@ function portalRoutineHistoryMarkup() {
           ? `Esta clase expiró${due ? ` el ${due}` : ''}. Cuenta como no cumplida y fue descontada de tu plan mensual.`
           : `Esta rutina expiró${due ? ` el ${due}` : ''} y quedó registrada como no cumplida.`;
     }
-    return `<article class="portal-routine-history-item ${status}"><div class="portal-routine-history-main"><div class="portal-routine-history-title"><strong>${escapeHtml(item.routine_title || 'Rutina')}</strong><span class="routine-history-status ${status}">${statusText[status] || status}</span></div><small>Enviada ${escapeHtml(sentAt)}${item.routine_version ? ` · versión ${escapeHtml(String(item.routine_version))}` : ''}</small><p>${detail}</p></div></article>`;
+    return `<article class="portal-routine-history-item ${status}"><div class="portal-routine-history-main"><div class="portal-routine-history-title"><strong>${escapeHtml(item.routine_title || 'Rutina')}</strong><span class="routine-history-status ${status}">${statusText[status] || status}</span></div><small>Enviada ${escapeHtml(sentAt)}</small><p>${detail}</p></div></article>`;
   }).join('');
   target.innerHTML = `<section class="portal-routine-history card"><div class="card-head"><div><h3>Historial de rutinas enviadas</h3><p>Consulta cuándo recibiste cada rutina y qué pasó con ella.</p></div></div>${cards || '<p class="empty">Todavía no tienes rutinas enviadas.</p>'}</section>`;
 }
