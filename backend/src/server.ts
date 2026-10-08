@@ -7390,7 +7390,7 @@ app.post('/api/notifications/:id/read', { preHandler: requireStaff }, async (req
 
 type ReminderCandidate = {
   user_id: string;
-  kind: 'session' | 'payment' | 'pending' | 'pause';
+  kind: 'session' | 'payment' | 'pending' | 'pause' | 'routine_expiring';
   reference_id: string;
   role: AuthUser['role'];
   full_name: string;
@@ -7399,6 +7399,7 @@ type ReminderCandidate = {
   amount?: number | string;
   balance?: number | string;
   concept?: string;
+  credit?: boolean;
   ends_on?: string;
 };
 
@@ -7444,6 +7445,27 @@ async function sendPushToUser(userId: string, payload: { title: string; body: st
     }
   }));
   return delivered;
+}
+
+// Aviso previo a la clienta: la rutina que ofreció en lugar de su clase de HOY vence a la medianoche de Panamá; desde las 19:00 se le avisa una sola vez (clave idempotente en
+// notification_deliveries). Solo las ofertas de la clienta, que son las que le cuestan la clase; las de Eileen no se penalizan y no se le alarma. `hora` solo se cambia en pruebas.
+const HORA_AVISO_RUTINA_POR_VENCER = 19;
+async function candidatasRutinaPorVencer(ownerId?: string, hora?: number) {
+  return sql<ReminderCandidate[]>`
+    SELECT u.id AS user_id, 'routine_expiring' AS kind, o.id AS reference_id, u.role, c.full_name, r.title AS concept,
+      (c.payment_mode = 'no_anticipado') AS credit
+    FROM session_routine_offers o
+    JOIN sessions s ON s.id = o.session_id
+    JOIN clients c ON c.id = s.client_id
+    JOIN routines r ON r.id = o.routine_id
+    JOIN users u ON u.id = c.portal_user_id AND u.active = true
+    JOIN notification_preferences np ON np.user_id = u.id AND np.browser_enabled = true
+    WHERE o.origin = 'client' AND o.status = 'offered' AND s.status = 'scheduled'
+      AND (s.starts_at AT TIME ZONE 'America/Panama')::date = (now() AT TIME ZONE 'America/Panama')::date
+      AND COALESCE(${hora ?? null}::int, extract(hour FROM now() AT TIME ZONE 'America/Panama')::int) >= ${HORA_AVISO_RUTINA_POR_VENCER}
+      AND (${ownerId ?? null}::uuid IS NULL OR c.owner_id = ${ownerId ?? null}::uuid)
+      AND EXISTS (SELECT 1 FROM push_subscriptions ps WHERE ps.user_id = u.id AND ps.active = true)
+      AND NOT EXISTS (SELECT 1 FROM notification_deliveries nd WHERE nd.user_id = u.id AND nd.kind = 'routine_expiring' AND nd.reference_id = o.id)`;
 }
 
 async function dispatchReminders() {
@@ -7536,7 +7558,8 @@ async function dispatchReminders() {
       )
   `;
 
-  for (const reminder of [...pendingRows, ...sessionRows, ...paymentRows, ...pauseRows]) {
+  const routineRows = await candidatasRutinaPorVencer();
+  for (const reminder of [...pendingRows, ...sessionRows, ...paymentRows, ...pauseRows, ...routineRows]) {
     const [reserved] = await sql`
       INSERT INTO notification_deliveries (user_id, kind, reference_id)
       VALUES (${reminder.user_id}, ${reminder.kind}, ${reminder.reference_id})
@@ -7555,6 +7578,12 @@ async function dispatchReminders() {
           title: isClient ? 'Próximo entrenamiento' : `Sesión con ${reminder.full_name}`,
           body: `Programada para ${new Date(reminder.starts_at!).toLocaleString('es-PA', { timeZone: 'America/Panama' })}.`,
           url: new URL(isClient ? '/#portal-calendar' : '/#calendar', config.APP_URL).toString()
+        }
+      : reminder.kind === 'routine_expiring'
+      ? {
+          title: 'Tu rutina vence esta noche',
+          body: `Completa "${reminder.concept}" antes de la medianoche: si no, tu clase de hoy cuenta como no cumplida y ${reminder.credit ? 'se suma a tu factura' : 'se descuenta de tu plan mensual'}.`,
+          url: new URL('/#portal-routines', config.APP_URL).toString(), sound: true
         }
       : reminder.kind === 'payment'
       ? {
@@ -9048,18 +9077,18 @@ app.post('/api/public/routine/:token/complete', async (request, reply) => {
 });
 
 // Dar por perdida una clase programada (J-104/J-107): es la consecuencia de "cancela el cliente y no reprograma": cuenta como incumplida y consume la clase del plan; a quien entrena
-// a crédito no se le cobra nada solo (cobrar una cancelación la decide Eileen). Se usa para (a) la rutina ofrecida por cancelación del cliente que no se cumplió ese día y
-// (b) la clase de un día de viaje sin rutina confirmada. Devuelve true si la clase seguía programada y se cerró.
+// a crédito la clase queda como cobrable (credit_charge) y la factura la suma, igual que la rutina ofrecida vencida (Joel, 2026-10-07). Se usa para la clase de un día de
+// viaje sin rutina confirmada. Devuelve null si la clase ya no estaba programada; si se cerró, quién es el dueño y si era a crédito (para recalcular su factura).
 async function cancelarComoPerdidaPorElCliente(sessionId: string, despues?: (transaction: typeof sql) => Promise<void>) {
   return sql.begin(async transaction => {
     const [actual] = await transaction`
-      SELECT s.*, c.payment_mode FROM sessions s JOIN clients c ON c.id = s.client_id
+      SELECT s.*, c.payment_mode, c.owner_id FROM sessions s JOIN clients c ON c.id = s.client_id
       WHERE s.id = ${sessionId} AND s.status = 'scheduled' FOR UPDATE`;
-    if (!actual) return false;
+    if (!actual) return null;
     const esCredito = actual.payment_mode === 'no_anticipado';
     await transaction`
       UPDATE sessions SET status = 'cancelled', cancellation_kind = 'not_rescheduled', cancelled_by = 'client',
-        cancellation_resolution = ${esCredito ? 'none' : 'debit'}, credit_charge = false, updated_at = now()
+        cancellation_resolution = ${esCredito ? 'none' : 'debit'}, credit_charge = ${esCredito}, updated_at = now()
       WHERE id = ${sessionId}`;
     if (!esCredito && !actual.package_debited) {
       const pack = await seleccionarSaldoParaSesion(transaction, actual.client_id as string, actual.starts_at as Date | string);
@@ -9070,7 +9099,7 @@ async function cancelarComoPerdidaPorElCliente(sessionId: string, despues?: (tra
       }
     }
     if (despues) await despues(transaction as unknown as typeof sql);
-    return true;
+    return { esCredito, ownerId: String(actual.owner_id) };
   });
 }
 
@@ -9193,7 +9222,10 @@ async function darPorPerdidasClasesDeViajeSinRutina(ownerId?: string) {
             notes = CASE WHEN COALESCE(notes, '') LIKE '%Cancelada automáticamente por viaje del cliente%' THEN notes ELSE COALESCE(notes || E'\n', '') || 'Cancelada automáticamente por viaje del cliente.' END
           WHERE id = ${fila.session_id}`;
       });
-      if (cerrada) perdidas += 1;
+      if (cerrada) {
+        if (cerrada.esCredito) await recalcularFacturasNoAnticipadas(cerrada.ownerId);
+        perdidas += 1;
+      }
     } catch (error) { app.log.warn({ err: error, sessionId: fila.session_id }, 'No se pudo cancelar una clase de viaje sin rutina'); }
   }
   return perdidas;
@@ -9205,6 +9237,13 @@ async function vigilarClasesSinCumplir(ownerId?: string) {
 app.post('/api/maintenance/vencer-ofertas-rutina', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return vigilarClasesSinCumplir(auth.sub);
+});
+// Solo lectura: a quién se le avisaría ahora (o a la hora indicada) de que su rutina ofrecida vence esta noche. El envío real lo hace dispatchReminders.
+app.get('/api/maintenance/rutinas-por-vencer', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const { hora } = z.object({ hora: z.coerce.number().int().min(0).max(23).optional() }).parse(request.query);
+  const filas = await candidatasRutinaPorVencer(auth.sub, hora);
+  return { aviso_desde_las: HORA_AVISO_RUTINA_POR_VENCER, candidatas: filas.map(fila => ({ cliente: fila.full_name, rutina: fila.concept, a_credito: Boolean(fila.credit) })) };
 });
 const primeraVigilanciaRutinas = setTimeout(() => vigilarClasesSinCumplir().catch(error => app.log.error(error)), 30_000);
 const vigilanciaRutinas = setInterval(() => vigilarClasesSinCumplir().catch(error => app.log.error(error)), 15 * 60_000);

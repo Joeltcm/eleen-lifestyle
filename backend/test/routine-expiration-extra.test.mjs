@@ -94,6 +94,53 @@ test('D) el historial de la clienta: lo que ve (sin versiones ni traslados), y e
   assert.ok(historial.every(x => x.routine_version == null), 'la clienta no ve números de versión');
 });
 
+test('F) viaje sin rutina confirmada: a crédito la clase queda cobrable (una vez); con plan mensual sigue descontando y no es cobrable', async () => {
+  const hace2 = dia(-2);
+  const caso = async nombre => {
+    const credito = nombre === 'Viaje credito';
+    const alta = await api.post('/api/clients', credito ? { fullName: nombre, cutoffDay: 1, email: 'viajecredito@prueba.test', paymentMode: 'no_anticipado', creditSessionPrice: 25 } : { fullName: nombre, cutoffDay: 1, email: 'viajemensual@prueba.test' });
+    assert.equal(alta.estado, 201, JSON.stringify(alta.datos));
+    const c = alta.datos.id;
+    let paquete = null;
+    if (!credito) { paquete = (await api.post('/api/packages', { clientId: c, totalSessions: 12, amount: 300, dueOn: dia(0), kind: 'monthly' })).datos; await db`UPDATE session_packages SET status = 'active' WHERE id = ${paquete.id}`; }
+    const viaje = (await api.post(`/api/clients/${c}/travel`, { startsOn: dia(-3), endsOn: dia(5), destination: 'Lisboa' })).datos.id;
+    const sesion = (await api.post('/api/sessions', { clientId: c, startsAt: aHora(hace2, '09:00'), durationMinutes: 45, mode: 'Presencial' })).datos.id;
+    await db`UPDATE client_travel SET created_at = now() - interval '3 days' WHERE id = ${viaje}`;
+    return { c, sesion, paquete };
+  };
+  const cred = await caso('Viaje credito'); const mens = await caso('Viaje mensual');
+  assert.equal((await vencer()).datos.porViaje, 2);
+  const [sc] = await db`SELECT status, cancelled_by, credit_charge, package_debited FROM sessions WHERE id = ${cred.sesion}`;
+  assert.deepEqual([sc.status, sc.cancelled_by, sc.credit_charge, sc.package_debited], ['cancelled', 'client', true, false]);
+  const [sm] = await db`SELECT status, credit_charge, package_debited FROM sessions WHERE id = ${mens.sesion}`;
+  assert.deepEqual([sm.status, sm.credit_charge, sm.package_debited], ['cancelled', false, true]);
+  assert.equal((await db`SELECT used_sessions FROM session_packages WHERE id = ${mens.paquete.id}`)[0].used_sessions, 1);
+  await vencer(); await vencer();
+  assert.equal((await db`SELECT count(*)::int AS n FROM sessions WHERE client_id = ${cred.c} AND credit_charge = true`)[0].n, 1, 'una sola clase cobrable');
+});
+
+test('G) aviso previo a la clienta: solo ofertas de ELLA, de HOY, desde las 19:00 (Panamá); la de Eileen no alarma; y 068 admite los tipos nuevos de aviso', async () => {
+  const suya = await escenario('Aviso clienta'); const credito = await escenario('Aviso credito', { credito: true }); const deEileen = await escenario('Aviso Eileen', { origen: 'trainer' });
+  const nombres = async hora => (await api.get(`/api/maintenance/rutinas-por-vencer?hora=${hora}`)).datos;
+  assert.deepEqual((await nombres(10)).candidatas, [], 'de mañana/mediodía todavía no');
+  // Sin suscripción push no hay a quién avisar: la consulta exige un dispositivo activo.
+  assert.deepEqual((await nombres(20)).candidatas, [], 'sin dispositivo registrado no hay aviso');
+  for (const e of [suya, credito, deEileen]) {
+    const usuario = (await db`SELECT portal_user_id FROM clients WHERE id = ${e.c}`)[0].portal_user_id;
+    await db`INSERT INTO notification_preferences (user_id, browser_enabled) VALUES (${usuario}, true) ON CONFLICT (user_id) DO UPDATE SET browser_enabled = true`;
+    await db`INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES (${usuario}, ${'https://push.invalid/' + e.c}, 'p', 'a')`;
+  }
+  const a20 = (await nombres(20)).candidatas;
+  assert.deepEqual(a20.map(x => [x.cliente, x.a_credito]).sort(), [['Aviso clienta', false], ['Aviso credito', true]], 'solo las dos ofertas de la clienta');
+  assert.deepEqual((await nombres(18)).candidatas, [], 'antes de las 19:00 no');
+  // Ya avisada (clave idempotente): deja de aparecer.
+  const oferta = (await db`SELECT o.id, c.portal_user_id AS u FROM session_routine_offers o JOIN sessions s ON s.id = o.session_id JOIN clients c ON c.id = s.client_id WHERE c.id = ${suya.c}`)[0];
+  await db`INSERT INTO notification_deliveries (user_id, kind, reference_id) VALUES (${oferta.u}, 'routine_expiring', ${oferta.id})`;
+  assert.deepEqual((await nombres(20)).candidatas.map(x => x.cliente), ['Aviso credito']);
+  // Los tipos que el código ya usaba y la restricción vieja rechazaba.
+  for (const tipo of ['pending', 'pause']) await db`INSERT INTO notification_deliveries (user_id, kind, reference_id) VALUES (${oferta.u}, ${tipo}, gen_random_uuid())`;
+});
+
 // Va al final: revierte la restricción compartida por todas las pruebas de este archivo.
 test('E) la reversa de 067 se NIEGA a borrar avisos de expiración sin orden expresa, y con ella deja la restricción anterior', async () => {
   const psql = (permitir = false) => promisify(execFile)('psql', ['-v', 'ON_ERROR_STOP=1', '-q', servidor.databaseUrl, ...(permitir ? ['-c', "SET billing.allow_destructive_down = 'on'"] : []), '-f', new URL('../migrations-down/067_routine_expiration_notifications.down.sql', import.meta.url).pathname]);
