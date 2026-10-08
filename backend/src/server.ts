@@ -2228,9 +2228,10 @@ app.get('/api/demo/summary', { preHandler: requireStaff }, async request => {
   ` as unknown as Array<{ client_id: string; root_id: string }>;
   const [funnel] = await sql`
     SELECT
-      count(DISTINCT client_id) FILTER (WHERE to_mode = 'demo')::int AS started,
+      count(DISTINCT client_id) FILTER (WHERE from_mode = 'standard' AND to_mode = 'demo')::int AS started,
       count(DISTINCT client_id) FILTER (WHERE to_mode = 'standard' AND from_mode = 'demo')::int AS converted,
-      count(DISTINCT client_id) FILTER (WHERE to_mode = 'demo' AND at >= ${inicioMes}::date)::int AS new_this_month
+      -- "Nueva" = el paso standard -> demo (no los ajustes demo -> demo de una demo vieja), con el mes contado en hora de Panamá.
+      count(DISTINCT client_id) FILTER (WHERE from_mode = 'standard' AND to_mode = 'demo' AND (at AT TIME ZONE 'America/Panama')::date >= ${inicioMes}::date)::int AS new_this_month
     FROM client_mode_events
     WHERE owner_id = ${auth.sub}
   `;
