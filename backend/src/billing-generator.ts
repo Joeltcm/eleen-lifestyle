@@ -83,6 +83,7 @@ async function loadSubscriptions(tx: Tx, ownerId: string): Promise<Subscription[
     JOIN clients b ON b.id = s.beneficiary_client_id
     JOIN clients p ON p.id = s.payer_client_id
     WHERE s.owner_id = ${ownerId} AND s.auto_generate = true
+      AND b.service_mode <> 'demo' AND p.service_mode <> 'demo'
     ORDER BY p.full_name, b.full_name, s.starts_on`;
   return rows.map(row => ({
     id: row.id as string, beneficiaryId: row.beneficiary_id as string, beneficiaryName: row.beneficiary_name as string, beneficiaryStatus: row.beneficiary_status as string,

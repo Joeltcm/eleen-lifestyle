@@ -80,6 +80,33 @@ test('la entrenadora entra y recorre todas las secciones sin errores', async () 
   } finally { await p.cerrar(); }
 });
 
+test('Eileen puede crear, filtrar y convertir un cliente demo desde la pantalla', async () => {
+  const demo = (await api.post('/api/clients', {
+    fullName: 'Demo de Pantalla', email: 'demo.pantalla@prueba.test', demo: true,
+    demoEndsOn: '2026-10-22', demoRoutineLimit: 2, demoNote: 'Referido'
+  })).datos;
+  const p = await abrirPantalla({ baseApi: servidor.base, token: tokenStaff, hash: '#clients', ancho: 375 });
+  try {
+    await esperar(() => !p.document.getElementById('app-shell').hidden, { mensaje: 'pantalla de clientes' });
+    await esperar(() => p.evaluar(`data.clients.some(client => client.id === '${demo.id}')`), { mensaje: 'demo cargada' });
+    p.clic(p.q('[data-action="new-client"]')); await esperar(() => p.q('#client-form'), { mensaje: 'alta de demo' });
+    assert.ok(p.q('#client-form [name="demo"]'), 'casilla Cliente demo (gratis)');
+    assert.equal(p.q('#demo-client-fields').hidden, true, 'los campos demo empiezan ocultos');
+    const demoToggle = p.q('#client-form [name="demo"]'); demoToggle.checked = true; demoToggle.dispatchEvent(new p.window.Event('change', { bubbles: true }));
+    assert.equal(p.q('#demo-client-fields').hidden, false, 'al marcar demo aparecen fin, tope y origen');
+    assert.equal(p.q('#client-plan').closest('label').hidden, true, 'el plan comercial se oculta en demo');
+    p.evaluar('modal.close()');
+    p.cambiar(p.q('#client-status-filter'), 'demo'); await p.quieta(250);
+    const tarjeta = await esperar(() => p.q('.client-card'), { mensaje: 'tarjeta demo filtrada' });
+    assert.match(tarjeta.textContent, /DEMO · GRATIS/);
+    p.clic(p.q('[data-client]', tarjeta));
+    const detalle = await esperar(() => p.q('.demo-client-panel'), { mensaje: 'perfil demo' });
+    assert.match(detalle.textContent, /Enviadas:/i);
+    assert.ok(p.q('[data-demo-convert]', detalle), 'botón Convertir en cliente');
+    sinErrores(p, 'gestión de demo');
+  } finally { await p.cerrar(); }
+});
+
 test('EDITAR una rutina guardada abre el editor completo y TODAS sus acciones funcionan (cambiar, mover entre bloques, agregar a un bloque, quitar) y se guarda', async () => {
   const p = await abrirPantalla({ baseApi: servidor.base, token: tokenStaff, hash: '#routines' });
   try {
@@ -197,6 +224,36 @@ test('el PORTAL del cliente dibuja todas sus secciones (rutinas con bloques, via
     p.window.location.hash = '#portal-calendar'; await p.quieta(300);
     assert.ok(p.q('.portal-col-dia.viaje'), 'los días de viaje en la agenda del cliente');
     sinErrores(p, 'portal del cliente');
+  } finally { await p.cerrar(); }
+});
+
+test('PORTAL demo: muestra el aviso y solo permite ver rutinas gratuitas', async () => {
+  const demo = (await api.post('/api/clients', {
+    fullName: 'Prospecto Demo UI', email: 'prospecto.demo.ui@prueba.test',
+    demo: true, demoEndsOn: '2026-10-22', demoRoutineLimit: 2, demoNote: 'Prueba de pantalla'
+  })).datos;
+  const rutinaDemo = (await api.post('/api/routines', {
+    title: 'Rutina demo UI', description: 'Calentamiento\nEjercicios principales\nEstiramientos',
+    sessionsPerWeek: 2, clientId: demo.id, dueOn: '2026-10-20',
+    exercises: [{ name: 'Plancha', sets: 2, reps: '30 seg', block: 1, rounds: 2 }]
+  })).datos;
+  const enlace = await api.post(`/api/clients/${demo.id}/access-link`, {});
+  const token = String(enlace.datos.url).split('acceso=')[1];
+  const acceso = await api.post(`/api/auth/access-link/${token}`, { password: 'clave-demo-ui-larga' });
+  const p = await abrirPantalla({ baseApi: servidor.base, token: acceso.datos.token, hash: '#portal-dashboard', ancho: 375 });
+  try {
+    await esperar(() => !p.document.getElementById('portal-shell').hidden, { mensaje: 'portal demo visible' });
+    await esperar(() => p.q('#portal-demo-banner'), { mensaje: 'aviso de demo' });
+    assert.match(p.q('#portal-demo-banner').textContent, /Tu demostración termina el 22-10-2026/);
+    assert.ok(p.q('#portal-demo-banner').textContent.includes('días'));
+    await esperar(() => p.q(`[data-portal-routine-card="${rutinaDemo.id}"]`), { mensaje: 'rutina demo' });
+    assert.match(p.q(`[data-portal-routine-card="${rutinaDemo.id}"]`).textContent, /Rutina 1 de 1/);
+    for (const id of ['portal-billing', 'portal-calendar', 'portal-reports']) {
+      assert.equal(p.q(`#${id}`).hidden, true, `${id} queda oculto para demo`);
+    }
+    assert.equal(p.q('#portal-routines').hidden, false, 'las rutinas son la única sección visible');
+    assert.match(p.q('#portal-routines').textContent, /Mis rutinas/);
+    sinErrores(p, 'portal demo');
   } finally { await p.cerrar(); }
 });
 

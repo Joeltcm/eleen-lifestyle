@@ -1,4 +1,4 @@
-const APP_VERSION = '300';
+const APP_VERSION = '301';
 const markPwaVersion = () => document.querySelectorAll('.topbar-actions').forEach(actions => {
   if (actions.querySelector('[data-pwa-version]')) return;
   const indicator = document.createElement('span');
@@ -501,7 +501,8 @@ async function loadData() {
     });
     const latest = history.at(-1);
     const inbodyReviews = clientAssessments.filter(item => item.extraction_status === 'review');
-    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), catalogPlan: client.plan_catalog_price == null ? null : Number(client.plan_catalog_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), creditSessionPrice: client.payment_mode === 'no_anticipado' ? Number(client.credit_session_price || 25) : null, reprogramaciones: Number(client.reprogramaciones_ciclo || 0), canceladas: Number(client.canceladas_ciclo || 0), canceladasPorElla: Number(client.canceladas_por_ella_ciclo || 0), creditoPendiente: Number(client.credito_pendiente || 0), deudaPendiente: Number(client.deuda_pendiente || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paymentMode: client.payment_mode || 'anticipado', paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), pauseId: client.active_pause_id || null, pauseStartedOn: client.pause_started_on || null, pauseReason: client.pause_reason || '', status: { active: 'Activo', paused: 'En pausa', inactive: 'Inactivo' }[client.status] || 'Inactivo', statusRaw: client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
+    const serviceMode = client.service_mode || 'standard';
+    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), catalogPlan: client.plan_catalog_price == null ? null : Number(client.plan_catalog_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), creditSessionPrice: client.payment_mode === 'no_anticipado' ? Number(client.credit_session_price || 25) : null, reprogramaciones: Number(client.reprogramaciones_ciclo || 0), canceladas: Number(client.canceladas_ciclo || 0), canceladasPorElla: Number(client.canceladas_por_ella_ciclo || 0), creditoPendiente: Number(client.credito_pendiente || 0), deudaPendiente: Number(client.deuda_pendiente || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paymentMode: client.payment_mode || 'anticipado', paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), pauseId: client.active_pause_id || null, pauseStartedOn: client.pause_started_on || null, pauseReason: client.pause_reason || '', serviceMode, demoStartedOn: client.demo_started_on || null, demoEndsOn: client.demo_ends_on || null, demoRoutineLimit: client.demo_routine_limit == null ? null : Number(client.demo_routine_limit), demoNote: client.demo_note || '', demoRoutinesUsed: Number(client.demo_routines_used || 0), status: serviceMode === 'demo' ? 'Demo' : ({ active: 'Activo', paused: 'En pausa', inactive: 'Inactivo' }[client.status] || 'Inactivo'), statusRaw: serviceMode === 'demo' ? 'demo' : client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
   });
   data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, billedForSpecified: Boolean(item.auto_generated && item.billed_for_client_id != null), billedForClientId: item.billed_for_client_id || item.client_id, billedFor: item.billed_for_name || item.full_name, packageId: item.package_id || null, coverageApplied: Number(item.coverage_applied || 0), lineItems: Array.isArray(item.line_items) ? item.line_items : [], concept: item.concept, amount: Number(item.amount), paidAmount: Number(item.paid_amount || 0), balance: Number(item.balance_amount ?? (item.source_system ? item.balance : item.status === 'pending' ? item.amount : 0)), due: dateOnly(item.due_on), issued: dateOnly(item.issued_on || item.due_on), billingPeriod: item.billing_period ? dateOnly(item.billing_period) : dateOnly(item.due_on), paidOn: item.confirmed_at ? String(item.confirmed_at).slice(0, 10) : '', method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '', autoGenerated: item.auto_generated || false, creditInvoice: Boolean(item.credit_invoice), coverageStart: item.coverage_start ? dateOnly(item.coverage_start) : '' }));
   data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, kind: item.kind, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), expiresOn: item.expires_on || '', status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired', originInvoiceId: item.origin_invoice_id || null, originNumber: item.origin_invoice_number || '', originConcept: item.origin_concept || '', originSource: item.origin_source || '', originStatus: item.origin_status || '', originDate: item.origin_date ? dateOnly(item.origin_date) : '', renovacionPendiente: item.renovacion_pendiente || false, vencidoConSaldo: item.vencido_con_saldo || false, pagoPendiente: item.pago_pendiente || false, purchasedOn: item.purchased_on ? dateOnly(item.purchased_on) : '' }));
@@ -736,6 +737,7 @@ function renderDashboard() {
 // de entrenar no debería competir por la atención con quien sigue viniendo.
 const ESTADOS_CLIENTE = [
   { clave: 'active', titulo: 'Activos' },
+  { clave: 'demo', titulo: 'Demos' },
   { clave: 'paused', titulo: 'En pausa' },
   { clave: 'inactive', titulo: 'Inactivos' }
 ];
@@ -754,12 +756,14 @@ function renderClients(filter = '') {
     const alertaCredito = client.paymentMode === 'no_anticipado' && client.deudaPendiente > 0
       ? `<p class="alerta-credito">Entrena a crédito · pago pendiente ${money.format(client.deudaPendiente)}</p>`
       : '';
-    const commercial = client.billingModel === 'package'
+    const commercial = client.serviceMode === 'demo'
+      ? `<span class="commercial-label demo-label">DEMO · GRATIS</span><b>${client.demoRoutineLimit == null ? `${client.demoRoutinesUsed} rutinas usadas` : `${client.demoRoutinesUsed} de ${client.demoRoutineLimit} rutinas usadas`}</b><small>${client.demoEndsOn ? `Termina el ${fechaCorta(client.demoEndsOn)}` : 'Sin fecha de término'}</small>`
+      : client.billingModel === 'package'
       ? `<span class="commercial-label package-label">Paquete</span><b>${pack?.status === 'pending' ? 'Pago pendiente' : `${pack ? remainingSessions(pack) : client.sessionsIncluded || 0} sesiones disponibles`}</b><small>${escapeHtml(client.planName || 'Plan por sesiones')} · ${money.format(client.plan)}</small>`
       : client.billingModel === 'single'
       ? `<span class="commercial-label single-label">Sesión suelta</span><b>${escapeHtml(client.planName || 'Sesiones individuales')} · ${money.format(client.plan)}</b><small>Por sesión, sin corte mensual</small>`
       : `<span class="commercial-label">Mensualidad</span><b>${escapeHtml(client.planName || 'Mensualidad')} · ${money.format(client.plan)}</b><small>${client.catalogPlan != null && Math.abs(client.plan - client.catalogPlan) > 0.009 ? `Precio propio · catálogo ${money.format(client.catalogPlan)} · ` : ''}${saldoDelMes(client)}Corte día ${client.cutoffDay}</small>`;
-    return `<article class="client-card"><header><span class="initials">${escapeHtml(initials(client.name))}</span><div><h3>${escapeHtml(client.name)}</h3><small>${escapeHtml(client.goal)}</small></div><span class="status estado-${client.statusRaw}">${client.status}</span></header><p>${client.inbody ? `Último InBody: ${client.inbody.date}` : 'Aún no se ha cargado un InBody.'}${client.portalActive ? ' · Portal activo' : ''}</p>${etiquetaViaje(client.id)}<div class="commercial-summary">${commercial}</div>${alertaCredito}${movimientosDelCiclo(client)}${data.packages.some(item => item.clientId === client.id && item.status === 'confirmed' && item.kind === 'makeup' && remainingSessions(item) > 0) ? `<button class="secondary wide-button" data-colocar-reposicion="${client.id}" style="margin-top:9px">Colocar reposición</button>` : ''}<div class="mini-data">${client.inbody ? `<div><b>${client.inbody.weight} kg</b><span>Peso</span></div><div><b>${client.inbody.smm} kg</b><span>Músculo</span></div><div><b>${client.inbody.pbf}%</b><span>Grasa</span></div>` : `<div><b>—</b><span>Evaluación pendiente</span></div>`}</div><div class="client-actions"><button class="secondary" data-client="${client.id}">Ver expediente</button><button class="secondary" data-edit-client="${client.id}">Editar</button><button class="secondary" data-inbody="${client.id}">+ InBody</button></div></article>`;
+    return `<article class="client-card"><header><span class="initials">${escapeHtml(initials(client.name))}</span><div><h3>${escapeHtml(client.name)}</h3><small>${escapeHtml(client.goal)}</small></div><span class="status estado-${client.statusRaw}">${client.status}</span></header><p>${client.inbody ? `Último InBody: ${client.inbody.date}` : 'Aún no se ha cargado un InBody.'}${client.portalActive ? ' · Portal activo' : ''}</p>${etiquetaViaje(client.id)}<div class="commercial-summary">${commercial}</div>${alertaCredito}${client.serviceMode !== 'demo' ? movimientosDelCiclo(client) : ''}${client.serviceMode !== 'demo' && data.packages.some(item => item.clientId === client.id && item.status === 'confirmed' && item.kind === 'makeup' && remainingSessions(item) > 0) ? `<button class="secondary wide-button" data-colocar-reposicion="${client.id}" style="margin-top:9px">Colocar reposición</button>` : ''}<div class="mini-data">${client.inbody ? `<div><b>${client.inbody.weight} kg</b><span>Peso</span></div><div><b>${client.inbody.smm} kg</b><span>Músculo</span></div><div><b>${client.inbody.pbf}%</b><span>Grasa</span></div>` : `<div><b>—</b><span>Evaluación pendiente</span></div>`}</div><div class="client-actions"><button class="secondary" data-client="${client.id}">Ver expediente</button><button class="secondary" data-edit-client="${client.id}">Editar</button><button class="secondary" data-inbody="${client.id}">+ InBody</button></div></article>`;
   };
 
   const grupos = ESTADOS_CLIENTE
@@ -1444,18 +1448,30 @@ function financialReportDialog(kind) {
 }
 function newClient() {
   const availablePlans = data.plans.filter(plan => plan.active);
-  if (!availablePlans.length) { navigate('billing'); toast('Crea un plan comercial antes de agregar clientes', true); return; }
   const content = formFromTemplate('new-client-template'); openModal(content);
   const planSelect = document.getElementById('client-plan'); availablePlans.forEach(plan => planSelect.add(new Option(`${plan.name} · ${money.format(plan.price)}${plan.billingModel === 'package' ? ` · ${plan.sessionsIncluded} sesiones` : plan.billingModel === 'single' ? ' por sesión' : '/mes'}`, plan.id)));
   document.getElementById('client-form').addEventListener('submit', async event => {
-    event.preventDefault(); const form = new FormData(event.target); const selectedPlan = data.plans.find(plan => plan.id === form.get('planId'));
-    if (!confirmarGuardado(`Nuevo expediente: ${form.get('name')}\nPlan ${selectedPlan?.name || 'sin plan'} · corte día ${form.get('cutoffDay')}`)) return;
+    event.preventDefault(); const form = new FormData(event.target); const selectedPlan = data.plans.find(plan => plan.id === form.get('planId')); const isDemo = form.get('demo') === 'on';
+    if (!confirmarGuardado(`Nuevo expediente: ${form.get('name')}\n${isDemo ? `Cliente demo · termina ${form.get('demoEndsOn') || 'en 14 días'}` : `Plan ${selectedPlan?.name || 'sin plan'} · corte día ${form.get('cutoffDay')}`}`)) return;
+    const payload = { fullName: form.get('name'), goal: form.get('goal'), planId: isDemo ? undefined : form.get('planId'), cutoffDay: Number(form.get('cutoffDay')), billingModel: selectedPlan?.billingModel || 'monthly', standardPrice: selectedPlan?.price || 0, packageSessions: selectedPlan?.sessionsIncluded || undefined, email: form.get('email'), phone: form.get('phone'), demo: isDemo, demoEndsOn: form.get('demoEndsOn') || undefined, demoRoutineLimit: form.get('demoRoutineLimit') || null, demoNote: form.get('demoNote') || undefined };
+    const crear = confirmDuplicate => api('/api/clients', { method: 'POST', body: confirmDuplicate ? { ...payload, confirmDuplicate: true } : payload });
     try {
       event.target.classList.add('loading-state');
-      await api('/api/clients', { method: 'POST', body: { fullName: form.get('name'), goal: form.get('goal'), planId: form.get('planId'), cutoffDay: Number(form.get('cutoffDay')), billingModel: selectedPlan?.billingModel || 'monthly', standardPrice: selectedPlan?.price || 0, packageSessions: selectedPlan?.sessionsIncluded || undefined, email: form.get('email') } });
+      try { await crear(false); }
+      catch (error) {
+        if (error.code !== 'client_duplicate') throw error;
+        const matches = (error.matches || []).map(item => `${item.full_name || item.name}${item.email ? ` · ${item.email}` : ''}`).join('\n');
+        if (!window.confirm(`Ya existe un expediente con este correo o teléfono:\n\n${matches || 'Cliente coincidente'}\n\n¿Crear de todos modos?`)) { event.target.classList.remove('loading-state'); return; }
+        await crear(true);
+      }
       await loadData(); renderAll(); modal.close(); navigate('clients'); toast('Cliente creado y sincronizado');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
+  const demoToggle = document.querySelector('#client-form [name="demo"]');
+  const demoFields = document.getElementById('demo-client-fields');
+  const planField = document.getElementById('client-plan')?.closest('label');
+  const refreshDemoFields = () => { const active = demoToggle.checked; demoFields.hidden = !active; planField.hidden = active; document.getElementById('client-plan').required = !active; if (active && !document.querySelector('#client-form [name="demoEndsOn"]').value) document.querySelector('#client-form [name="demoEndsOn"]').value = demoDateDefault(14); };
+  demoToggle?.addEventListener('change', refreshDemoFields); refreshDemoFields();
 }
 function editClient(client) {
   const box = document.createElement('div');
@@ -4991,12 +5007,15 @@ function enviarEnlaceRutina(rutina, client, viaje = null) {
 
 function clientDetail(id) {
   const client = data.clients.find(item => item.id === id); const inbody = client.inbody;
+  const esDemo = client.serviceMode === 'demo';
   const pack = clientPackage(client.name);
   const pagador = client.paysForMeId ? data.clients.find(item => item.id === client.paysForMeId) : null;
   const dependientes = data.clients.filter(item => item.paysForMeId === client.id);
   const notaPago = pagador ? `<br><span class="pago-nota">Paga ${escapeHtml(pagador.name)}</span>`
     : dependientes.length ? `<br><span class="pago-nota">Paga también por ${escapeHtml(dependientes.map(d => d.name).join(', '))}</span>` : '';
-  const commercialDescription = client.billingModel === 'package'
+  const commercialDescription = esDemo
+    ? `DEMO · gratis · ${client.demoRoutinesUsed || 0}${client.demoRoutineLimit == null ? '' : ` de ${client.demoRoutineLimit}`} rutinas usadas`
+    : client.billingModel === 'package'
     ? `${client.planName || pack?.label || `Paquete ${client.sessionsIncluded || 0} sesiones`} · ${pack ? remainingSessions(pack) : client.sessionsIncluded || 0} disponibles · ${money.format(client.plan)}`
     : client.billingModel === 'single'
     ? `${client.planName || 'Sesiones individuales'} · ${money.format(client.plan)} por sesión`
@@ -5006,27 +5025,55 @@ function clientDetail(id) {
   const box = document.createElement('div');
   const reviewNotice = client.inbodyReviews.length ? `<button class="secondary wide-button" id="review-inbody">Revisar ${client.inbodyReviews.length} evaluación${client.inbodyReviews.length > 1 ? 'es' : ''} pendiente${client.inbodyReviews.length > 1 ? 's' : ''}</button>` : '';
   box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${escapeHtml(client.name)}</h2><p style="color:#6f7b75;margin-top:-12px">${escapeHtml(client.goal)}<br>${commercialDescription}${notaPago}</p>${clientBillingSection(client)}<p class="eyebrow" style="margin-top:20px">PLAN DE FACTURACIÓN</p><div id="client-billing-subscriptions"><p class="empty">Cargando conceptos a facturar…</p></div><button type="button" class="secondary wide-button" id="add-billing-subscription-detail">Agregar concepto a facturar</button><p class="section-note">Preparado para el sistema nuevo; hoy la facturación automática sigue usando el monto mensual del cliente.</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">CAMBIO DESDE LA MEDICIÓN ANTERIOR</p>${inbodyComparison(inbody)}<p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th>vs. anterior</th><th></th></tr></thead><tbody>${inbody.history.slice().reverse().map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td class="delta-cell">${reading.delta ? `${deltaChip('weight', reading.delta.weight)}${deltaChip('smm', reading.delta.smm)}${deltaChip('pbf', reading.delta.pbf)}` : '<span class="delta neutral">primera</span>'}</td><td>${reading.documentId ? `<button class="secondary session-use" data-view-inbody="${reading.documentId}" data-inbody-client="${client.id}">Ver reporte</button>` : ''}<button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">SALDO DE SESIONES</p><div id="client-balances"><p class="empty">Cargando saldos…</p></div><p class="eyebrow" style="margin-top:20px">ASISTENCIA MENSUAL</p><div id="client-attendance"><p class="empty">Calculando cumplimiento…</p></div><p class="eyebrow" style="margin-top:20px">RUTINAS ENVIADAS</p><div id="client-routine-deliveries"><p class="empty">Cargando envíos de rutinas…</p></div><p class="eyebrow" style="margin-top:20px">HISTORIAL DE RUTINAS</p><div id="client-routine-history"><p class="empty">Cargando historial de rutinas…</p></div><p class="eyebrow" style="margin-top:20px">LESIONES Y PADECIMIENTOS</p><div id="client-conditions"><p class="empty">Cargando expediente clínico…</p></div><p class="eyebrow" style="margin-top:20px">FOTOS DE PROGRESO</p><div id="client-photos"><p class="empty">Cargando fotos…</p></div><p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="client-report">Informe de cumplimiento</button><button class="secondary" id="portal-link">${client.portalActive ? 'Enviar enlace de acceso' : 'Activar portal con enlace'}</button><button class="secondary" id="portal-access">${client.portalActive ? 'Poner contraseña a mano' : 'Activar con contraseña'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
-  openModal(box); const pauseButton = document.createElement('button'); pauseButton.className = 'secondary wide-button'; pauseButton.textContent = client.pauseId ? 'Reanudar paquete' : 'Pausar paquete'; box.querySelector('.detail-actions').appendChild(pauseButton); pauseButton.onclick = async () => { try { if (client.pauseId) { await api(`/api/client-pauses/${client.pauseId}/resume`, { method: 'POST' }); toast('Paquete reactivado y vencimiento extendido'); await loadData(); renderAll(); modal.close(); clientDetail(client.id); } else pausePackageDialog(client); } catch (error) { toast(error.message, true); } }; document.getElementById('open-scan').onclick = () => inbodyImport(client); document.getElementById('edit-client-contact').onclick = () => editClient(client); document.getElementById('edit-client-plan').onclick = () => clientPlanEditor(client); document.getElementById('portal-access').onclick = () => portalAccessEditor(client); document.getElementById('portal-link').onclick = () => portalAccessLink(client); document.getElementById('client-report').onclick = () => complianceReport(client); document.getElementById('delete-client').onclick = () => deleteResource(`/api/clients/${client.id}`, `¿Eliminar a ${client.name}? También se eliminarán sus documentos, sesiones y cobros asociados.`, 'Cliente eliminado');
+  openModal(box);
+  const detailActions = box.querySelector('.detail-actions');
+  if (esDemo) {
+    const demoPanel = document.createElement('section');
+    demoPanel.className = 'demo-client-panel';
+    demoPanel.innerHTML = `<p class="eyebrow">CLIENTE DEMO · GRATIS</p><p class="section-note">${client.demoEndsOn ? `Termina el <b>${fechaCorta(client.demoEndsOn)}</b>.` : 'Sin fecha de término.'} Enviadas: <b>${client.demoRoutinesUsed || 0}${client.demoRoutineLimit == null ? '' : ` de ${client.demoRoutineLimit}`}</b>.</p><div class="detail-actions demo-actions"><button type="button" class="secondary" data-demo-adjust="${client.id}">Acortar / alargar</button><button type="button" class="primary" data-demo-convert="${client.id}">Convertir en cliente</button></div></section>`;
+    box.querySelector('h2').after(demoPanel);
+    box.querySelectorAll('#client-billing-subscriptions, #add-billing-subscription-detail, #client-balances, #client-attendance').forEach(node => { node.previousElementSibling?.matches('.eyebrow') && node.previousElementSibling.remove(); node.remove(); });
+    box.querySelectorAll('.client-billing-summary, .client-invoice-list').forEach(node => { node.previousElementSibling?.matches('.eyebrow') && node.previousElementSibling.remove(); node.remove(); });
+    box.querySelectorAll('.declarative-billing, #client-travel').forEach(node => { node.previousElementSibling?.remove(); node.remove(); });
+    detailActions?.querySelectorAll('#edit-client-plan, #client-report').forEach(button => button.remove());
+  }
+  const pauseButton = document.createElement('button'); pauseButton.className = 'secondary wide-button'; pauseButton.textContent = client.pauseId ? 'Reanudar paquete' : 'Pausar paquete';
+  if (!esDemo) detailActions?.appendChild(pauseButton);
+  pauseButton.onclick = async () => { try { if (client.pauseId) { await api(`/api/client-pauses/${client.pauseId}/resume`, { method: 'POST' }); toast('Paquete reactivado y vencimiento extendido'); await loadData(); renderAll(); modal.close(); clientDetail(client.id); } else pausePackageDialog(client); } catch (error) { toast(error.message, true); } };
+  const action = id => box.querySelector(`#${id}`);
+  action('open-scan')?.addEventListener('click', () => inbodyImport(client));
+  action('edit-client-contact')?.addEventListener('click', () => editClient(client));
+  action('edit-client-plan')?.addEventListener('click', () => clientPlanEditor(client));
+  action('portal-access')?.addEventListener('click', () => portalAccessEditor(client));
+  action('portal-link')?.addEventListener('click', () => portalAccessLink(client));
+  action('client-report')?.addEventListener('click', () => complianceReport(client));
+  action('delete-client')?.addEventListener('click', () => deleteResource(`/api/clients/${client.id}`, `¿Eliminar a ${client.name}? También se eliminarán sus documentos, sesiones y cobros asociados.`, 'Cliente eliminado'));
+  if (esDemo) {
+    box.querySelector('[data-demo-adjust]').onclick = () => demoAdjustDialog(client);
+    box.querySelector('[data-demo-convert]').onclick = () => demoConvert(client);
+  } else {
+    const pasarDemo = document.createElement('button'); pasarDemo.type = 'button'; pasarDemo.className = 'secondary'; pasarDemo.textContent = 'Pasar a modo demo';
+    detailActions?.insertBefore(pasarDemo, detailActions.querySelector('#delete-client')); pasarDemo.onclick = () => demoAdjustDialog(client, true);
+  }
   if (inbody) {
     const summary = box.querySelector('.metrics');
     if (summary) summary.insertAdjacentHTML('afterend', inbodyDetailSection(inbody.values));
   }
   if (client.inbodyReviews.length) document.getElementById('review-inbody').onclick = () => inbodyReview(client, client.inbodyReviews);
-  api(`/api/clients/${client.id}/billing-subscriptions`).then(payload => renderBillingSubscriptions(document.getElementById('client-billing-subscriptions'), payload, client)).catch(error => {
+  if (!esDemo) api(`/api/clients/${client.id}/billing-subscriptions`).then(payload => renderBillingSubscriptions(document.getElementById('client-billing-subscriptions'), payload, client)).catch(error => {
     const target = document.getElementById('client-billing-subscriptions'); if (target) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
   });
-  document.getElementById('add-billing-subscription-detail').onclick = () => billingSubscriptionDialog(client);
+  if (!esDemo) document.getElementById('add-billing-subscription-detail').onclick = () => billingSubscriptionDialog(client);
   // Viajes: arriba del expediente, junto al resumen del cliente, para encontrarlos sin recorrer todo el modal.
   box.querySelector('h2').nextElementSibling?.insertAdjacentHTML('afterend', '<p class="eyebrow" style="margin-top:20px">VIAJES</p><div id="client-travel"><p class="empty">Cargando…</p></div>');
-  viajesSection(document.getElementById('client-travel'), client);
+  if (!esDemo) viajesSection(document.getElementById('client-travel'), client);
   const balanceTarget = document.getElementById('client-balances');
   if (balanceTarget) {
 
     balanceTarget.insertAdjacentHTML('beforebegin', '<p class="eyebrow" style="margin-top:20px">PESO REGISTRADO POR EL CLIENTE</p><div id="client-weight-logs"><p class="empty">Cargando registros…</p></div>');
     clientWeightLogsSection(document.getElementById('client-weight-logs'), client.id);
   }
-  balancesSection(document.getElementById('client-balances'), client);
-  attendanceSection(document.getElementById('client-attendance'), client.id);
+  if (!esDemo) { balancesSection(document.getElementById('client-balances'), client); attendanceSection(document.getElementById('client-attendance'), client.id); }
   routineDeliveriesSection(document.getElementById('client-routine-deliveries'), `/api/clients/${encodeURIComponent(client.id)}/routine-deliveries`);
   routineHistorySection(document.getElementById('client-routine-history'), client);
   clientWeightLogsSection(document.getElementById('client-weight-logs'), client.id);
@@ -5051,6 +5098,38 @@ function clientDetail(id) {
     const target = document.getElementById('client-documents');
     if (target) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
   });
+}
+
+function demoDateDefault(days = 14) {
+  const date = new Date(`${dateKey(today)}T12:00:00-05:00`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function demoAdjustDialog(client, convertExisting = false) {
+  const box = document.createElement('div');
+  const currentEnd = client.demoEndsOn || demoDateDefault(14);
+  box.innerHTML = `<form id="demo-adjust-form"><p class="eyebrow">${convertExisting ? 'PROMOCIÓN' : 'CLIENTE DEMO'}</p><h2>${convertExisting ? 'Pasar a modo demo' : 'Ajustar demostración'}</h2><p class="section-note">${convertExisting ? 'Solo cambia la modalidad y conserva intactos sus rutinas, enlaces, envíos y fechas límite.' : `Ya usó ${client.demoRoutinesUsed || 0}${client.demoRoutineLimit == null ? '' : ` de ${client.demoRoutineLimit}`} rutinas distintas.`}</p><label>Fin de la demostración<input name="demoEndsOn" type="date" min="${dateKey(today)}" value="${currentEnd}" required /></label><label>Rutinas gratis <span class="muted">(vacío = sin tope)</span><input name="demoRoutineLimit" type="number" min="1" value="${client.demoRoutineLimit ?? ''}" placeholder="Sin tope" /></label><label>Nota / origen<textarea name="demoNote" rows="2">${escapeHtml(client.demoNote || '')}</textarea></label><button class="primary wide-button">${convertExisting ? 'Pasar a demo' : 'Guardar cambios'}</button></form>`;
+  openModal(box);
+  box.querySelector('form').addEventListener('submit', async event => {
+    event.preventDefault(); const values = new FormData(event.currentTarget); const limit = values.get('demoRoutineLimit');
+    try {
+      event.currentTarget.classList.add('loading-state');
+      await api(`/api/clients/${client.id}/demo`, { method: convertExisting ? 'POST' : 'PATCH', body: { demoEndsOn: values.get('demoEndsOn'), demoRoutineLimit: limit || null, demoNote: values.get('demoNote') || undefined } });
+      await loadData(); renderAll(); modal.close(); clientDetail(client.id); toast(convertExisting ? 'Cliente pasado a modo demo' : 'Demostración actualizada');
+    } catch (error) { toast(error.message, true); event.currentTarget.classList.remove('loading-state'); }
+  });
+}
+
+function demoConvert(client) {
+  if (!window.confirm(`Convertir a ${client.name} en cliente estándar?\n\nSu historial de rutinas se conserva y no se cobrarán días anteriores. Luego podrás elegir su plan comercial.`)) return;
+  void (async () => {
+    try {
+      await api(`/api/clients/${client.id}/demo/convert`, { method: 'POST', body: {} });
+      await loadData(); renderAll(); modal.close(); toast('Demo convertida. Completa ahora su plan comercial.');
+      const updated = data.clients.find(item => item.id === client.id); if (updated) editClient(updated);
+    } catch (error) { toast(error.message, true); }
+  })();
 }
 
 const inbodyReviewFields = [
@@ -6592,8 +6671,9 @@ function portalRoutineCard(routine) {
   const completed = Number(todayCompletion?.completion_percent || 0) >= 100;
   const completedCount = exercises.reduce((total, _, index) => total + (portalExerciseCompleted(routine.id, index, todayCompletion) ? 1 : 0), 0);
   const hoyIso = dateKey(today);
+  const demoPosition = portalData?.demo ? `<span class="demo-routine-position">Rutina ${routine.demo_routine_index} de ${routine.demo_routine_total}</span>` : '';
   const feedback = completed ? `<form data-portal-routine-feedback="${routine.id}" class="routine-feedback-form"><strong>¿Cómo te sentiste?</strong><div class="routine-feedback-options"><label>Sensación<select name="feeling"><option value="">Selecciona</option><option value="excelente" ${todayCompletion?.feeling === 'excelente' ? 'selected' : ''}>Excelente</option><option value="bien" ${todayCompletion?.feeling === 'bien' ? 'selected' : ''}>Bien</option><option value="dificil" ${todayCompletion?.feeling === 'dificil' ? 'selected' : ''}>Difícil</option><option value="muy_dificil" ${todayCompletion?.feeling === 'muy_dificil' ? 'selected' : ''}>Muy difícil</option></select></label><label>Dificultad<select name="difficulty"><option value="">Selecciona</option><option value="facil" ${todayCompletion?.difficulty === 'facil' ? 'selected' : ''}>Fácil</option><option value="bien" ${todayCompletion?.difficulty === 'bien' ? 'selected' : ''}>Bien</option><option value="dificil" ${todayCompletion?.difficulty === 'dificil' ? 'selected' : ''}>Difícil</option></select></label></div><label>Comentario <textarea name="feedback" maxlength="500" placeholder="Cuéntale a Eileen cómo fue tu entrenamiento">${escapeHtml(todayCompletion?.feedback || '')}</textarea></label><button type="submit" class="secondary">${todayCompletion?.feedback || todayCompletion?.feeling || todayCompletion?.difficulty ? 'Actualizar feedback' : 'Enviar feedback (opcional)'}</button></form>` : '';
-  return `<article class="card portal-routine-card" data-portal-routine-card="${routine.id}"><div class="card-head"><div><h3>${escapeHtml(routine.title)}</h3><p><span class="routine-descripcion">${escapeHtml(routine.description || '')}</span> · ${routine.sessions_per_week} veces por semana</p>${routine.due_on ? `<p class="routine-due${dateOnly(routine.due_on) < hoyIso ? ' overdue' : ''}">${dateOnly(routine.due_on) < hoyIso ? 'Venció el' : 'Para cumplirla antes del'} ${fechaCorta(routine.due_on)}</p>` : ''}</div></div>${oferta ? `<p class="portal-offer-inline">Rutina de hoy en lugar de tu clase: si la cumples hoy, cuenta como clase${oferta.origin === 'client' ? '; si no, la clase se da por perdida' : ''}.</p>` : ''}<div class="routine-round-summary"><strong>${completedCount} de ${exercises.length} ejercicios</strong><span>${completed ? 'Rutina completada hoy' : 'Marca cada ejercicio al terminarlo'}</span></div><div class="routine-timer-row${timer && !timer.paused && timer.startedAt ? ' is-running' : ''}" data-routine-timer="${routine.id}"><span>Tiempo activo <b class="routine-timer-clock" data-timer-display>${formatRoutineElapsed(elapsed)}</b></span><div class="routine-timer-actions"><button type="button" class="primary routine-timer-button" data-start-routine-timer="${routine.id}" data-timer-toggle>${timer && !timer.paused ? 'Cronómetro activo' : started ? '▶ Reanudar entrenamiento' : '▶ Iniciar entrenamiento'}</button><button type="button" class="secondary" data-pause-routine-timer="${routine.id}" ${timer && !timer.paused ? '' : 'hidden'}>⏸ Pausar</button></div></div><div class="routine-countdown" hidden><span>Prepárate</span><strong>3</strong><small>El cronómetro comenzará después de la cuenta regresiva</small></div>${!started && !completed ? '<p class="routine-timer-required">Primero toca “Iniciar entrenamiento”. El tiempo activo se guarda para Eileen.</p>' : ''}<div class="exercise-preview routine-exercise-checks">${portalExerciseRows(exercises, routine.id, todayCompletion)}</div><button type="button" class="primary routine-complete-button" data-complete-routine="${routine.id}" data-completed="${completed}" ${!started || completed ? 'disabled' : ''}>${completed ? 'Rutina completada' : 'Completar rutina'}</button>${feedback}</article>`;
+  return `<article class="card portal-routine-card" data-portal-routine-card="${routine.id}"><div class="card-head"><div>${demoPosition}<h3>${escapeHtml(routine.title)}</h3><p><span class="routine-descripcion">${escapeHtml(routine.description || '')}</span> · ${routine.sessions_per_week} veces por semana</p>${routine.due_on ? `<p class="routine-due${dateOnly(routine.due_on) < hoyIso ? ' overdue' : ''}">${dateOnly(routine.due_on) < hoyIso ? 'Venció el' : 'Para cumplirla antes del'} ${fechaCorta(routine.due_on)}</p>` : ''}</div></div>${oferta ? `<p class="portal-offer-inline">Rutina de hoy en lugar de tu clase: si la cumples hoy, cuenta como clase${oferta.origin === 'client' ? '; si no, la clase se da por perdida' : ''}.</p>` : ''}<div class="routine-round-summary"><strong>${completedCount} de ${exercises.length} ejercicios</strong><span>${completed ? 'Rutina completada hoy' : 'Marca cada ejercicio al terminarlo'}</span></div><div class="routine-timer-row${timer && !timer.paused && timer.startedAt ? ' is-running' : ''}" data-routine-timer="${routine.id}"><span>Tiempo activo <b class="routine-timer-clock" data-timer-display>${formatRoutineElapsed(elapsed)}</b></span><div class="routine-timer-actions"><button type="button" class="primary routine-timer-button" data-start-routine-timer="${routine.id}" data-timer-toggle>${timer && !timer.paused ? 'Cronómetro activo' : started ? '▶ Reanudar entrenamiento' : '▶ Iniciar entrenamiento'}</button><button type="button" class="secondary" data-pause-routine-timer="${routine.id}" ${timer && !timer.paused ? '' : 'hidden'}>⏸ Pausar</button></div></div><div class="routine-countdown" hidden><span>Prepárate</span><strong>3</strong><small>El cronómetro comenzará después de la cuenta regresiva</small></div>${!started && !completed ? '<p class="routine-timer-required">Primero toca “Iniciar entrenamiento”. El tiempo activo se guarda para Eileen.</p>' : ''}<div class="exercise-preview routine-exercise-checks">${portalExerciseRows(exercises, routine.id, todayCompletion)}</div><button type="button" class="primary routine-complete-button" data-complete-routine="${routine.id}" data-completed="${completed}" ${!started || completed ? 'disabled' : ''}>${completed ? 'Rutina completada' : 'Completar rutina'}</button>${feedback}</article>`;
 }
 
 function renderOfertasRutina() {
@@ -6616,8 +6696,22 @@ document.addEventListener('click', async event => {
   if (ir) { location.hash = '#portal-routines'; setTimeout(() => document.querySelector(`[data-routine-timer="${ir.dataset.irRutina}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 250); return; }
 });
 
-function renderPortal() {
+function renderPortalDemo() {
   const client = portalData.client;
+  document.querySelectorAll('[data-portal-view]').forEach(link => { link.hidden = link.dataset.portalView !== 'portal-routines'; link.classList.toggle('active', link.dataset.portalView === 'portal-routines'); });
+  document.querySelectorAll('.portal-view').forEach(view => { view.hidden = !['portal-routines'].includes(view.id); view.classList.toggle('active', view.id === 'portal-routines'); });
+  document.getElementById('portal-title').textContent = 'Mis rutinas';
+  document.getElementById('portal-demo-banner')?.remove();
+  document.getElementById('portal-routines-list').insertAdjacentHTML('beforebegin', `<div class="portal-demo-banner${client.demo_ended ? ' ended' : ''}" id="portal-demo-banner">${client.demo_ended ? '<strong>Tu demostración terminó</strong><span>Tus rutinas quedan disponibles para que consultes tu historial.</span>' : `<strong>Tu demostración termina el ${fechaCorta(client.demo_ends_on)}</strong><span>Te quedan ${client.demo_days_remaining ?? 0} días para entrenar.</span>`}<a class="secondary demo-whatsapp-link" ${client.whatsapp_url ? `href="${escapeHtml(client.whatsapp_url)}" target="_blank" rel="noopener"` : 'hidden'}>Hablar con Eileen</a></div>`);
+  document.getElementById('portal-routines-list').innerHTML = portalData.routines.length ? portalData.routines.map(portalRoutineCard).join('') : '<p class="empty">Todavía no tienes rutinas de demostración.</p>';
+  portalRoutineHistoryMarkup();
+  document.querySelectorAll('#portal-dashboard, #portal-calendar, #portal-billing, #portal-reports').forEach(view => { view.hidden = true; });
+}
+
+function renderPortal() {
+  if (portalData?.demo || portalData?.client?.service_mode === 'demo') { renderPortalDemo(); return; }
+  const client = portalData.client;
+  document.querySelectorAll('[data-portal-view], .portal-view').forEach(item => { item.hidden = false; });
   const period = portalPeriod();
   const billingPeriodControls = document.getElementById('portal-billing-period');
   if (billingPeriodControls) {
@@ -6762,7 +6856,7 @@ async function enterPortal(user) {
   const restoredView = portalViewFromHash(); currentUser = user; portalView(restoredView);
   document.getElementById('auth-screen').hidden = true; document.getElementById('app-shell').hidden = true; document.getElementById('portal-shell').hidden = false;
   document.getElementById('portal-account-button').textContent = initials(user.fullName || user.full_name || user.email);
-  await loadPortalData(); portalNavigate(restoredView, { replace: true });
+  await loadPortalData(); portalNavigate(portalData?.demo ? 'portal-routines' : restoredView, { replace: true });
 }
 document.querySelectorAll('[data-portal-view]').forEach(link => link.addEventListener('click', event => { event.preventDefault(); portalNavigate(link.dataset.portalView); }));
 document.querySelectorAll('[data-portal-view-go]').forEach(link => link.addEventListener('click', event => { event.preventDefault(); portalNavigate(link.dataset.portalViewGo); }));
@@ -6914,9 +7008,16 @@ function accountMenu() {
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">TU CUENTA</p><h2>${escapeHtml(nombre || 'Sesión activa')}</h2>
     <div class="account-card"><div><b>${escapeHtml(currentUser?.email || '')}</b><small>${rol}</small></div><span class="initials">${initials(nombre || currentUser?.email || '')}</span></div>
-    <button class="secondary wide-button" id="account-logout">Cerrar sesión</button>`;
+    ${currentUser?.role !== 'client' ? '<button class="secondary wide-button" id="demo-contact-settings">Ajustes de demostraciones</button>' : ''}<button class="secondary wide-button" id="account-logout">Cerrar sesión</button>`;
   openModal(box);
+  document.getElementById('demo-contact-settings')?.addEventListener('click', accountDemoSettings);
   document.getElementById('account-logout').onclick = () => { modal.close(); logout(); };
+}
+async function accountDemoSettings() {
+  const box = document.createElement('div'); box.innerHTML = '<p class="eyebrow">PROMOCIONES</p><h2>Ajustes de demostraciones</h2><form id="demo-settings-form"><label>WhatsApp de Eileen<input name="contactWhatsapp" inputmode="numeric" placeholder="50762128180" /></label><small>Solo dígitos con código de país. Déjalo vacío para ocultar “Hablar con Eileen”.</small><button class="primary wide-button">Guardar ajuste</button></form>';
+  openModal(box);
+  try { const settings = await api('/api/account-settings'); box.querySelector('[name="contactWhatsapp"]').value = settings.contact_whatsapp || ''; } catch (error) { toast(error.message, true); }
+  box.querySelector('form').addEventListener('submit', async event => { event.preventDefault(); const value = new FormData(event.currentTarget).get('contactWhatsapp'); try { await api('/api/account-settings', { method: 'PATCH', body: { contactWhatsapp: value } }); modal.close(); toast('Ajuste de WhatsApp guardado'); } catch (error) { toast(error.message, true); } });
 }
 document.getElementById('account-button').addEventListener('click', accountMenu);
 document.getElementById('portal-account-button').addEventListener('click', accountMenu);

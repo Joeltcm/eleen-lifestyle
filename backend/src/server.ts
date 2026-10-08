@@ -127,6 +127,65 @@ function sessionStateConflict(message: string): never {
   throw error;
 }
 
+class ClientDuplicateError extends Error {
+  code = 'client_duplicate';
+  statusCode = 409;
+  matches: Array<{ id: string; full_name: string; email: string | null; phone: string | null; service_mode?: string }>;
+  constructor(matches: Array<{ id: string; full_name: string; email: string | null; phone: string | null; service_mode?: string }>) {
+    super('Ya existe un cliente con ese correo o teléfono. Confirma si quieres crear otro expediente.');
+    this.matches = matches;
+  }
+}
+
+function fechaPanamaMasDias(fecha: string, dias: number): string {
+  const value = new Date(`${fecha}T12:00:00-05:00`);
+  value.setUTCDate(value.getUTCDate() + dias);
+  return value.toISOString().slice(0, 10);
+}
+
+function fechaDbTexto(value: unknown): string | null {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  const iso = /^(\d{4}-\d{2}-\d{2})/.exec(String(value));
+  return iso?.[1] || null;
+}
+
+function normalizarCorreo(value: unknown): string | null {
+  const result = String(value || '').trim().toLowerCase();
+  return result || null;
+}
+
+function normalizarTelefono(value: unknown): string | null {
+  const result = String(value || '').replace(/\D/g, '');
+  return result || null;
+}
+
+async function buscarClientesDuplicados(transaction: TransactionSql, ownerId: string, email: unknown, phone: unknown) {
+  const correo = normalizarCorreo(email);
+  const telefono = normalizarTelefono(phone);
+  if (!correo && !telefono) return [];
+  return transaction`
+    SELECT id, full_name, email, phone, service_mode
+    FROM clients
+    WHERE owner_id = ${ownerId}
+      AND (
+        (${correo}::text IS NOT NULL AND lower(trim(email)) = ${correo})
+        OR (${telefono}::text IS NOT NULL AND regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = ${telefono})
+      )
+    ORDER BY created_at DESC
+    LIMIT 5
+  ` as unknown as Array<{ id: string; full_name: string; email: string | null; phone: string | null; service_mode?: string }>;
+}
+
+async function registrarCambioModalidad(transaction: TransactionSql, input: {
+  clientId: string; ownerId: string; fromMode: string; toMode: string; userId: string; note?: string | null;
+}) {
+  await transaction`
+    INSERT INTO client_mode_events (client_id, owner_id, from_mode, to_mode, by_user_id, note)
+    VALUES (${input.clientId}, ${input.ownerId}, ${input.fromMode}, ${input.toMode}, ${input.userId}, ${input.note || null})
+  `;
+}
+
 async function recurringBillingStatus(ownerId: string) {
   const [zohoConnection] = await sql`
     SELECT status, sync_enabled, last_sync_at
@@ -138,7 +197,7 @@ async function recurringBillingStatus(ownerId: string) {
     WITH eligible AS (
       SELECT c.id, c.billing_cutoff_day, c.standard_price
       FROM clients c
-      WHERE c.owner_id = ${ownerId} AND c.status = 'active' AND c.billing_model = 'monthly'
+      WHERE c.owner_id = ${ownerId} AND c.status = 'active' AND c.service_mode <> 'demo' AND c.billing_model = 'monthly'
         AND c.standard_price > 0
         AND EXISTS (
           SELECT 1 FROM memberships m
@@ -446,7 +505,7 @@ async function generateRecurringInvoices(ownerId?: string) {
       FROM clients c
       LEFT JOIN service_plans p ON p.id = c.plan_id
       CROSS JOIN periods
-      WHERE c.status = 'active' AND c.billing_model = 'monthly' AND c.standard_price > 0
+      WHERE c.status = 'active' AND c.service_mode <> 'demo' AND c.billing_model = 'monthly' AND c.standard_price > 0
         AND (${selectedOwner}::uuid IS NULL OR c.owner_id = ${selectedOwner}::uuid)
         AND NOT EXISTS (
           SELECT 1 FROM integration_connections ic
@@ -536,7 +595,7 @@ async function generateRecurringInvoices(ownerId?: string) {
       FROM invoices i
       JOIN clients c ON c.id = COALESCE(i.billed_for_client_id, i.client_id)
       LEFT JOIN service_plans pl ON pl.id = c.plan_id
-      WHERE c.status = 'active' AND c.billing_model = 'monthly' AND i.status <> 'void'
+      WHERE c.status = 'active' AND c.service_mode <> 'demo' AND c.billing_model = 'monthly' AND i.status <> 'void'
         AND i.package_id IS NULL
         -- Sólo el ciclo que viene. Un cobro de un mes cerrado es historial: no
         -- debe repartir sesiones hoy ni corregir nada hacia atrás.
@@ -850,8 +909,9 @@ app.post('/api/billing/invoices', { preHandler: requireStaff }, async (request, 
 
   // Todas las personas deben ser del mismo dueño (otro dueño recibe 404 como si no existiera).
   const ids = [...new Set([input.payerClientId, ...input.lines.map(line => line.beneficiaryClientId)])];
-  const found = await sql`SELECT id, billing_cutoff_day FROM clients WHERE owner_id = ${auth.sub} AND id IN ${sql(ids)}`;
+  const found = await sql`SELECT id, billing_cutoff_day, service_mode FROM clients WHERE owner_id = ${auth.sub} AND id IN ${sql(ids)}`;
   if (found.length !== ids.length) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  if (found.some(client => client.service_mode === 'demo')) return reply.code(409).send({ error: 'Los clientes demo no admiten facturas ni cobros.' });
   const payer = found.find(client => client.id === input.payerClientId)!;
 
   const cutDay = input.cutDay ?? (Number(payer.billing_cutoff_day) || Number(cycleStart.slice(8, 10)));
@@ -1178,8 +1238,9 @@ app.post('/api/billing/payments', { preHandler: requireStaff }, async (request, 
   const auth = request.user as AuthUser;
   const input = billingPaymentInput.parse(request.body);
   const paidOn = input.paidOn ?? fechaDeNegocioPanama();
-  const [payer] = await sql`SELECT id FROM clients WHERE id = ${input.payerClientId} AND owner_id = ${auth.sub}`;
+  const [payer] = await sql`SELECT id, service_mode FROM clients WHERE id = ${input.payerClientId} AND owner_id = ${auth.sub}`;
   if (!payer) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  if (payer.service_mode === 'demo') return reply.code(409).send({ error: 'Los clientes demo no admiten pagos.' });
   const amount = desdeCentavos(centavos(input.amount));
   try {
     const result = await sql.begin(async transaction => {
@@ -1380,7 +1441,7 @@ async function proposedBillingLines(ownerId: string, today: string) {
       c.billing_model, c.payment_mode, c.standard_price::text AS standard_price, c.credit_session_price::text AS credit_session_price,
       c.billing_cutoff_day, c.monthly_session_target, p.sessions_included, p.validity_days
     FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id
-    WHERE c.owner_id = ${ownerId} AND c.status = 'active' AND c.billing_model IN ('monthly', 'package')
+    WHERE c.owner_id = ${ownerId} AND c.status = 'active' AND c.service_mode <> 'demo' AND c.billing_model IN ('monthly', 'package')
       AND (c.standard_price > 0 OR c.payment_mode = 'no_anticipado')
       -- Se compara por la PAREJA beneficiario + pagador del expediente actual: quien tiene además un plan propio (Ernesto) sigue necesitando
       -- la línea con el pagador de su plan familiar.
@@ -1512,14 +1573,15 @@ app.get('/api/billing/cutover/readiness', { preHandler: requireStaff }, async re
 const NEW_BILLING_CLEAN_START = '2026-09-01';
 function incomePaymentsSource(ownerId: string) {
   if (billingEngine.state !== 'new') {
-    return sql`(SELECT p.id, p.client_id, p.paid_on, p.amount, p.method, p.reference FROM invoice_payments p JOIN clients c0 ON c0.id = p.client_id WHERE c0.owner_id = ${ownerId})`;
+    return sql`(SELECT p.id, p.client_id, p.paid_on, p.amount, p.method, p.reference FROM invoice_payments p JOIN clients c0 ON c0.id = p.client_id WHERE c0.owner_id = ${ownerId} AND c0.service_mode <> 'demo')`;
   }
   return sql`(
     SELECT p.id, p.client_id, p.paid_on, p.amount, p.method, p.reference FROM invoice_payments p JOIN clients c0 ON c0.id = p.client_id
-      WHERE c0.owner_id = ${ownerId} AND p.paid_on < ${NEW_BILLING_CLEAN_START}::date
+      WHERE c0.owner_id = ${ownerId} AND c0.service_mode <> 'demo' AND p.paid_on < ${NEW_BILLING_CLEAN_START}::date
     UNION ALL
     SELECT bp.id, bp.payer_client_id, bp.paid_on, bp.amount, bp.method, bp.reference FROM billing_payments bp
-      WHERE bp.owner_id = ${ownerId} AND bp.voided_at IS NULL)`;
+      JOIN clients c0 ON c0.id = bp.payer_client_id
+      WHERE bp.owner_id = ${ownerId} AND c0.service_mode <> 'demo' AND bp.voided_at IS NULL)`;
 }
 
 // ── Estado de cuenta, reportes y aviso al beneficiario del módulo nuevo (1B-5) ──
@@ -1813,6 +1875,10 @@ app.post('/api/auth/setup', async (request, reply) => {
     VALUES (${input.email.toLowerCase()}, ${passwordHash}, ${input.fullName}, 'admin')
     RETURNING id, email, full_name, role
   `;
+  // En una instalación nueva la migración corre antes de que exista la cuenta
+  // administradora; completa aquí el valor inicial que la migración deja para
+  // cuentas ya existentes.
+  await sql`INSERT INTO account_settings (owner_id, contact_whatsapp) VALUES (${user.id}, '50762128180') ON CONFLICT (owner_id) DO NOTHING`;
   const token = app.jwt.sign({ sub: user.id, email: user.email, role: user.role }, { expiresIn: sessionLifetime });
   return reply.code(201).send({ user, token });
 });
@@ -1970,7 +2036,13 @@ const clientSchema = z.object({
   status: z.enum(['active', 'paused', 'inactive']).optional(),
   // Anticipado (default): paga por adelantado. No anticipado: entrena a crédito
   // y paga al final; se le señala el pago pendiente. Ver migración 046.
-  paymentMode: z.enum(['anticipado', 'no_anticipado']).default('anticipado')
+  paymentMode: z.enum(['anticipado', 'no_anticipado']).default('anticipado'),
+  demo: z.boolean().default(false),
+  demoEndsOn: z.string().date().optional(),
+  demoRoutineLimit: z.union([z.literal(''), z.null(), z.coerce.number().int().min(1).max(1000)]).optional()
+    .transform(value => (value === '' || value === undefined ? null : value)),
+  demoNote: z.string().trim().max(500).optional(),
+  confirmDuplicate: z.boolean().default(false)
 });
 const clientEditSchema = clientSchema.pick({
   fullName: true, email: true, phone: true, goal: true, notes: true,
@@ -1987,6 +2059,19 @@ app.get('/api/clients', { preHandler: requireStaff }, async request => {
   return sql`
     SELECT c.*, p.name AS plan_name, p.price AS plan_catalog_price, p.sessions_included, p.validity_days,
       COALESCE((SELECT sum(total_sessions - used_sessions) FROM session_packages sp WHERE sp.client_id = c.id AND sp.status = 'active' AND (sp.expires_on IS NULL OR sp.expires_on >= current_date)), 0)::integer AS available_sessions,
+      COALESCE((SELECT count(*) FROM (
+        SELECT COALESCE(r.root_routine_id, r.id) AS root_id
+        FROM routine_deliveries d JOIN routines r ON r.id = d.routine_id WHERE d.client_id = c.id
+        UNION
+        SELECT COALESCE(r.root_routine_id, r.id)
+        FROM routine_assignments a JOIN routines r ON r.id = a.routine_id WHERE a.client_id = c.id
+        UNION
+        SELECT COALESCE(r.root_routine_id, r.id)
+        FROM routine_share_links l JOIN routines r ON r.id = l.routine_id WHERE l.client_id = c.id
+        UNION
+        SELECT COALESCE(r.root_routine_id, r.id)
+        FROM session_routine_offers o JOIN routines r ON r.id = o.routine_id WHERE o.client_id = c.id
+      ) demo_usage), 0)::integer AS demo_routines_used,
       -- Movimientos del ciclo en curso, separados. Este contador cuenta los
       -- eventos por sr.created_at (cuando se pidió la reprogramación), mientras
       -- que Asistencia cuenta sesiones por starts_at. No son la misma métrica.
@@ -2037,33 +2122,196 @@ app.get('/api/clients', { preHandler: requireStaff }, async request => {
 });
 app.post('/api/clients', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = clientSchema.parse(request.body);
-  const result = await sql.begin(async transaction => {
-    const [selectedPlan] = input.planId ? await transaction`SELECT * FROM service_plans WHERE id = ${input.planId} AND owner_id = ${auth.sub} AND active = true` : [];
-    if (input.planId && !selectedPlan) return null;
-    const billingModel = selectedPlan?.billing_model || input.billingModel;
-    const standardPrice = selectedPlan ? Number(selectedPlan.price) : input.standardPrice;
-    const packageSessions = selectedPlan?.sessions_included || input.packageSessions;
-    const [client] = await transaction`
-      INSERT INTO clients (owner_id, full_name, email, phone, goal, notes, billing_model, standard_price, plan_id, billing_cutoff_day, payment_mode, credit_session_price)
-      VALUES (${auth.sub}, ${input.fullName}, ${input.email || null}, ${input.phone || null}, ${input.goal || null}, ${input.notes || null}, ${billingModel}, ${standardPrice}, ${selectedPlan?.id || null}, ${input.cutoffDay}, ${input.paymentMode}, ${input.creditSessionPrice ?? (input.paymentMode === 'no_anticipado' ? 25 : null)}) RETURNING *
-    `;
-    if (billingModel === 'monthly') {
-      // Las sesiones del plan mensual son la meta contra la que se mide el
-      // cumplimiento. Sin esto el número del plan y el del cumplimiento serían
-      // dos cifras distintas que nadie mantiene sincronizadas.
-      if (selectedPlan?.sessions_included) {
-        await transaction`UPDATE clients SET monthly_session_target = ${selectedPlan.sessions_included} WHERE id = ${client.id}`;
+  try {
+    const result = await sql.begin(async transaction => {
+      const duplicados = await buscarClientesDuplicados(transaction, auth.sub, input.email, input.phone);
+      if (duplicados.length && !input.confirmDuplicate) throw new ClientDuplicateError(duplicados);
+      if (input.demo && input.planId) sessionStateConflict('Un cliente demo no usa plan comercial; define sus rutinas gratis y conviértelo cuando pase a un plan de pago.');
+      const hoy = fechaDeNegocioPanama();
+      const demoEndsOn = input.demo ? (input.demoEndsOn || fechaPanamaMasDias(hoy, 14)) : null;
+      if (input.demo && demoEndsOn! < hoy) sessionStateConflict('La fecha final de la demo no puede estar en el pasado.');
+      const [selectedPlan] = !input.demo && input.planId ? await transaction`SELECT * FROM service_plans WHERE id = ${input.planId} AND owner_id = ${auth.sub} AND active = true` : [];
+      if (!input.demo && input.planId && !selectedPlan) return null;
+      const billingModel = input.demo ? 'single' : (selectedPlan?.billing_model || input.billingModel);
+      const standardPrice = input.demo ? 0 : (selectedPlan ? Number(selectedPlan.price) : input.standardPrice);
+      const packageSessions = input.demo ? null : (selectedPlan?.sessions_included || input.packageSessions);
+      const [client] = await transaction`
+        INSERT INTO clients (owner_id, full_name, email, phone, goal, notes, billing_model, standard_price, plan_id, billing_cutoff_day, payment_mode,
+          credit_session_price, service_mode, demo_started_on, demo_ends_on, demo_routine_limit, demo_note)
+        VALUES (${auth.sub}, ${input.fullName}, ${normalizarCorreo(input.email)}, ${input.phone || null}, ${input.goal || null}, ${input.notes || null}, ${billingModel}, ${standardPrice}, ${selectedPlan?.id || null}, ${input.cutoffDay}, ${input.paymentMode},
+          ${input.creditSessionPrice ?? (input.paymentMode === 'no_anticipado' ? 25 : null)}, ${input.demo ? 'demo' : 'standard'}, ${input.demo ? hoy : null}::date, ${demoEndsOn}::date, ${input.demo ? input.demoRoutineLimit : null}, ${input.demo ? input.demoNote || null : null}) RETURNING *
+      `;
+      if (input.demo) {
+        await registrarCambioModalidad(transaction, { clientId: client.id, ownerId: auth.sub, fromMode: 'standard', toMode: 'demo', userId: auth.sub, note: `${input.demoNote || 'Alta de cliente demo'}${input.confirmDuplicate ? ' · duplicado confirmado por Eileen' : ''}` });
+      } else if (billingModel === 'monthly') {
+        if (selectedPlan?.sessions_included) {
+          await transaction`UPDATE clients SET monthly_session_target = ${selectedPlan.sessions_included} WHERE id = ${client.id}`;
+        }
+        await transaction`INSERT INTO memberships (client_id, amount, renewal_day) VALUES (${client.id}, ${standardPrice}, ${input.cutoffDay})`;
+      } else if (packageSessions) {
+        const expiresOn = vencePaqueteDesde(new Date());
+        const [pack] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on) VALUES (${client.id}, ${selectedPlan?.name || `Paquete ${packageSessions} sesiones`}, ${packageSessions}, ${standardPrice}, ${expiresOn}) RETURNING id`;
+        if (billingEngine.legacyWrites) await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${client.id}, ${pack.id}, 'Paquete de sesiones', ${standardPrice}, current_date)`;
       }
-      await transaction`INSERT INTO memberships (client_id, amount, renewal_day) VALUES (${client.id}, ${standardPrice}, ${input.cutoffDay})`;
-    } else if (packageSessions) {
-      const expiresOn = vencePaqueteDesde(new Date());
-      const [pack] = await transaction`INSERT INTO session_packages (client_id, label, total_sessions, amount, expires_on) VALUES (${client.id}, ${selectedPlan?.name || `Paquete ${packageSessions} sesiones`}, ${packageSessions}, ${standardPrice}, ${expiresOn}) RETURNING id`;
-      if (billingEngine.legacyWrites) await transaction`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) VALUES (${client.id}, ${pack.id}, 'Paquete de sesiones', ${standardPrice}, current_date)`;
-    }
-    return client;
+      return client;
+    });
+    if (!result) return reply.code(404).send({ error: 'Plan no encontrado o inactivo' });
+    return reply.code(201).send(result);
+  } catch (error) {
+    if (error instanceof ClientDuplicateError) return reply.code(409).send({ code: error.code, message: error.message, matches: error.matches });
+    throw error;
+  }
+});
+
+async function demoRoutineUsage(transaction: TransactionSql, clientId: string): Promise<number> {
+  const [row] = await transaction`
+    SELECT count(*)::int AS total FROM (
+      SELECT COALESCE(r.root_routine_id, r.id) AS root_id
+      FROM routine_deliveries d JOIN routines r ON r.id = d.routine_id
+      WHERE d.client_id = ${clientId}
+      UNION
+      SELECT COALESCE(r.root_routine_id, r.id) AS root_id
+      FROM routine_assignments a JOIN routines r ON r.id = a.routine_id
+      WHERE a.client_id = ${clientId}
+      UNION
+      SELECT COALESCE(r.root_routine_id, r.id) AS root_id
+      FROM routine_share_links l JOIN routines r ON r.id = l.routine_id
+      WHERE l.client_id = ${clientId}
+      UNION
+      SELECT COALESCE(r.root_routine_id, r.id) AS root_id
+      FROM session_routine_offers o JOIN routines r ON r.id = o.routine_id
+      WHERE o.client_id = ${clientId}
+    ) used
+  `;
+  return Number(row?.total || 0);
+}
+
+async function assertDemoCanReceiveRoutine(transaction: TransactionSql, clientId: string, routineId: string) {
+  const [client] = await transaction`
+    SELECT service_mode, demo_ends_on, demo_routine_limit
+    FROM clients WHERE id = ${clientId} FOR UPDATE
+  `;
+  if (!client || client.service_mode !== 'demo') return;
+  const hoy = fechaDeNegocioPanama();
+  if (fechaDbTexto(client.demo_ends_on) && fechaDbTexto(client.demo_ends_on)! < hoy) {
+    sessionStateConflict('La demostración terminó. Prorroga la demo o conviértela en cliente para enviar otra rutina.');
+  }
+  if (client.demo_routine_limit == null) return;
+  const [root] = await transaction`SELECT COALESCE(root_routine_id, id) AS root_id FROM routines WHERE id = ${routineId}`;
+  if (!root) return;
+  const [already] = await transaction`
+    SELECT 1 FROM (
+      SELECT COALESCE(r.root_routine_id, r.id) AS root_id FROM routine_deliveries d JOIN routines r ON r.id = d.routine_id WHERE d.client_id = ${clientId}
+      UNION SELECT COALESCE(r.root_routine_id, r.id) FROM routine_assignments a JOIN routines r ON r.id = a.routine_id WHERE a.client_id = ${clientId}
+      UNION SELECT COALESCE(r.root_routine_id, r.id) FROM routine_share_links l JOIN routines r ON r.id = l.routine_id WHERE l.client_id = ${clientId}
+      UNION SELECT COALESCE(r.root_routine_id, r.id) FROM session_routine_offers o JOIN routines r ON r.id = o.routine_id WHERE o.client_id = ${clientId}
+    ) sent WHERE root_id = ${root.root_id}
+  `;
+  if (already) return;
+  const used = await demoRoutineUsage(transaction, clientId);
+  if (used >= Number(client.demo_routine_limit)) {
+    sessionStateConflict(`Esta demo ya usó sus ${client.demo_routine_limit} rutinas gratis. Sube el tope o conviértela en cliente para enviar otra.`);
+  }
+}
+
+app.post('/api/clients/:id/demo', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const clientId = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = z.object({ demoEndsOn: z.string().date().optional(), demoRoutineLimit: z.union([z.literal(''), z.null(), z.coerce.number().int().min(1).max(1000)]).optional().transform(value => (value === '' || value === undefined ? null : value)), demoNote: z.string().trim().max(500).optional() }).parse(request.body);
+  try {
+    const result = await sql.begin(async transaction => {
+      const [client] = await transaction`SELECT * FROM clients WHERE id = ${clientId} AND owner_id = ${auth.sub} FOR UPDATE`;
+      if (!client) return null;
+      if (client.service_mode === 'demo') sessionStateConflict('Este cliente ya está en modo demo.');
+      const [blocked] = await transaction`
+        SELECT EXISTS (SELECT 1 FROM memberships WHERE client_id = ${clientId})
+          OR EXISTS (SELECT 1 FROM billing_subscriptions WHERE beneficiary_client_id = ${clientId} OR payer_client_id = ${clientId})
+          OR EXISTS (SELECT 1 FROM invoices WHERE client_id = ${clientId} OR billed_for_client_id = ${clientId})
+          OR EXISTS (SELECT 1 FROM received_payments WHERE client_id = ${clientId})
+          OR EXISTS (SELECT 1 FROM payment_allocations pa JOIN invoices i ON i.id = pa.invoice_id WHERE i.client_id = ${clientId} OR i.billed_for_client_id = ${clientId})
+          OR EXISTS (SELECT 1 FROM session_packages WHERE client_id = ${clientId} AND status IN ('pending', 'active') AND used_sessions < total_sessions)
+          OR EXISTS (SELECT 1 FROM sessions WHERE client_id = ${clientId} AND status = 'scheduled') AS blocked
+      `;
+      if (blocked?.blocked) sessionStateConflict('No se puede pasar a demo: el cliente tiene facturación, saldo o clases programadas.');
+      const hoy = fechaDeNegocioPanama();
+      const ends = input.demoEndsOn || fechaPanamaMasDias(hoy, 14);
+      if (ends < hoy) sessionStateConflict('La fecha final de la demo no puede estar en el pasado.');
+      const used = await demoRoutineUsage(transaction, clientId);
+      if (input.demoRoutineLimit != null && input.demoRoutineLimit < used) sessionStateConflict(`El tope no puede ser menor que las ${used} rutinas ya enviadas.`);
+      const [updated] = await transaction`
+        UPDATE clients SET service_mode = 'demo', demo_started_on = ${hoy}::date, demo_ends_on = ${ends}::date,
+          demo_routine_limit = ${input.demoRoutineLimit}, demo_note = ${input.demoNote || null}, demo_converted_at = NULL, updated_at = now()
+        WHERE id = ${clientId} RETURNING *
+      `;
+      await registrarCambioModalidad(transaction, { clientId, ownerId: auth.sub, fromMode: 'standard', toMode: 'demo', userId: auth.sub, note: input.demoNote || 'Cliente existente pasado a modo demo' });
+      return { ...updated, demo_routines_used: used };
+    });
+    if (!result) return reply.code(404).send({ error: 'Cliente no encontrado' });
+    return result;
+  } catch (error) { throw error; }
+});
+
+app.patch('/api/clients/:id/demo', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const clientId = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = z.object({ demoEndsOn: z.string().date().optional(), demoRoutineLimit: z.union([z.literal(''), z.null(), z.coerce.number().int().min(1).max(1000)]).optional().transform(value => (value === undefined ? undefined : value === '' ? null : value)), demoNote: z.string().trim().max(500).optional() }).parse(request.body);
+  const result = await sql.begin(async transaction => {
+    const [client] = await transaction`SELECT * FROM clients WHERE id = ${clientId} AND owner_id = ${auth.sub} FOR UPDATE`;
+    if (!client) return null;
+    if (client.service_mode !== 'demo') sessionStateConflict('El cliente no está en modo demo.');
+    const hoy = fechaDeNegocioPanama();
+    const ends = input.demoEndsOn || fechaDbTexto(client.demo_ends_on);
+    if (!ends) sessionStateConflict('La demostración no tiene una fecha final válida.');
+    if (ends < hoy) sessionStateConflict('La fecha final debe ser hoy o una fecha futura.');
+    const used = await demoRoutineUsage(transaction, clientId);
+    if (input.demoRoutineLimit != null && input.demoRoutineLimit < used) sessionStateConflict(`El tope no puede ser menor que las ${used} rutinas ya enviadas.`);
+    const note = input.demoNote || (input.demoEndsOn ? `Demo ajustada hasta ${ends}` : 'Tope de rutinas demo actualizado');
+    const [updated] = await transaction`UPDATE clients SET demo_ends_on = ${ends}::date, demo_routine_limit = ${input.demoRoutineLimit === undefined ? client.demo_routine_limit : input.demoRoutineLimit}, demo_note = COALESCE(${input.demoNote || null}, demo_note), updated_at = now() WHERE id = ${clientId} RETURNING *`;
+    await registrarCambioModalidad(transaction, { clientId, ownerId: auth.sub, fromMode: 'demo', toMode: 'demo', userId: auth.sub, note });
+    return { ...updated, demo_routines_used: used };
   });
-  if (!result) return reply.code(404).send({ error: 'Plan no encontrado o inactivo' });
-  return reply.code(201).send(result);
+  if (!result) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  return result;
+});
+
+app.post('/api/clients/:id/demo/convert', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const clientId = z.string().uuid().parse((request.params as { id: string }).id);
+  const result = await sql.begin(async transaction => {
+    const [client] = await transaction`SELECT * FROM clients WHERE id = ${clientId} AND owner_id = ${auth.sub} FOR UPDATE`;
+    if (!client) return null;
+    if (client.service_mode !== 'demo') sessionStateConflict('El cliente ya está en modalidad estándar.');
+    const [updated] = await transaction`UPDATE clients SET service_mode = 'standard', demo_converted_at = now(), updated_at = now() WHERE id = ${clientId} RETURNING *`;
+    await registrarCambioModalidad(transaction, { clientId, ownerId: auth.sub, fromMode: 'demo', toMode: 'standard', userId: auth.sub, note: 'Demo convertida en cliente; la facturación empieza desde esta conversión' });
+    return updated;
+  });
+  if (!result) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  return result;
+});
+
+app.get('/api/clients/:id/mode-events', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  const clientId = z.string().uuid().parse((request.params as { id: string }).id);
+  const [owned] = await sql`SELECT id FROM clients WHERE id = ${clientId} AND owner_id = ${auth.sub}`;
+  if (!owned) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  return sql`SELECT id, from_mode, to_mode, at, by_user_id, note FROM client_mode_events WHERE client_id = ${clientId} AND owner_id = ${auth.sub} ORDER BY at DESC`;
+});
+
+app.get('/api/account-settings', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const [settings] = await sql`SELECT owner_id, contact_whatsapp FROM account_settings WHERE owner_id = ${auth.sub}`;
+  return settings || { owner_id: auth.sub, contact_whatsapp: null };
+});
+
+app.patch('/api/account-settings', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const input = z.object({ contactWhatsapp: z.string().trim().regex(/^\d*$/, 'Usa solo dígitos').max(20).optional().nullable() }).parse(request.body);
+  const [settings] = await sql`
+    INSERT INTO account_settings (owner_id, contact_whatsapp) VALUES (${auth.sub}, ${input.contactWhatsapp || null})
+    ON CONFLICT (owner_id) DO UPDATE SET contact_whatsapp = EXCLUDED.contact_whatsapp, updated_at = now()
+    RETURNING owner_id, contact_whatsapp
+  `;
+  return settings;
 });
 
 app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, reply) => {
@@ -2272,7 +2520,7 @@ async function auditBillingSubscription(transaction: TransactionSql, request: Fa
 
 async function assertBillingClients(transaction: TransactionSql, ownerId: string, beneficiaryId: string, payerId: string) {
   const clients = await transaction`
-    SELECT id, full_name, billing_responsible_client_id, billing_model, payment_mode,
+    SELECT id, full_name, billing_responsible_client_id, billing_model, payment_mode, service_mode,
       standard_price, credit_session_price, billing_cutoff_day, monthly_session_target,
       plan_id, created_at
     FROM clients WHERE owner_id = ${ownerId} AND (id = ${beneficiaryId} OR id = ${payerId})
@@ -2280,6 +2528,9 @@ async function assertBillingClients(transaction: TransactionSql, ownerId: string
   const beneficiary = clients.find(client => client.id === beneficiaryId);
   const payer = clients.find(client => client.id === payerId);
   if (!beneficiary || !payer) return { beneficiary: null, payer: null };
+  if (beneficiary.service_mode === 'demo' || payer.service_mode === 'demo') {
+    sessionStateConflict('Los clientes demo solo pueden recibir rutinas gratuitas; no admiten suscripciones ni facturación.');
+  }
   // La línea declarativa permite que un beneficiario tenga una línea propia y
   // otra familiar. Sólo se prohíbe encadenar a un pagador que ya depende de
   // otro cliente; no se toca billing_responsible_client_id.
@@ -2308,12 +2559,13 @@ app.get('/api/clients/:id/billing-subscriptions', { preHandler: requireStaff }, 
   const auth = request.user as AuthUser;
   const clientId = z.string().uuid().parse((request.params as { id: string }).id);
   const [focus] = await sql`
-    SELECT c.id, c.full_name, c.billing_responsible_client_id, c.billing_model, c.payment_mode,
+    SELECT c.id, c.full_name, c.billing_responsible_client_id, c.billing_model, c.payment_mode, c.service_mode,
       c.standard_price, c.credit_session_price, c.billing_cutoff_day, c.monthly_session_target,
       c.plan_id, c.created_at
     FROM clients c WHERE c.id = ${clientId} AND c.owner_id = ${auth.sub}
   `;
   if (!focus) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  if (focus.service_mode === 'demo') return reply.code(409).send({ error: 'Los clientes demo no admiten conceptos de facturación.' });
   const rows = await sql`
     SELECT bs.*, b.full_name AS beneficiary_name, p.full_name AS payer_name
     FROM billing_subscriptions bs
@@ -2390,11 +2642,12 @@ app.patch('/api/billing-subscriptions/:id', { preHandler: requireStaff }, async 
   const input = billingSubscriptionPatch.parse(request.body);
   const updated = await sql.begin(async transaction => {
     const [current] = await transaction`
-      SELECT bs.*, b.full_name AS beneficiary_name, p.full_name AS payer_name
+      SELECT bs.*, b.full_name AS beneficiary_name, p.full_name AS payer_name, b.service_mode AS beneficiary_service_mode, p.service_mode AS payer_service_mode
       FROM billing_subscriptions bs JOIN clients b ON b.id = bs.beneficiary_client_id JOIN clients p ON p.id = bs.payer_client_id
       WHERE bs.id = ${id} AND bs.owner_id = ${auth.sub} FOR UPDATE
     ` as unknown as Record<string, any>[];
     if (!current) return null;
+    if (current.beneficiary_service_mode === 'demo' || current.payer_service_mode === 'demo') sessionStateConflict('Los clientes demo no admiten suscripciones ni facturación.');
     const oldValue = billingSubscriptionValue(current);
     const nextStart = input.startsOn || dateOnly(current.starts_on);
     const nextEnd = input.endsOn === undefined ? (current.ends_on ? dateOnly(current.ends_on) : null) : input.endsOn;
@@ -2435,10 +2688,11 @@ app.post('/api/billing-subscriptions/:id/correct-price', { preHandler: requireSt
   const input = z.object({ price: z.coerce.number().positive().max(100000), reason: z.string().trim().min(3, 'Indique el motivo').max(300) }).parse(request.body);
   const result = await sql.begin(async transaction => {
     const [current] = await transaction`
-      SELECT bs.*, b.full_name AS beneficiary_name, p.full_name AS payer_name
+      SELECT bs.*, b.full_name AS beneficiary_name, p.full_name AS payer_name, b.service_mode AS beneficiary_service_mode, p.service_mode AS payer_service_mode
       FROM billing_subscriptions bs JOIN clients b ON b.id = bs.beneficiary_client_id JOIN clients p ON p.id = bs.payer_client_id
       WHERE bs.id = ${id} AND bs.owner_id = ${auth.sub} FOR UPDATE` as unknown as Record<string, any>[];
     if (!current) return null;
+    if (current.beneficiary_service_mode === 'demo' || current.payer_service_mode === 'demo') sessionStateConflict('Los clientes demo no admiten suscripciones ni facturación.');
     if (centavos(Number(current.price)) === centavos(input.price)) sessionStateConflict('El monto ya es ese');
     const hoy = fechaDeNegocioPanama();
     const oldValue = billingSubscriptionValue(current);
@@ -2739,12 +2993,13 @@ app.get('/api/packages', { preHandler: requireStaff }, async request => {
       )) AS pago_pendiente
     FROM session_packages p JOIN clients c ON c.id = p.client_id
     LEFT JOIN invoices oi ON oi.id = p.origin_invoice_id
-    WHERE c.owner_id = ${auth.sub} AND p.status <> 'cancelled' ORDER BY p.created_at DESC`;
+    WHERE c.owner_id = ${auth.sub} AND c.service_mode <> 'demo' AND p.status <> 'cancelled' ORDER BY p.created_at DESC`;
 });
 app.post('/api/packages', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = packageSchema.parse(request.body);
-  const [client] = await sql`SELECT id, billing_cutoff_day FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub}`;
+  const [client] = await sql`SELECT id, billing_cutoff_day, service_mode FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub}`;
   if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  if (client.service_mode === 'demo') return reply.code(409).send({ error: 'Los clientes demo no admiten saldos ni paquetes de sesiones.' });
 
   const esCobroMensual = input.kind === 'monthly';
   const concepto = esCobroMensual ? 'Mensualidad' : 'Paquete de sesiones';
@@ -3528,6 +3783,7 @@ app.post('/api/routines', { preHandler: requireStaff }, async (request, reply) =
       const routineId = randomUUID();
       const [created] = await transaction`INSERT INTO routines (id, owner_id, root_routine_id, title, description, sessions_per_week, exercises, exercises_hash) VALUES (${routineId}, ${auth.sub}, ${routineId}, ${input.title}, ${input.description || null}, ${input.sessionsPerWeek}, ${transaction.json(input.exercises)}, ${exercisesHash(input.exercises)}) RETURNING *`;
       if (input.clientId) {
+        await assertDemoCanReceiveRoutine(transaction, input.clientId, created.id);
         const repeticionConfirmada = await rejectRecentRoutineRepeat(transaction, created as unknown as RoutineDeliveryRoutine, input.clientId, input.confirmRepeat, 'assignment');
         const [assignment] = await transaction`INSERT INTO routine_assignments (routine_id, client_id, due_on) SELECT ${created.id}, id, ${input.dueOn ?? null}::date FROM clients WHERE id = ${input.clientId} AND owner_id = ${auth.sub} RETURNING *`;
         if (assignment) await recordRoutineDelivery(transaction, { routine: created as unknown as RoutineDeliveryRoutine, clientId: assignment.client_id, kind: 'assignment', sentByUserId: auth.sub, dueOn: assignment.due_on, assignmentId: assignment.id, repeatConfirmed: repeticionConfirmada });
@@ -3654,6 +3910,7 @@ app.patch('/api/routines/:id', { preHandler: requireStaff }, async (request, rep
       // otra. En ese flujo la fecha sigue viajando con la asignación nueva.
       if (input.clientId !== undefined) {
         if (input.clientId) {
+          await assertDemoCanReceiveRoutine(transaction, input.clientId, id);
           const repeticionConfirmada = await rejectRecentRoutineRepeat(transaction, updated as unknown as RoutineDeliveryRoutine, input.clientId, input.confirmRepeat, 'assignment');
           await transaction`UPDATE routine_assignments SET active = false, ends_on = current_date WHERE routine_id = ${id} AND active = true`;
           const [assignment] = await transaction`INSERT INTO routine_assignments (routine_id, client_id, due_on) SELECT ${id}, c.id, ${input.dueOn ?? null}::date FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} ON CONFLICT (routine_id, client_id, starts_on) DO UPDATE SET active = true, ends_on = null, due_on = EXCLUDED.due_on RETURNING *`;
@@ -4061,8 +4318,9 @@ app.get('/api/exercises/:id/video-urls', { preHandler: requireAuth }, async (req
 // Agendar a alguien que ya no entrena no tiene sentido y ensucia su expediente:
 // las sesiones cuentan para su cumplimiento aunque esté dado de baja.
 async function clienteAgendable(clientId: string, ownerId: string) {
-  const [cliente] = await sql`SELECT id, full_name, status FROM clients WHERE id = ${clientId} AND owner_id = ${ownerId}`;
+  const [cliente] = await sql`SELECT id, full_name, status, service_mode FROM clients WHERE id = ${clientId} AND owner_id = ${ownerId}`;
   if (!cliente) return { error: 'Cliente no encontrado', code: 404 };
+  if (cliente.service_mode === 'demo') return { error: 'Los clientes demo solo reciben rutinas gratuitas; no se les agendan sesiones.', code: 409 };
   if (cliente.status !== 'active') {
     return { error: `${cliente.full_name} está ${cliente.status === 'paused' ? 'en pausa' : 'inactivo'}. Actívalo antes de agendarle sesiones.`, code: 409 };
   }
@@ -4086,7 +4344,7 @@ app.get('/api/sessions', { preHandler: requireStaff }, async request => {
     LEFT JOIN routines r ON r.id = s.routine_id
     LEFT JOIN session_packages charged ON charged.id = s.package_id
     LEFT JOIN session_routine_offers sro ON sro.session_id = s.id AND sro.status <> 'withdrawn'
-    WHERE c.owner_id = ${auth.sub} ORDER BY s.starts_at`;
+    WHERE c.owner_id = ${auth.sub} AND c.service_mode <> 'demo' ORDER BY s.starts_at`;
 });
 // El horario de trabajo, por tramos. Sin tramos configurados la aplicación
 // sigue deduciéndolo de la agenda, que es lo que hacía hasta ahora: nadie se
@@ -5350,7 +5608,7 @@ app.get('/api/trainings/daily', { preHandler: requireStaff }, async request => {
       ORDER BY quick_logged DESC, starts_at LIMIT 1
     ) s ON true
     LEFT JOIN routines r ON r.id = s.routine_id
-    WHERE c.owner_id = ${auth.sub} AND c.status = 'active'
+    WHERE c.owner_id = ${auth.sub} AND c.status = 'active' AND c.service_mode <> 'demo'
     ORDER BY c.full_name
   `;
 });
@@ -5372,7 +5630,7 @@ app.post('/api/trainings/daily', { preHandler: requireStaff }, async (request, r
   const startsAt = `${input.date}T12:00:00-05:00`;
 
   const result = await sql.begin(async transaction => {
-    const owned = await transaction`SELECT id FROM clients WHERE owner_id = ${auth.sub} AND id = ANY(${input.clientIds}::uuid[])`;
+    const owned = await transaction`SELECT id FROM clients WHERE owner_id = ${auth.sub} AND service_mode <> 'demo' AND id = ANY(${input.clientIds}::uuid[])`;
     const ownedIds = owned.map(row => row.id as string);
 
     // Se crean las que faltan. Si ese día ya hay una sesión agendada de verdad
@@ -5736,7 +5994,7 @@ async function asentarMensualidad(clientId: string, ownerId: string, amount: num
 
 app.post('/api/invoices', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = invoiceSchema.parse(request.body);
-  const [invoice] = await sql`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) SELECT c.id, ${input.packageId || null}, ${input.concept}, ${input.amount}, ${input.dueOn} FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} RETURNING *`;
+  const [invoice] = await sql`INSERT INTO invoices (client_id, package_id, concept, amount, due_on) SELECT c.id, ${input.packageId || null}, ${input.concept}, ${input.amount}, ${input.dueOn} FROM clients c WHERE c.id = ${input.clientId} AND c.owner_id = ${auth.sub} AND c.service_mode <> 'demo' RETURNING *`;
   if (!invoice) return reply.code(404).send({ error: 'Cliente no encontrado' });
   if (esMensualidad(input.concept) && input.amount > 0) await asentarMensualidad(input.clientId, auth.sub, input.amount);
   return reply.code(201).send(invoice);
@@ -6697,7 +6955,7 @@ app.get('/api/compliance/by-month', { preHandler: requireStaff }, async request 
       count(*) FILTER (WHERE s.status = 'completed')::int AS completadas,
       COALESCE(round(avg(${complianceCompletionExpression()})), 0)::int AS percent
     FROM sessions s JOIN clients c ON c.id = s.client_id
-    WHERE c.owner_id = ${auth.sub}
+    WHERE c.owner_id = ${auth.sub} AND c.service_mode <> 'demo'
       AND s.starts_at >= ${from}::date AND s.starts_at < (${to}::date + interval '1 day')
       AND ${complianceSessionCondition()}
     GROUP BY 1, 2
@@ -6737,7 +6995,7 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async (request,
     const [cutoffClient] = await sql`
       SELECT id, billing_cutoff_day
       FROM clients
-      WHERE id = ${query.cutoffClientId} AND owner_id = ${auth.sub}
+      WHERE id = ${query.cutoffClientId} AND owner_id = ${auth.sub} AND service_mode <> 'demo'
     `;
     if (!cutoffClient) return reply.code(404).send({ error: 'Cliente no encontrado' });
     const day = Number(cutoffClient.billing_cutoff_day) || 1;
@@ -6789,7 +7047,7 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async (request,
               AND (s.starts_at AT TIME ZONE 'America/Panama')::date <= ${toInclusive}::date`
           : sql`s.starts_at >= ${from}::date AT TIME ZONE 'America/Panama'
               AND s.starts_at < ${to}::date AT TIME ZONE 'America/Panama'`}
-      WHERE c.owner_id = ${auth.sub}
+      WHERE c.owner_id = ${auth.sub} AND c.service_mode <> 'demo'
         AND (${cutoffCycle?.clientId ?? null}::uuid IS NULL OR c.id = ${cutoffCycle?.clientId ?? null}::uuid)
     ), rollup AS (
       SELECT client_id,
@@ -6821,7 +7079,7 @@ app.get('/api/attendance/monthly', { preHandler: requireStaff }, async (request,
       COALESCE(r.medibles, 0)::int AS medibles,
       COALESCE(r.puntos_cumplimiento, 0)::int AS puntos_cumplimiento
     FROM clients c LEFT JOIN rollup r ON r.client_id = c.id
-    WHERE c.owner_id = ${auth.sub}
+    WHERE c.owner_id = ${auth.sub} AND c.service_mode <> 'demo'
       AND (${cutoffCycle?.clientId ?? null}::uuid IS NULL OR c.id = ${cutoffCycle?.clientId ?? null}::uuid)
     ORDER BY c.full_name
   `;
@@ -7020,7 +7278,7 @@ async function complianceRows(ownerId: string, period: z.infer<typeof reportPeri
     FROM sessions s
     JOIN clients c ON c.id = s.client_id
     LEFT JOIN routines r ON r.id = s.routine_id
-    WHERE c.owner_id = ${ownerId}
+    WHERE c.owner_id = ${ownerId} AND c.service_mode <> 'demo'
       AND s.starts_at >= ${start}
       AND (${clientId || null}::uuid IS NULL OR c.id = ${clientId || null})
       AND ${complianceSessionCondition()}
@@ -7149,8 +7407,8 @@ app.get('/api/compliance/report', { preHandler: requireStaff }, async (request, 
     if (q.from > q.to) return reply.code(400).send({ error: 'La fecha inicial no puede ser mayor que la final' });
   }
   const clientes = ids.length
-    ? await sql`SELECT id, full_name, billing_cutoff_day, inicio_ciclo(billing_cutoff_day)::text AS ciclo_inicio FROM clients WHERE owner_id = ${auth.sub} AND id = ANY(${ids}) ORDER BY full_name`
-    : await sql`SELECT id, full_name, billing_cutoff_day, inicio_ciclo(billing_cutoff_day)::text AS ciclo_inicio FROM clients WHERE owner_id = ${auth.sub} AND status = 'active' ORDER BY full_name`;
+    ? await sql`SELECT id, full_name, billing_cutoff_day, inicio_ciclo(billing_cutoff_day)::text AS ciclo_inicio FROM clients WHERE owner_id = ${auth.sub} AND service_mode <> 'demo' AND id = ANY(${ids}) ORDER BY full_name`
+    : await sql`SELECT id, full_name, billing_cutoff_day, inicio_ciclo(billing_cutoff_day)::text AS ciclo_inicio FROM clients WHERE owner_id = ${auth.sub} AND status = 'active' AND service_mode <> 'demo' ORDER BY full_name`;
   if (!clientes.length) return reply.code(404).send({ error: 'No hay clientes para el informe' });
   const ventana = new Map<string, { start: string; end: string }>();
   for (const c of clientes) {
@@ -7172,7 +7430,7 @@ app.get('/api/compliance/report.pdf', { preHandler: requireStaff }, async (reque
   const query = monthlyReportSchema.parse(request.query);
   let client = null;
   if (query.clientId) {
-    const [row] = await sql`SELECT id, full_name, email FROM clients WHERE id = ${query.clientId} AND owner_id = ${auth.sub}`;
+    const [row] = await sql`SELECT id, full_name, email FROM clients WHERE id = ${query.clientId} AND owner_id = ${auth.sub} AND service_mode <> 'demo'`;
     if (!row) return reply.code(404).send({ error: 'Cliente no encontrado' });
     client = row;
   }
@@ -7255,7 +7513,7 @@ async function openNewInvoiceNotices(ownerId: string, paymentDays: number, clien
       GREATEST(i.total - COALESCE((SELECT sum(a.amount) FROM billing_payment_applications a WHERE a.invoice_id = i.id AND a.reversed_at IS NULL), 0), 0)::text AS balance,
       (i.due_on < current_date) AS atrasada, (current_date - i.due_on) AS dias_atraso
     FROM billing_invoices i JOIN clients p ON p.id = i.payer_client_id
-    WHERE i.owner_id = ${ownerId} AND i.status IN ('pendiente', 'parcial') AND p.status <> 'paused'
+    WHERE i.owner_id = ${ownerId} AND i.status IN ('pendiente', 'parcial') AND p.status <> 'paused' AND p.service_mode <> 'demo'
       AND (${clientId ?? null}::uuid IS NULL OR i.payer_client_id = ${clientId ?? null}::uuid)
       AND i.due_on <= current_date + (${paymentDays})::integer ORDER BY i.due_on`;
   return rows.map(row => ({ due_on: row.due_on, amount: row.amount, balance: row.balance, full_name: row.full_name, atrasada: row.atrasada, dias_atraso: row.dias_atraso,
@@ -7272,6 +7530,7 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
   if (auth.role === 'client') {
     const [client] = await sql`SELECT * FROM clients WHERE portal_user_id = ${auth.sub}`;
     if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+    if (client.service_mode === 'demo') return [];
     const sessions = await sql`SELECT starts_at, duration_minutes FROM sessions WHERE client_id = ${client.id} AND status = 'scheduled' AND NOT COALESCE(paused_hold, false) AND starts_at BETWEEN now() AND now() + ${`${sessionHours} hours`}::interval ORDER BY starts_at`;
     const invoices = billingEngine.state === 'new'
       ? await openNewInvoiceNotices(client.owner_id as string, paymentDays, client.id as string)
@@ -7285,7 +7544,7 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
   }
   const sessions = await sql`
     SELECT s.starts_at, c.full_name FROM sessions s JOIN clients c ON c.id = s.client_id
-    WHERE c.owner_id = ${auth.sub} AND s.status = 'scheduled' AND NOT COALESCE(s.paused_hold, false) AND s.starts_at BETWEEN now() AND now() + ${`${sessionHours} hours`}::interval ORDER BY s.starts_at
+    WHERE c.owner_id = ${auth.sub} AND c.service_mode <> 'demo' AND s.status = 'scheduled' AND NOT COALESCE(s.paused_hold, false) AND s.starts_at BETWEEN now() AND now() + ${`${sessionHours} hours`}::interval ORDER BY s.starts_at
   `;
   const invoices = billingEngine.state === 'new' ? await openNewInvoiceNotices(auth.sub, paymentDays) : await sql`
     SELECT i.due_on, i.amount, i.concept, c.full_name,
@@ -7325,7 +7584,7 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
   const viajesSinRutina = await sql`
     SELECT t.id, t.client_id, t.starts_on::text AS starts_on, t.ends_on::text AS ends_on, c.full_name
     FROM client_travel t JOIN clients c ON c.id = t.client_id
-    WHERE c.owner_id = ${auth.sub} AND c.status = 'active'
+    WHERE c.owner_id = ${auth.sub} AND c.status = 'active' AND c.service_mode <> 'demo'
       AND t.starts_on <= (now() AT TIME ZONE 'America/Panama')::date + 1
       AND COALESCE(t.ends_on, DATE '9999-12-31') >= (now() AT TIME ZONE 'America/Panama')::date
       AND NOT EXISTS (SELECT 1 FROM routine_share_links l WHERE l.client_id = t.client_id AND l.revoked_at IS NULL AND l.expires_at > now())
@@ -7461,6 +7720,7 @@ async function candidatasRutinaPorVencer(ownerId?: string, hora?: number) {
     JOIN users u ON u.id = c.portal_user_id AND u.active = true
     JOIN notification_preferences np ON np.user_id = u.id AND np.browser_enabled = true
     WHERE o.origin = 'client' AND o.status = 'offered' AND s.status = 'scheduled'
+      AND c.service_mode <> 'demo'
       AND (s.starts_at AT TIME ZONE 'America/Panama')::date = (now() AT TIME ZONE 'America/Panama')::date
       AND COALESCE(${hora ?? null}::int, extract(hour FROM now() AT TIME ZONE 'America/Panama')::int) >= ${HORA_AVISO_RUTINA_POR_VENCER}
       AND (${ownerId ?? null}::uuid IS NULL OR c.owner_id = ${ownerId ?? null}::uuid)
@@ -7479,6 +7739,7 @@ async function dispatchReminders() {
         OR (u.role IN ('admin', 'trainer') AND c.owner_id = u.id)
       JOIN sessions s ON s.client_id = c.id
       WHERE np.browser_enabled = true AND s.status = 'scheduled' AND NOT COALESCE(s.paused_hold, false)
+        AND c.service_mode <> 'demo'
         AND s.starts_at BETWEEN now() AND now() + make_interval(hours => np.session_reminder_hours)
         AND EXISTS (SELECT 1 FROM push_subscriptions ps WHERE ps.user_id = u.id AND ps.active = true)
         AND NOT EXISTS (
@@ -7496,6 +7757,7 @@ async function dispatchReminders() {
         OR (u.role IN ('admin', 'trainer') AND c.owner_id = u.id)
       JOIN invoices i ON i.client_id = c.id
       WHERE np.browser_enabled = true AND i.status = 'pending'
+        AND c.service_mode <> 'demo'
         -- Tras el corte (estado new) las facturas del sistema anterior ya no generan recordatorios: lo hacen las nuevas (consulta siguiente).
         AND ${billingEngine.state === 'new' ? sql`false` : sql`true`}
         AND i.due_on BETWEEN current_date - 30 AND current_date + np.payment_reminder_days
@@ -7514,7 +7776,7 @@ async function dispatchReminders() {
       JOIN clients c ON (u.role = 'client' AND c.portal_user_id = u.id)
         OR (u.role IN ('admin', 'trainer') AND c.owner_id = u.id)
       JOIN billing_invoices i ON i.payer_client_id = c.id
-      WHERE ${billingEngine.state === 'new' ? sql`true` : sql`false`} AND np.browser_enabled = true AND i.status IN ('pendiente', 'parcial') AND c.status <> 'paused'
+      WHERE ${billingEngine.state === 'new' ? sql`true` : sql`false`} AND np.browser_enabled = true AND i.status IN ('pendiente', 'parcial') AND c.status <> 'paused' AND c.service_mode <> 'demo'
         AND i.due_on BETWEEN current_date - 30 AND current_date + np.payment_reminder_days
         AND EXISTS (SELECT 1 FROM push_subscriptions ps WHERE ps.user_id = u.id AND ps.active = true)
         AND NOT EXISTS (
@@ -7529,6 +7791,7 @@ async function dispatchReminders() {
       JOIN users u ON u.id = c.owner_id AND u.active = true AND u.role IN ('admin', 'trainer')
       JOIN notification_preferences np ON np.user_id = u.id
       WHERE pp.status = 'active' AND pp.ends_on = ((now() AT TIME ZONE 'America/Panama')::date + 2)
+        AND c.service_mode <> 'demo'
         AND np.browser_enabled = true
         AND EXISTS (SELECT 1 FROM push_subscriptions ps WHERE ps.user_id = u.id AND ps.active = true)
         AND NOT EXISTS (
@@ -7549,6 +7812,7 @@ async function dispatchReminders() {
     JOIN clients c ON c.owner_id = u.id
     JOIN sessions s ON s.client_id = c.id
     WHERE np.browser_enabled = true AND s.status = 'scheduled'
+      AND c.service_mode <> 'demo'
       AND s.starts_at + make_interval(mins => s.duration_minutes) <= now()
       AND s.starts_at >= now() - interval '7 days'
       AND EXISTS (SELECT 1 FROM push_subscriptions ps WHERE ps.user_id = u.id AND ps.active = true)
@@ -7610,6 +7874,88 @@ async function portalClient(userId: string) {
   return client;
 }
 
+async function portalDemoSummary(client: Record<string, any>) {
+  const hoy = fechaDeNegocioPanama();
+  const [settings] = await sql`SELECT contact_whatsapp FROM account_settings WHERE owner_id = ${client.owner_id}`;
+  const routines = await sql`
+    SELECT DISTINCT ON (COALESCE(r.root_routine_id, r.id))
+      ra.id AS assignment_id, ra.due_on, r.id, r.title, r.description, r.version, r.root_routine_id, r.sessions_per_week, r.exercises
+    FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id
+    WHERE ra.client_id = ${client.id} AND ra.active = true AND r.archived_at IS NULL
+    ORDER BY COALESCE(r.root_routine_id, r.id), r.version DESC, ra.starts_on DESC
+  `;
+  const routineIds = routines.map(routine => String(routine.id));
+  const [routineCompletions, routineExerciseCompletions] = routineIds.length ? await Promise.all([
+    sql`SELECT routine_id, completed_on, completion_percent, duration_seconds, feeling, difficulty, feedback
+      FROM routine_completions WHERE client_id = ${client.id} AND routine_id IN ${sql(routineIds)} ORDER BY completed_on`,
+    sql`SELECT routine_id, completed_on, exercise_index, completed
+      FROM routine_exercise_completions WHERE client_id = ${client.id} AND routine_id IN ${sql(routineIds)} ORDER BY completed_on, exercise_index`
+  ]) : [[], []];
+  const exercises = await ejerciciosDeLaRutina(client.owner_id, routines.flatMap(routine => Array.isArray(routine.exercises) ? routine.exercises : []));
+  const routineHistory = await sql`
+    WITH deliveries AS (
+      SELECT d.*, lead(d.sent_at) OVER (PARTITION BY d.client_id, COALESCE(r.root_routine_id, r.id) ORDER BY d.sent_at) AS next_sent_at,
+        COALESCE(ra.due_on, d.due_on) AS effective_due_on,
+        o.status AS offer_status, o.origin AS offer_origin, s.credit_charge, s.package_debited
+      FROM routine_deliveries d JOIN routines r ON r.id = d.routine_id
+      LEFT JOIN session_routine_offers o ON o.id = d.offer_id
+      LEFT JOIN sessions s ON s.id = o.session_id
+      LEFT JOIN LATERAL (
+        SELECT due_on FROM routine_assignments x
+        WHERE x.client_id = d.client_id AND x.active = true
+          AND (x.routine_id = d.routine_id OR x.routine_id IN (SELECT id FROM routines v WHERE v.root_routine_id = r.root_routine_id))
+        ORDER BY x.starts_on DESC LIMIT 1
+      ) ra ON true
+      WHERE d.client_id = ${client.id} AND d.kind <> 'new_version'
+    )
+    SELECT d.id, d.routine_id, d.routine_title, d.kind, d.sent_at, d.backfilled AS sent_approx,
+      d.effective_due_on AS due_on, completed.completed_on, completed.completion_percent,
+      CASE WHEN completed.completed_on IS NOT NULL AND completed.completion_percent >= 100 THEN 'completed'
+        WHEN d.offer_status = 'expired' OR (d.effective_due_on IS NOT NULL AND d.effective_due_on < ${hoy}::date) THEN 'expired' ELSE 'active' END AS delivery_status,
+      CASE WHEN d.effective_due_on IS NULL THEN NULL ELSE GREATEST(0, d.effective_due_on - ${hoy}::date)::int END AS days_remaining,
+      CASE WHEN d.offer_status = 'expired' AND d.credit_charge THEN 'credit'
+        WHEN d.offer_status = 'expired' AND d.package_debited THEN 'monthly' ELSE NULL END AS expiration_billing
+    FROM deliveries d
+    LEFT JOIN LATERAL (
+      SELECT rc.completed_on, rc.completion_percent FROM routine_completions rc
+      JOIN routines cr ON cr.id = rc.routine_id
+      WHERE rc.client_id = d.client_id
+        AND COALESCE(cr.root_routine_id, cr.id) = (SELECT COALESCE(rr.root_routine_id, rr.id) FROM routines rr WHERE rr.id = d.routine_id)
+        AND (rc.created_at >= d.sent_at OR rc.completed_on >= (d.sent_at AT TIME ZONE 'America/Panama')::date)
+        AND (d.next_sent_at IS NULL OR rc.created_at < d.next_sent_at)
+        AND (d.next_sent_at IS NULL OR rc.completed_on < (d.next_sent_at AT TIME ZONE 'America/Panama')::date)
+      ORDER BY rc.created_at DESC LIMIT 1
+    ) completed ON true
+    ORDER BY d.sent_at DESC
+    LIMIT 200
+  `;
+  const total = new Set(routines.map(item => String(item.root_routine_id || item.id))).size;
+  // postgres.js entrega una columna DATE como Date. `String(date)` usa la zona
+  // local del proceso y puede convertir la medianoche de Panamá al día anterior;
+  // el portal debe recibir siempre la fecha de negocio, no el texto local del
+  // runtime.
+  const ends = fechaDbTexto(client.demo_ends_on);
+  const daysRemaining = ends ? Math.max(0, Math.round((Date.parse(`${ends}T12:00:00Z`) - Date.parse(`${hoy}T12:00:00Z`)) / 86_400_000)) : null;
+  const ended = Boolean(ends && ends < hoy);
+  const firstName = String(client.full_name || '').trim().split(/\s+/)[0] || 'cliente';
+  const contact = String(settings?.contact_whatsapp || '').replace(/\D/g, '');
+  const whatsappUrl = contact
+    ? `https://wa.me/${contact}?text=${encodeURIComponent(`Hola Eileen, soy ${firstName}. Terminó mi demostración y quiero seguir entrenando.`)}`
+    : null;
+  const numbered = routines.map((routine, index) => ({ ...routine, demo_routine_index: index + 1, demo_routine_total: routines.length }));
+  return {
+    client: {
+      id: client.id, full_name: client.full_name, email: client.email, goal: client.goal, status: client.status,
+      service_mode: 'demo', demo_started_on: client.demo_started_on, demo_ends_on: ends,
+      demo_routine_limit: client.demo_routine_limit == null ? null : Number(client.demo_routine_limit),
+      demo_routines_used: total, demo_days_remaining: daysRemaining, demo_ended: ended, whatsapp_url: whatsappUrl
+    },
+    routines: numbered, routineHistory, routineCompletions, routineExerciseCompletions, exercises,
+    sessions: [], complianceSessions: [], busySlots: [], assessments: [], travel: [], invoices: [], packages: [], credits: [], weightLogs: [],
+    billingNotice: null, demo: true
+  };
+}
+
 // Portal con la fuente nueva (solo en estado `new`): el PAGADOR ve sus facturas con la misma forma que las del sistema anterior (el portal
 // no cambia) y el BENEFICIARIO que no paga solo ve uno de dos avisos, sin montos, sin saldos y sin el nombre del pagador.
 async function portalBillingFromNewSource(clientId: string, ownerId: string) {
@@ -7651,6 +7997,7 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   const auth = request.user as AuthUser;
   if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
   const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
+  if (client.service_mode === 'demo') return portalDemoSummary(client);
   // También se ejecuta al entrar al portal: una clienta debe ver la rutina
   // expirada y el efecto de su clase aunque el proceso no haya pasado por el
   // intervalo de mantenimiento entre el vencimiento y esta visita.
@@ -8028,14 +8375,15 @@ const routineFeedbackSchema = z.object({ routineId: z.string().uuid(), completed
 async function notifyRoutineActivity(input: {
   ownerId: string; clientId: string; routineId: string; completedOn: string; kind: 'started' | 'completed' | 'feedback' | 'expired'; clientName: string; routineTitle: string;
   elapsedSeconds?: number; completedCount?: number; totalExercises?: number; completionPercent?: number; feeling?: string | null; difficulty?: string | null; feedback?: string | null;
-  countsAsClass?: boolean; expirationMessage?: string;
+  countsAsClass?: boolean; expirationMessage?: string; demo?: boolean;
 }) {
   const feelingLabels: Record<string, string> = { muy_dificil: 'Muy difícil', dificil: 'Difícil', bien: 'Bien', excelente: 'Excelente' };
   const difficultyLabels: Record<string, string> = { facil: 'Fácil', bien: 'Bien', dificil: 'Difícil' };
   const feedbackText = [input.feeling ? `Sensación: ${feelingLabels[input.feeling] || input.feeling}` : '', input.difficulty ? `Dificultad: ${difficultyLabels[input.difficulty] || input.difficulty}` : '', input.feedback ? `Comentario: ${input.feedback}` : ''].filter(Boolean).join('\n');
   // "Cuenta como su clase de hoy" es información del sistema, no un comentario de la clienta: va en su propia línea.
   const feedbackLine = `${input.kind === 'completed' && input.countsAsClass ? '\nCuenta como su clase de hoy' : ''}${feedbackText ? `\n${feedbackText}` : ''}`;
-  const title = input.kind === 'started' ? `Entrenamiento iniciado · ${input.clientName}` : input.kind === 'completed' ? `Rutina completada · ${input.clientName}` : input.kind === 'expired' ? `Rutina expirada · ${input.clientName}` : `Feedback recibido · ${input.clientName}`;
+  const prefix = input.demo ? 'Demo · ' : '';
+  const title = input.kind === 'started' ? `${prefix}Entrenamiento iniciado · ${input.clientName}` : input.kind === 'completed' ? `${prefix}Rutina completada · ${input.clientName}` : input.kind === 'expired' ? `${prefix}Rutina expirada · ${input.clientName}` : `${prefix}Feedback recibido · ${input.clientName}`;
   const durationText = input.elapsedSeconds != null ? duracionTexto(Number(input.elapsedSeconds)) : '';
   const body = input.kind === 'started'
     ? `${input.clientName} inició «${input.routineTitle}».`
@@ -8054,14 +8402,14 @@ async function notifyRoutineActivity(input: {
 app.post('/api/portal/routine-activity', { preHandler: requireAuth }, async (request, reply) => {
   const auth = request.user as AuthUser; if (auth.role !== 'client') return reply.code(403).send({ error: 'Acceso exclusivo para clientes' });
   const input = routineActivitySchema.parse(request.body); const client = await portalClient(auth.sub); if (!client) return reply.code(404).send({ error: 'Portal de cliente no encontrado' });
-  const [routine] = await sql`SELECT r.title, c.id AS client_id, c.full_name, c.owner_id FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id JOIN clients c ON c.id = ra.client_id WHERE ra.routine_id = ${input.routineId} AND ra.client_id = ${client.id} AND ra.active = true AND (ra.ends_on IS NULL OR ra.ends_on >= current_date)`;
+  const [routine] = await sql`SELECT r.title, c.id AS client_id, c.full_name, c.owner_id, c.service_mode FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id JOIN clients c ON c.id = ra.client_id WHERE ra.routine_id = ${input.routineId} AND ra.client_id = ${client.id} AND ra.active = true AND (ra.ends_on IS NULL OR ra.ends_on >= current_date)`;
   if (!routine) return reply.code(404).send({ error: 'La rutina no está asignada a este cliente' });
   await sql.begin(async transaction => {
     if (input.kind === 'started') await transaction`INSERT INTO routine_timer_sessions (routine_id, client_id, completed_on, started_at, elapsed_seconds, active) VALUES (${input.routineId}, ${client.id}, ${input.completedOn}, now(), ${input.elapsedSeconds}, true) ON CONFLICT (routine_id, client_id, completed_on) DO UPDATE SET active = true, paused_at = null, elapsed_seconds = GREATEST(routine_timer_sessions.elapsed_seconds, EXCLUDED.elapsed_seconds), updated_at = now()`;
     else if (input.kind === 'paused') await transaction`UPDATE routine_timer_sessions SET active = false, paused_at = now(), elapsed_seconds = GREATEST(elapsed_seconds, ${input.elapsedSeconds}), updated_at = now() WHERE routine_id = ${input.routineId} AND client_id = ${client.id} AND completed_on = ${input.completedOn}`;
     else await transaction`UPDATE routine_timer_sessions SET active = true, paused_at = null, elapsed_seconds = GREATEST(elapsed_seconds, ${input.elapsedSeconds}), updated_at = now() WHERE routine_id = ${input.routineId} AND client_id = ${client.id} AND completed_on = ${input.completedOn}`;
   });
-  if (input.kind === 'started') await notifyRoutineActivity({ ownerId: routine.owner_id, clientId: routine.client_id, routineId: input.routineId, completedOn: input.completedOn, kind: 'started', clientName: routine.full_name, routineTitle: routine.title });
+  if (input.kind === 'started') await notifyRoutineActivity({ ownerId: routine.owner_id, clientId: routine.client_id, routineId: input.routineId, completedOn: input.completedOn, kind: 'started', clientName: routine.full_name, routineTitle: routine.title, demo: routine.service_mode === 'demo' });
   return reply.code(201).send({ recorded: true });
 });
 
@@ -8111,8 +8459,8 @@ app.post('/api/portal/routine-exercise-completions', { preHandler: requireAuth }
   });
   if (!result) return reply.code(404).send({ error: 'La rutina no está asignada a este cliente' });
   if (result.routineCompleted) {
-    const [routine] = await sql`SELECT r.title, c.full_name, c.owner_id FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id JOIN clients c ON c.id = ra.client_id WHERE ra.routine_id = ${input.routineId} AND ra.client_id = ${client.id} AND ra.active = true`;
-    if (routine) await notifyRoutineActivity({ ownerId: routine.owner_id, clientId: client.id, routineId: input.routineId, completedOn: input.completedOn, kind: 'completed', clientName: routine.full_name, routineTitle: routine.title, elapsedSeconds: input.elapsedSeconds, completedCount: result.completedCount, totalExercises: result.totalExercises, feeling: result.completion.feeling, difficulty: result.completion.difficulty, feedback: result.completion.feedback, countsAsClass: Boolean(result.sessionCompleted) });
+    const [routine] = await sql`SELECT r.title, c.full_name, c.owner_id, c.service_mode FROM routine_assignments ra JOIN routines r ON r.id = ra.routine_id JOIN clients c ON c.id = ra.client_id WHERE ra.routine_id = ${input.routineId} AND ra.client_id = ${client.id} AND ra.active = true`;
+    if (routine) await notifyRoutineActivity({ ownerId: routine.owner_id, clientId: client.id, routineId: input.routineId, completedOn: input.completedOn, kind: 'completed', clientName: routine.full_name, routineTitle: routine.title, elapsedSeconds: input.elapsedSeconds, completedCount: result.completedCount, totalExercises: result.totalExercises, feeling: result.completion.feeling, difficulty: result.completion.difficulty, feedback: result.completion.feedback, countsAsClass: Boolean(result.sessionCompleted), demo: routine.service_mode === 'demo' });
   }
   return reply.code(201).send(result);
 });
@@ -8140,11 +8488,11 @@ const duracionTexto = (segundos: number | null) => {
 };
 
 async function avisarRutinaCumplida(cliente: Record<string, unknown>, rutina: string, porcentaje: number, duracion: number | null, enLugarDeClase: boolean, routineId: string, completedOn: string) {
-  const client = cliente as { id: string; owner_id: string; full_name: string };
+  const client = cliente as { id: string; owner_id: string; full_name: string; service_mode?: string };
   await notifyRoutineActivity({
     ownerId: client.owner_id, clientId: client.id, routineId, completedOn, kind: 'completed',
     clientName: client.full_name, routineTitle: rutina, completionPercent: porcentaje,
-    elapsedSeconds: duracion ?? undefined, countsAsClass: enLugarDeClase
+    elapsedSeconds: duracion ?? undefined, countsAsClass: enLugarDeClase, demo: client.service_mode === 'demo'
   });
 }
 
@@ -8172,6 +8520,7 @@ app.post('/api/sessions/:id/routine-offer', { preHandler: requireStaff }, async 
   let oferta;
   try {
     [oferta] = await sql.begin(async transaction => {
+      await assertDemoCanReceiveRoutine(transaction, sesion.client_id, rutina.id);
       const repeticionConfirmada = await rejectRecentRoutineRepeat(transaction, rutina as unknown as RoutineDeliveryRoutine, sesion.client_id, input.confirmRepeat, 'offer');
       const filas = await transaction`
         INSERT INTO session_routine_offers (session_id, routine_id, client_id, offered_by_user_id, origin)
@@ -8926,6 +9275,7 @@ app.post('/api/routines/:id/share-links', { preHandler: requireStaff }, async (r
   let enlace;
   try {
     enlace = await sql.begin(async transaction => {
+      await assertDemoCanReceiveRoutine(transaction, input.clientId, rutina.id);
       const repeticionConfirmada = await rejectRecentRoutineRepeat(transaction, rutina as unknown as RoutineDeliveryRoutine, input.clientId, input.confirmRepeat, input.travelId ? 'travel_link' : 'link');
       const [created] = await transaction`
         INSERT INTO routine_share_links (owner_id, client_id, routine_id, travel_id, token_hash, expires_at, created_by)
@@ -8980,7 +9330,7 @@ function demasiadasVisitas(request: { ip: string }) {
 async function enlaceDeRutina(token: string) {
   if (!/^[A-Za-z0-9_-]{30,80}$/.test(token)) return { estado: 'desconocido' as const };
   const [fila] = await sql`
-    SELECT l.*, r.title, r.description, r.exercises, c.full_name, c.owner_id AS client_owner_id, c.portal_user_id, c.status AS client_status
+    SELECT l.*, r.title, r.description, r.exercises, c.full_name, c.owner_id AS client_owner_id, c.portal_user_id, c.status AS client_status, c.service_mode
     FROM routine_share_links l JOIN routines r ON r.id = l.routine_id JOIN clients c ON c.id = l.client_id
     WHERE l.token_hash = ${hashToken(token)}`;
   if (!fila) return { estado: 'desconocido' as const };
@@ -9082,7 +9432,7 @@ app.post('/api/public/routine/:token/complete', async (request, reply) => {
       catch (error) { app.log.warn({ err: error, sessionId: clase.id }, 'La rutina por enlace se cumplió pero la clase no pudo marcarse como realizada'); }
     }
   }
-  await avisarRutinaCumplida({ id: fila.client_id, owner_id: fila.owner_id, full_name: fila.full_name }, String(fila.title), input.completionPercent, input.durationSeconds ?? null, Boolean(claseCerrada), String(fila.routine_id), hoy);
+  await avisarRutinaCumplida({ id: fila.client_id, owner_id: fila.owner_id, full_name: fila.full_name, service_mode: fila.service_mode }, String(fila.title), input.completionPercent, input.durationSeconds ?? null, Boolean(claseCerrada), String(fila.routine_id), hoy);
   return { completed: true, sessionCompleted: Boolean(claseCerrada) };
 });
 
@@ -9092,9 +9442,10 @@ app.post('/api/public/routine/:token/complete', async (request, reply) => {
 async function cancelarComoPerdidaPorElCliente(sessionId: string, despues?: (transaction: typeof sql) => Promise<void>) {
   return sql.begin(async transaction => {
     const [actual] = await transaction`
-      SELECT s.*, c.payment_mode, c.owner_id FROM sessions s JOIN clients c ON c.id = s.client_id
+      SELECT s.*, c.payment_mode, c.service_mode, c.owner_id FROM sessions s JOIN clients c ON c.id = s.client_id
       WHERE s.id = ${sessionId} AND s.status = 'scheduled' FOR UPDATE`;
     if (!actual) return null;
+    if (actual.service_mode === 'demo') return null;
     const esCredito = actual.payment_mode === 'no_anticipado';
     await transaction`
       UPDATE sessions SET status = 'cancelled', cancellation_kind = 'not_rescheduled', cancelled_by = 'client',
@@ -9128,6 +9479,7 @@ async function darPorPerdidasClasesConRutinaVencida(ownerId?: string) {
     JOIN clients c ON c.id = s.client_id
     JOIN routines r ON r.id = o.routine_id
     WHERE o.origin = 'client' AND o.status = 'offered' AND s.status = 'scheduled'
+      AND c.service_mode <> 'demo'
       AND (s.starts_at AT TIME ZONE 'America/Panama')::date < (now() AT TIME ZONE 'America/Panama')::date
       AND (${ownerId ?? null}::uuid IS NULL OR c.owner_id = ${ownerId ?? null}::uuid)`;
   let perdidas = 0;
@@ -9137,6 +9489,7 @@ async function darPorPerdidasClasesConRutinaVencida(ownerId?: string) {
         const [actual] = await transaction`
           SELECT o.id AS offer_id, o.routine_id, o.client_id, s.id AS session_id, s.starts_at,
             s.package_debited, s.status AS session_status, c.owner_id, c.full_name, c.payment_mode,
+            c.service_mode,
             COALESCE(c.credit_session_price, 25) AS credit_session_price, r.title AS routine_title
           FROM session_routine_offers o
           JOIN sessions s ON s.id = o.session_id
@@ -9146,6 +9499,7 @@ async function darPorPerdidasClasesConRutinaVencida(ownerId?: string) {
           FOR UPDATE OF o, s
         `;
         if (!actual) return null;
+        if (actual.service_mode === 'demo') return null;
         const esCredito = actual.payment_mode === 'no_anticipado';
         let packageDebited = Boolean(actual.package_debited);
         let packageLabel: string | null = null;
@@ -9214,7 +9568,7 @@ async function darPorPerdidasClasesDeViajeSinRutina(ownerId?: string) {
     JOIN client_travel t ON t.client_id = s.client_id
       AND (s.starts_at AT TIME ZONE 'America/Panama')::date BETWEEN t.starts_on AND COALESCE(t.ends_on, DATE '9999-12-31')
       AND (s.starts_at AT TIME ZONE 'America/Panama')::date >= (t.created_at AT TIME ZONE 'America/Panama')::date
-    WHERE s.status = 'scheduled' AND NOT COALESCE(s.paused_hold, false) AND c.status = 'active'
+    WHERE s.status = 'scheduled' AND NOT COALESCE(s.paused_hold, false) AND c.status = 'active' AND c.service_mode <> 'demo'
       AND (s.starts_at AT TIME ZONE 'America/Panama')::date < (now() AT TIME ZONE 'America/Panama')::date
       AND (${ownerId ?? null}::uuid IS NULL OR c.owner_id = ${ownerId ?? null}::uuid)
       AND NOT EXISTS (
@@ -9291,7 +9645,7 @@ async function reconciliarSaldos(ownerId?: string) {
   const saldos = await sql`
     SELECT sp.id, sp.client_id, sp.expires_on, sp.total_sessions, sp.used_sessions
     FROM session_packages sp JOIN clients c ON c.id = sp.client_id
-    WHERE sp.status = 'active' AND sp.used_sessions < sp.total_sessions AND sp.expires_on IS NOT NULL
+    WHERE sp.status = 'active' AND sp.used_sessions < sp.total_sessions AND sp.expires_on IS NOT NULL AND c.service_mode <> 'demo'
       AND (${ownerId ?? null}::uuid IS NULL OR c.owner_id = ${ownerId ?? null}::uuid)
     ORDER BY sp.expires_on ASC`;
   let descontadas = 0;
