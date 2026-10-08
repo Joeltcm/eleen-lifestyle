@@ -1,4 +1,4 @@
-const APP_VERSION = '299';
+const APP_VERSION = '300';
 const markPwaVersion = () => document.querySelectorAll('.topbar-actions').forEach(actions => {
   if (actions.querySelector('[data-pwa-version]')) return;
   const indicator = document.createElement('span');
@@ -984,7 +984,7 @@ function renderRoutines() {
   document.getElementById('routine-grid').innerHTML = data.routines.map(routine => {
     const asignados = (routine.assignedClientIds || []).map(id => data.clients.find(client => client.id === id)?.name).filter(Boolean);
     const uso = routine.deliveryCount ? `Enviada a ${routine.deliveryClients} cliente${routine.deliveryClients === 1 ? '' : 's'} · última ${fechaHoraPanama(routine.lastSentAt, false)}` : 'Aún no se ha enviado';
-    return `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${escapeHtml(routine.title)}</h3><p class="routine-descripcion">${escapeHtml(routine.description)}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.slice(0, 4).map(exercise => `<span>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<span class="exercise-more">+${routine.exercises.length - 4} más</span>` : ''}</div>` : ''}<footer><span class="routine-usage">${uso}</span><br>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''}${asignados.length ? `<br><span>Para: ${escapeHtml(asignados.join(', '))}</span>` : ''} · ${routine.sessions} ${routine.sessions === 1 ? 'sesión' : 'sesiones'} / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''} · ${routineVideoCount(routine)} con video${routine.dueOn ? `<br><span class="routine-due${dateOnly(routine.dueOn) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">Fecha límite: ${fechaCorta(routine.dueOn)}</span>` : ''}</footer><div class="client-actions">${routine.assignedClientIds?.[0] ? `<button class="secondary" data-share-routine="${routine.id}">Enviar enlace</button>` : ''}<button class="secondary" data-open-routine="${routine.id}">Ver rutina</button><button class="secondary" data-edit-routine="${routine.id}">Editar</button><button class="secondary" data-duplicate-routine="${routine.id}">Reutilizar</button><button class="secondary" data-delete-routine="${routine.id}">Eliminar</button></div></article>`;
+    return `<article class="routine-card"><span class="routine-icon">⌁</span><h3>${escapeHtml(routine.title)}</h3><p class="routine-descripcion">${escapeHtml(routine.description)}</p>${routine.exercises.length ? `<div class="exercise-preview">${routine.exercises.map((exercise, index) => `<span${index >= 4 ? ' class="exercise-extra"' : ''}>${exerciseLabel(exercise)}</span>`).join('')}${routine.exercises.length > 4 ? `<button type="button" class="exercise-more" data-toggle-exercises="${routine.exercises.length - 4}" aria-expanded="false">+${routine.exercises.length - 4} más</button>` : ''}</div>` : ''}<footer><span class="routine-usage">${uso}</span><br>${routine.clients} cliente${routine.clients !== 1 ? 's' : ''} asignado${routine.clients !== 1 ? 's' : ''}${asignados.length ? `<br><span>Para: ${escapeHtml(asignados.join(', '))}</span>` : ''} · ${routine.sessions} ${routine.sessions === 1 ? 'sesión' : 'sesiones'} / semana · ${routine.exercises.length} ejercicio${routine.exercises.length !== 1 ? 's' : ''} · ${routineVideoCount(routine)} con video${routine.dueOn ? `<br><span class="routine-due${dateOnly(routine.dueOn) < new Date().toISOString().slice(0, 10) ? ' overdue' : ''}">Fecha límite: ${fechaCorta(routine.dueOn)}</span>` : ''}</footer><div class="client-actions">${routine.assignedClientIds?.[0] ? `<button class="secondary" data-share-routine="${routine.id}">Enviar enlace</button>` : ''}<button class="secondary" data-open-routine="${routine.id}">Ver rutina</button><button class="secondary" data-edit-routine="${routine.id}">Editar</button><button class="secondary" data-duplicate-routine="${routine.id}">Reutilizar</button><button class="secondary" data-delete-routine="${routine.id}">Eliminar</button></div></article>`;
   }).join('');
 }
 function renderBillingInsights() {
@@ -5735,6 +5735,11 @@ document.addEventListener('click', event => {
   if (event.target.dataset.editClient) editClient(data.clients.find(client => client.id === event.target.dataset.editClient));
   if (event.target.dataset.editRoutine) newRoutine(data.routines.find(routine => routine.id === event.target.dataset.editRoutine));
   if (event.target.dataset.duplicateRoutine) newRoutine(data.routines.find(routine => routine.id === event.target.dataset.duplicateRoutine), true);
+  if (event.target.dataset.toggleExercises) {
+    // "+N más" de la tarjeta de rutina: muestra u oculta el resto de los ejercicios sin abrir el detalle.
+    const lista = event.target.closest('.exercise-preview'); const abierta = lista.classList.toggle('expanded');
+    event.target.setAttribute('aria-expanded', String(abierta)); event.target.textContent = abierta ? 'Ver menos' : `+${event.target.dataset.toggleExercises} más`;
+  }
   if (event.target.dataset.openRoutine) routineDetail(data.routines.find(routine => routine.id === event.target.dataset.openRoutine));
   if (event.target.dataset.deleteRoutine) {
     const rutina = data.routines.find(item => item.id === event.target.dataset.deleteRoutine);

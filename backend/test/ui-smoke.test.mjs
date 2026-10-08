@@ -296,6 +296,28 @@ test('la descripción de una rutina con secciones (Objetivo, Calentamiento…) s
   assert.match(readFileSync(new URL('../../styles.css', import.meta.url), 'utf8'), /\.routine-descripcion\{white-space:pre-line\}/, 'la regla que conserva los saltos de línea existe');
 });
 
+test('la tarjeta de la lista muestra 4 ejercicios y "+N más" se toca para ver el resto y volver a plegar, sin abrir el detalle', async () => {
+  const ejercicios = ['Uno', 'Dos', 'Tres', 'Cuatro', 'Cinco', 'Seis'].map(name => ({ name, sets: 3, reps: '10' }));
+  await api.post('/api/routines', { title: 'Rutina plegable', sessionsPerWeek: 1, clientId, exercises: ejercicios });
+  const p = await abrirPantalla({ baseApi: servidor.base, token: tokenStaff, hash: '#routines' });
+  try {
+    await esperar(() => p.evaluar('data.routines.length') >= 1, { mensaje: 'rutinas cargadas' });
+    p.clic(p.q('[data-view="routines"]')); await p.quieta(200);
+    const tarjeta = () => p.qa('.routine-card').find(x => x.textContent.includes('Rutina plegable'));
+    const lista = () => tarjeta().querySelector('.exercise-preview');
+    assert.equal(lista().querySelectorAll('span.exercise-extra').length, 2, 'los dos últimos van ocultos hasta que se toque');
+    const boton = () => tarjeta().querySelector('[data-toggle-exercises]');
+    assert.equal(boton().tagName, 'BUTTON'); assert.match(boton().textContent, /\+2 más/); assert.equal(boton().getAttribute('aria-expanded'), 'false');
+    p.clic(boton()); await p.quieta(50);
+    assert.ok(lista().classList.contains('expanded'), 'al tocar se despliega el resto'); assert.equal(boton().getAttribute('aria-expanded'), 'true'); assert.match(boton().textContent, /Ver menos/);
+    assert.ok(!p.q('dialog[open]'), 'no abre el detalle ni ningún diálogo');
+    p.clic(boton()); await p.quieta(50);
+    assert.ok(!lista().classList.contains('expanded'), 'vuelve a plegarse'); assert.match(boton().textContent, /\+2 más/);
+    sinErrores(p, 'tarjeta plegable');
+  } finally { await p.cerrar(); }
+  assert.match(readFileSync(new URL('../../styles.css', import.meta.url), 'utf8'), /\.exercise-preview:not\(\.expanded\) \.exercise-extra\{display:none\}/, 'la regla que oculta los extras existe');
+});
+
 test('AVISO DE REPETIDO en pantalla: reutilizar para la misma clienta pregunta; Cancelar no envía nada, Enviar de todos modos sí y queda registrado', async () => {
   const p = await abrirPantalla({ baseApi: servidor.base, token: tokenStaff, hash: '#routines' });
   try {
