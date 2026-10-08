@@ -141,6 +141,22 @@ test('G) aviso previo a la clienta: solo ofertas de ELLA, de HOY, desde las 19:0
   for (const tipo of ['pending', 'pause']) await db`INSERT INTO notification_deliveries (user_id, kind, reference_id) VALUES (${oferta.u}, ${tipo}, gen_random_uuid())`;
 });
 
+test('H) historial de la clienta: asignación y enlace de la MISMA rutina el mismo día con la misma fecha límite son UN solo envío; otro día sí cuenta aparte; la hora reconstruida no se muestra', async () => {
+  const { c, r, portal } = await escenario('Doble envio', { conPaquete: false });
+  // escenario() deja una oferta; aquí interesan los envíos ordinarios de la rutina: se parte de cero.
+  await db`DELETE FROM routine_deliveries WHERE client_id = ${c}`;
+  const envio = (tipo, cuando, extra = {}) => db`
+    INSERT INTO routine_deliveries (owner_id, routine_id, client_id, kind, sent_at, due_on, routine_title, routine_version, client_name, summary_text, exercises_snapshot, backfilled)
+    SELECT owner_id, id, ${c}, ${tipo}, ${cuando}::timestamptz, ${dia(5)}::date, title, 1, 'Doble envio', 'resumen', '[]'::jsonb, ${extra.backfilled ?? false} FROM routines WHERE id = ${r.id}`;
+  await envio('link', aHora(dia(0), '09:00')); await envio('assignment', aHora(dia(0), '12:00'), { backfilled: true });
+  let h = (await portal.get('/api/portal/summary')).datos.routineHistory;
+  assert.equal(h.length, 1, `un solo envío ese día (hay ${h.length}: ${JSON.stringify(h.map(x => x.kind))})`);
+  assert.equal(h[0].kind, 'assignment'); assert.equal(h[0].sent_approx, true, 'la hora de una asignación reconstruida es aproximada');
+  await envio('link', aHora(dia(-3), '10:00'));
+  h = (await portal.get('/api/portal/summary')).datos.routineHistory;
+  assert.equal(h.length, 2, 'un envío de otro día sí aparece aparte');
+});
+
 // Va al final: revierte la restricción compartida por todas las pruebas de este archivo.
 test('E) la reversa de 067 se NIEGA a borrar avisos de expiración sin orden expresa, y con ella deja la restricción anterior', async () => {
   const psql = (permitir = false) => promisify(execFile)('psql', ['-v', 'ON_ERROR_STOP=1', '-q', servidor.databaseUrl, ...(permitir ? ['-c', "SET billing.allow_destructive_down = 'on'"] : []), '-f', new URL('../migrations-down/067_routine_expiration_notifications.down.sql', import.meta.url).pathname]);

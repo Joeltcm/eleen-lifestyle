@@ -1,4 +1,4 @@
-const APP_VERSION = '298';
+const APP_VERSION = '299';
 const markPwaVersion = () => document.querySelectorAll('.topbar-actions').forEach(actions => {
   if (actions.querySelector('[data-pwa-version]')) return;
   const indicator = document.createElement('span');
@@ -6553,7 +6553,8 @@ function portalRoutineHistoryMarkup() {
   const statusText = { active: 'Activa', completed: 'Cumplida', expired: 'Expirada' };
   const cards = history.map(item => {
     const status = item.delivery_status || 'active';
-    const sentAt = fechaHoraPanama(item.sent_at, true);
+    // La hora de una asignación reconstruida (relleno) es inventada: solo se muestra el día.
+    const sentAt = fechaHoraPanama(item.sent_at, !item.sent_approx);
     const due = item.due_on ? fechaCorta(item.due_on) : null;
     let detail = '';
     if (status === 'active') {

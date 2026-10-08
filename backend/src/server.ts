@@ -7736,8 +7736,18 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
         ) actual ON true
         -- Un traslado automático a una versión nueva no es un envío para la clienta: no se le muestra.
         WHERE d.client_id = ${client.id} AND d.kind <> 'new_version'
+          -- Para la clienta, una asignación y un enlace de la MISMA rutina el mismo día y con la misma fecha límite son un solo envío: se muestra el último
+          -- (así la rutina cumplida se atribuye al envío que se ve). Las ofertas por clase no se juntan: cada una es de una clase distinta.
+          AND (d.offer_id IS NOT NULL OR NOT EXISTS (
+            SELECT 1 FROM routine_deliveries d2
+            WHERE d2.client_id = d.client_id AND d2.kind <> 'new_version' AND d2.offer_id IS NULL AND d2.id <> d.id
+              AND (SELECT COALESCE(x.root_routine_id, x.id) FROM routines x WHERE x.id = d2.routine_id) = (SELECT COALESCE(x.root_routine_id, x.id) FROM routines x WHERE x.id = d.routine_id)
+              AND (d2.sent_at AT TIME ZONE 'America/Panama')::date = (d.sent_at AT TIME ZONE 'America/Panama')::date
+              AND d2.due_on IS NOT DISTINCT FROM d.due_on
+              AND (d2.sent_at, d2.id) > (d.sent_at, d.id)))
       )
       SELECT d.id, d.routine_id, d.routine_title, NULL::int AS routine_version, d.kind, d.sent_at,
+        (d.backfilled AND d.kind = 'assignment') AS sent_approx,
         d.effective_due_on AS due_on, d.session_id, d.offer_origin,
         completed.completed_on, completed.completion_percent,
         (completed.completed_on IS NOT NULL AND completed.completion_percent >= 100) AS completed,
