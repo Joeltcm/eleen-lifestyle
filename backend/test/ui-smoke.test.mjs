@@ -80,6 +80,36 @@ test('la entrenadora entra y recorre todas las secciones sin errores', async () 
   } finally { await p.cerrar(); }
 });
 
+test('el Resumen invita a crear una demo cuando no hay demos registradas', async () => {
+  const p = await abrirPantalla({ baseApi: servidor.base, token: tokenStaff, hash: '#dashboard', ancho: 375 });
+  try {
+    await esperar(() => p.q('#demo-summary-content')?.textContent.includes('Aún no tienes clientes en demo'), { mensaje: 'estado vacío de demos' });
+    const tarjeta = p.q('#demo-summary-card');
+    assert.match(tarjeta.textContent, /Marca «Cliente demo \(gratis\)»/);
+    assert.ok(p.q('#demo-summary-card [data-action="new-client"]'));
+    sinErrores(p, 'estado vacío de demos');
+  } finally { await p.cerrar(); }
+});
+
+test('el Resumen muestra la tarjeta Demos y abre el expediente desde la lista a 375 px', async () => {
+  const demo = (await api.post('/api/clients', { fullName: 'Demo Resumen UI', email: 'demo.resumen.ui@prueba.test', demo: true, demoEndsOn: panama(2), demoRoutineLimit: 3 })).datos;
+  const p = await abrirPantalla({ baseApi: servidor.base, token: tokenStaff, hash: '#dashboard', ancho: 375 });
+  try {
+    await esperar(() => p.q('#demo-summary-card'), { mensaje: 'tarjeta de demos' });
+    await esperar(() => p.q(`[data-demo-client="${demo.id}"]`), { mensaje: 'demo en la lista de vencimientos' });
+    const tarjeta = p.q('#demo-summary-card');
+    assert.match(tarjeta.textContent, /Demos activas/);
+    assert.match(tarjeta.textContent, /Vencen en 7 días/);
+    assert.match(tarjeta.textContent, /Vencidas sin decidir/);
+    assert.match(tarjeta.textContent, /Rutinas enviadas/);
+    assert.match(tarjeta.textContent, /Embudo de conversión/);
+    p.clic(p.q(`[data-demo-client="${demo.id}"]`));
+    await esperar(() => p.q('.modal-content h2') || p.q('#modal-content h2'), { mensaje: 'expediente de la demo' });
+    assert.match((p.q('#modal-content') || p.q('.modal-content')).textContent, /Demo Resumen UI/);
+    sinErrores(p, 'resumen de demos');
+  } finally { await p.cerrar(); }
+});
+
 test('Eileen puede crear, filtrar y convertir un cliente demo desde la pantalla', async () => {
   const demo = (await api.post('/api/clients', {
     fullName: 'Demo de Pantalla', email: 'demo.pantalla@prueba.test', demo: true,

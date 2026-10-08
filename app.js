@@ -1,4 +1,4 @@
-const APP_VERSION = '302';
+const APP_VERSION = '303';
 const markPwaVersion = () => document.querySelectorAll('.topbar-actions').forEach(actions => {
   if (actions.querySelector('[data-pwa-version]')) return;
   const indicator = document.createElement('span');
@@ -56,7 +56,7 @@ if (authToken && !localStorage.getItem(authKey)) {
   localStorage.removeItem(legacyAuthKey);
 }
 let currentUser = null;
-let data = { travel: [], clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, notifications: [], googleCalendar: { configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } } };
+let data = { travel: [], clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, demoSummary: null, notifications: [], googleCalendar: { configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } } };
 let portalData = null;
 let portalPeriodMode = 'month';
 let portalPeriodMonth = dateKey(today).slice(0, 7);
@@ -451,7 +451,7 @@ async function refreshGoogleCalendarState() {
   data.googleCalendar = await api('/api/integrations/google-calendar/status').catch(() => ({ configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } }));
 }
 async function loadData() {
-  const [clients, invoices, packages, sessions, routines, plans, compliance, notifications, googleCalendar, catalog, allInbody, travel] = await Promise.all([
+  const [clients, invoices, packages, sessions, routines, plans, compliance, notifications, googleCalendar, catalog, allInbody, travel, demoSummary] = await Promise.all([
     api('/api/clients'), api('/api/invoices'), api('/api/packages'), api('/api/sessions'), api('/api/routines'),
     api('/api/plans'),
     api(`/api/compliance/summary?period=${compliancePeriod}`).catch(() => ({ compliancePercent: 0, activities: 0, clients: [] })),
@@ -461,7 +461,8 @@ async function loadData() {
     // nueve: un viaje de ida y vuelta entero por nada.
     api('/api/exercises').catch(() => null),
     api('/api/inbody').catch(() => []),
-    api('/api/travel').catch(() => [])
+    api('/api/travel').catch(() => []),
+    api('/api/demo/summary').catch(() => null)
   ]);
   data.travel = Array.isArray(travel) ? travel : [];
   exerciseCatalog = catalog ? catalog.map(exercise => ({
@@ -509,7 +510,7 @@ async function loadData() {
   data.sessions = sessions.map(sessionFromApi);
   data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: (item.assigned_client_ids || []).length, assignedClientIds: item.assigned_client_ids || [], sessions: item.sessions_per_week, dueOn: item.due_on || null, exercises: item.exercises || [], version: Number(item.version || 1), rootRoutineId: item.root_routine_id || item.id, archivedAt: item.archived_at || null, deliveryCount: Number(item.deliveries_count || 0), deliveryClients: Number(item.delivery_clients_count || 0), lastSentAt: item.last_sent_at || null, lastCompletedAt: item.last_completed_at || null }));
   data.plans = plans.map(item => ({ id: item.id, name: item.name, description: item.description || '', billingModel: item.billing_model, price: Number(item.price), sessionsIncluded: Number(item.sessions_included || 0), validityDays: Number(item.validity_days || 0), zone: item.zone || '', specialFor: item.special_for || '', active: item.active }));
-  data.compliance = compliance; data.notifications = notifications; data.googleCalendar = googleCalendar; billingAnalytics = null; billingAnalyticsLoadingYear = null; billingAnalyticsRequest += 1; showPendingBrowserNotification(notifications);
+  data.compliance = compliance; data.demoSummary = demoSummary; data.notifications = notifications; data.googleCalendar = googleCalendar; billingAnalytics = null; billingAnalyticsLoadingYear = null; billingAnalyticsRequest += 1; showPendingBrowserNotification(notifications);
 }
 const initials = name => name.split(' ').slice(0, 2).map(word => word[0]).join('').toUpperCase();
 const modalidadPlan = modelo => modelo === 'package' ? 'Paquete' : modelo === 'single' ? 'Sesión suelta' : 'Mensualidad';
@@ -730,7 +731,24 @@ function renderDashboard() {
   const cobrosPendientes = data.invoices.filter(item => item.status === 'pending' && item.source !== 'zoho_invoice' && clientesActivos.has(item.clientId)).length;
   document.getElementById('alerts').innerHTML = `${noInbody || '<div class="alert-item"><b>Todo al día</b><span>No hay alertas de seguimiento.</span></div>'}<div class="alert-item"><b>${cobrosPendientes} ${cobrosPendientes === 1 ? 'cobro pendiente' : 'cobros pendientes'}</b><span>Revisa pagos y comprobantes.</span></div>`;
   document.getElementById('compliance-list').innerHTML = data.compliance.clients.length ? data.compliance.clients.map(client => `<div class="compliance-row"><span class="initials">${escapeHtml(initials(client.name))}</span><div><b>${escapeHtml(client.name)}</b><small>${client.completed} de ${client.activities} clases${client.missed ? ` · ${client.missed} perdida${client.missed === 1 ? '' : 's'}` : ''}${avanceDelMes(client.clientId)}</small><span class="compliance-track"><i style="width:${client.compliancePercent}%"></i></span></div><strong>${client.compliancePercent}%</strong></div>`).join('') : '<p class="empty">Aún no hay clases vencidas en este período.</p>';
+  renderDemoSummary();
   const notificationCount = document.getElementById('notification-count'); notificationCount.textContent = data.notifications.length; notificationCount.hidden = !data.notifications.length;
+}
+function renderDemoSummary(summary = data.demoSummary) {
+  const root = document.getElementById('demo-summary-content');
+  if (!root || !summary) { if (root) root.innerHTML = '<p class="empty">No se pudo cargar el resumen de demos.</p>'; return; }
+  if (!summary.funnel?.started && !summary.expiring?.length && !summary.active && !summary.routinesSent) {
+    root.innerHTML = '<div class="card-head"><div><h3>Demos</h3><p>Rutinas promocionales y conversión</p></div></div><div class="demo-empty"><strong>Aún no tienes clientes en demo.</strong><span>Marca «Cliente demo (gratis)» al crear uno para enviar rutinas promocionales.</span><button type="button" class="secondary" data-action="new-client">Crear cliente demo</button></div>';
+    return;
+  }
+  const metric = (label, value, note = '') => `<article><span>${label}</span><strong>${value}</strong>${note ? `<small>${note}</small>` : ''}</article>`;
+  const list = (summary.expiring || []).map(item => {
+    const used = Number(item.routinesUsed || 0); const limit = item.demo_routine_limit == null ? used : Number(item.demo_routine_limit);
+    const expired = Boolean(item.expired); const days = Math.abs(Number(item.days_remaining || 0));
+    return `<button type="button" class="demo-expiring-row${expired ? ' expired' : ''}" data-demo-client="${escapeHtml(item.id)}"><span class="initials">${escapeHtml(initials(item.full_name))}</span><span><b>${escapeHtml(item.full_name)}</b><small>${expired ? `Venció el ${fechaCorta(item.demo_ends_on)} · vencida hace ${days} día${days === 1 ? '' : 's'}` : `Termina el ${fechaCorta(item.demo_ends_on)} · quedan ${days} día${days === 1 ? '' : 's'}`}</small><small>${used} de ${limit} rutinas</small></span><span aria-hidden="true">›</span></button>`;
+  }).join('');
+  const funnel = summary.funnel || {};
+  root.innerHTML = `<div class="card-head"><div><h3>Demos</h3><p>Rutinas promocionales y conversión</p></div><button type="button" class="text-button" data-action="demo-filter">Ver todas →</button></div><div class="demo-metrics">${metric('Demos activas', summary.active)}${metric('Vencen en 7 días', summary.endingSoon)}${metric('Vencidas sin decidir', summary.expiredUndecided)}${metric('Rutinas enviadas', summary.routinesSent, `${summary.routinesCompleted} completadas`)}</div><div class="demo-funnel"><b>Embudo de conversión</b><span>Convertidas ${funnel.converted || 0} de ${funnel.started || 0} demos iniciadas · ${funnel.conversionPercent || 0}%</span><small>Este mes: ${funnel.newThisMonth || 0} demos nuevas</small></div>${list ? `<div class="demo-expiring"><b>Vencen antes</b>${list}</div>` : ''}`;
 }
 // Los inactivos aparte y al final. Mezclados alfabéticamente obligaban a leer
 // la etiqueta de cada tarjeta para saber a quién se entrena hoy, y quien deja
@@ -5746,6 +5764,7 @@ window.addEventListener('popstate', () => { if (currentUser?.role !== 'client') 
 window.addEventListener('hashchange', () => { if (currentUser?.role !== 'client') view(viewFromHash()); });
 document.addEventListener('click', event => {
   const actionButton = event.target.closest('[data-action]');
+  const demoClientButton = event.target.closest('[data-demo-client]');
   const invoicePdfButton = event.target.closest('[data-invoice-pdf]');
   const editSessionButton = event.target.closest('[data-edit-session]');
   const calendarModeButton = event.target.closest('[data-calendar-mode]');
@@ -5807,10 +5826,12 @@ document.addEventListener('click', event => {
   if (actionButton?.dataset.action === 'informe-mensual') informeMensual();
   if (actionButton?.dataset.action === 'account-statement') financialReportDialog('account-statement');
   if (actionButton?.dataset.action === 'accounts-receivable') financialReportDialog('accounts-receivable');
+  if (actionButton?.dataset.action === 'demo-filter') { navigate('clients'); const filter = document.getElementById('client-status-filter'); if (filter) filter.value = 'demo'; renderClients(); }
   if (invoicePdfButton) previewProtectedPdf(`/api/invoices/${invoicePdfButton.dataset.invoicePdf}/pdf`, `Comprobante ${invoicePdfButton.dataset.invoiceNumber}`, `comprobante-${invoicePdfButton.dataset.invoiceNumber}.pdf`);
   if (editSessionButton) editSessionSchedule(data.sessions.find(session => session.id === editSessionButton.dataset.editSession));
   if (event.target.dataset.editPlan) planEditor(data.plans.find(plan => plan.id === event.target.dataset.editPlan));
   if (event.target.dataset.client) clientDetail(event.target.dataset.client);
+  if (demoClientButton) clientDetail(demoClientButton.dataset.demoClient);
   if (event.target.dataset.editClient) editClient(data.clients.find(client => client.id === event.target.dataset.editClient));
   if (event.target.dataset.editRoutine) newRoutine(data.routines.find(routine => routine.id === event.target.dataset.editRoutine));
   if (event.target.dataset.duplicateRoutine) newRoutine(data.routines.find(routine => routine.id === event.target.dataset.duplicateRoutine), true);
@@ -6998,7 +7019,7 @@ document.getElementById('setup-form').addEventListener('submit', async event => 
 const logout = () => {
   stopCalendarSynchronization();
   localStorage.removeItem(authKey); localStorage.removeItem(legacyAuthKey); authToken = null; currentUser = null; portalData = null;
-  data = { clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, notifications: [], googleCalendar: { configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } } }; showAuth(false);
+  data = { clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, demoSummary: null, notifications: [], googleCalendar: { configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } } }; showAuth(false);
 };
 // El avatar cerraba la sesión de un toque, sin aviso: un roce al buscar el
 // menú te sacaba de la aplicación. Ahora abre la cuenta y salir es explícito.

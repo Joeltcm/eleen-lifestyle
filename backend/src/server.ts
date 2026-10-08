@@ -2186,6 +2186,89 @@ async function demoRoutineUsage(transaction: TransactionSql, clientId: string): 
   return Number(row?.total || 0);
 }
 
+// Resumen de demos para el tablero. Las cifras viven aquí, no en la lista de
+// clientes que carga la pantalla: así se respetan el dueño, las cadenas de
+// versiones y los eventos históricos aunque el frontend cambie de vista.
+app.get('/api/demo/summary', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const hoy = fechaDeNegocioPanama();
+  const enSieteDias = fechaPanamaMasDias(hoy, 7);
+  const inicioMes = `${hoy.slice(0, 8)}01`;
+  const [counts] = await sql`
+    SELECT
+      count(*) FILTER (WHERE c.demo_ends_on >= ${hoy}::date)::int AS active,
+      count(*) FILTER (WHERE c.demo_ends_on >= ${hoy}::date AND c.demo_ends_on <= ${enSieteDias}::date)::int AS ending_soon,
+      count(*) FILTER (WHERE c.demo_ends_on < ${hoy}::date AND c.demo_converted_at IS NULL)::int AS expired_undecided
+    FROM clients c
+    WHERE c.owner_id = ${auth.sub} AND c.service_mode = 'demo'
+  `;
+  const used = await sql`
+    SELECT DISTINCT c.id::text AS client_id, COALESCE(r.root_routine_id, r.id)::text AS root_id
+    FROM clients c JOIN routine_deliveries d ON d.client_id = c.id JOIN routines r ON r.id = d.routine_id
+    WHERE c.owner_id = ${auth.sub} AND c.service_mode = 'demo'
+    UNION
+    SELECT DISTINCT c.id::text, COALESCE(r.root_routine_id, r.id)::text
+    FROM clients c JOIN routine_assignments a ON a.client_id = c.id JOIN routines r ON r.id = a.routine_id
+    WHERE c.owner_id = ${auth.sub} AND c.service_mode = 'demo'
+    UNION
+    SELECT DISTINCT c.id::text, COALESCE(r.root_routine_id, r.id)::text
+    FROM clients c JOIN routine_share_links l ON l.client_id = c.id JOIN routines r ON r.id = l.routine_id
+    WHERE c.owner_id = ${auth.sub} AND c.service_mode = 'demo'
+    UNION
+    SELECT DISTINCT c.id::text, COALESCE(r.root_routine_id, r.id)::text
+    FROM clients c JOIN session_routine_offers o ON o.client_id = c.id JOIN routines r ON r.id = o.routine_id
+    WHERE c.owner_id = ${auth.sub} AND c.service_mode = 'demo'
+  ` as unknown as Array<{ client_id: string; root_id: string }>;
+  const completed = await sql`
+    SELECT DISTINCT c.id::text AS client_id, COALESCE(r.root_routine_id, r.id)::text AS root_id
+    FROM clients c
+    JOIN routine_completions rc ON rc.client_id = c.id AND rc.completion_percent >= 100
+    JOIN routines r ON r.id = rc.routine_id
+    WHERE c.owner_id = ${auth.sub} AND c.service_mode = 'demo'
+  ` as unknown as Array<{ client_id: string; root_id: string }>;
+  const [funnel] = await sql`
+    SELECT
+      count(DISTINCT client_id) FILTER (WHERE to_mode = 'demo')::int AS started,
+      count(DISTINCT client_id) FILTER (WHERE to_mode = 'standard' AND from_mode = 'demo')::int AS converted,
+      count(DISTINCT client_id) FILTER (WHERE to_mode = 'demo' AND at >= ${inicioMes}::date)::int AS new_this_month
+    FROM client_mode_events
+    WHERE owner_id = ${auth.sub}
+  `;
+  const expiring = await sql`
+    SELECT c.id::text, c.full_name, c.demo_ends_on::text AS demo_ends_on,
+      c.demo_routine_limit,
+      (c.demo_ends_on - ${hoy}::date)::int AS days_remaining
+    FROM clients c
+    WHERE c.owner_id = ${auth.sub} AND c.service_mode = 'demo'
+    ORDER BY c.demo_ends_on NULLS LAST, c.full_name
+    LIMIT 5
+  ` as unknown as Array<{ id: string; full_name: string; demo_ends_on: string | null; demo_routine_limit: number | null; days_remaining: number }>;
+  const usedByClient = new Map<string, Set<string>>();
+  for (const row of used) {
+    if (!usedByClient.has(row.client_id)) usedByClient.set(row.client_id, new Set());
+    usedByClient.get(row.client_id)!.add(row.root_id);
+  }
+  const completedByClient = new Map<string, Set<string>>();
+  for (const row of completed) {
+    if (!completedByClient.has(row.client_id)) completedByClient.set(row.client_id, new Set());
+    completedByClient.get(row.client_id)!.add(row.root_id);
+  }
+  const routineSent = used.reduce((set, row) => set.add(`${row.client_id}:${row.root_id}`), new Set<string>()).size;
+  const routineCompleted = completed.reduce((set, row) => set.add(`${row.client_id}:${row.root_id}`), new Set<string>()).size;
+  const started = Number(funnel?.started || 0);
+  const converted = Number(funnel?.converted || 0);
+  return {
+    today: hoy,
+    active: Number(counts?.active || 0),
+    endingSoon: Number(counts?.ending_soon || 0),
+    expiredUndecided: Number(counts?.expired_undecided || 0),
+    routinesSent: routineSent,
+    routinesCompleted: routineCompleted,
+    funnel: { started, converted, conversionPercent: started ? Math.round((converted / started) * 100) : 0, newThisMonth: Number(funnel?.new_this_month || 0) },
+    expiring: expiring.map(item => ({ ...item, routinesUsed: usedByClient.get(item.id)?.size || 0, routinesCompleted: completedByClient.get(item.id)?.size || 0, expired: item.demo_ends_on ? item.demo_ends_on < hoy : false }))
+  };
+});
+
 async function assertDemoCanReceiveRoutine(transaction: TransactionSql, clientId: string, routineId: string) {
   const [client] = await transaction`
     SELECT service_mode, demo_ends_on, demo_routine_limit
