@@ -104,3 +104,19 @@ test('8) los trabajos de vencimiento saltan a un demo aunque se le fuerce una cl
   await api.post('/api/maintenance/vencer-ofertas-rutina', {});
   assert.equal((await db`SELECT status FROM sessions WHERE id = ${ses.id}`)[0].status, 'scheduled', 'no se cancela ni se descuenta');
 });
+
+test('9) una clienta que VUELVE (inactiva, con facturas y pagos viejos ya cobrados) sí puede pasar a demo; con una factura por cobrar, no', async () => {
+  const c = (await api.post('/api/clients', { fullName: 'Vuelve', cutoffDay: 1, email: 'vuelve@prueba.test' })).datos.id;
+  const [{ id: factura }] = await db`INSERT INTO invoices (client_id, concept, amount, due_on, status) VALUES (${c}, 'Mensualidad antigua', 100, '2025-12-01', 'confirmed') RETURNING id`;
+  await db`INSERT INTO invoice_payments (client_id, amount, paid_on, method) VALUES (${c}, 100, '2025-12-02', 'Yappy')`;
+  await db`UPDATE clients SET status = 'inactive' WHERE id = ${c}`;
+  await db`UPDATE clients SET status = 'active' WHERE id = ${c}`;
+  const ok = await api.post(`/api/clients/${c}/demo`, { demoEndsOn: dia(14), demoRoutineLimit: 2 });
+  assert.equal(ok.estado, 200, JSON.stringify(ok.datos));
+  assert.ok(factura);
+  const d = (await api.post('/api/clients', { fullName: 'Debe', cutoffDay: 1, email: 'debe@prueba.test' })).datos.id;
+  await db`INSERT INTO invoices (client_id, concept, amount, due_on, status) VALUES (${d}, 'Mensualidad sin cobrar', 100, '2026-08-01', 'pending')`;
+  const no = await api.post(`/api/clients/${d}/demo`, { demoEndsOn: dia(14) });
+  assert.equal(no.estado, 409);
+  assert.match(String(no.datos.error || no.datos.message), /1 factura pendiente de cobro/);
+});

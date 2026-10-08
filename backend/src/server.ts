@@ -2226,16 +2226,13 @@ app.post('/api/clients/:id/demo', { preHandler: requireStaff }, async (request, 
       const [blocked] = await transaction`
         SELECT
           (SELECT count(*)::int FROM sessions WHERE client_id = ${clientId} AND status = 'scheduled') AS scheduled_sessions,
+          -- Un cliente que volvió (reactivado) trae facturas y pagos viejos ya cobrados: eso es historial, no impide la demo. Solo bloquea lo que sigue ABIERTO:
+          -- facturas por cobrar, suscripciones vigentes, saldo con clases y clases programadas.
           (SELECT count(*)::int FROM (
-            SELECT id FROM invoices WHERE client_id = ${clientId} OR billed_for_client_id = ${clientId}
+            SELECT id FROM invoices WHERE (client_id = ${clientId} OR billed_for_client_id = ${clientId}) AND status = 'pending'
             UNION ALL
-            SELECT id FROM billing_invoices WHERE payer_client_id = ${clientId}
+            SELECT id FROM billing_invoices WHERE payer_client_id = ${clientId} AND status IN ('pendiente', 'parcial')
           ) invoices_seen) AS invoices,
-          (SELECT count(*)::int FROM (
-            SELECT id FROM invoice_payments WHERE client_id = ${clientId}
-            UNION ALL
-            SELECT id FROM billing_payments WHERE payer_client_id = ${clientId}
-          ) payments_seen) AS payments,
           (SELECT count(*)::int FROM billing_subscriptions
             WHERE (beneficiary_client_id = ${clientId} OR payer_client_id = ${clientId})
               AND (ends_on IS NULL OR ends_on >= (now() AT TIME ZONE 'America/Panama')::date)) AS subscriptions,
@@ -2244,8 +2241,7 @@ app.post('/api/clients/:id/demo', { preHandler: requireStaff }, async (request, 
       `;
       const motivos = [
         Number(blocked?.scheduled_sessions || 0) ? `${blocked.scheduled_sessions} ${Number(blocked.scheduled_sessions) === 1 ? 'clase programada' : 'clases programadas'}` : null,
-        Number(blocked?.invoices || 0) ? `${blocked.invoices} ${Number(blocked.invoices) === 1 ? 'factura' : 'facturas'}` : null,
-        Number(blocked?.payments || 0) ? `${blocked.payments} ${Number(blocked.payments) === 1 ? 'pago registrado' : 'pagos registrados'}` : null,
+        Number(blocked?.invoices || 0) ? `${blocked.invoices} ${Number(blocked.invoices) === 1 ? 'factura pendiente de cobro' : 'facturas pendientes de cobro'}` : null,
         Number(blocked?.subscriptions || 0) ? `${blocked.subscriptions} ${Number(blocked.subscriptions) === 1 ? 'suscripción activa' : 'suscripciones activas'}` : null,
         Number(blocked?.balances || 0) ? `${blocked.balances} ${Number(blocked.balances) === 1 ? 'saldo con clases disponibles' : 'saldos con clases disponibles'}` : null
       ].filter(Boolean);

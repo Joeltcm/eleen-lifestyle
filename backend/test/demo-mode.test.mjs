@@ -108,8 +108,8 @@ test('pasar un cliente existente a demo explica cada bloqueo con su cantidad y c
   assert.equal(blocked.estado, 409, JSON.stringify(blocked.datos));
   const mensaje = String(blocked.datos.error || blocked.datos.message);
   assert.match(mensaje, /1 clase programada/);
-  assert.match(mensaje, /1 factura/);
-  assert.match(mensaje, /1 pago registrado/);
+  assert.match(mensaje, /1 factura pendiente de cobro/);
+  assert.doesNotMatch(mensaje, /pago registrado/, 'los pagos ya cobrados son historial y no bloquean');
   assert.match(mensaje, /1 suscripción activa/);
   assert.match(mensaje, /1 saldo con clases disponibles/);
   assert.equal((await db`SELECT service_mode FROM clients WHERE id = ${standard.id}`)[0].service_mode, 'standard');
