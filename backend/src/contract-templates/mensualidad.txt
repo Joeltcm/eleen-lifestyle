@@ -1,0 +1,17 @@
+CONTRATO DE SERVICIOS DE ENTRENAMIENTO PERSONAL
+
+En {{CONTRACT_CITY}}, el {{START_DATE}}, entre {{OWNER_LEGAL_NAME}}, identificación {{OWNER_LEGAL_ID}}, con domicilio en {{OWNER_LEGAL_ADDRESS}}, en adelante Eileen, y {{CLIENT_NAME}}, identificación {{CLIENT_ID}}, domicilio {{CLIENT_ADDRESS}}, correo {{CLIENT_EMAIL}}, se acuerda:
+
+1. Objeto. Eileen prestará {{SERVICE_TYPE}} de entrenamiento personal conforme al plan {{PLAN_NAME}}, con {{SESSIONS}} clases por mes y un precio de {{PRICE}} USD al mes. El corte de cobro es el día {{CUTOFF_DAY}} de cada mes. La modalidad de pago es {{PAYMENT_MODE}}.
+
+2. Vigencia y renovación. El servicio comienza el {{START_DATE}} y se contrata por {{COMMITMENT_MONTHS}} meses. Si el plazo es 0, es mes a mes. Se renueva automáticamente salvo aviso de terminación con al menos {{TERMINATION_NOTICE_DAYS}} días de anticipación al día de corte.
+
+3. Clases y cancelaciones. Las clases no utilizadas se pierden al cierre del ciclo y no se acumulan. Cancelar sin reprogramar o no presentarse consume la clase. Una reprogramación acordada reemplaza la original y se descuenta en su ciclo; no abre una clase adicional. Si cancela Eileen no se descuenta la clase. Una pausa autorizada desplaza el corte por los días de pausa. Viajar no pausa el plan: confirmar una rutina por enlace el día de la clase cuenta como clase cumplida. Una rutina ofrecida en lugar de la clase por cancelación del cliente vale solo ese día; si vence sin completarse, la clase se pierde y se descuenta del plan mensual o se cobra a crédito.
+
+4. Crédito. Cuando el pago es a crédito, se facturan al cierre las clases dadas y las cancelaciones cobrables a {{CREDIT_CLASS_PRICE}} USD por clase.
+
+5. Salud y datos. La persona declara que informó sus condiciones de salud, registradas en su expediente, y comunicará cualquier cambio. El entrenamiento no sustituye atención médica; se obliga a seguir las indicaciones y detenerse ante dolor o malestar, y reconoce los riesgos propios del ejercicio, sin excluir responsabilidades que la ley no permita excluir. El tratamiento de datos se realiza conforme a la Ley 81 de 2019 de Panamá. La aplicación usa un servicio externo de inteligencia artificial para proponer rutinas e interpretar evaluaciones. Las fotos de progreso solo se usan con consentimiento aparte.
+
+6. Aceptación. Las partes aceptan el alcance anterior y los datos del expediente. Este documento es un comprobante interno de servicios; no sustituye una factura fiscal.
+
+{{ACCEPTANCE_BLOCK}}

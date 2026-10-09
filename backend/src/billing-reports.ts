@@ -35,9 +35,9 @@ const dmy = (value: unknown) => {
 const clean = (value: unknown) => String(value ?? '').replace(/[\r\n]+/g, ' ').trim();
 const status = (value: unknown) => value === 'confirmed' ? 'Pagada' : value === 'void' ? 'Anulada' : 'Pendiente';
 
-function pdfBuffer(draw: (document: PDFKit.PDFDocument) => void) {
+function pdfBuffer(draw: (document: PDFKit.PDFDocument) => void, createdAt?: Date | string) {
   return new Promise<Buffer>((resolve, reject) => {
-    const document = new PDFDocument({ size: 'LETTER', margin: 42, bufferPages: true, info: { Author: 'Eileen Lifestyle', Creator: 'Eileen Lifestyle' } });
+    const document = new PDFDocument({ size: 'LETTER', margin: 42, bufferPages: true, info: { Author: 'Eileen Lifestyle', Creator: 'Eileen Lifestyle', ...(createdAt ? { CreationDate: new Date(createdAt), ModDate: new Date(createdAt) } : {}) } });
     const chunks: Buffer[] = [];
     document.on('data', chunk => chunks.push(Buffer.from(chunk)));
     document.on('error', reject);
@@ -53,6 +53,21 @@ function pdfBuffer(draw: (document: PDFKit.PDFDocument) => void) {
     }
     document.end();
   });
+}
+
+/** Documento interno de contrato. El texto ya fue congelado por el servidor;
+ * este helper solo lo presenta, no vuelve a consultar ni recalcula el contrato. */
+export function contractPdf(input: { title: string; subtitle: string; body: string; createdAt?: Date | string }) {
+  return pdfBuffer(document => {
+    brandHeader(document, input.title, input.subtitle);
+    input.body.split('\n').forEach(line => {
+      ensureSpace(document, line ? 30 : 14, 'Contrato de servicios');
+      if (/^\d+\./.test(line)) document.font('Helvetica-Bold').fontSize(10).fillColor(colors.ink);
+      else document.font('Helvetica').fontSize(9).fillColor(colors.ink);
+      document.text(line || ' ', 42, document.y, { width: document.page.width - 84, lineGap: 3 });
+      document.y += line ? 5 : 2;
+    });
+  }, input.createdAt);
 }
 
 function brandMark(document: PDFKit.PDFDocument, x: number, y: number, size: number) {

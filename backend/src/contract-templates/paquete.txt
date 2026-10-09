@@ -1,0 +1,15 @@
+CONTRATO DE PAQUETE DE SESIONES
+
+En {{CONTRACT_CITY}}, el {{START_DATE}}, entre {{OWNER_LEGAL_NAME}}, identificación {{OWNER_LEGAL_ID}}, con domicilio en {{OWNER_LEGAL_ADDRESS}}, y {{CLIENT_NAME}}, identificación {{CLIENT_ID}}, domicilio {{CLIENT_ADDRESS}}, correo {{CLIENT_EMAIL}}, se acuerda:
+
+1. Objeto y precio. Eileen prestará {{SERVICE_TYPE}} de entrenamiento personal en el plan {{PLAN_NAME}}, por {{SESSIONS}} sesiones y {{PRICE}} USD.
+
+2. Pago y vigencia. El pago es {{PAYMENT_MODE}}. El paquete es válido por {{PACKAGE_VALIDITY_DAYS}} días desde el pago. Las sesiones no utilizadas vencen al terminar ese plazo. Después de {{PACKAGE_RENEWAL_DAYS}} días se muestra el aviso de renovación manual; no se renueva automáticamente. Al renovar, Eileen decide si las sesiones sobrantes se suman al nuevo paquete o se pierden.
+
+3. Cancelaciones. Cancelar sin reprogramar o no presentarse consume una sesión. Una reprogramación acordada reemplaza la original y se descuenta en su ciclo; no abre una sesión adicional. Si cancela Eileen no se descuenta la sesión. La renovación de este paquete es manual. El servicio comienza el {{START_DATE}} y el compromiso acordado es de {{COMMITMENT_MONTHS}} meses (0 = sin compromiso adicional). Para no continuar, informa con {{TERMINATION_NOTICE_DAYS}} días de anticipación a la renovación prevista; el paquete no genera una mensualidad automática.
+
+4. Salud y datos. La persona declara que informó sus condiciones de salud, registradas en su expediente, y comunicará cualquier cambio. El entrenamiento no sustituye atención médica; seguirá las indicaciones y se detendrá ante dolor o malestar, reconociendo los riesgos del ejercicio sin excluir responsabilidades que la ley no permita excluir. El tratamiento de datos se realiza conforme a la Ley 81 de 2019 de Panamá. La aplicación usa un servicio externo de inteligencia artificial para proponer rutinas e interpretar evaluaciones. Las fotos de progreso solo se usan con consentimiento aparte.
+
+5. Aceptación. Este documento es un comprobante interno de servicios; no sustituye una factura fiscal.
+
+{{ACCEPTANCE_BLOCK}}

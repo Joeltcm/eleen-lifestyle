@@ -1,4 +1,4 @@
-const APP_VERSION = '303';
+const APP_VERSION = '304';
 const markPwaVersion = () => document.querySelectorAll('.topbar-actions').forEach(actions => {
   if (actions.querySelector('[data-pwa-version]')) return;
   const indicator = document.createElement('span');
@@ -56,7 +56,7 @@ if (authToken && !localStorage.getItem(authKey)) {
   localStorage.removeItem(legacyAuthKey);
 }
 let currentUser = null;
-let data = { travel: [], clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, demoSummary: null, notifications: [], googleCalendar: { configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } } };
+let data = { travel: [], clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, demoSummary: null, contractSummary: { pending: 0, overdue: 0 }, notifications: [], googleCalendar: { configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } } };
 let portalData = null;
 let portalPeriodMode = 'month';
 let portalPeriodMonth = dateKey(today).slice(0, 7);
@@ -451,7 +451,7 @@ async function refreshGoogleCalendarState() {
   data.googleCalendar = await api('/api/integrations/google-calendar/status').catch(() => ({ configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } }));
 }
 async function loadData() {
-  const [clients, invoices, packages, sessions, routines, plans, compliance, notifications, googleCalendar, catalog, allInbody, travel, demoSummary] = await Promise.all([
+  const [clients, invoices, packages, sessions, routines, plans, compliance, notifications, googleCalendar, catalog, allInbody, travel, demoSummary, contractSummary] = await Promise.all([
     api('/api/clients'), api('/api/invoices'), api('/api/packages'), api('/api/sessions'), api('/api/routines'),
     api('/api/plans'),
     api(`/api/compliance/summary?period=${compliancePeriod}`).catch(() => ({ compliancePercent: 0, activities: 0, clients: [] })),
@@ -462,7 +462,8 @@ async function loadData() {
     api('/api/exercises').catch(() => null),
     api('/api/inbody').catch(() => []),
     api('/api/travel').catch(() => []),
-    api('/api/demo/summary').catch(() => null)
+    api('/api/demo/summary').catch(() => null),
+    api('/api/contracts/pending-summary').catch(() => ({ pending: 0, overdue: 0 }))
   ]);
   data.travel = Array.isArray(travel) ? travel : [];
   exerciseCatalog = catalog ? catalog.map(exercise => ({
@@ -503,14 +504,14 @@ async function loadData() {
     const latest = history.at(-1);
     const inbodyReviews = clientAssessments.filter(item => item.extraction_status === 'review');
     const serviceMode = client.service_mode || 'standard';
-    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), catalogPlan: client.plan_catalog_price == null ? null : Number(client.plan_catalog_price), planId: client.plan_id, planName: client.plan_name, cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), creditSessionPrice: client.payment_mode === 'no_anticipado' ? Number(client.credit_session_price || 25) : null, reprogramaciones: Number(client.reprogramaciones_ciclo || 0), canceladas: Number(client.canceladas_ciclo || 0), canceladasPorElla: Number(client.canceladas_por_ella_ciclo || 0), creditoPendiente: Number(client.credito_pendiente || 0), deudaPendiente: Number(client.deuda_pendiente || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paymentMode: client.payment_mode || 'anticipado', paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), pauseId: client.active_pause_id || null, pauseStartedOn: client.pause_started_on || null, pauseReason: client.pause_reason || '', serviceMode, demoStartedOn: client.demo_started_on || null, demoEndsOn: client.demo_ends_on || null, demoRoutineLimit: client.demo_routine_limit == null ? null : Number(client.demo_routine_limit), demoNote: client.demo_note || '', demoRoutinesUsed: Number(client.demo_routines_used || 0), status: serviceMode === 'demo' ? 'Demo' : ({ active: 'Activo', paused: 'En pausa', inactive: 'Inactivo' }[client.status] || 'Inactivo'), statusRaw: serviceMode === 'demo' ? 'demo' : client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
+    return { id: client.id, name: client.full_name, goal: client.goal || 'Sin meta definida', billingModel: client.billing_model, plan: Number(client.standard_price), catalogPlan: client.plan_catalog_price == null ? null : Number(client.plan_catalog_price), planId: client.plan_id, planName: client.plan_name, serviceType: client.service_type || 'presencial', routinesPerMonth: client.routines_per_month == null ? null : Number(client.routines_per_month), cutoffDay: Number(client.billing_cutoff_day || 1), sessionsIncluded: Number(client.sessions_included || 0), creditSessionPrice: client.payment_mode === 'no_anticipado' ? Number(client.credit_session_price || 25) : null, reprogramaciones: Number(client.reprogramaciones_ciclo || 0), canceladas: Number(client.canceladas_ciclo || 0), canceladasPorElla: Number(client.canceladas_por_ella_ciclo || 0), creditoPendiente: Number(client.credito_pendiente || 0), deudaPendiente: Number(client.deuda_pendiente || 0), validityDays: Number(client.validity_days || 0), email: client.email || '', phone: client.phone || '', idDocument: client.id_document || '', birthDate: client.birth_date ? String(client.birth_date).slice(0, 10) : '', emergencyContactName: client.emergency_contact_name || '', emergencyContactPhone: client.emergency_contact_phone || '', address: client.address || '', notes: client.notes || '', monthlySessionTarget: client.monthly_session_target ?? null, paymentMode: client.payment_mode || 'anticipado', paysForMeId: client.billing_responsible_client_id || null, portalActive: Boolean(client.portal_user_id), pauseId: client.active_pause_id || null, pauseStartedOn: client.pause_started_on || null, pauseReason: client.pause_reason || '', serviceMode, demoStartedOn: client.demo_started_on || null, demoEndsOn: client.demo_ends_on || null, demoRoutineLimit: client.demo_routine_limit == null ? null : Number(client.demo_routine_limit), demoNote: client.demo_note || '', demoRoutinesUsed: Number(client.demo_routines_used || 0), status: serviceMode === 'demo' ? 'Demo' : ({ active: 'Activo', paused: 'En pausa', inactive: 'Inactivo' }[client.status] || 'Inactivo'), statusRaw: serviceMode === 'demo' ? 'demo' : client.status, inbodyReviews, inbody: latest ? { ...latest, history } : null };
   });
   data.invoices = invoices.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, billedForSpecified: Boolean(item.auto_generated && item.billed_for_client_id != null), billedForClientId: item.billed_for_client_id || item.client_id, billedFor: item.billed_for_name || item.full_name, packageId: item.package_id || null, coverageApplied: Number(item.coverage_applied || 0), lineItems: Array.isArray(item.line_items) ? item.line_items : [], concept: item.concept, amount: Number(item.amount), paidAmount: Number(item.paid_amount || 0), balance: Number(item.balance_amount ?? (item.source_system ? item.balance : item.status === 'pending' ? item.amount : 0)), due: dateOnly(item.due_on), issued: dateOnly(item.issued_on || item.due_on), billingPeriod: item.billing_period ? dateOnly(item.billing_period) : dateOnly(item.due_on), paidOn: item.confirmed_at ? String(item.confirmed_at).slice(0, 10) : '', method: item.payment_method || 'pending', reference: item.payment_reference, status: item.status, source: item.source_system || 'eileen', invoiceNumber: item.invoice_number || '', externalStatus: item.external_status || '', autoGenerated: item.auto_generated || false, creditInvoice: Boolean(item.credit_invoice), coverageStart: item.coverage_start ? dateOnly(item.coverage_start) : '' }));
   data.packages = packages.map(item => ({ id: item.id, clientId: item.client_id, client: item.full_name, label: item.label, kind: item.kind, total: item.total_sessions, used: item.used_sessions, amount: Number(item.amount), expiresOn: item.expires_on || '', status: item.status === 'active' ? 'confirmed' : item.status === 'pending' ? 'pending' : 'expired', originInvoiceId: item.origin_invoice_id || null, originNumber: item.origin_invoice_number || '', originConcept: item.origin_concept || '', originSource: item.origin_source || '', originStatus: item.origin_status || '', originDate: item.origin_date ? dateOnly(item.origin_date) : '', renovacionPendiente: item.renovacion_pendiente || false, vencidoConSaldo: item.vencido_con_saldo || false, pagoPendiente: item.pago_pendiente || false, purchasedOn: item.purchased_on ? dateOnly(item.purchased_on) : '' }));
   data.sessions = sessions.map(sessionFromApi);
   data.routines = routines.map(item => ({ id: item.id, title: item.title, description: item.description || '', clients: (item.assigned_client_ids || []).length, assignedClientIds: item.assigned_client_ids || [], sessions: item.sessions_per_week, dueOn: item.due_on || null, exercises: item.exercises || [], version: Number(item.version || 1), rootRoutineId: item.root_routine_id || item.id, archivedAt: item.archived_at || null, deliveryCount: Number(item.deliveries_count || 0), deliveryClients: Number(item.delivery_clients_count || 0), lastSentAt: item.last_sent_at || null, lastCompletedAt: item.last_completed_at || null }));
-  data.plans = plans.map(item => ({ id: item.id, name: item.name, description: item.description || '', billingModel: item.billing_model, price: Number(item.price), sessionsIncluded: Number(item.sessions_included || 0), validityDays: Number(item.validity_days || 0), zone: item.zone || '', specialFor: item.special_for || '', active: item.active }));
-  data.compliance = compliance; data.demoSummary = demoSummary; data.notifications = notifications; data.googleCalendar = googleCalendar; billingAnalytics = null; billingAnalyticsLoadingYear = null; billingAnalyticsRequest += 1; showPendingBrowserNotification(notifications);
+  data.plans = plans.map(item => ({ id: item.id, name: item.name, description: item.description || '', billingModel: item.billing_model, serviceType: item.service_type || 'presencial', routinesPerMonth: item.routines_per_month == null ? null : Number(item.routines_per_month), price: Number(item.price), sessionsIncluded: Number(item.sessions_included || 0), validityDays: Number(item.validity_days || 0), zone: item.zone || '', specialFor: item.special_for || '', active: item.active }));
+  data.compliance = compliance; data.demoSummary = demoSummary; data.contractSummary = contractSummary || { pending: 0, overdue: 0 }; data.notifications = notifications; data.googleCalendar = googleCalendar; billingAnalytics = null; billingAnalyticsLoadingYear = null; billingAnalyticsRequest += 1; showPendingBrowserNotification(notifications);
 }
 const initials = name => name.split(' ').slice(0, 2).map(word => word[0]).join('').toUpperCase();
 const modalidadPlan = modelo => modelo === 'package' ? 'Paquete' : modelo === 'single' ? 'Sesión suelta' : 'Mensualidad';
@@ -729,7 +730,9 @@ function renderDashboard() {
   const clientesActivos = new Set(data.clients.filter(client => client.statusRaw === 'active').map(client => client.id));
   const noInbody = data.clients.filter(client => !client.inbody && clientesActivos.has(client.id)).map(client => `<div class="alert-item"><b>${escapeHtml(client.name)}</b><span>Sin evaluación InBody registrada.</span></div>`).join('');
   const cobrosPendientes = data.invoices.filter(item => item.status === 'pending' && item.source !== 'zoho_invoice' && clientesActivos.has(item.clientId)).length;
-  document.getElementById('alerts').innerHTML = `${noInbody || '<div class="alert-item"><b>Todo al día</b><span>No hay alertas de seguimiento.</span></div>'}<div class="alert-item"><b>${cobrosPendientes} ${cobrosPendientes === 1 ? 'cobro pendiente' : 'cobros pendientes'}</b><span>Revisa pagos y comprobantes.</span></div>`;
+  const contratosPendientes = Number(data.contractSummary?.pending || 0); const contratosVencidos = Number(data.contractSummary?.overdue || 0);
+  const contratoAlerta = contratosPendientes ? `<div class="alert-item${contratosVencidos ? ' contract-overdue' : ''}"><b>${contratosPendientes} ${contratosPendientes === 1 ? 'contrato por firmar' : 'contratos por firmar'}</b><span>${contratosVencidos ? `${contratosVencidos} llevan más de 3 días · ` : ''}Revisa el expediente del cliente.</span></div>` : '';
+  document.getElementById('alerts').innerHTML = `${noInbody || '<div class="alert-item"><b>Todo al día</b><span>No hay alertas de seguimiento.</span></div>'}<div class="alert-item"><b>${cobrosPendientes} ${cobrosPendientes === 1 ? 'cobro pendiente' : 'cobros pendientes'}</b><span>Revisa pagos y comprobantes.</span></div>${contratoAlerta}`;
   document.getElementById('compliance-list').innerHTML = data.compliance.clients.length ? data.compliance.clients.map(client => `<div class="compliance-row"><span class="initials">${escapeHtml(initials(client.name))}</span><div><b>${escapeHtml(client.name)}</b><small>${client.completed} de ${client.activities} clases${client.missed ? ` · ${client.missed} perdida${client.missed === 1 ? '' : 's'}` : ''}${avanceDelMes(client.clientId)}</small><span class="compliance-track"><i style="width:${client.compliancePercent}%"></i></span></div><strong>${client.compliancePercent}%</strong></div>`).join('') : '<p class="empty">Aún no hay clases vencidas en este período.</p>';
   renderDemoSummary();
   const notificationCount = document.getElementById('notification-count'); notificationCount.textContent = data.notifications.length; notificationCount.hidden = !data.notifications.length;
@@ -774,7 +777,9 @@ function renderClients(filter = '') {
     const alertaCredito = client.paymentMode === 'no_anticipado' && client.deudaPendiente > 0
       ? `<p class="alerta-credito">Entrena a crédito · pago pendiente ${money.format(client.deudaPendiente)}</p>`
       : '';
-    const commercial = client.serviceMode === 'demo'
+    const commercial = client.serviceType === 'rutinas' && client.serviceMode !== 'demo'
+      ? `<span class="commercial-label">Rutinas mensuales</span><b>${client.routinesPerMonth} rutinas al mes · ${money.format(client.plan)}</b><small>Corte día ${client.cutoffDay} · sin clases ni saldo de sesiones</small>`
+      : client.serviceMode === 'demo'
       ? `<span class="commercial-label demo-label">DEMO · GRATIS</span><b>${client.demoRoutineLimit == null ? `${client.demoRoutinesUsed} rutinas usadas` : `${client.demoRoutinesUsed} de ${client.demoRoutineLimit} rutinas usadas`}</b><small>${client.demoEndsOn ? `Termina el ${fechaCorta(client.demoEndsOn)}` : 'Sin fecha de término'}</small>`
       : client.billingModel === 'package'
       ? `<span class="commercial-label package-label">Paquete</span><b>${pack?.status === 'pending' ? 'Pago pendiente' : `${pack ? remainingSessions(pack) : client.sessionsIncluded || 0} sesiones disponibles`}</b><small>${escapeHtml(client.planName || 'Plan por sesiones')} · ${money.format(client.plan)}</small>`
@@ -1149,7 +1154,7 @@ function renderBilling() {
   if (planZoneFilter) planZoneFilter.onchange = renderBilling;
   if (planSessionsFilter) planSessionsFilter.onchange = renderBilling;
   const visiblePlans = data.plans.filter(plan => (!planZoneFilter?.value || plan.zone === planZoneFilter.value) && (!planSessionsFilter?.value || String(plan.sessionsIncluded) === planSessionsFilter.value));
-  document.getElementById('plan-grid').innerHTML = visiblePlans.length ? visiblePlans.map(plan => `<article class="plan-card ${plan.active ? '' : 'inactive'}"><div><span class="commercial-label ${plan.billingModel === 'package' ? 'package-label' : ''}${plan.billingModel === 'single' ? ' single-label' : ''}">${modalidadPlan(plan.billingModel)}</span>${plan.zone ? `<span class="plan-zone">${escapeHtml(plan.zone)}</span>` : ''}${plan.specialFor ? `<span class="plan-special">Tarifa especial · ${escapeHtml(plan.specialFor)}</span>` : ''}<h4>${escapeHtml(plan.name)}</h4><p>${escapeHtml(plan.description || (plan.billingModel === 'package' ? `${plan.sessionsIncluded} sesiones · ${plan.validityDays} días` : plan.billingModel === 'single' ? 'Se cobra por sesión' : `${plan.sessionsIncluded} sesiones / mes`))}</p></div><div class="plan-price"><strong>${money.format(plan.price)}</strong><small>${plan.active ? 'Disponible' : 'Inactivo'}</small></div><button class="text-button" data-edit-plan="${plan.id}">Editar</button></article>`).join('') : '<p class="empty">No hay tarifas con estos filtros.</p>';
+  document.getElementById('plan-grid').innerHTML = visiblePlans.length ? visiblePlans.map(plan => `<article class="plan-card ${plan.active ? '' : 'inactive'}"><div><span class="commercial-label ${plan.billingModel === 'package' ? 'package-label' : ''}${plan.billingModel === 'single' ? ' single-label' : ''}">${modalidadPlan(plan.billingModel)}</span>${plan.zone ? `<span class="plan-zone">${escapeHtml(plan.zone)}</span>` : ''}${plan.specialFor ? `<span class="plan-special">Tarifa especial · ${escapeHtml(plan.specialFor)}</span>` : ''}<h4>${escapeHtml(plan.name)}</h4><p>${escapeHtml(plan.description || (plan.serviceType === 'rutinas' ? `${plan.routinesPerMonth} rutinas / mes` : plan.billingModel === 'package' ? `${plan.sessionsIncluded} sesiones · ${plan.validityDays} días` : plan.billingModel === 'single' ? 'Se cobra por sesión' : `${plan.sessionsIncluded} sesiones / mes`))}</p></div><div class="plan-price"><strong>${money.format(plan.price)}</strong><small>${plan.active ? 'Disponible' : 'Inactivo'}</small></div><button class="text-button" data-edit-plan="${plan.id}">Editar</button></article>`).join('') : '<p class="empty">No hay tarifas con estos filtros.</p>';
   document.getElementById('invoice-table').innerHTML = visibleInvoices.length ? visibleInvoices.map(invoice => {
     const parcial = invoice.status === 'pending' && invoice.paidAmount > 0 && invoice.balance > 0;
     const label = invoice.status === 'confirmed' ? 'Confirmado' : invoice.status === 'void' ? 'Anulada' : parcial ? 'Pago parcial' : 'Pago pendiente';
@@ -1496,6 +1501,7 @@ function editClient(client) {
   box.innerHTML = `<form id="edit-client-form"><p class="eyebrow">CONTACTO Y EXPEDIENTE</p><h2>Editar cliente</h2><label>Nombre completo<input name="fullName" required value="${escapeHtml(client.name)}" /></label><label>Correo electrónico<input name="email" type="email" value="${escapeHtml(client.email)}" /></label><label>Teléfono<input name="phone" value="${escapeHtml(client.phone)}" /></label><label>Meta principal<input name="goal" value="${escapeHtml(client.goal)}" /></label><label>Sesiones esperadas al mes<input name="monthlySessionTarget" type="number" min="1" max="31" value="${client.monthlySessionTarget ?? ''}" placeholder="Sin meta pactada" /><small>Cambiarlo aplica desde el próximo corte; el saldo del ciclo en curso no se modifica.</small></label><label>Quién paga<select name="billingResponsibleClientId" id="client-payer"><option value="">Paga por sí mismo</option></select><small>Plan familiar: el saldo de sesiones y los cobros van a nombre de quien paga. El progreso y la asistencia siguen siendo de cada uno.</small></label><p class="section-note">Meta contra la cual se mide el cumplimiento mensual. Déjala vacía para derivarla del paquete o de la rutina activa.</p><label>Notas privadas<textarea name="notes" rows="3">${escapeHtml(client.notes)}</textarea></label>${client.billingModel === 'monthly' ? `<label>Monto mensual de este cliente<input name="standardPrice" type="number" min="0.01" max="100000" step="0.01" value="${client.plan > 0 ? client.plan.toFixed(2) : ''}" placeholder="Sin monto propio" /><small>Precio propio del expediente. Déjalo vacío para conservar el valor actual. Sólo se valida y aplica cuando lo modificas.</small></label>` : ''}<label>Plan comercial<select name="planId" id="edit-client-plan"></select><small>Cambiarlo actualiza su precio, su membresía y su meta de sesiones.</small></label><label>Día de corte<input name="cutoffDay" type="number" min="1" max="31" required value="${client.cutoffDay}" /><small>El día del mes en que se le cobra la mensualidad.</small></label><label>Modalidad de pago<select name="paymentMode"><option value="anticipado"${client.paymentMode !== 'no_anticipado' ? ' selected' : ''}>Anticipado (paga por adelantado)</option><option value="no_anticipado"${client.paymentMode === 'no_anticipado' ? ' selected' : ''}>No anticipado (entrena y paga al final)</option></select><small>No anticipado: cobra sólo las sesiones impartidas a la tarifa pactada. El cliente puede entrenar aunque la factura esté pendiente.</small></label>${client.paymentMode === 'no_anticipado' ? `<label>Tarifa por sesión a crédito<input name="creditSessionPrice" type="number" min="0.01" step="0.01" value="${client.creditSessionPrice || 25}" /><small>Se usa para clientes no anticipados, como Julio. Las cancelaciones cobrables aparecen detalladas en la factura.</small></label>` : ''}<label>Estado<select name="status">${[['active', 'Activo'], ['paused', 'En pausa'], ['inactive', 'Inactivo']].map(([valor, texto]) => `<option value="${valor}"${client.statusRaw === valor ? ' selected' : ''}>${texto}</option>`).join('')}</select><small>Un cliente inactivo conserva su expediente, su historial y sus cobros, pero desaparece de la agenda y de los listados del día a día.</small></label><section class="declarative-billing"><p class="eyebrow">PLAN DE FACTURACIÓN</p><p class="section-note">Preparado para el sistema nuevo; hoy la facturación automática sigue usando el monto mensual del cliente.</p><div id="client-billing-subscriptions-editor"><p class="empty">Cargando conceptos a facturar…</p></div><button type="button" class="secondary wide-button" id="add-billing-subscription">Agregar concepto a facturar</button></section><button class="primary wide-button">Guardar cambios</button>
     <button type="button" class="secondary wide-button" id="borrar-expediente">Eliminar expediente</button>
     <p class="section-note">Para expedientes duplicados o creados por error. Se lleva su historial, mediciones, documentos y cobros. Si simplemente dejó de entrenar, ponlo Inactivo.</p></form>`;
+  box.innerHTML = box.innerHTML.replace('<label>Meta principal', `<div class="form-row"><label>Documento de identidad<input name="idDocument" value="${escapeHtml(client.idDocument)}" /></label><label>Fecha de nacimiento<input name="birthDate" type="date" value="${escapeHtml(client.birthDate)}" /></label></div><label>Dirección<textarea name="address" rows="2">${escapeHtml(client.address)}</textarea></label><div class="form-row"><label>Contacto de emergencia<input name="emergencyContactName" value="${escapeHtml(client.emergencyContactName)}" /></label><label>Teléfono de emergencia<input name="emergencyContactPhone" value="${escapeHtml(client.emergencyContactPhone)}" /></label></div><label>Meta principal`);
   openModal(box);
   // Sólo pueden ser pagadores quienes no dependen de otro: encadenar dejaría el
   // saldo en un tercero imposible de rastrear.
@@ -1565,6 +1571,10 @@ async function deleteResource(path, label, success) {
 function planEditor(plan = null) {
   const content = formFromTemplate('plan-template'); openModal(content);
   const form = document.getElementById('plan-form'); const model = document.getElementById('plan-billing-model'); const packageFields = document.getElementById('plan-package-fields');
+  const serviceWrap = document.createElement('label'); serviceWrap.innerHTML = 'Servicio incluido<select name="serviceType" id="plan-service-type"><option value="presencial">Entrenamiento presencial</option><option value="virtual">Entrenamiento virtual</option><option value="rutinas">Rutinas personalizadas</option></select>';
+  const routinesWrap = document.createElement('label'); routinesWrap.id = 'plan-routines-label'; routinesWrap.hidden = true; routinesWrap.innerHTML = 'Rutinas por mes<input name="routinesPerMonth" type="number" min="1" max="31" /><small>La mensualidad de rutinas no abre clases ni saldo.</small>';
+  packageFields.before(serviceWrap, routinesWrap);
+  const serviceType = form.elements.serviceType; const routinesPerMonth = form.elements.routinesPerMonth;
   // Las sesiones se piden en las dos modalidades: en mensualidad son las del
   // mes y alimentan el cumplimiento; en paquete son el total contratado. Sólo
   // la vigencia en días sigue siendo cosa del paquete.
@@ -1583,19 +1593,22 @@ function planEditor(plan = null) {
       ? 'Total del paquete. Se reparte entre los meses de vigencia para medir el cumplimiento.'
       : 'Es la meta contra la que se mide el cumplimiento del cliente.';
     document.getElementById('plan-price-label').childNodes[0].nodeValue = esSuelta ? 'Precio por sesión (USD)' : 'Precio (USD)';
+    const esRutinas = serviceType.value === 'rutinas'; routinesWrap.hidden = !esRutinas; routinesPerMonth.required = esRutinas; if (esRutinas) { etiqueta.hidden = true; etiqueta.querySelector('input').required = false; model.value = 'monthly'; packageFields.hidden = true; }
   };
   model.addEventListener('change', togglePackage);
+  serviceType.addEventListener('change', togglePackage);
   if (plan) {
     document.getElementById('plan-form-title').textContent = 'Editar tarifa';
     form.elements.name.value = plan.name; form.elements.description.value = plan.description; form.elements.billingModel.value = plan.billingModel; form.elements.price.value = plan.price;
     form.elements.sessionsIncluded.value = plan.sessionsIncluded || ''; form.elements.validityDays.value = plan.validityDays || 30; form.elements.zone.value = plan.zone || ''; form.elements.specialFor.value = plan.specialFor || ''; form.elements.active.checked = plan.active;
+    serviceType.value = plan.serviceType || 'presencial'; routinesPerMonth.value = plan.routinesPerMonth || '';
   }
   togglePackage();
   form.addEventListener('submit', async event => {
     event.preventDefault(); const values = new FormData(event.target); const billingModel = values.get('billingModel');
     try {
       event.target.classList.add('loading-state');
-      await api(plan ? `/api/plans/${plan.id}` : '/api/plans', { method: plan ? 'PATCH' : 'POST', body: { name: values.get('name'), description: values.get('description'), billingModel, price: Number(values.get('price')), sessionsIncluded: billingModel === 'single' ? undefined : Number(values.get('sessionsIncluded')), validityDays: billingModel === 'package' ? Number(values.get('validityDays')) : undefined, zone: values.get('zone'), specialFor: values.get('specialFor'), active: Boolean(values.get('active')) } });
+      await api(plan ? `/api/plans/${plan.id}` : '/api/plans', { method: plan ? 'PATCH' : 'POST', body: { name: values.get('name'), description: values.get('description'), billingModel, serviceType: values.get('serviceType'), routinesPerMonth: values.get('routinesPerMonth') ? Number(values.get('routinesPerMonth')) : undefined, price: Number(values.get('price')), sessionsIncluded: billingModel === 'single' || values.get('serviceType') === 'rutinas' ? undefined : Number(values.get('sessionsIncluded')), validityDays: billingModel === 'package' ? Number(values.get('validityDays')) : undefined, zone: values.get('zone'), specialFor: values.get('specialFor'), active: Boolean(values.get('active')) } });
       await loadData(); renderAll(); modal.close(); toast(plan ? 'Plan actualizado' : 'Plan creado');
     } catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
@@ -1616,7 +1629,7 @@ function planEditor(plan = null) {
     form.append(borrar);
   }
 }
-function clientPlanEditor(client) {
+function clientPlanEditor(client, offerContract = false) {
   const box = document.createElement('div'); const availablePlans = data.plans.filter(plan => plan.active || plan.id === client.planId);
   // "Clase suelta" no necesita un plan creado: pasa al cliente a modelo suelta
   // directo (se cobra por sesión, sin bolsa ni mensualidad).
@@ -1634,7 +1647,7 @@ function clientPlanEditor(client) {
     const body = eleccion === '__single__'
       ? { model: 'single', cutoffDay: Number(form.get('cutoffDay')), referencePrice: Number(form.get('referencePrice')) || 0 }
       : { planId: eleccion, cutoffDay: Number(form.get('cutoffDay')) };
-    try { event.target.classList.add('loading-state'); await api(`/api/clients/${client.id}/plan`, { method: 'PATCH', body }); await loadData(); renderAll(); modal.close(); toast('Plan del cliente actualizado'); }
+    try { event.target.classList.add('loading-state'); await api(`/api/clients/${client.id}/plan`, { method: 'PATCH', body }); await loadData(); renderAll(); modal.close(); toast('Plan del cliente actualizado'); if (offerContract && window.confirm('¿Generar ahora el contrato con el plan elegido?')) contractEditor(data.clients.find(item => item.id === client.id)); }
     catch (error) { toast(error.message, true); event.target.classList.remove('loading-state'); }
   });
 }
@@ -5023,6 +5036,70 @@ function enviarEnlaceRutina(rutina, client, viaje = null) {
   });
 }
 
+async function downloadContract(contractId) {
+  const result = await api(`/api/contracts/${contractId}/download`);
+  if (result.url) { window.open(result.url, '_blank', 'noopener'); return; }
+  // En pruebas sin R2, la API devuelve el PDF por la misma sesión autorizada.
+  const response = await fetch(`${API_BASE}/api/contracts/${contractId}/pdf`, { headers: { Authorization: `Bearer ${authToken}` } });
+  if (!response.ok) throw new Error('No se pudo descargar el contrato');
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement('a'); link.href = url; link.download = 'contrato.pdf'; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+async function clientContractsSection(target, client) {
+  if (!target) return;
+  try {
+    const contracts = await api(`/api/clients/${client.id}/contracts`);
+    if (!target.isConnected) return;
+    const label = value => ({ borrador: 'Borrador', enviado: 'Pendiente de firma', firmado: 'Firmado', reemplazado: 'Reemplazado', anulado: 'Anulado' }[value] || value);
+    target.innerHTML = `${contracts.length ? contracts.map(contract => `<div class="viaje-fila"><div><b>${label(contract.status)} · ${contract.template_key}</b><small>${contract.signed_at ? `Firmado ${fechaCorta(contract.signed_at)}` : contract.sent_at ? `Enviado ${fechaCorta(contract.sent_at)}` : 'Sin enviar'}${contract.signed_name ? ` · ${escapeHtml(contract.signed_name)}` : ''}</small></div><div class="viaje-acciones"><button type="button" class="secondary" data-contract-download="${contract.id}">Descargar PDF</button>${contract.status === 'borrador' ? `<button type="button" class="primary" data-contract-send="${contract.id}">Enviar al portal</button>` : ''}${['borrador', 'enviado'].includes(contract.status) ? `<button type="button" class="secondary" data-contract-paper="${contract.id}">Firmado en papel</button>` : ''}</div></div>`).join('') : '<p class="empty">Sin contrato.</p>'}<button type="button" class="primary wide-button" id="generate-client-contract">Generar contrato</button><button type="button" class="secondary wide-button" id="contract-whatsapp">Enviar por WhatsApp</button>`;
+    target.querySelector('#generate-client-contract').onclick = () => contractEditor(client);
+    target.querySelectorAll('[data-contract-download]').forEach(button => { button.onclick = () => downloadContract(button.dataset.contractDownload).catch(error => toast(error.message, true)); });
+    target.querySelectorAll('[data-contract-send]').forEach(button => { button.onclick = async () => { try { await api(`/api/contracts/${button.dataset.contractSend}/send`, { method: 'POST', body: {} }); await loadData(); renderAll(); await clientContractsSection(target, client); toast('Contrato enviado al portal'); } catch (error) { toast(error.message, true); } }; });
+    target.querySelectorAll('[data-contract-paper]').forEach(button => { button.onclick = () => paperContractDialog(client, button.dataset.contractPaper); });
+    target.querySelector('#contract-whatsapp').onclick = () => {
+      // Solo el enlace genérico al portal: sin nombre, cédula ni token en la URL.
+      const portalUrl = new URL('./', window.location.href); portalUrl.hash = 'portal-routines'; portalUrl.search = '';
+      window.open(`https://wa.me/?text=${encodeURIComponent(portalUrl.toString())}`, '_blank', 'noopener');
+    };
+  } catch (error) { if (target.isConnected) target.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`; }
+}
+function paperContractDialog(client, contractId) {
+  const box = document.createElement('div');
+  box.innerHTML = '<form id="paper-contract"><h2>Contrato firmado en papel</h2><p>Sube el escaneo firmado antes de registrar la aceptación.</p><label>Escaneo<input name="scan" type="file" accept="application/pdf,image/jpeg,image/png" required /></label><button class="primary wide-button">Subir y registrar firma</button></form>'; openModal(box);
+  box.querySelector('form').onsubmit = async event => {
+    event.preventDefault(); const form = event.currentTarget; const file = form.elements.scan.files[0]; if (!file) return;
+    try {
+      form.classList.add('loading-state');
+      const contentType = file.type || ({ pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png' })[file.name.split('.').pop().toLowerCase()];
+      if (!['application/pdf', 'image/jpeg', 'image/png'].includes(contentType) || file.size > 20 * 1024 * 1024) throw new Error('Usa PDF, JPG o PNG de hasta 20 MB');
+      const created = await api('/api/documents/upload-url', { method: 'POST', body: { clientId: client.id, kind: 'contract', fileName: file.name, contentType, sizeBytes: file.size } });
+      await api(`/api/documents/${created.document.id}/content`, { method: 'PUT', headers: { 'Content-Type': contentType }, body: file });
+      await api(`/api/clients/${client.id}/contracts/paper`, { method: 'POST', body: { contractId, documentId: created.document.id } });
+      await loadData(); renderAll(); clientDetail(client.id); toast('Firma en papel registrada');
+    } catch (error) { toast(error.message, true); } finally { form.classList.remove('loading-state'); }
+  };
+}
+function contractEditor(client) {
+  const classes = Number(client.billingModel === 'package' ? client.sessionsIncluded || 0 : client.monthlySessionTarget || client.sessionsIncluded || 0);
+  const perClass = classes ? money.format(client.plan / classes) : 'Sin referencia de clases';
+  const alternatives = data.plans.filter(plan => plan.active && plan.sessionsIncluded > 0).map(plan => `${plan.billingModel === 'package' ? 'Paquete' : 'Mensualidad'}: ${money.format(plan.price / plan.sessionsIncluded)} / clase`).join(' · ');
+  const box = document.createElement('div'); box.innerHTML = `<form id="contract-editor"><p class="eyebrow">CONTRATO · BORRADOR PARA REVISIÓN LEGAL</p><h2>Generar contrato</h2><p class="form-summary">Precio pactado: ${money.format(client.plan)} · ${perClass}${classes ? ' / clase' : ''}. ${escapeHtml(alternatives)}</p><p class="section-note">Plan: ${escapeHtml(client.planName || 'Sin plan')} · ${client.serviceType === 'rutinas' ? `${client.routinesPerMonth || 0} rutinas al mes` : `${classes} clases`} · corte día ${client.cutoffDay}. Los datos se toman del expediente; para cambiarlos edita el expediente.</p><label>Modelo<select name="templateKey"><option value="mensualidad">Mensualidad (sugerida)</option><option value="paquete">Paquete</option><option value="rutinas">Rutinas personalizadas</option></select></label><div class="form-row"><label>Inicio<input name="startsOn" type="date" value="${dateKey(today)}" required /></label><label>Meses de compromiso<input name="commitmentMonths" type="number" min="0" max="60" value="0" /><small>0 = mes a mes</small></label></div><label class="checkbox-line"><input name="send" type="checkbox" /> Enviar al portal al guardar</label><button type="button" class="secondary wide-button" id="preview-contract">Vista previa del PDF</button><button class="primary wide-button">Guardar contrato</button><div id="contract-preview"></div></form>`; openModal(box);
+  const form = box.querySelector('form'); const preview = box.querySelector('#contract-preview');
+  const payload = send => { const values = new FormData(form); return { templateKey: values.get('templateKey'), startsOn: values.get('startsOn'), commitmentMonths: Number(values.get('commitmentMonths') || 0), send }; };
+  box.querySelector('#preview-contract').onclick = async () => {
+    try {
+      const result = await api(`/api/clients/${client.id}/contracts/preview`, { method: 'POST', body: payload(false) });
+      preview.innerHTML = `<p class="section-note">${result.canSend ? 'Listo para enviar.' : `Faltan: ${escapeHtml(result.missing.join(', '))}.`}</p><a class="secondary" href="data:application/pdf;base64,${result.pdfBase64}" download="contrato-borrador.pdf">Descargar PDF</a><iframe title="Vista previa del contrato" class="contract-pdf-preview" src="data:application/pdf;base64,${result.pdfBase64}"></iframe><details><summary>Leer texto</summary><pre class="contract-text">${escapeHtml(result.bodyText)}</pre></details>`;
+    } catch (error) { toast(error.message, true); }
+  };
+  form.onsubmit = async event => {
+    event.preventDefault(); const sending = form.elements.send.checked;
+    try { form.classList.add('loading-state'); await api(`/api/clients/${client.id}/contracts`, { method: 'POST', body: payload(sending) }); await loadData(); renderAll(); clientDetail(client.id); toast(sending ? 'Contrato enviado al portal' : 'Contrato guardado como borrador'); }
+    catch (error) { toast(error.message, true); } finally { form.classList.remove('loading-state'); }
+  };
+}
+
 function clientDetail(id) {
   const client = data.clients.find(item => item.id === id); const inbody = client.inbody;
   const esDemo = client.serviceMode === 'demo';
@@ -5031,7 +5108,9 @@ function clientDetail(id) {
   const dependientes = data.clients.filter(item => item.paysForMeId === client.id);
   const notaPago = pagador ? `<br><span class="pago-nota">Paga ${escapeHtml(pagador.name)}</span>`
     : dependientes.length ? `<br><span class="pago-nota">Paga también por ${escapeHtml(dependientes.map(d => d.name).join(', '))}</span>` : '';
-  const commercialDescription = esDemo
+  const commercialDescription = client.serviceType === 'rutinas' && !esDemo
+    ? `${client.routinesPerMonth} rutinas al mes · ${money.format(client.plan)} · corte día ${client.cutoffDay}`
+    : esDemo
     ? `DEMO · gratis · ${client.demoRoutinesUsed || 0}${client.demoRoutineLimit == null ? '' : ` de ${client.demoRoutineLimit}`} rutinas usadas`
     : client.billingModel === 'package'
     ? `${client.planName || pack?.label || `Paquete ${client.sessionsIncluded || 0} sesiones`} · ${pack ? remainingSessions(pack) : client.sessionsIncluded || 0} disponibles · ${money.format(client.plan)}`
@@ -5043,6 +5122,7 @@ function clientDetail(id) {
   const box = document.createElement('div');
   const reviewNotice = client.inbodyReviews.length ? `<button class="secondary wide-button" id="review-inbody">Revisar ${client.inbodyReviews.length} evaluación${client.inbodyReviews.length > 1 ? 'es' : ''} pendiente${client.inbodyReviews.length > 1 ? 's' : ''}</button>` : '';
   box.innerHTML = `<p class="eyebrow">EXPEDIENTE</p><h2>${escapeHtml(client.name)}</h2><p style="color:#6f7b75;margin-top:-12px">${escapeHtml(client.goal)}<br>${commercialDescription}${notaPago}</p>${clientBillingSection(client)}<p class="eyebrow" style="margin-top:20px">PLAN DE FACTURACIÓN</p><div id="client-billing-subscriptions"><p class="empty">Cargando conceptos a facturar…</p></div><button type="button" class="secondary wide-button" id="add-billing-subscription-detail">Agregar concepto a facturar</button><p class="section-note">Preparado para el sistema nuevo; hoy la facturación automática sigue usando el monto mensual del cliente.</p>${inbody ? `<div class="metrics" style="grid-template-columns:repeat(2,1fr)"><article><span>Peso</span><strong>${inbody.weight} kg</strong></article><article><span>Masa muscular</span><strong>${inbody.smm} kg</strong></article><article><span>Grasa corporal</span><strong>${inbody.pbf}%</strong></article><article><span>InBody Score</span><strong>${inbody.score}/100</strong></article></div><p class="eyebrow" style="margin-top:20px">CAMBIO DESDE LA MEDICIÓN ANTERIOR</p>${inbodyComparison(inbody)}<p class="eyebrow" style="margin-top:20px">HISTORIAL IMPORTADO</p><div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Peso</th><th>Músculo</th><th>Grasa</th><th>vs. anterior</th><th></th></tr></thead><tbody>${inbody.history.slice().reverse().map(reading => `<tr><td>${reading.date}</td><td>${reading.weight} kg</td><td>${reading.smm} kg</td><td>${reading.pbf}%</td><td class="delta-cell">${reading.delta ? `${deltaChip('weight', reading.delta.weight)}${deltaChip('smm', reading.delta.smm)}${deltaChip('pbf', reading.delta.pbf)}` : '<span class="delta neutral">primera</span>'}</td><td>${reading.documentId ? `<button class="secondary session-use" data-view-inbody="${reading.documentId}" data-inbody-client="${client.id}">Ver reporte</button>` : ''}<button class="secondary session-use" data-delete-inbody="${reading.id}">Eliminar</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="empty">Aún no se ha confirmado una evaluación InBody.</p>'}${reviewNotice}<p class="eyebrow" style="margin-top:20px">SALDO DE SESIONES</p><div id="client-balances"><p class="empty">Cargando saldos…</p></div><p class="eyebrow" style="margin-top:20px">ASISTENCIA MENSUAL</p><div id="client-attendance"><p class="empty">Calculando cumplimiento…</p></div><p class="eyebrow" style="margin-top:20px">RUTINAS ENVIADAS</p><div id="client-routine-deliveries"><p class="empty">Cargando envíos de rutinas…</p></div><p class="eyebrow" style="margin-top:20px">HISTORIAL DE RUTINAS</p><div id="client-routine-history"><p class="empty">Cargando historial de rutinas…</p></div><p class="eyebrow" style="margin-top:20px">LESIONES Y PADECIMIENTOS</p><div id="client-conditions"><p class="empty">Cargando expediente clínico…</p></div><p class="eyebrow" style="margin-top:20px">FOTOS DE PROGRESO</p><div id="client-photos"><p class="empty">Cargando fotos…</p></div><p class="eyebrow" style="margin-top:20px">DOCUMENTOS PRIVADOS</p><div id="client-documents"><p class="empty">Cargando documentos del expediente…</p></div><div class="detail-actions"><button class="secondary" id="edit-client-contact">Editar contacto</button><button class="secondary" id="edit-client-plan">Editar plan y corte</button><button class="secondary" id="client-report">Informe de cumplimiento</button><button class="secondary" id="portal-link">${client.portalActive ? 'Enviar enlace de acceso' : 'Activar portal con enlace'}</button><button class="secondary" id="portal-access">${client.portalActive ? 'Poner contraseña a mano' : 'Activar con contraseña'}</button><button class="secondary" id="delete-client">Eliminar cliente</button></div><button class="primary wide-button" id="open-scan">${inbody ? 'Importar nuevo InBody' : 'Importar InBody'}</button>`;
+  box.innerHTML = box.innerHTML.replace('<p class="eyebrow" style="margin-top:20px">HISTORIAL DE RUTINAS</p>', '<p class="eyebrow" style="margin-top:20px">CONTRATO</p><div id="client-contracts"><p class="empty">Cargando contratos…</p></div><p class="eyebrow" style="margin-top:20px">HISTORIAL DE RUTINAS</p>');
   openModal(box);
   const detailActions = box.querySelector('.detail-actions');
   if (esDemo) {
@@ -5093,6 +5173,7 @@ function clientDetail(id) {
   }
   if (!esDemo) { balancesSection(document.getElementById('client-balances'), client); attendanceSection(document.getElementById('client-attendance'), client.id); }
   routineDeliveriesSection(document.getElementById('client-routine-deliveries'), `/api/clients/${encodeURIComponent(client.id)}/routine-deliveries`);
+  clientContractsSection(document.getElementById('client-contracts'), client);
   routineHistorySection(document.getElementById('client-routine-history'), client);
   clientWeightLogsSection(document.getElementById('client-weight-logs'), client.id);
   conditionsSection(document.getElementById('client-conditions'), client);
@@ -5145,7 +5226,7 @@ function demoConvert(client) {
     try {
       await api(`/api/clients/${client.id}/demo/convert`, { method: 'POST', body: {} });
       await loadData(); renderAll(); modal.close(); toast('Demo convertida. Completa ahora su plan comercial.');
-      const updated = data.clients.find(item => item.id === client.id); if (updated) clientPlanEditor(updated);
+      const updated = data.clients.find(item => item.id === client.id); if (updated) clientPlanEditor(updated, true);
     } catch (error) { toast(error.message, true); }
   })();
 }
@@ -6681,6 +6762,35 @@ function portalRoutineHistoryMarkup() {
   }).join('');
   target.innerHTML = `<section class="portal-routine-history card"><div class="card-head"><div><h3>Historial de rutinas enviadas</h3><p>Consulta cuándo recibiste cada rutina y qué pasó con ella.</p></div></div>${cards || '<p class="empty">Todavía no tienes rutinas enviadas.</p>'}</section>`;
 }
+function renderPortalContracts() {
+  const shell = document.getElementById('portal-shell'); if (!shell) return;
+  let target = document.getElementById('portal-contracts'); if (!target) { target = document.createElement('div'); target.id = 'portal-contracts'; shell.querySelector('.portal-header').after(target); }
+  const contracts = Array.isArray(portalData?.contracts) ? portalData.contracts : [];
+  target.innerHTML = contracts.length ? `<section class="portal-contracts card"><p class="eyebrow">CONTRATOS</p>${contracts.map(contract => `<article class="portal-contract-item"><div><b>${contract.status === 'firmado' ? 'Contrato firmado' : 'Tienes un contrato por aceptar'}</b><small>${contract.template_key} · ${contract.sent_at ? fechaCorta(contract.sent_at) : ''}</small></div>${contract.status === 'enviado' ? `<button type="button" class="primary" data-portal-sign-contract="${contract.id}">Leer y aceptar</button>` : `<button type="button" class="secondary" data-portal-download-contract="${contract.id}">Descargar PDF</button>`}</article>`).join('')}</section>` : '';
+  target.querySelectorAll('[data-portal-sign-contract]').forEach(button => { button.onclick = () => portalSignContract(button.dataset.portalSignContract); });
+  target.querySelectorAll('[data-portal-download-contract]').forEach(button => { button.onclick = () => downloadContract(button.dataset.portalDownloadContract).catch(error => toast(error.message, true)); });
+}
+function portalSignContract(contractId) {
+  const box = document.createElement('div'); box.innerHTML = '<form id="portal-sign-contract"><p class="eyebrow">CONTRATO</p><h2>Tienes un contrato por aceptar</h2><p class="section-note">Lee hasta el final para habilitar la aceptación.</p><pre class="contract-text" tabindex="0">Cargando contrato…</pre><label class="checkbox-line"><input name="accept" type="checkbox" required disabled /> He leído y acepto este contrato</label><label>Escribe tu nombre completo<input name="signedName" required /></label><div id="contract-guardian" hidden><label>Nombre del representante legal<input name="guardianName" /></label><label>Identificación del representante<input name="guardianId" /></label></div><button class="primary wide-button" disabled>Firmar contrato</button></form>'; openModal(box);
+  const form = box.querySelector('form'); const text = box.querySelector('pre'); const submit = form.querySelector('button');
+  let loaded = false; let read = false;
+  const update = () => { if (loaded && text.scrollTop + text.clientHeight >= text.scrollHeight - 2) read = true; form.elements.accept.disabled = !read; submit.disabled = !read || !form.elements.accept.checked; };
+  text.addEventListener('scroll', update); form.elements.accept.addEventListener('change', update);
+  api(`/api/contracts/${contractId}/download`).then(result => {
+    text.textContent = result.bodyText; loaded = true;
+    box.querySelector('#contract-guardian').hidden = !result.requiresGuardian;
+    form.elements.guardianName.required = result.requiresGuardian; form.elements.guardianId.required = result.requiresGuardian;
+    requestAnimationFrame(update);
+  }).catch(error => { text.textContent = error.message; });
+  form.onsubmit = async event => {
+    event.preventDefault(); if (!read || !form.elements.accept.checked) return;
+    try {
+      form.classList.add('loading-state'); const values = new FormData(form);
+      await api(`/api/contracts/${contractId}/sign`, { method: 'POST', body: { accepted: true, signedName: values.get('signedName'), ...(form.elements.guardianName.required ? { guardianName: values.get('guardianName'), guardianId: values.get('guardianId') } : {}) } });
+      modal.close(); await loadPortalData(); toast('Contrato firmado');
+    } catch (error) { toast(error.message, true); } finally { form.classList.remove('loading-state'); }
+  };
+}
 function portalRoutineCard(routine) {
   const todayCompletion = portalRoutineCompletion(routine.id);
   const oferta = ofertaDeRutina(routine.id);
@@ -6730,6 +6840,7 @@ function renderPortalDemo() {
 }
 
 function renderPortal() {
+  renderPortalContracts();
   if (portalData?.demo || portalData?.client?.service_mode === 'demo') { renderPortalDemo(); return; }
   const client = portalData.client;
   document.querySelectorAll('[data-portal-view], .portal-view').forEach(item => { item.hidden = false; });
@@ -7019,7 +7130,7 @@ document.getElementById('setup-form').addEventListener('submit', async event => 
 const logout = () => {
   stopCalendarSynchronization();
   localStorage.removeItem(authKey); localStorage.removeItem(legacyAuthKey); authToken = null; currentUser = null; portalData = null;
-  data = { clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, demoSummary: null, notifications: [], googleCalendar: { configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } } }; showAuth(false);
+  data = { clients: [], invoices: [], packages: [], sessions: [], routines: [], plans: [], compliance: { compliancePercent: 0, activities: 0, clients: [] }, demoSummary: null, contractSummary: { pending: 0, overdue: 0 }, notifications: [], googleCalendar: { configured: false, connected: false, sessions: { synced: 0, pending: 0, failed: 0 } } }; showAuth(false);
 };
 // El avatar cerraba la sesión de un toque, sin aviso: un roce al buscar el
 // menú te sacaba de la aplicación. Ahora abre la cuenta y salir es explícito.
@@ -7029,16 +7140,16 @@ function accountMenu() {
   const box = document.createElement('div');
   box.innerHTML = `<p class="eyebrow">TU CUENTA</p><h2>${escapeHtml(nombre || 'Sesión activa')}</h2>
     <div class="account-card"><div><b>${escapeHtml(currentUser?.email || '')}</b><small>${rol}</small></div><span class="initials">${initials(nombre || currentUser?.email || '')}</span></div>
-    ${currentUser?.role !== 'client' ? '<button class="secondary wide-button" id="demo-contact-settings">Ajustes de demostraciones</button>' : ''}<button class="secondary wide-button" id="account-logout">Cerrar sesión</button>`;
+    ${currentUser?.role !== 'client' ? '<button class="secondary wide-button" id="demo-contact-settings">Ajustes de la cuenta</button>' : ''}<button class="secondary wide-button" id="account-logout">Cerrar sesión</button>`;
   openModal(box);
   document.getElementById('demo-contact-settings')?.addEventListener('click', accountDemoSettings);
   document.getElementById('account-logout').onclick = () => { modal.close(); logout(); };
 }
 async function accountDemoSettings() {
-  const box = document.createElement('div'); box.innerHTML = '<p class="eyebrow">PROMOCIONES</p><h2>Ajustes de demostraciones</h2><form id="demo-settings-form"><label>WhatsApp de Eileen<input name="contactWhatsapp" inputmode="numeric" placeholder="50762128180" /></label><small>Solo dígitos con código de país. Déjalo vacío para ocultar “Hablar con Eileen”.</small><button class="primary wide-button">Guardar ajuste</button></form>';
+  const box = document.createElement('div'); box.innerHTML = '<p class="eyebrow">AJUSTES DE LA CUENTA</p><h2>Ajustes de la cuenta</h2><form id="demo-settings-form"><label>WhatsApp de Eileen<input name="contactWhatsapp" inputmode="numeric" placeholder="Código de país + número" /></label><small>Solo dígitos con código de país. Déjalo vacío para ocultar “Hablar con Eileen”.</small><p class="eyebrow" style="margin-top:20px">DATOS PARA CONTRATOS</p><label>Nombre legal<input name="legalName" /></label><label>Identificación legal<input name="legalId" /></label><label>Domicilio legal<textarea name="legalAddress" rows="2"></textarea></label><label>Ciudad del contrato<input name="contractCity" /></label><small>Estos datos se guardan en Ajustes de la cuenta y no se incluyen en el código de la aplicación.</small><button class="primary wide-button">Guardar ajustes</button></form>';
   openModal(box);
-  try { const settings = await api('/api/account-settings'); box.querySelector('[name="contactWhatsapp"]').value = settings.contact_whatsapp || ''; } catch (error) { toast(error.message, true); }
-  box.querySelector('form').addEventListener('submit', async event => { event.preventDefault(); const value = new FormData(event.currentTarget).get('contactWhatsapp'); try { await api('/api/account-settings', { method: 'PATCH', body: { contactWhatsapp: value } }); modal.close(); toast('Ajuste de WhatsApp guardado'); } catch (error) { toast(error.message, true); } });
+  try { const settings = await api('/api/account-settings'); for (const [name, key] of [['contactWhatsapp', 'contact_whatsapp'], ['legalName', 'legal_name'], ['legalId', 'legal_id'], ['legalAddress', 'legal_address'], ['contractCity', 'contract_city']]) box.querySelector(`[name="${name}"]`).value = settings[key] || ''; } catch (error) { toast(error.message, true); }
+  box.querySelector('form').addEventListener('submit', async event => { event.preventDefault(); const values = new FormData(event.currentTarget); try { await api('/api/account-settings', { method: 'PATCH', body: { contactWhatsapp: values.get('contactWhatsapp'), legalName: values.get('legalName'), legalId: values.get('legalId'), legalAddress: values.get('legalAddress'), contractCity: values.get('contractCity') } }); modal.close(); toast('Ajustes de la cuenta guardados'); } catch (error) { toast(error.message, true); } });
 }
 document.getElementById('account-button').addEventListener('click', accountMenu);
 document.getElementById('portal-account-button').addEventListener('click', accountMenu);

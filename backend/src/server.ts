@@ -16,12 +16,13 @@ import { moveSessionInTransaction } from './session-reschedule.js';
 import { complianceCompletionExpression, complianceSessionCondition } from './compliance.js';
 import { routineSuggestionsReady, suggestRoutine } from './routine-suggestions.js';
 import { normalizeRegisteredVideo } from './video-upload-normalizer.js';
-import { accountStatementPdf, accountsReceivablePdf, billingInvoicePdf, compliancePdf, invoicePdf, monthlyFinancePdf } from './billing-reports.js';
+import { accountStatementPdf, accountsReceivablePdf, billingInvoicePdf, compliancePdf, contractPdf, invoicePdf, monthlyFinancePdf } from './billing-reports.js';
 import { fechaDeNegocioPanama, fechaPanamaDiasAtras } from './panama-date.js';
 import { resolveBillingEngine } from './billing-engine.js';
 import { planBillingGeneration, runBillingGeneration, shiftCutAfterPause } from './billing-generator.js';
 import { DEFAULT_IMPORT_MANIFEST, applyBatch, approveBatch, createPreviewBatch, getBatch, listBatches, reverseBatch, type ImportManifest } from './billing-import.js';
 import { exercisesHash, sameExerciseSet, routineSummaryText, type RoutineExerciseForSummary } from './routine-utils.js';
+import { CONTRACT_TERMINATION_NOTICE_DAYS, contractTimestamp, contractTemplateVersion, normalizeContractName, renderContractTemplate, type ContractTemplateKey } from './contracts.js';
 
 type AuthUser = { sub: string; role: 'admin' | 'trainer' | 'client'; email: string };
 const app = Fastify({ logger: true, trustProxy: true });
@@ -1939,6 +1940,8 @@ const planSchema = z.object({
   name: z.string().trim().min(2).max(80), description: z.string().trim().max(240).optional(),
   billingModel: z.enum(['monthly', 'package', 'single']), price: z.coerce.number().min(0),
   sessionsIncluded: z.coerce.number().int().positive().optional(), validityDays: z.coerce.number().int().positive().optional(),
+  serviceType: z.enum(['presencial', 'virtual', 'rutinas']).default('presencial'),
+  routinesPerMonth: z.coerce.number().int().min(1).max(31).optional(),
   zone: z.string().trim().max(80).optional().transform(value => value || null),
   specialFor: z.string().trim().max(120).optional().transform(value => value || null),
   active: z.boolean().default(true)
@@ -1949,10 +1952,12 @@ const planSchema = z.object({
   // salvo que alguien la escribiera a mano en su ficha.
   // Las sesiones individuales no llevan número: se cobra una cada vez que
   // ocurre, no hay bolsa ni meta mensual que declarar por adelantado.
-  if (plan.billingModel !== 'single' && !plan.sessionsIncluded) context.addIssue({
+  if (plan.billingModel !== 'single' && plan.serviceType !== 'rutinas' && !plan.sessionsIncluded) context.addIssue({
     code: 'custom', path: ['sessionsIncluded'],
     message: plan.billingModel === 'package' ? 'Indica la cantidad de sesiones' : 'Indica las sesiones por mes'
   });
+  if (plan.serviceType === 'rutinas' && plan.billingModel !== 'monthly') context.addIssue({ code: 'custom', path: ['billingModel'], message: 'Las rutinas se cobran por mensualidad' });
+  if (plan.serviceType === 'rutinas' && !plan.routinesPerMonth) context.addIssue({ code: 'custom', path: ['routinesPerMonth'], message: 'Indica las rutinas por mes' });
 });
 
 app.get('/api/plans', { preHandler: requireStaff }, async request => {
@@ -1963,8 +1968,8 @@ app.get('/api/plans', { preHandler: requireStaff }, async request => {
 app.post('/api/plans', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser; const input = planSchema.parse(request.body);
   const [plan] = await sql`
-    INSERT INTO service_plans (owner_id, name, description, billing_model, price, sessions_included, validity_days, zone, special_for, active)
-    VALUES (${auth.sub}, ${input.name}, ${input.description || null}, ${input.billingModel}, ${input.price}, ${input.billingModel === 'single' ? null : input.sessionsIncluded!}, ${input.billingModel === 'package' ? input.validityDays || 30 : null}, ${input.zone}, ${input.specialFor}, ${input.active})
+    INSERT INTO service_plans (owner_id, name, description, billing_model, price, sessions_included, validity_days, service_type, routines_per_month, zone, special_for, active)
+    VALUES (${auth.sub}, ${input.name}, ${input.description || null}, ${input.billingModel}, ${input.price}, ${input.serviceType === 'rutinas' || input.billingModel === 'single' ? null : input.sessionsIncluded!}, ${input.billingModel === 'package' ? input.validityDays || 30 : null}, ${input.serviceType}, ${input.serviceType === 'rutinas' ? input.routinesPerMonth ?? null : null}, ${input.zone}, ${input.specialFor}, ${input.active})
     RETURNING *
   `;
   return reply.code(201).send(plan);
@@ -1974,8 +1979,8 @@ app.patch('/api/plans/:id', { preHandler: requireStaff }, async (request, reply)
   const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id); const input = planSchema.parse(request.body);
   const [plan] = await sql`
     UPDATE service_plans SET name = ${input.name}, description = ${input.description || null}, billing_model = ${input.billingModel},
-      price = ${input.price}, sessions_included = ${input.billingModel === 'single' ? null : input.sessionsIncluded!},
-      validity_days = ${input.billingModel === 'package' ? input.validityDays || 30 : null}, zone = ${input.zone}, special_for = ${input.specialFor}, active = ${input.active}, updated_at = now()
+      price = ${input.price}, sessions_included = ${input.serviceType === 'rutinas' || input.billingModel === 'single' ? null : input.sessionsIncluded!},
+      validity_days = ${input.billingModel === 'package' ? input.validityDays || 30 : null}, service_type = ${input.serviceType}, routines_per_month = ${input.serviceType === 'rutinas' ? input.routinesPerMonth ?? null : null}, zone = ${input.zone}, special_for = ${input.specialFor}, active = ${input.active}, updated_at = now()
     WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *
   `;
   if (!plan) return reply.code(404).send({ error: 'Plan no encontrado' });
@@ -2018,7 +2023,9 @@ app.delete('/api/plans/:id', { preHandler: requireStaff }, async (request, reply
 
 const clientSchema = z.object({
   fullName: z.string().min(2), email: z.string().email().optional().or(z.literal('')), phone: z.string().optional(),
-  goal: z.string().optional(), notes: z.string().optional(), billingModel: z.enum(['monthly', 'package', 'single']).default('monthly'),
+  goal: z.string().optional(), notes: z.string().optional(), idDocument: z.string().trim().max(120).optional(), birthDate: z.string().date().or(z.literal('')).optional(),
+  emergencyContactName: z.string().trim().max(120).optional(), emergencyContactPhone: z.string().trim().max(40).optional(), address: z.string().trim().max(240).optional(),
+  billingModel: z.enum(['monthly', 'package', 'single']).default('monthly'),
   standardPrice: z.coerce.number().min(0).default(0), packageSessions: z.coerce.number().int().positive().optional(),
   planId: z.string().uuid().optional(), cutoffDay: z.coerce.number().int().min(1).max(31).default(1),
   // Vacío llega como '' desde el formulario y significa "sin meta pactada".
@@ -2046,6 +2053,7 @@ const clientSchema = z.object({
 });
 const clientEditSchema = clientSchema.pick({
   fullName: true, email: true, phone: true, goal: true, notes: true,
+  idDocument: true, birthDate: true, emergencyContactName: true, emergencyContactPhone: true, address: true,
   monthlySessionTarget: true, creditSessionPrice: true,
   billingResponsibleClientId: true, status: true, cutoffDay: true, paymentMode: true
 }).extend({
@@ -2057,7 +2065,7 @@ const clientEditSchema = clientSchema.pick({
 app.get('/api/clients', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
   return sql`
-    SELECT c.*, p.name AS plan_name, p.price AS plan_catalog_price, p.sessions_included, p.validity_days,
+    SELECT c.*, p.name AS plan_name, p.price AS plan_catalog_price, p.sessions_included, p.validity_days, p.service_type, p.routines_per_month,
       COALESCE((SELECT sum(total_sessions - used_sessions) FROM session_packages sp WHERE sp.client_id = c.id AND sp.status = 'active' AND (sp.expires_on IS NULL OR sp.expires_on >= current_date)), 0)::integer AS available_sessions,
       COALESCE((SELECT count(*) FROM (
         SELECT COALESCE(r.root_routine_id, r.id) AS root_id
@@ -2136,9 +2144,9 @@ app.post('/api/clients', { preHandler: requireStaff }, async (request, reply) =>
       const standardPrice = input.demo ? 0 : (selectedPlan ? Number(selectedPlan.price) : input.standardPrice);
       const packageSessions = input.demo ? null : (selectedPlan?.sessions_included || input.packageSessions);
       const [client] = await transaction`
-        INSERT INTO clients (owner_id, full_name, email, phone, goal, notes, billing_model, standard_price, plan_id, billing_cutoff_day, payment_mode,
+    INSERT INTO clients (owner_id, full_name, email, phone, goal, notes, id_document, birth_date, emergency_contact_name, emergency_contact_phone, address, billing_model, standard_price, plan_id, billing_cutoff_day, payment_mode,
           credit_session_price, service_mode, demo_started_on, demo_ends_on, demo_routine_limit, demo_note)
-        VALUES (${auth.sub}, ${input.fullName}, ${normalizarCorreo(input.email)}, ${input.phone || null}, ${input.goal || null}, ${input.notes || null}, ${billingModel}, ${standardPrice}, ${selectedPlan?.id || null}, ${input.cutoffDay}, ${input.paymentMode},
+        VALUES (${auth.sub}, ${input.fullName}, ${normalizarCorreo(input.email)}, ${input.phone || null}, ${input.goal || null}, ${input.notes || null}, ${input.idDocument || null}, ${input.birthDate || null}::date, ${input.emergencyContactName || null}, ${input.emergencyContactPhone || null}, ${input.address || null}, ${billingModel}, ${standardPrice}, ${selectedPlan?.id || null}, ${input.cutoffDay}, ${input.paymentMode},
           ${input.creditSessionPrice ?? (input.paymentMode === 'no_anticipado' ? 25 : null)}, ${input.demo ? 'demo' : 'standard'}, ${input.demo ? hoy : null}::date, ${demoEndsOn}::date, ${input.demo ? input.demoRoutineLimit : null}, ${input.demo ? input.demoNote || null : null}) RETURNING *
       `;
       if (input.demo) {
@@ -2401,21 +2409,234 @@ app.get('/api/clients/:id/mode-events', { preHandler: requireStaff }, async (req
 
 app.get('/api/account-settings', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
-  const [settings] = await sql`SELECT owner_id, contact_whatsapp FROM account_settings WHERE owner_id = ${auth.sub}`;
-  return settings || { owner_id: auth.sub, contact_whatsapp: null };
+  const [settings] = await sql`SELECT owner_id, contact_whatsapp, legal_name, legal_id, legal_address, contract_city FROM account_settings WHERE owner_id = ${auth.sub}`;
+  return settings || { owner_id: auth.sub, contact_whatsapp: null, legal_name: null, legal_id: null, legal_address: null, contract_city: null };
 });
 
 app.patch('/api/account-settings', { preHandler: requireStaff }, async request => {
   const auth = request.user as AuthUser;
-  const input = z.object({ contactWhatsapp: z.string().trim().regex(/^\d*$/, 'Usa solo dígitos').max(20).optional().nullable() }).parse(request.body);
+  const input = z.object({ contactWhatsapp: z.string().trim().regex(/^\d*$/, 'Usa solo dígitos').max(20).optional().nullable(), legalName: z.string().trim().max(160).optional().nullable(), legalId: z.string().trim().max(80).optional().nullable(), legalAddress: z.string().trim().max(240).optional().nullable(), contractCity: z.string().trim().max(100).optional().nullable() }).parse(request.body);
   const [settings] = await sql`
-    INSERT INTO account_settings (owner_id, contact_whatsapp) VALUES (${auth.sub}, ${input.contactWhatsapp || null})
-    ON CONFLICT (owner_id) DO UPDATE SET contact_whatsapp = EXCLUDED.contact_whatsapp, updated_at = now()
-    RETURNING owner_id, contact_whatsapp
+    INSERT INTO account_settings (owner_id, contact_whatsapp, legal_name, legal_id, legal_address, contract_city)
+    VALUES (${auth.sub}, ${input.contactWhatsapp || null}, ${input.legalName || null}, ${input.legalId || null}, ${input.legalAddress || null}, ${input.contractCity || null})
+    ON CONFLICT (owner_id) DO UPDATE SET
+      contact_whatsapp = CASE WHEN ${input.contactWhatsapp === undefined} THEN account_settings.contact_whatsapp ELSE ${input.contactWhatsapp || null} END,
+      legal_name = CASE WHEN ${input.legalName === undefined} THEN account_settings.legal_name ELSE ${input.legalName || null} END,
+      legal_id = CASE WHEN ${input.legalId === undefined} THEN account_settings.legal_id ELSE ${input.legalId || null} END,
+      legal_address = CASE WHEN ${input.legalAddress === undefined} THEN account_settings.legal_address ELSE ${input.legalAddress || null} END,
+      contract_city = CASE WHEN ${input.contractCity === undefined} THEN account_settings.contract_city ELSE ${input.contractCity || null} END,
+      updated_at = now()
+    RETURNING owner_id, contact_whatsapp, legal_name, legal_id, legal_address, contract_city
   `;
   return settings;
 });
 
+// ── Contratos internos generados desde el expediente ─────────────────────
+const contractDraftSchema = z.object({
+  templateKey: z.enum(['mensualidad', 'paquete', 'rutinas']).optional(),
+  startsOn: z.string().date().optional(),
+  commitmentMonths: z.coerce.number().int().min(0).max(60).default(0),
+  send: z.boolean().default(false)
+});
+
+function edadEnFecha(nacimiento: string | null, hoy: string) {
+  if (!nacimiento) return null;
+  const born = nacimiento.slice(0, 10);
+  return Number(hoy.slice(0, 4)) - Number(born.slice(0, 4)) - (hoy.slice(5) < born.slice(5) ? 1 : 0);
+}
+
+async function materialContrato(db: any, ownerId: string, clientId: string, input: z.infer<typeof contractDraftSchema>) {
+  const [row] = await db`SELECT c.*, p.name AS plan_name, p.sessions_included, p.service_type, p.routines_per_month,
+      s.legal_name, s.legal_id, s.legal_address, s.contract_city
+    FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id LEFT JOIN account_settings s ON s.owner_id = c.owner_id
+    WHERE c.id = ${clientId} AND c.owner_id = ${ownerId}`;
+  if (!row) return null;
+  if (row.service_mode === 'demo') sessionStateConflict('Convierte la demo en cliente antes de generar su contrato de pago.');
+  const key: ContractTemplateKey = input.templateKey || (row.service_type === 'rutinas' ? 'rutinas' : row.billing_model === 'package' ? 'paquete' : 'mensualidad');
+  const missing: string[] = [];
+  for (const [value, label] of [
+    [row.id_document, 'documento de identidad del cliente'], [row.legal_name, 'nombre legal de Eileen'],
+    [row.legal_id, 'identificación legal de Eileen'], [row.contract_city, 'ciudad del contrato']
+  ]) if (!value) missing.push(String(label));
+  if (!row.plan_id) missing.push('plan del expediente');
+  if (!Number(row.standard_price)) missing.push('precio del expediente');
+  const sessions = Number(key === 'paquete' ? row.sessions_included ?? 0 : row.monthly_session_target ?? row.sessions_included ?? 0);
+  if (key === 'rutinas' && (row.service_type !== 'rutinas' || !row.routines_per_month)) missing.push('plan de rutinas y rutinas por mes');
+  if (key !== 'rutinas' && !sessions) missing.push('sesiones incluidas en el expediente');
+  if (row.service_type === 'rutinas' && key !== 'rutinas') missing.push('selecciona el modelo de rutinas para este plan');
+  if (key === 'paquete' && row.billing_model !== 'package') missing.push('selecciona un plan de paquete en el expediente');
+  if (key === 'mensualidad' && row.billing_model !== 'monthly') missing.push('selecciona una mensualidad en el expediente');
+  const startsOn = input.startsOn || fechaDeNegocioPanama();
+  const values = {
+    OWNER_LEGAL_NAME: row.legal_name || '[pendiente: nombre legal]', OWNER_LEGAL_ID: row.legal_id || '[pendiente: identificación legal]',
+    OWNER_LEGAL_ADDRESS: row.legal_address || 'No registrado', CONTRACT_CITY: row.contract_city || '[pendiente: ciudad]',
+    CLIENT_NAME: row.full_name, CLIENT_ID: row.id_document || '[pendiente: documento de identidad]',
+    CLIENT_ADDRESS: row.address || 'No registrado', CLIENT_EMAIL: row.email || 'No registrado',
+    CLIENT_BIRTH_DATE: row.birth_date ? dateOnly(row.birth_date) : null,
+    EMERGENCY_CONTACT_NAME: row.emergency_contact_name || null, EMERGENCY_CONTACT_PHONE: row.emergency_contact_phone || null,
+    PLAN_ID: row.plan_id || null, PLAN_NAME: row.plan_name || 'Acuerdo personalizado del expediente',
+    SERVICE_TYPE: row.service_type === 'virtual' ? 'servicios virtuales' : row.service_type === 'rutinas' ? 'rutinas personalizadas' : 'servicios presenciales',
+    PRICE: '$' + Number(row.standard_price || 0).toFixed(2), SESSIONS: sessions || '[pendiente: sesiones]',
+    ROUTINES_PER_MONTH: Number(row.routines_per_month || 0), CUTOFF_DAY: Number(row.billing_cutoff_day || 1),
+    PAYMENT_MODE: row.payment_mode === 'no_anticipado' ? 'a crédito' : 'anticipado',
+    CREDIT_CLASS_PRICE: '$' + Number(row.credit_session_price || 25).toFixed(2), START_DATE: dmy(startsOn),
+    STARTS_ON: startsOn, COMMITMENT_MONTHS: input.commitmentMonths, PACKAGE_VALIDITY_DAYS: DIAS_USO_PAQUETE,
+    PACKAGE_RENEWAL_DAYS: DIAS_RENOVACION_PAQUETE, TERMINATION_NOTICE_DAYS: CONTRACT_TERMINATION_NOTICE_DAYS, ACCEPTANCE_BLOCK: ''
+  };
+  return { row, key, values, missing, bodyText: renderContractTemplate(key, values), version: contractTemplateVersion(key) };
+}
+
+async function guardarPdfContrato(db: any, contractId: string, ownerId: string, clientId: string, pdf: Buffer) {
+  const objectKey = `contracts/${ownerId}/${clientId}/${contractId}/${randomUUID()}.pdf`;
+  if (storageReady) await uploadObject(objectKey, 'application/pdf', pdf);
+  else if (config.NODE_ENV !== 'test') sessionStateConflict('Configura el almacenamiento de documentos antes de guardar o firmar contratos.');
+  const [document] = await db`INSERT INTO documents (client_id, kind, object_key, original_name, content_type, size_bytes, upload_status)
+    VALUES (${clientId}, 'contract', ${objectKey}, ${'contrato-' + contractId + '.pdf'}, 'application/pdf', ${pdf.byteLength}, 'ready') RETURNING id, object_key`;
+  return document;
+}
+
+app.get('/api/clients/:id/contracts', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const clientId = z.string().uuid().parse((request.params as { id: string }).id);
+  const [client] = await sql`SELECT id FROM clients WHERE id = ${clientId} AND owner_id = ${auth.sub}`;
+  if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  return sql`SELECT id, template_key, template_version, status, values, sent_at, signed_at, signed_name, guardian_name, pdf_document_id, pdf_sha256, created_at
+    FROM client_contracts WHERE client_id = ${clientId} AND owner_id = ${auth.sub} ORDER BY created_at DESC`;
+});
+app.post('/api/clients/:id/contracts/preview', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const clientId = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = contractDraftSchema.parse(request.body || {}); const material = await materialContrato(sql, auth.sub, clientId, input);
+  if (!material) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  const pdf = await contractPdf({ title: 'Contrato de servicios', subtitle: material.row.full_name + ' · borrador', body: material.bodyText });
+  return { templateKey: material.key, templateVersion: material.version, values: material.values, bodyText: material.bodyText,
+    missing: material.missing, canSend: !material.missing.length, pdfBase64: pdf.toString('base64') };
+});
+app.post('/api/clients/:id/contracts', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const clientId = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = contractDraftSchema.parse(request.body || {});
+  const result = await sql.begin(async transaction => {
+    await lockBillingClient(transaction, clientId);
+    const material = await materialContrato(transaction, auth.sub, clientId, input);
+    if (!material) return null;
+    if (input.send && material.missing.length) return { missing: material.missing };
+    const status = input.send ? 'enviado' : 'borrador';
+    const [contract] = await transaction`INSERT INTO client_contracts (owner_id, client_id, template_key, template_version, status, values, body_text, sent_at, created_by)
+      VALUES (${auth.sub}, ${clientId}, ${material.key}, ${material.version}, ${status}, ${transaction.json(material.values)}, ${material.bodyText}, ${input.send ? transaction`now()` : null}, ${auth.sub}) RETURNING *`;
+    const pdf = await contractPdf({ title: 'Contrato de servicios', subtitle: material.row.full_name + ' · ' + status, body: material.bodyText });
+    const document = await guardarPdfContrato(transaction, contract.id, auth.sub, clientId, pdf);
+    const [updated] = await transaction`UPDATE client_contracts SET pdf_document_id = ${document.id} WHERE id = ${contract.id} RETURNING *`;
+    return { contract: updated, missing: material.missing };
+  });
+  if (!result) return reply.code(404).send({ error: 'Cliente no encontrado' });
+  if (!('contract' in result)) return reply.code(409).send({ code: 'contract_missing_data', error: 'Faltan datos: ' + result.missing.join(', '), missing: result.missing });
+  return reply.code(201).send({ ...result.contract, missing: result.missing });
+});
+app.post('/api/contracts/:id/send', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const result = await sql.begin(async transaction => {
+    const [draft] = await transaction`SELECT * FROM client_contracts WHERE id = ${id} AND owner_id = ${auth.sub} AND status = 'borrador' FOR UPDATE`;
+    if (!draft) return null;
+    const material = await materialContrato(transaction, auth.sub, draft.client_id, contractDraftSchema.parse({
+      templateKey: draft.template_key, startsOn: draft.values.STARTS_ON, commitmentMonths: draft.values.COMMITMENT_MONTHS
+    }));
+    if (!material || material.missing.length) return { missing: material?.missing || ['expediente del cliente'] };
+    const pdf = await contractPdf({ title: 'Contrato de servicios', subtitle: material.row.full_name + ' · enviado', body: material.bodyText });
+    const document = await guardarPdfContrato(transaction, draft.id, auth.sub, draft.client_id, pdf);
+    const [contract] = await transaction`UPDATE client_contracts SET status = 'enviado', sent_at = now(), values = ${transaction.json(material.values)},
+      body_text = ${material.bodyText}, template_version = ${material.version}, pdf_document_id = ${document.id} WHERE id = ${id} RETURNING *`;
+    return { contract };
+  });
+  if (!result) return reply.code(404).send({ error: 'Borrador de contrato no encontrado' });
+  if (!('contract' in result)) return reply.code(409).send({ code: 'contract_missing_data', error: 'Faltan datos: ' + result.missing.join(', '), missing: result.missing });
+  return result.contract;
+});
+app.get('/api/contracts/pending-summary', { preHandler: requireStaff }, async request => {
+  const auth = request.user as AuthUser;
+  const [summary] = await sql`SELECT count(*) FILTER (WHERE status = 'enviado')::int AS pending,
+    count(*) FILTER (WHERE status = 'enviado' AND sent_at < now() - interval '3 days')::int AS overdue
+    FROM client_contracts WHERE owner_id = ${auth.sub}`;
+  return { pending: Number(summary?.pending || 0), overdue: Number(summary?.overdue || 0) };
+});
+async function contratoVisible(auth: AuthUser, id: string) {
+  const [contract] = auth.role === 'client'
+    ? await sql`SELECT cc.*, d.object_key, d.original_name FROM client_contracts cc JOIN clients c ON c.id = cc.client_id LEFT JOIN documents d ON d.id = cc.pdf_document_id
+        WHERE cc.id = ${id} AND c.portal_user_id = ${auth.sub} AND cc.status IN ('enviado', 'firmado', 'reemplazado')`
+    : await sql`SELECT cc.*, d.object_key, d.original_name FROM client_contracts cc LEFT JOIN documents d ON d.id = cc.pdf_document_id WHERE cc.id = ${id} AND cc.owner_id = ${auth.sub}`;
+  return contract;
+}
+app.get('/api/contracts/:id/download', { preHandler: requireAuth }, async (request, reply) => {
+  const contract = await contratoVisible(request.user as AuthUser, z.string().uuid().parse((request.params as { id: string }).id));
+  if (!contract) return reply.code(404).send({ error: 'Contrato no encontrado' });
+  return { url: contract.object_key && storageReady ? await createDownloadUrl(contract.object_key) : null,
+    bodyText: contract.body_text, status: contract.status, requiresGuardian: edadEnFecha(contract.values.CLIENT_BIRTH_DATE, fechaDeNegocioPanama()) != null && edadEnFecha(contract.values.CLIENT_BIRTH_DATE, fechaDeNegocioPanama())! < 18 };
+});
+app.get('/api/contracts/:id/pdf', { preHandler: requireAuth }, async (request, reply) => {
+  const contract = await contratoVisible(request.user as AuthUser, z.string().uuid().parse((request.params as { id: string }).id));
+  if (!contract) return reply.code(404).send({ error: 'Contrato no encontrado' });
+  const pdf = storageReady && contract.object_key ? (await downloadObject(contract.object_key)).body
+    : await contractPdf({ title: 'Contrato de servicios', subtitle: contract.values.CLIENT_NAME + ' · ' + (contract.signed_at ? 'firmado' : contract.status),
+        body: contract.body_text, createdAt: contract.signed_at || contract.created_at });
+  return reply.type('application/pdf').header('Content-Disposition', 'inline; filename="contrato.pdf"').send(pdf);
+});
+app.post('/api/contracts/:id/sign', { preHandler: requireAuth }, async (request, reply) => {
+  const auth = request.user as AuthUser;
+  if (auth.role !== 'client') return reply.code(403).send({ error: 'Solo el cliente puede firmar desde el portal' });
+  const input = z.object({ accepted: z.literal(true), signedName: z.string().trim().min(2).max(160),
+    guardianName: z.string().trim().min(2).max(160).optional(), guardianId: z.string().trim().min(2).max(80).optional() }).parse(request.body);
+  const id = z.string().uuid().parse((request.params as { id: string }).id);
+  const [owned] = await sql`SELECT cc.client_id FROM client_contracts cc JOIN clients c ON c.id = cc.client_id WHERE cc.id = ${id} AND c.portal_user_id = ${auth.sub}`;
+  if (!owned) return reply.code(404).send({ error: 'Contrato pendiente no encontrado' });
+  const result = await sql.begin(async transaction => {
+    await lockBillingClient(transaction, owned.client_id);
+    const [contract] = await transaction`SELECT cc.*, c.full_name, c.birth_date FROM client_contracts cc JOIN clients c ON c.id = cc.client_id
+      WHERE cc.id = ${id} AND c.portal_user_id = ${auth.sub} AND cc.status = 'enviado' FOR UPDATE OF cc`;
+    if (!contract) return null;
+    if (normalizeContractName(input.signedName) !== normalizeContractName(contract.values.CLIENT_NAME))
+      return { error: 'Escribe tu nombre completo tal como aparece en el contrato', code: 400 };
+    const age = edadEnFecha(contract.values.CLIENT_BIRTH_DATE, fechaDeNegocioPanama());
+    if (age != null && age < 18 && (!input.guardianName || !input.guardianId)) return { error: 'Para una persona menor de edad faltan el nombre y la identificación del representante legal', code: 400 };
+    const signedAt = new Date();
+    const acceptance = '\n\nACEPTACIÓN DIGITAL\nAceptado electrónicamente por ' + input.signedName + ' el ' + contractTimestamp(signedAt) + ' (Panamá).' +
+      (age != null && age < 18 ? '\nRepresentante legal: ' + input.guardianName + ' · identificación ' + input.guardianId : '');
+    const bodyText = contract.body_text + acceptance;
+    const pdf = await contractPdf({ title: 'Contrato de servicios', subtitle: contract.values.CLIENT_NAME + ' · firmado', body: bodyText, createdAt: signedAt });
+    const hash = createHash('sha256').update(pdf).digest('hex');
+    const document = await guardarPdfContrato(transaction, id, contract.owner_id, contract.client_id, pdf);
+    await transaction`UPDATE client_contracts SET status = 'reemplazado', replaced_by = ${id} WHERE client_id = ${contract.client_id} AND status = 'firmado' AND id <> ${id}`;
+    const [signed] = await transaction`UPDATE client_contracts SET status = 'firmado', body_text = ${bodyText}, signed_at = ${signedAt},
+      signed_name = ${input.signedName}, signed_ip = ${request.ip}, signed_user_agent = ${request.headers['user-agent'] || null},
+      guardian_name = ${age != null && age < 18 ? input.guardianName! : null}, guardian_id = ${age != null && age < 18 ? input.guardianId! : null},
+      pdf_document_id = ${document.id}, pdf_sha256 = ${hash} WHERE id = ${id} RETURNING *`;
+    await transaction`INSERT INTO contract_notifications (owner_id, client_id, contract_id, title, body)
+      VALUES (${contract.owner_id}, ${contract.client_id}, ${id}, ${'Contrato firmado · ' + contract.values.CLIENT_NAME}, 'El cliente firmó su contrato desde el portal.') ON CONFLICT (contract_id) DO NOTHING`;
+    return { signed };
+  });
+  if (!result) return reply.code(409).send({ error: 'Este contrato ya no está pendiente de firma' });
+  if ('error' in result) return reply.code(result.code || 400).send({ error: result.error });
+  await sendPushToUser(result.signed.owner_id, { title: 'Contrato firmado · ' + result.signed.values.CLIENT_NAME,
+    body: 'El cliente firmó su contrato desde el portal.', url: new URL('/#clients', config.APP_URL).toString() }).catch(error => app.log.warn({ err: error }, 'Push de contrato firmado'));
+  return result.signed;
+});
+app.post('/api/clients/:id/contracts/paper', { preHandler: requireStaff }, async (request, reply) => {
+  const auth = request.user as AuthUser; const clientId = z.string().uuid().parse((request.params as { id: string }).id);
+  const input = z.object({ contractId: z.string().uuid(), documentId: z.string().uuid() }).parse(request.body);
+  const result = await sql.begin(async transaction => {
+    await lockBillingClient(transaction, clientId);
+    const [contract] = await transaction`SELECT * FROM client_contracts WHERE id = ${input.contractId} AND client_id = ${clientId} AND owner_id = ${auth.sub} AND status IN ('borrador', 'enviado') FOR UPDATE`;
+    if (!contract) return null;
+    const incomplete = Object.values(contract.values).some(value => typeof value === 'string' && value.startsWith('[pendiente:'));
+    if (incomplete) return { error: 'Completa los datos legales y del expediente antes de registrar la firma en papel' };
+    const [document] = await transaction`SELECT * FROM documents WHERE id = ${input.documentId} AND client_id = ${clientId} AND kind = 'contract' AND upload_status = 'ready'`;
+    if (!document || document.object_key.startsWith('contracts/')) return { error: 'Sube primero el escaneo firmado como documento Contrato de este cliente' };
+    const bytes = storageReady ? await downloadObject(document.object_key) : null;
+    await transaction`UPDATE client_contracts SET status = 'reemplazado', replaced_by = ${contract.id} WHERE client_id = ${clientId} AND status = 'firmado' AND id <> ${contract.id}`;
+    const [signed] = await transaction`UPDATE client_contracts SET status = 'firmado', signed_at = now(), signed_name = 'Firma en papel', pdf_document_id = ${document.id},
+      pdf_sha256 = ${bytes ? createHash('sha256').update(bytes.body).digest('hex') : null} WHERE id = ${contract.id} RETURNING *`;
+    return { signed };
+  });
+  if (!result) return reply.code(404).send({ error: 'Contrato no encontrado o ya firmado' });
+  if ('error' in result) return reply.code(400).send(result);
+  return result.signed;
+});
 app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
@@ -2468,7 +2689,13 @@ app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, repl
       }
     }
 
-    const [client] = await transaction`UPDATE clients SET full_name = ${input.fullName}, email = ${input.email || null}, phone = ${input.phone || null}, goal = ${input.goal || null}, notes = ${input.notes || null}, monthly_session_target = ${input.monthlySessionTarget ?? null}, credit_session_price = CASE WHEN ${tocaTarifaCredito} THEN ${input.creditSessionPrice ?? null} WHEN ${tocaModalidad} AND ${input.paymentMode} = 'no_anticipado' AND credit_session_price IS NULL THEN 25 ELSE credit_session_price END, billing_responsible_client_id = ${input.billingResponsibleClientId ?? null}, status = COALESCE(${input.status ?? null}, status),
+    const [client] = await transaction`UPDATE clients SET full_name = ${input.fullName}, email = ${input.email || null}, phone = ${input.phone || null}, goal = ${input.goal || null}, notes = ${input.notes || null},
+      id_document = CASE WHEN ${input.idDocument !== undefined} THEN ${input.idDocument || null} ELSE id_document END,
+      birth_date = CASE WHEN ${input.birthDate !== undefined} THEN ${input.birthDate || null}::date ELSE birth_date END,
+      emergency_contact_name = CASE WHEN ${input.emergencyContactName !== undefined} THEN ${input.emergencyContactName || null} ELSE emergency_contact_name END,
+      emergency_contact_phone = CASE WHEN ${input.emergencyContactPhone !== undefined} THEN ${input.emergencyContactPhone || null} ELSE emergency_contact_phone END,
+      address = CASE WHEN ${input.address !== undefined} THEN ${input.address || null} ELSE address END,
+      monthly_session_target = ${input.monthlySessionTarget ?? null}, credit_session_price = CASE WHEN ${tocaTarifaCredito} THEN ${input.creditSessionPrice ?? null} WHEN ${tocaModalidad} AND ${input.paymentMode} = 'no_anticipado' AND credit_session_price IS NULL THEN 25 ELSE credit_session_price END, billing_responsible_client_id = ${input.billingResponsibleClientId ?? null}, status = COALESCE(${input.status ?? null}, status),
       standard_price = CASE WHEN ${tocaMontoMensual} THEN ${montoMensualSolicitado}::numeric ELSE standard_price END,
       billing_cutoff_day = CASE WHEN ${tocaCorte} THEN ${input.cutoffDay}::int ELSE billing_cutoff_day END,
       payment_mode = CASE WHEN ${tocaModalidad} THEN ${input.paymentMode} ELSE payment_mode END, updated_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING *`;
@@ -2536,16 +2763,19 @@ app.patch('/api/clients/:id', { preHandler: requireStaff }, async (request, repl
 app.delete('/api/clients/:id', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const documents = await sql`
-    SELECT d.object_key FROM documents d JOIN clients c ON c.id = d.client_id
-    WHERE d.client_id = ${id} AND c.owner_id = ${auth.sub}
-  `;
-  if (storageReady) {
-    for (const document of documents) await deleteObject(document.object_key);
-  }
-  const [client] = await sql`DELETE FROM clients WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING id, full_name`;
-  if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
-  return { deleted: true, client };
+  return sql.begin(async transaction => {
+    // Mismo bloqueo que al firmar: comprobar y borrar no puede cruzarse con
+    // una firma y eliminar en R2 el PDF que acaba de quedar como evidencia.
+    await lockBillingClient(transaction, id);
+    const [client] = await transaction`SELECT id, full_name FROM clients WHERE id = ${id} AND owner_id = ${auth.sub} FOR UPDATE`;
+    if (!client) return reply.code(404).send({ error: 'Cliente no encontrado' });
+    const [signed] = await transaction`SELECT id FROM client_contracts WHERE client_id = ${id} AND signed_at IS NOT NULL LIMIT 1`;
+    if (signed) return reply.code(409).send({ error: 'Este expediente conserva contratos firmados. Desactiva al cliente en lugar de borrar su evidencia.' });
+    const documents = await transaction`SELECT object_key FROM documents WHERE client_id = ${id}`;
+    if (storageReady) for (const document of documents) await deleteObject(document.object_key);
+    await transaction`DELETE FROM clients WHERE id = ${id}`;
+    return { deleted: true, client };
+  });
 });
 
 // ── Cobro declarativo del expediente (etapa 1A) ───────────────────────────
@@ -2861,6 +3091,9 @@ app.patch('/api/clients/:id/plan', { preHandler: requireStaff }, async (request,
     `;
     if (!client) return null;
     if (plan.billing_model === 'monthly') {
+      if (plan.service_type === 'rutinas') {
+        await transaction`UPDATE clients SET monthly_session_target = NULL WHERE id = ${id}`;
+      }
       if (plan.sessions_included) {
         await transaction`UPDATE clients SET monthly_session_target = ${plan.sessions_included} WHERE id = ${id}`;
       }
@@ -4447,9 +4680,10 @@ app.get('/api/exercises/:id/video-urls', { preHandler: requireAuth }, async (req
 // Agendar a alguien que ya no entrena no tiene sentido y ensucia su expediente:
 // las sesiones cuentan para su cumplimiento aunque esté dado de baja.
 async function clienteAgendable(clientId: string, ownerId: string) {
-  const [cliente] = await sql`SELECT id, full_name, status, service_mode FROM clients WHERE id = ${clientId} AND owner_id = ${ownerId}`;
+  const [cliente] = await sql`SELECT c.id, c.full_name, c.status, c.service_mode, p.service_type FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id WHERE c.id = ${clientId} AND c.owner_id = ${ownerId}`;
   if (!cliente) return { error: 'Cliente no encontrado', code: 404 };
   if (cliente.service_mode === 'demo') return { error: 'Los clientes demo solo reciben rutinas gratuitas; no se les agendan sesiones.', code: 409 };
+  if (cliente.service_type === 'rutinas') return { error: 'Este cliente tiene un plan de rutinas mensuales; no se le agendan clases ni se abre saldo de sesiones.', code: 409 };
   if (cliente.status !== 'active') {
     return { error: `${cliente.full_name} está ${cliente.status === 'paused' ? 'en pausa' : 'inactivo'}. Actívalo antes de agendarle sesiones.`, code: 409 };
   }
@@ -4695,7 +4929,9 @@ async function extenderRecurrencias(ownerId?: string, forzar = false) {
            r.mode, r.notes, r.starts_on, r.ends_on, c.owner_id
     FROM session_recurrences r
     JOIN clients c ON c.id = r.client_id
+    LEFT JOIN service_plans p ON p.id = c.plan_id
     WHERE r.active AND c.status = 'active'
+      AND c.service_mode <> 'demo' AND COALESCE(p.service_type, 'presencial') <> 'rutinas'
       AND (r.ends_on IS NULL OR r.ends_on >= current_date)
       AND (${ownerId ?? null}::uuid IS NULL OR c.owner_id = ${ownerId ?? null}::uuid)
   `;
@@ -7736,6 +7972,10 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
     WHERE owner_id = ${auth.sub} AND read_at IS NULL
     ORDER BY created_at DESC
     LIMIT 50`;
+  const contractNotificationRows = await sql`
+    SELECT id, title, body, created_at FROM contract_notifications
+    WHERE owner_id = ${auth.sub} AND read_at IS NULL
+    ORDER BY created_at DESC LIMIT 50`;
   return [
     ...viajesSinRutina.map(viaje => {
       const [a, m, d] = String(viaje.starts_on).split('-'); const [a2, m2, d2] = viaje.ends_on ? String(viaje.ends_on).split('-') : [];
@@ -7752,6 +7992,7 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
       scheduledFor: item.updated_at
     })),
     ...routineActivityRows.map(item => ({ notificationId: item.id, type: 'routine', title: item.title, body: item.body, scheduledFor: item.created_at })),
+    ...contractNotificationRows.map(item => ({ notificationId: item.id, type: 'contract', title: item.title, body: item.body, scheduledFor: item.created_at })),
     ...pendientes.map(session => ({
       type: 'pending', sessionId: session.id,
       title: `Falta marcar: ${session.full_name}`,
@@ -7771,8 +8012,9 @@ app.get('/api/notifications', { preHandler: requireAuth }, async (request, reply
 app.post('/api/notifications/:id/read', { preHandler: requireStaff }, async (request, reply) => {
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
-  const [notification] = await sql`UPDATE routine_activity_notifications SET read_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING id`;
-  if (!notification) return reply.code(404).send({ error: 'Notificación no encontrada' });
+  const [routineNotification] = await sql`UPDATE routine_activity_notifications SET read_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING id`;
+  const [contractNotification] = routineNotification ? [null] : await sql`UPDATE contract_notifications SET read_at = now() WHERE id = ${id} AND owner_id = ${auth.sub} RETURNING id`;
+  if (!routineNotification && !contractNotification) return reply.code(404).send({ error: 'Notificación no encontrada' });
   return { read: true };
 });
 
@@ -7997,7 +8239,7 @@ async function dispatchReminders() {
 
 async function portalClient(userId: string) {
   const [client] = await sql`
-    SELECT c.*, p.name AS plan_name, p.sessions_included, p.validity_days
+    SELECT c.*, p.name AS plan_name, p.sessions_included, p.validity_days, p.service_type, p.routines_per_month
     FROM clients c LEFT JOIN service_plans p ON p.id = c.plan_id WHERE c.portal_user_id = ${userId}
   `;
   return client;
@@ -8006,6 +8248,7 @@ async function portalClient(userId: string) {
 async function portalDemoSummary(client: Record<string, any>) {
   const hoy = fechaDeNegocioPanama();
   const [settings] = await sql`SELECT contact_whatsapp FROM account_settings WHERE owner_id = ${client.owner_id}`;
+  const contracts = await sql`SELECT id, template_key, status, sent_at, signed_at, signed_name, pdf_sha256, created_at FROM client_contracts WHERE client_id = ${client.id} AND status IN ('enviado', 'firmado') ORDER BY created_at DESC`;
   const routines = await sql`
     SELECT DISTINCT ON (COALESCE(r.root_routine_id, r.id))
       ra.id AS assignment_id, ra.due_on, r.id, r.title, r.description, r.version, r.root_routine_id, r.sessions_per_week, r.exercises
@@ -8098,7 +8341,7 @@ async function portalDemoSummary(client: Record<string, any>) {
     },
     routines: numbered, routineHistory, routineCompletions, routineExerciseCompletions, exercises,
     sessions: [], complianceSessions: [], busySlots: [], assessments: [], travel: [], invoices: [], packages: [], credits: [], weightLogs: [],
-    billingNotice: null, demo: true
+    billingNotice: null, contracts, demo: true
   };
 }
 
@@ -8277,6 +8520,10 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
       LIMIT 200
     `
   ]);
+  const contracts = await sql`
+    SELECT id, template_key, status, sent_at, signed_at, signed_name, pdf_sha256, created_at
+    FROM client_contracts WHERE client_id = ${client.id} AND status IN ('enviado', 'firmado') ORDER BY created_at DESC
+  `;
   const profile = {
     id: client.id, full_name: client.full_name, email: client.email, goal: client.goal, status: client.status,
     billing_model: client.billing_model, standard_price: client.standard_price, billing_cutoff_day: client.billing_cutoff_day,
@@ -8293,9 +8540,9 @@ app.get('/api/portal/summary', { preHandler: requireAuth }, async (request, repl
   // Tras el corte (estado `new`) el portal lee la facturación nueva y ya no muestra saldos de clases (D-14).
   if (billingEngine.state === 'new') {
     const fromNew = await portalBillingFromNewSource(client.id as string, client.owner_id as string);
-    return { client: profile, travel: viajes, invoices: fromNew.invoices, billingNotice: fromNew.notice, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, routineExerciseCompletions: exerciseCompletions, routineHistory, exercises, packages: [], credits: [], weightLogs };
+    return { client: profile, travel: viajes, invoices: fromNew.invoices, billingNotice: fromNew.notice, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, routineExerciseCompletions: exerciseCompletions, routineHistory, exercises, packages: [], credits: [], weightLogs, contracts };
   }
-  return { client: profile, travel: viajes, invoices, billingNotice: null, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, routineExerciseCompletions: exerciseCompletions, routineHistory, exercises, packages, credits, weightLogs };
+  return { client: profile, travel: viajes, invoices, billingNotice: null, routines, sessions, complianceSessions, busySlots: privateBusySlots, assessments, routineCompletions: completions, routineExerciseCompletions: exerciseCompletions, routineHistory, exercises, packages, credits, weightLogs, contracts };
 });
 
 const clientWeightLogSchema = z.object({
@@ -8821,15 +9068,18 @@ app.put('/api/documents/:id/content', { preHandler: requireStaff, bodyLimit: max
     WHERE d.id = ${id} AND c.owner_id = ${auth.sub}
   `;
   if (!document) return reply.code(404).send({ error: 'Documento no encontrado' });
-  if (document.content_type !== contentType) return reply.code(400).send({ error: 'El tipo de archivo no coincide con el documento registrado' });
-
-  const uploaded = await uploadObject(document.object_key, contentType, body);
-  const [updated] = await sql`
-    UPDATE documents SET upload_status = 'ready', size_bytes = ${uploaded.sizeBytes}, content_type = ${uploaded.contentType}
-    WHERE id = ${id}
-    RETURNING id, client_id, kind, original_name, content_type, size_bytes, upload_status, created_at
-  `;
-  return updated;
+  return sql.begin(async transaction => {
+    await lockBillingClient(transaction, document.client_id);
+    const [current] = await transaction`SELECT * FROM documents WHERE id = ${id} FOR UPDATE`;
+    if (!current) return reply.code(404).send({ error: 'Documento no encontrado' });
+    const [signed] = await transaction`SELECT id FROM client_contracts WHERE pdf_document_id = ${id} AND signed_at IS NOT NULL LIMIT 1`;
+    if (signed) return reply.code(409).send({ error: 'El archivo de un contrato firmado no se puede sustituir' });
+    if (current.content_type !== contentType) return reply.code(400).send({ error: 'El tipo de archivo no coincide con el documento registrado' });
+    const uploaded = await uploadObject(current.object_key, contentType, body);
+    const [updated] = await transaction`UPDATE documents SET upload_status = 'ready', size_bytes = ${uploaded.sizeBytes}, content_type = ${uploaded.contentType}
+      WHERE id = ${id} RETURNING id, client_id, kind, original_name, content_type, size_bytes, upload_status, created_at`;
+    return updated;
+  });
 });
 
 app.post('/api/documents/:id/complete', { preHandler: requireStaff }, async (request, reply) => {
@@ -8888,18 +9138,22 @@ app.delete('/api/documents/:id', { preHandler: requireStaff }, async (request, r
   const auth = request.user as AuthUser;
   const id = z.string().uuid().parse((request.params as { id: string }).id);
   const [document] = await sql`
-    SELECT d.id, d.object_key, d.original_name
+    SELECT d.id, d.client_id, d.object_key, d.original_name
     FROM documents d JOIN clients c ON c.id = d.client_id
     WHERE d.id = ${id} AND c.owner_id = ${auth.sub}
   `;
   if (!document) return reply.code(404).send({ error: 'Documento no encontrado' });
-  await deleteObject(document.object_key);
-  const removedAssessments = await sql.begin(async transaction => {
+  return sql.begin(async transaction => {
+    await lockBillingClient(transaction, document.client_id);
+    const [current] = await transaction`SELECT id, object_key, original_name FROM documents WHERE id = ${id} FOR UPDATE`;
+    if (!current) return reply.code(404).send({ error: 'Documento no encontrado' });
+    const [signed] = await transaction`SELECT id FROM client_contracts WHERE pdf_document_id = ${id} AND signed_at IS NOT NULL LIMIT 1`;
+    if (signed) return reply.code(409).send({ error: 'El archivo de un contrato firmado no se puede borrar' });
+    await deleteObject(current.object_key);
     const assessments = await transaction`DELETE FROM inbody_assessments WHERE document_id = ${id} RETURNING id`;
     await transaction`DELETE FROM documents WHERE id = ${id}`;
-    return assessments.length;
+    return { deleted: true, document: { id: current.id, originalName: current.original_name }, removedAssessments: assessments.length };
   });
-  return { deleted: true, document: { id: document.id, originalName: document.original_name }, removedAssessments };
 });
 
 const inbodySchema = z.object({ clientId: z.string().uuid(), documentId: z.string().uuid().optional(), deviceModel: z.string().optional(), testedAt: z.string().datetime({ offset: true }), values: z.record(z.string(), z.union([z.number(), z.string(), z.null()])), confidence: z.record(z.string(), z.number()).default({}), extractionStatus: z.enum(['pending', 'processing', 'ready', 'review', 'failed']).default('ready') });

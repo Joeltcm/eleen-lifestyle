@@ -1,0 +1,15 @@
+CONTRATO DE SERVICIOS DE RUTINAS PERSONALIZADAS
+
+En {{CONTRACT_CITY}}, el {{START_DATE}}, entre {{OWNER_LEGAL_NAME}}, identificación {{OWNER_LEGAL_ID}}, con domicilio en {{OWNER_LEGAL_ADDRESS}}, y {{CLIENT_NAME}}, identificación {{CLIENT_ID}}, domicilio {{CLIENT_ADDRESS}}, correo {{CLIENT_EMAIL}}, se acuerda:
+
+1. Objeto y precio. Eileen preparará {{ROUTINES_PER_MONTH}} rutinas personalizadas al mes en el plan {{PLAN_NAME}}, por {{PRICE}} USD al mes, con pago {{PAYMENT_MODE}} y corte el día {{CUTOFF_DAY}}. Las rutinas se entregan en el portal o mediante un enlace individual; cada una tendrá su fecha límite. Este plan no incluye clases presenciales ni saldo de sesiones.
+
+2. Vigencia y renovación. El servicio comienza el {{START_DATE}} y se contrata por {{COMMITMENT_MONTHS}} meses. Si el plazo es 0, es mes a mes. Se renueva automáticamente salvo aviso de terminación con al menos {{TERMINATION_NOTICE_DAYS}} días de anticipación al día de corte {{CUTOFF_DAY}}.
+
+3. Uso responsable. Los videos son de uso personal y se usan como guía. La persona declara que informó sus condiciones de salud, registradas en su expediente, y comunicará cambios; seguirá las indicaciones y se detendrá ante dolor o malestar. El entrenamiento no sustituye atención médica. Reconoce los riesgos del ejercicio sin excluir responsabilidades que la ley no permita excluir.
+
+4. Datos. El tratamiento de datos se realiza conforme a la Ley 81 de 2019 de Panamá. La aplicación usa un servicio externo de inteligencia artificial para proponer rutinas e interpretar evaluaciones. Las fotos de progreso solo se usan con consentimiento aparte.
+
+5. Aceptación. Este documento es un comprobante interno de servicios; no sustituye una factura fiscal.
+
+{{ACCEPTANCE_BLOCK}}
