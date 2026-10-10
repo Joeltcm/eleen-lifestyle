@@ -2486,12 +2486,12 @@ async function materialContrato(db: any, ownerId: string, clientId: string, inpu
   return { row, key, values, missing, bodyText: renderContractTemplate(key, values), version: contractTemplateVersion(key) };
 }
 
-async function guardarPdfContrato(db: any, contractId: string, ownerId: string, clientId: string, pdf: Buffer) {
+async function guardarPdfContrato(db: any, contractId: string, ownerId: string, clientId: string, pdf: Buffer, nombre = 'contrato-' + contractId + '.pdf') {
   const objectKey = `contracts/${ownerId}/${clientId}/${contractId}/${randomUUID()}.pdf`;
   if (storageReady) await uploadObject(objectKey, 'application/pdf', pdf);
   else if (config.NODE_ENV !== 'test') sessionStateConflict('Configura el almacenamiento de documentos antes de guardar o firmar contratos.');
   const [document] = await db`INSERT INTO documents (client_id, kind, object_key, original_name, content_type, size_bytes, upload_status)
-    VALUES (${clientId}, 'contract', ${objectKey}, ${'contrato-' + contractId + '.pdf'}, 'application/pdf', ${pdf.byteLength}, 'ready') RETURNING id, object_key`;
+    VALUES (${clientId}, 'contract', ${objectKey}, ${nombre}, 'application/pdf', ${pdf.byteLength}, 'ready') RETURNING id, object_key`;
   return document;
 }
 
@@ -2600,7 +2600,7 @@ app.post('/api/contracts/:id/sign', { preHandler: requireAuth }, async (request,
     const bodyText = contract.body_text + acceptance;
     const pdf = await contractPdf({ title: 'Contrato de servicios', subtitle: contract.values.CLIENT_NAME + ' · firmado', body: bodyText, createdAt: signedAt });
     const hash = createHash('sha256').update(pdf).digest('hex');
-    const document = await guardarPdfContrato(transaction, id, contract.owner_id, contract.client_id, pdf);
+    const document = await guardarPdfContrato(transaction, id, contract.owner_id, contract.client_id, pdf, `Contrato firmado ${contractTimestamp(signedAt).slice(0, 10)}.pdf`);
     await transaction`UPDATE client_contracts SET status = 'reemplazado', replaced_by = ${id} WHERE client_id = ${contract.client_id} AND status = 'firmado' AND id <> ${id}`;
     const [signed] = await transaction`UPDATE client_contracts SET status = 'firmado', body_text = ${bodyText}, signed_at = ${signedAt},
       signed_name = ${input.signedName}, signed_ip = ${request.ip}, signed_user_agent = ${request.headers['user-agent'] || null},
@@ -9115,6 +9115,8 @@ app.get('/api/documents', { preHandler: requireStaff }, async request => {
     SELECT d.id, d.client_id, d.kind, d.original_name, d.content_type, d.size_bytes, d.upload_status, d.created_at, c.full_name
     FROM documents d JOIN clients c ON c.id = d.client_id
     WHERE c.owner_id = ${auth.sub} AND (${query.clientId || null}::uuid IS NULL OR d.client_id = ${query.clientId || null})
+      -- Los PDF que genera el sistema para borradores y envíos son copias de trabajo (se ven en la sección Contratos): en Documentos solo el FIRMADO.
+      AND (d.object_key NOT LIKE 'contracts/%' OR EXISTS (SELECT 1 FROM client_contracts cc WHERE cc.pdf_document_id = d.id AND cc.signed_at IS NOT NULL))
     ORDER BY d.created_at DESC
   `;
 });
